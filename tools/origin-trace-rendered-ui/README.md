@@ -44,9 +44,11 @@ out of the asynchronous gap after native activation. Option+Tab is used when Ful
 matching Safari, so every control is a stop. [`probes.js`](probes.js) inspects
 the DOM and computed layout and scrolls targets into view. It skips a row its
 scroller shows by under 2 px, where hit testing snaps onto the next row, but
-still checks a control whose own box is that small;
+still checks a control whose own box is that small. It clips a box only by
+the ancestors that contain it, as CSS paints it, so a popover fixed to the
+window is not judged cut by the short table it opens from;
 [`check-rendered-ui-probes.mjs`](../check-rendered-ui-probes.mjs), part of
-`make lint`, checks both against modelled boxes.
+`make lint`, checks these against modelled boxes.
 
 No smoke flag or test hook exists in the product, and nothing here uses the
 Chrome DevTools Protocol. The evidence is synthetic; this suite does not
@@ -168,8 +170,8 @@ decision at both window sizes. The driver names a `REB_BRAVE_BINARY` that does
 not exist, so Start fails at once and no browser launches on any machine. The
 panel must sit inside the workspace with nothing clipped, open with Start
 Session focused and this run's last choice, with no Keychain choice, reach
-every control with Shift+Tab and visible focus (in Content, the media choice
-and both budgets sit between the mode and the actions), change the mode with an
+every control with Shift+Tab and visible focus (nothing sits between the mode
+and the actions in either mode), change the mode with an
 arrow key, and start on Return. The failure must name the cause, say Retry uses
 the mode chosen by keyboard (so native received it), and focus Retry; Return
 on Retry must fail afresh, and Continue Offline must close the panel and return
@@ -210,15 +212,42 @@ while the summary steps aside for the graph. With **Linear** shown (pressed at
 narrow, where it starts hidden), no control may meet the graph and linear
 divider while the linear view sweeps one row height of scroll offsets, so a
 row's sliver cannot pass under it at whatever offset the display height leaves.
-Space on the footer's **Key** opens the whole edge key and Escape returns a
-visible focus ring to Key. A native pointer drag then takes the divider to the
+The module's functions are single blocks, so the footer must offer no **Key**
+and name no edge kind. A native pointer drag then takes the divider to the
 graph's minimum, where the Functions menu must open whole, and to the linear
 view's minimum, repeating the sweep at each, and Home on the divider forgets
 the drag.
 
+`test25bBlockGraphShapes` opens the measured
+[block graph shapes](../fixtures/wasm-block-graph/README.md) in Graph, cold at
+both sizes and at 1440 by 900: a 1,000-case switch ladder (341), a 256-arm
+interpreter loop (342), two nests of eight loops (343), the exception fixture (344)
+and a 19,459-block interpreter loop (345). Each must draw without an error state
+and without layout defects or clipped text, the exception function's key must
+name exception and unresolved edges, and the interpreter loop's must name table
+edges. Where the footer folds the key behind **Key**, Space on Key opens it
+whole and Escape returns a visible focus ring to Key, with no control on the
+graph and linear divider (Linear is shown for that check and hidden again where
+the window starts without it). Each shape is photographed at its opening
+zoom and fitted whole with `0`, where the graph's canvas must hold only its
+background under the overview cue and the minimap. It prints a `RENDERED_UI_GRAPH` line per shape
+and size: the time from the native click on Graph to the frame after the first
+drawing, which spans decode, transfer, layout and draw, and, while Shift+Arrow
+pans once a frame at each zoom (right, down, left and up in turn, so every
+frame draws a new view clear of a pan limit), the median, 95th percentile and
+slowest frame interval and the time each frame spends drawing the graph. Then
+Shift+Arrow pushes the fitted view far past the bottom right, where the canvas
+must still draw the graph, not only its background. A median interval
+fails over 50 ms, or over twice the slower median of the 25-block exceptions
+shape at that size where that is longer (a `RENDERED_UI_GRAPH_BOUND` line per
+size). A display without a GPU, as on a CI host, holds even that shape to
+30-50 ms a frame while its draw takes 1 ms, so the bound follows the machine.
+One long frame does not fail, because a hidden window or a sleeping display
+stops frames whatever the page does.
+
 `test35MissingFinalHeaders` opens a content-session request the HTTP cache
-answered, which has only a provisional request block that the session budget
-refused ([missing final blocks](../../protocol/native-network-v3.md#missing-final-blocks)).
+answered, which has only a provisional request block that an older browser's
+header budget refused ([missing final blocks](../../protocol/native-network-v3.md#missing-final-blocks)).
 At both sizes the Traffic footer must show one **2 header gaps** item that adds
 no footer line and leaves nothing cut off; Space must open its breakdown with
 the refused block and the request without final headers, each with its reason,
@@ -227,30 +256,28 @@ cache answered without sending a request and that the block was not retained;
 and the Cookies tab must list the hop with the same reason in place of a bare
 "No cookie list was retained", with nothing clipped and captured text inert.
 
-`test36StartPanelContentLimits` takes the start panel's **Content limits**
-through both window sizes ([#428](https://github.com/sunghoojung/reverse-engineering-browser/issues/428),
-[#436](https://github.com/sunghoojung/reverse-engineering-browser/issues/436)).
-Normal opens with the defaults (256 and 512 MiB, media skipped), in both
-themes, with every limit a Shift+Tab stop with a visible ring. A typed 5000
-sent with Return is named at its field and starts nothing; native refuses an
-out-of-bounds, fractional, missing or Metadata-only limit sent past the page
-with the agent path's reasons. A raised 1,024 MiB budget and media capture
-typed and checked from the keyboard reach the start, whose failure (the
-missing Brave) names them. Narrow opens with those limits, held for the run;
-Metadata hides them and its start names none. In Traffic, the fixture's
-`api.budget.test` row is a content-session POST whose target past its first
-116 bytes, body and response met their budgets. The footer must take its
-counts from the session summary (two request records, one response) and, as
-this harness backend is not live, name no size; once the page reads a live
-session context (64 and 128 MiB), the footer, the Request URL row and the
-Payload tab name those sizes, and the Response tab names the control, all
-without an environment variable. At the narrow size with the request open the
-footer must show a one-line button instead of the line, fully visible, which
-Return or Space opens to the whole sentence and Escape closes with focus kept;
-focus leaving it, a press elsewhere and closing the request close it too, and a
-request opened again starts with it closed. Beside `test35`'s **header gaps**
-item, the two must not overlap when both are open, and each Escape must close
-only its own and not the request. Both themes, nothing clipped.
+`test36StartPanelContentWithoutLimits` opens the start panel at both window
+sizes and both themes. A Content session keeps every body whole, so the
+capture mode must be the panel's only input; Content must name the free-disk
+reserve as the only bound and say nothing of a budget, a media switch or
+16 MiB, and Metadata must name no reserve. Native must refuse the removed
+`request_content_budget_mib`, `response_body_budget_mib` and `response_media`
+keys sent past the page as it refuses any other key, and start nothing; a
+Content start's failure (the missing Brave) names the mode and no limit. In
+Traffic, the fixture's `api.disk-reserve.test` row is a current content-session
+POST whose body and response the receiver refused to keep its disk reserve,
+and its `api.budget.test` row is a POST whose target past its first 116 bytes,
+body and response an older browser's budgets refused. The footer must take its
+counts from the session summary (two disk reserve records, three budget
+records) and the Request URL row and the Payload and Response tabs must say
+why, naming no control to raise and no environment variable. At the narrow
+size with the request open the footer must show a one-line button instead of
+the line, fully visible, which Return or Space opens to the whole sentence and
+Escape closes with focus kept; focus leaving it, a press elsewhere and closing
+the request close it too, and a request opened again starts with it closed.
+Beside `test35`'s **header gaps** item, the two must not overlap when both are
+open, and each Escape must close only its own and not the request. Both themes,
+nothing clipped.
 
 `test39WasmFunctionNames` opens the synthetic module artifact 420 (an import,
 a helper and an exported caller) in Sources Inspect, renames the helper with

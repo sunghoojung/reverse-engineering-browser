@@ -558,7 +558,12 @@ pub(crate) mod tests {
         let large = vec![b'x'; (1 << 20) + 7];
         let needle = digest(b"xx");
         assert_eq!(
-            find_values(&large, &[needle.clone()], &AtomicBool::new(false)).unwrap(),
+            find_values(
+                &large,
+                std::slice::from_ref(&needle),
+                &AtomicBool::new(false)
+            )
+            .unwrap(),
             vec![true]
         );
         let error =
@@ -832,10 +837,10 @@ pub(crate) mod tests {
         let mut body = b"v=1&n=".to_vec();
         body.extend_from_slice(token);
         body.extend_from_slice(b"&c=x");
-        assert_eq!(body_contains(&body, &digest), true);
-        assert_eq!(body_contains(token, &digest), true);
+        assert!(body_contains(&body, &digest));
+        assert!(body_contains(token, &digest));
         // One byte short, transformed or absent: no match, never a guess.
-        assert_eq!(body_contains(&token[1..], &digest), false);
+        assert!(!body_contains(&token[1..], &digest));
         let escaped: Vec<u8> = token
             .iter()
             .flat_map(|b| {
@@ -846,13 +851,13 @@ pub(crate) mod tests {
                 }
             })
             .collect();
-        assert_eq!(body_contains(&escaped, &digest), false);
-        assert_eq!(body_contains(b"", &digest), false);
+        assert!(!body_contains(&escaped, &digest));
+        assert!(!body_contains(b"", &digest));
         // A rolling-hash collision alone never confirms a match.
         let forged = Digest32 {
             sha256: [0; 32],
             ..digest
         };
-        assert_eq!(body_contains(&body, &forged), false);
+        assert!(!body_contains(&body, &forged));
     }
 }

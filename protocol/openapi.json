@@ -92,6 +92,19 @@
       ],
       "description": "The native debugger reads values out of a page while it is paused. Those values and the page-derived names they are keyed by are omitted below --allow-content, which --permission full implies: a property name or a paused function name can carry a secret as well as its value. The gate is content admission itself, not the --omit-content flag, so the raw-flag path (--allow-effects alone, which sets neither flag) omits them too. Identifiers, counts, origins and URLs are returned at every level, as elsewhere."
     },
+    "credential_values": {
+      "flag": "--allow-content",
+      "parameter": "credential_values",
+      "operations": [
+        "get_request_headers",
+        "get_request_cookies",
+        "get_cookie_provenance",
+        "get_artifact_text",
+        "search_artifact_text",
+        "export_requests_har"
+      ],
+      "description": "Credential header values, cookie values and received Set-Cookie lines, and the header blocks and cookie lists that hold them, are returned only when a request passes credential_values=1. The projection never lists that parameter in a tool's input schema, so a model cannot ask for it, and passes credential_values=1 on these operations with --allow-content, which --permission full implies. Below Full access they stay withheld. A header document larger than the inline limit returns a structural summary; get_artifact_text then reads each block or list it names by artifact_id in bounded pages."
+    },
     "run_values": {
       "flag": "--allow-content",
       "operations": [
@@ -116,7 +129,8 @@
         "search_artifact_text",
         "search_wasm_inspection",
         "run_wasm_function",
-        "get_wasm_runs"
+        "get_wasm_runs",
+        "export_requests_har"
       ],
       "description": "Operations whose purpose is captured content (source, bytecode, disassembly and request and response bodies) are listed only with --allow-content. With it, get_source_format also lays out request and response bodies, and no result has content fields omitted below the inline limit. Larger documents still return a structural summary, so content is read in pages: get_artifact_text, get_source_format with start_line and line_count, inspect_wasm with row_offset or byte_offset and row_limit, and get_wasm_pseudocode with line_offset and line_limit. Binary responses are still refused. An analyst_action run_local_analyst_script that names a selected_artifact reads that stored artifact whole, so without --allow-content it is refused before any request."
     },
@@ -130,7 +144,7 @@
         "start"
       ],
       "title": "Start a live capture session",
-      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. An option left unset takes the Origin Trace app's default, false turns a default off, and none is inherited from the environment. On by default: request_content, canvas_images, request_stacks (the call stack that started each renderer request, get_request_stack), wasm_dispatch, wasm_call_indirect, quiet, document_start (permits document-start Console scripts; arming is a separate Console action), and js_invocation_digests with armed sites. Off by default: browser_internal, extension_traffic and fresh_profile. Allowing this tool is the researcher's consent to that sensitive capture, so a start needs no confirm_sensitive_capture. Agent sessions share one browser profile of their own, so a sign-in carries over; fresh_profile starts signed out in a new profile. The session runs until it is ended; duration_seconds sets a limit. request_content_budget_mib (1 to 4096, default 256) sets how much unique request content is kept. response_body_budget_mib (1 to 16384, default 512) sets how much unique response content is kept, and response_media also keeps element images, audio, video and fonts; both need request_content. request_content keeps request paths, queries and bodies, request and response headers including Cookie, Set-Cookie and Authorization, each request's cookies, and response bodies. js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set) arm invocation sites. wasm_samples_per_function, wasm_samples_per_indirect_site, wasm_function_allow, wasm_function_deny and wasm_module_allowlist restrict the 16-record Wasm sample budgets and require wasm_dispatch or wasm_call_indirect. The result options and get_session_context capture_options show what the session runs with. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Next: get_session_context, then get_session_summary; get_native_console for the Console. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started. reset_wasm_sample_budgets restarts both Wasm sample indexes without a new session.",
+      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. An option left unset takes the Origin Trace app's default, false turns a default off, and none is inherited from the environment. On by default: request_content, canvas_images, request_stacks (the call stack that started each renderer request, get_request_stack), wasm_dispatch, wasm_call_indirect, quiet, document_start (permits document-start Console scripts; arming is a separate Console action), and js_invocation_digests with armed sites. Off by default: browser_internal, extension_traffic and fresh_profile. Allowing this tool is the researcher's consent to that sensitive capture, so a start needs no confirm_sensitive_capture. Agent sessions share one browser profile of their own, so a sign-in carries over; fresh_profile starts signed out in a new profile. The session runs until it is ended; duration_seconds sets a limit. request_content keeps request paths, queries and bodies, request and response headers including Cookie, Set-Cookie and Authorization, each request's cookies, and every response body, media and fonts included, each kept whole. js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set) arm invocation sites. wasm_samples_per_function, wasm_samples_per_indirect_site, wasm_function_allow, wasm_function_deny and wasm_module_allowlist restrict the 16-record Wasm sample budgets and require wasm_dispatch or wasm_call_indirect. The result options and get_session_context capture_options show what the session runs with. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Next: get_session_context, then get_session_summary; get_native_console for the Console. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started. reset_wasm_sample_budgets restarts both Wasm sample indexes without a new session.",
       "input": {
         "$ref": "#/components/schemas/LiveSessionStart"
       },
@@ -182,7 +196,7 @@
       "get": {
         "operationId": "get_session_context",
         "summary": "Get compact session context and capture options",
-        "description": "First read for a connected agent. Reports live_admission (ready means live capture with its broker connected), capture mode, the health instance id, capture_options (what the launcher passed to Brave: request_content, content_limits with the content session's budgets and media choice, canvas_images, document_start permitted or not_permitted, and js_invocation state, count and digests), and up to 16 retained Wasm artifacts from a 256 KiB manifest tail, without fetching bytecode. Next: get_session_summary. Debugger fields are fixed retirement values since CDP was removed. The HTTP API cannot know client effects flags: allow_effects is null; reb-api mcp fills its actual invocation admission. live_admission is availability, not authorization. Cache the context with its own ETag.",
+        "description": "First read for a connected agent. Reports live_admission (ready means live capture with its broker connected), capture mode, the health instance id, capture_options (what the launcher passed to Brave: request_content, canvas_images, document_start permitted or not_permitted, and js_invocation state, count and digests), and the 16 newest retained Wasm artifacts of the whole manifest with a count of the rest (list_artifacts with kind=wasm pages them), without fetching bytecode. Next: get_session_summary. Debugger fields are fixed retirement values since CDP was removed. The HTTP API cannot know client effects flags: allow_effects is null; reb-api mcp fills its actual invocation admission. live_admission is availability, not authorization. Cache the context with its own ETag.",
         "tags": [
           "health"
         ],
@@ -270,7 +284,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Reads allowlisted local state and a bounded artifact manifest tail. Probes the configured broker socket. Does not fetch source, launch helpers, reconnect, infer joins or authorize effects; inventories are not one atomic evidence snapshot.",
+          "notes": "Reads allowlisted local state and the artifact lookup index of the whole manifest. Probes the configured broker socket. Does not fetch source, launch helpers, reconnect, infer joins or authorize effects; inventories are not one atomic evidence snapshot.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/app.rs",
@@ -298,7 +312,7 @@
       "get": {
         "operationId": "get_session_summary",
         "summary": "Summarize what this capture recorded",
-        "description": "One call that answers whether a capture worked: capture state, event counts by type, the busiest frames with their event types, session IDs, gap counts and named gap reasons, artifact counts by kind with the newest digests, and checks that name what looks wrong, such as a full sampling budget, Wasm compiled without a stored module, each artifact capture failure reason, or request bodies, full targets, header blocks and cookie lists a content session did not retain (budget, block limit, pool, channel, URL or kind) with counts, network header blocks and cookie lists that arrived for requests no longer tracked (network_headers_unattributed), requests that ended with only provisional headers (final_headers_missing, one check per reason: download, service_worker, from_cache, failed, not_reported or record_dropped), counted browser-internal exclusions, requests without a browser tab, and every request's response body case (retained, or why not: served by a service worker, reused from the memory cache, 304, redirected, aborted, cancelled, empty and the rest). Call it after get_session_context and again after an action. Counts, identifiers and origin labels only: no payloads, source, URLs paths or bodies. Covers the newest 64 MiB of events. Use get_events filters (type, frame_id, request_id) to read the records behind a count.",
+        "description": "One call that answers whether a capture worked: capture state, event counts by type, the busiest frames with their event types, session IDs, gap counts and named gap reasons, artifact counts by kind with the newest digests, and checks that name what looks wrong, such as a full sampling budget, Wasm compiled without a stored module, each artifact capture failure reason, or request bodies, full targets, header blocks and cookie lists a content session did not retain (block limit, pool, channel, URL, the receiver's free-disk reserve, or an older browser's budget, size limit or media exception) with counts, network header blocks and cookie lists that arrived for requests no longer tracked (network_headers_unattributed), requests that ended with only provisional headers (final_headers_missing, one check per reason: download, service_worker, from_cache, failed, not_reported or record_dropped), counted browser-internal exclusions, requests without a browser tab, and every request's response body case (retained, or why not: served by a service worker, reused from the memory cache, 304, redirected, aborted, cancelled, empty and the rest). Call it after get_session_context and again after an action. Counts, identifiers and origin labels only: no payloads, source, URLs paths or bodies. Covers the whole session; while the backend first indexes a long store it covers what is indexed, and a summary_indexing check says how far. Use get_events filters (type, frame_id, request_id) to read the records behind a count.",
         "tags": [
           "health"
         ],
@@ -1137,7 +1151,7 @@
       "get": {
         "operationId": "get_origin_trace",
         "summary": "get origin trace",
-        "description": "Bounded recent evidence window: 10000 events, 30000 edges, 10000 artifacts. Optional session_id limits selection to that exact captured session. Supply it with root_process_id and root_sequence_number for an exact event. Omitted selectors remain backward-compatible only for unambiguous matches; cross-session or multiple-root matches return ambiguous without selecting a trace. A missing exact match is empty, with no fallback. An empty/ambiguous/partial document is a successful result, not a missing-resource error. Where the identity chain ends, monotonic_time_ns proximity is a separate declared correlation input: at most one cross-process record of the same request identity within 1 ms is reported as a terminal temporal_adjacency step with time_adjacent confidence. It is counted only in time_adjacent_links, never in observed_links or correlated_links, it never replaces the no_predecessor gap, and it moves neither linked_steps nor percent.",
+        "description": "Traces back through the whole session: the event and edge stores are read by identity through disk-backed indexes the backend keeps beside them, so the oldest request of a long session traces like the newest. While the indexes are still catching up with the stores past a 5 s wait, returns 503 with how far indexing got rather than a trace over part of the session. A malformed, oversized or duplicate record anywhere in a store refuses every trace over it. Optional session_id limits selection to that exact captured session. Supply it with root_process_id and root_sequence_number for an exact event. Omitted selectors remain backward-compatible only for unambiguous matches; cross-session or multiple-root matches return ambiguous without selecting a trace. A missing exact match is empty, with no fallback. An empty/ambiguous/partial document is a successful result, not a missing-resource error. Where the identity chain ends, monotonic_time_ns proximity is a separate declared correlation input: at most one cross-process record of the same request identity within 1 ms is reported as a terminal temporal_adjacency step with time_adjacent confidence. It is counted only in time_adjacent_links, never in observed_links or correlated_links, it never replaces the no_predecessor gap, and it moves neither linked_steps nor percent.",
         "tags": [
           "origin-trace"
         ],
@@ -1187,6 +1201,16 @@
           },
           "500": {
             "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The event or edge index has not reached the end of its store within the wait; retry shortly.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1276,7 +1300,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Builds a bounded in-process projection from stored events, edges, and artifact metadata.",
+          "notes": "Reads stored events, edges and artifact metadata by identity through private SQLite indexes the backend keeps beside each store and folds every second; a read folds what the background task has not reached. Stored evidence is never changed. No browser mutation is requested.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/app.rs",
@@ -1293,7 +1317,7 @@
       "get": {
         "operationId": "get_request_headers",
         "summary": "get request headers",
-        "description": "Header blocks of one native request per redirect hop (protocol/native-network-v3.md), from the bytes the request index names for that request, or the newest 64 MiB of events when it names none, reading at most 1024 of its records; coverage says what was read. Recorded only in sessions that retain request content. Each block gives its source (browser: a request's provisional headers, before the network stack, or a response as it reached the browser, without Set-Cookie, Set-Cookie2 and Clear-Site-Data; network: what the network stack sent or received; early_hints: a 103), state, header count, byte length, SHA-256, and its referrer policy or status and remote endpoint. Retained blocks are read after a size and SHA-256 check and parsed into ordered headers. Values of Authorization, Proxy-Authorization, Cookie, Set-Cookie and any header whose name contains a credential root (token, secret, passw, csrf, xsrf, cookie, bearer, signature, credential, sessionid, authoriz and similar), has the whole word auth, session, jwt, otp or pwd, or has a word ending in key, except Sec-WebSocket-Key, Idempotency-Key and Public-Key-Pins are withheld as value_withheld with their byte length: like request bodies they stay in the binary artifact. Withholding goes by name, so another value, such as a Location query, is returned as captured. A hop is provisional when it has only browser request blocks.",
+        "description": "Header blocks of one native request per redirect hop (protocol/native-network-v3.md), from the bytes the request index names for that request, or the newest 64 MiB of events when it names none, reading at most 1024 of its records; coverage says what was read. Recorded only in sessions that retain request content. Each block gives its source (browser: a request's provisional headers, before the network stack, or a response as it reached the browser, without Set-Cookie, Set-Cookie2 and Clear-Site-Data; network: what the network stack sent or received; early_hints: a 103), state, header count, byte length, SHA-256, and its referrer policy or status and remote endpoint. Retained blocks are read after a size and SHA-256 check and parsed into ordered headers. Values of Authorization, Proxy-Authorization, Cookie, Set-Cookie and any header whose name contains a credential root (token, secret, passw, csrf, xsrf, cookie, bearer, signature, credential, sessionid, authoriz and similar), has the whole word auth, session, jwt, otp or pwd, or has a word ending in key, except Sec-WebSocket-Key, Idempotency-Key and Public-Key-Pins are withheld as value_withheld with their byte length unless credential_values=1, which returns each as value with credential true. reb-api mcp passes it only with --allow-content (--permission full), so below Full access those values stay in the binary artifact. Withholding goes by name, so another value, such as a Location query, is returned as captured. A hop is provisional when it has only browser request blocks.",
         "tags": [
           "request-headers"
         ],
@@ -1389,6 +1413,20 @@
             }
           },
           {
+            "name": "credential_values",
+            "in": "query",
+            "required": false,
+            "description": "1 returns credential header values, cookie values and received Set-Cookie lines as captured. Default 0 withholds them. reb-api mcp never lists this parameter and passes 1 only with --allow-content (--permission full), so a model below Full access cannot ask for them (x-reb-mcp.credential_values).",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
             "name": "If-None-Match",
             "in": "header",
             "required": false,
@@ -1427,7 +1465,7 @@
       "get": {
         "operationId": "get_request_cookies",
         "summary": "get request cookies",
-        "description": "Cookie lists of one native request per redirect hop (\"Cookies\" in protocol/native-network-v3.md), from the bytes the request index names for that request, or the newest 64 MiB of events when it names none, reading at most 1024 of its records; coverage says what was read. Recorded only in sessions that retain request content. Each hop has the cookies the network service sent with the request, including excluded ones, and the Set-Cookie cookies it received, each with state, counts, byte length and SHA-256. Retained lists are read after a size and SHA-256 check: every cookie has its name, domain, path, expiry, size, HttpOnly, Secure, SameSite, effective SameSite, partition key, priority, source scheme and port, and its exclusion and warning reasons. Values are withheld as value_withheld with their byte length and SHA-256, and a received line as line_withheld with its length: like credential headers they stay in the binary artifact.",
+        "description": "Cookie lists of one native request per redirect hop (\"Cookies\" in protocol/native-network-v3.md), from the bytes the request index names for that request, or the newest 64 MiB of events when it names none, reading at most 1024 of its records; coverage says what was read. Recorded only in sessions that retain request content. Each hop has the cookies the network service sent with the request, including excluded ones, and the Set-Cookie cookies it received, each with state, counts, byte length and SHA-256. Retained lists are read after a size and SHA-256 check: every cookie has its name, domain, path, expiry, size, HttpOnly, Secure, SameSite, effective SameSite, partition key, priority, source scheme and port, and its exclusion and warning reasons. Values are withheld as value_withheld with their byte length and SHA-256, and a received line as line_withheld with its length, unless credential_values=1, which returns them as value and line beside the same length and digest. reb-api mcp passes it only with --allow-content (--permission full), so below Full access they stay in the binary artifact.",
         "tags": [
           "request-cookies"
         ],
@@ -1523,6 +1561,20 @@
             }
           },
           {
+            "name": "credential_values",
+            "in": "query",
+            "required": false,
+            "description": "1 returns credential header values, cookie values and received Set-Cookie lines as captured. Default 0 withholds them. reb-api mcp never lists this parameter and passes 1 only with --allow-content (--permission full), so a model below Full access cannot ask for them (x-reb-mcp.credential_values).",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
             "name": "If-None-Match",
             "in": "header",
             "required": false,
@@ -1561,7 +1613,7 @@
       "get": {
         "operationId": "get_cookie_provenance",
         "summary": "get cookie provenance",
-        "description": "What touched one cookie name in a session (\"Cookies\" in protocol/native-network-v3.md): the document.cookie and Cookie Store API calls that wrote or read it anywhere in the session, with frame, count, script frame and stack digest, which the request index locates (script_coverage says whether every call was read); and, from the newest 5000 cookie list, request start, redirect, script call and script identity records within the last 64 MiB of events and at most 256 distinct retained cookie lists, the responses that set it, with attributes and block reasons, and the requests that sent it. coverage.complete is false when older records were not read, so an absent response or request is unknown. A sent cookie names the script writes whose value SHA-256 equals its own. Values are withheld with their length and SHA-256. A script record keeps 24 name bytes, so a longer name matches by length and prefix. A document.cookie read names each cookie it returned, at most 360 per read; read_coverage counts the reads that may hold the name without naming it.",
+        "description": "What touched one cookie name in a session (\"Cookies\" in protocol/native-network-v3.md): the document.cookie and Cookie Store API calls that wrote or read it anywhere in the session, with frame, count, script frame and stack digest, which the request index locates (script_coverage says whether every call was read); and, from every cookie list of the session's indexed requests, also located by the index and each distinct list read once, the responses that set it, with attributes and block reasons, and the requests that sent it. coverage.complete is false while the index is still catching up with the store, so an absent response or request is then unknown. Each distinct script position resolves to source once. A sent cookie names the script writes whose value SHA-256 equals its own. Values are withheld with their length and SHA-256 unless credential_values=1, which reb-api mcp passes only with --allow-content (--permission full). A script record keeps 24 name bytes, so a longer name matches by length and prefix. A document.cookie read names each cookie it returned, at most 360 per read; read_coverage counts the reads that may hold the name without naming it.",
         "tags": [
           "request-cookies"
         ],
@@ -1659,6 +1711,20 @@
             }
           },
           {
+            "name": "credential_values",
+            "in": "query",
+            "required": false,
+            "description": "1 returns credential header values, cookie values and received Set-Cookie lines as captured. Default 0 withholds them. reb-api mcp never lists this parameter and passes 1 only with --allow-content (--permission full), so a model below Full access cannot ask for them (x-reb-mcp.credential_values).",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
             "name": "If-None-Match",
             "in": "header",
             "required": false,
@@ -1697,7 +1763,7 @@
       "get": {
         "operationId": "get_request_signal_profile",
         "summary": "get request signal profile",
-        "description": "Exact identity lookup over the most recent 10000 profiles. A 404 may also carry ETag; an exact conditional request can return 304 before redoing lookup.",
+        "description": "Exact identity lookup over every profile in the signal store, through its disk index (`request-signals.jsonl.profiles-v1`); a later record for the same root replaces an earlier one. While the index has not reached a root it returns 503 with how far it got. A malformed or oversized profile line fails every lookup with 500. A 404 may also carry ETag; an exact conditional request can return 304 before redoing lookup.",
         "tags": [
           "request-signal-profile"
         ],
@@ -1757,6 +1823,16 @@
           },
           "500": {
             "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The signal profile index is still catching up with the store. Retry shortly.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1960,7 +2036,7 @@
       "get": {
         "operationId": "get_request_stack",
         "summary": "Read the JavaScript and Wasm call stack that started one renderer request or script navigation",
-        "description": "Newest request_initiator_stack record (34) inside the bytes the request index names for one renderer request (or the newest 64 MiB of events when it names none), named by the renderer's process_id and request_id as its request_initiated record carries them, or with navigation_sequence the navigation_initiator_stack record (46) a browser navigation_initiator_link (47) names, or with observation_sequence one debugger observation record (40 to 45) of that renderer, with every recorded frame innermost first. JavaScript frames resolve through their script_identity record (35) and its SHA-256 to a retained JavaScript artifact of any capture origin (network, stack_script, compiled_script or dynamic_javascript), then to one-based line and UTF-16 column, artifact_line and artifact_column for Sources, and the function name the source gives at the function start. Wasm frames name their function index, module byte offset and a name-section name when the module is retained. A frame that does not resolve keeps its raw identity and a reason; nothing is guessed. A stack deeper than 1,024 frames keeps the innermost and outermost 512 with omitted frames after omitted_after_index. Await frames follow the synchronous ones. A version 2 record adds task_segments, nearest first: each async task (timer, animation frame, idle callback, window.postMessage, XMLHttpRequest.send, scheduler.postTask, queued event or observer) with the stack that scheduled it, resolved from its async_task_stack (48) artifact, and microtask hops linked through task attribution. A version 3 record adds scope, the isolate the stack was walked in (the document main thread or a dedicated, shared or service worker), message segments (MessagePort, BroadcastChannel and worker postMessage) whose frames resolve in the posting thread's or renderer's isolate, a microtask segment's promise registration (then, catch, finally or await) when promise stacks were recorded, a no_script segment that ends the chain where a task was scheduled with no script running, and an origin_rejected segment that ends it where a received message's task origin did not validate. task_chain_cut says an earlier caller was not recorded; async_callers_not_shown lists the callers this record version cannot show. status is not_recorded when the read covered the request's indexed bytes or the whole store and found no stack record, and outside_scan when it did not reach all of them; coverage says what was read. A frame keeps reason script_identity_outside_scan when its identity was not found and not every identity was read. An observation adds observation: its type, decoded detail and its own frame (the listener, timer callback or throw site) resolved alone as site, or null when it names none; its stack is the one recorded when it fired, and the site can resolve when the stack holds no script. See protocol/native-network-v3.md and protocol/native-debugger-observation-v1.md. Wasm frames carry module_sha256 and, when the researcher named the function, analyst_name; analyst_names reports the names document status.",
+        "description": "Newest request_initiator_stack record (34) inside the bytes the request index names for one renderer request (or the newest 64 MiB of events when it names none), named by the renderer's process_id and request_id as its request_initiated record carries them, or with navigation_sequence the navigation_initiator_stack record (46) a browser navigation_initiator_link (47) names, or with observation_sequence one debugger observation record (40 to 45) of that renderer; a navigation or observation record is found by its identity anywhere in the store through the event index. Every recorded frame is listed innermost first. JavaScript frames resolve through their script_identity record (35) and its SHA-256 to a retained JavaScript artifact of any capture origin (network, stack_script, compiled_script or dynamic_javascript), then to one-based line and UTF-16 column, artifact_line and artifact_column for Sources, and the function name the source gives at the function start. Wasm frames name their function index, module byte offset and a name-section name when the module is retained. A frame that does not resolve keeps its raw identity and a reason; nothing is guessed. A stack deeper than 1,024 frames keeps the innermost and outermost 512 with omitted frames after omitted_after_index. Await frames follow the synchronous ones. A version 2 record adds task_segments, nearest first: each async task (timer, animation frame, idle callback, window.postMessage, XMLHttpRequest.send, scheduler.postTask, queued event or observer) with the stack that scheduled it, resolved from its async_task_stack (48) artifact, and microtask hops linked through task attribution. A version 3 record adds scope, the isolate the stack was walked in (the document main thread or a dedicated, shared or service worker), message segments (MessagePort, BroadcastChannel and worker postMessage) whose frames resolve in the posting thread's or renderer's isolate, a microtask segment's promise registration (then, catch, finally or await) when promise stacks were recorded, a no_script segment that ends the chain where a task was scheduled with no script running, and an origin_rejected segment that ends it where a received message's task origin did not validate. task_chain_cut says an earlier caller was not recorded; async_callers_not_shown lists the callers this record version cannot show. status is not_recorded when the read covered the request's indexed bytes or the whole store and found no stack record, and outside_scan when it did not reach all of them; coverage says what was read. A frame keeps reason script_identity_outside_scan when its identity was not found and not every identity was read. An observation adds observation: its type, decoded detail and its own frame (the listener, timer callback or throw site) resolved alone as site, or null when it names none; its stack is the one recorded when it fired, and the site can resolve when the stack holds no script. See protocol/native-network-v3.md and protocol/native-debugger-observation-v1.md. Wasm frames carry module_sha256 and, when the researcher named the function, analyst_name; analyst_names reports the names document status.",
         "tags": [
           "events"
         ],
@@ -2097,7 +2173,7 @@
       "get": {
         "operationId": "get_events",
         "summary": "Read native events, optionally filtered and paged",
-        "description": "Without filters this is the Origin Trace UI polling window: the newest events of the last 64 MiB plus an independent network window. With any filter or cursor it scans complete records from the cursor (default: newest first), returns up to limit matches unchanged, and adds a query object with next_before and next_after cursors. Filters combine with AND. Gap fields then describe only the scanned byte range, and network_events is empty: select network records with category=network. Network requests: request_body (22) gives each body's length, type and digest, and request_target (23) the path and query only when the session retains request content; response_body (33), in those sessions only, says whether each response body was retained, partial, refused or never observed, names its response_body artifact and joins its response_started parent; select one request with request_id. request_headers (30) and response_headers (31) summarize each header block in those sessions; read them with get_request_headers. Invocation sites: js_invocation_start (24), js_invocation_settle (25) and js_invocation_request (26) give armed calls and the requests made inside them. Each also includes js_invocation beside the hex (JsInvocationDecode): status decoded with kind start, settle or request, never a value digest; status invalid has no fields. wasm_execution_outcome (27) records a trap or that an instrumented Wasm call is still executing. A sample refused by a function, module, call-site, or the 16-record stream budget is wasm_dispatch_overflow (28) or wasm_indirect_overflow (29): a compact identity, not a full observation. Payloads stay hex. wasm_dispatch_observation and wasm_indirect_observation also include wasm_observation beside that hex, decoded without an opcode workspace. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. callee_function_index is 0 unless resolution is resolved. status invalid carries no fields. Version 1 decodes as not observed. Any other payload version is invalid with no fields, not a version-2 prefix. The record is protocol 3, category vm, and flags 0.  wasm_dispatch_overflow and wasm_indirect_overflow include wasm_overflow beside that hex. status decoded names kind identity or omitted. An identity names ring_index, function_index, and module_byte_offset, plus selector and arm_count, or table_index, slot, and resolution. An omitted record names omitted_count and no site. status invalid carries no fields. With any filter or cursor, debugger observations, request_watch_match (40) through dom_mutation (45), include debugger_observation beside that hex (DebuggerObservationDecode); the unfiltered polling window does not. status decoded carries the fields get_native_debugger lists, site (the listener, timer callback or throw site, resolved to the retained script's url, line, column and function name, or a reason with its raw script_id and position; every site in up to 4 scripts per page, newest records first, the rest deferred with source_limit until the same cursor is read again) and stack_read, the exact arguments of get_request_stack (stack_read_operation) for its stack; status invalid has no fields. Unknown parameters are rejected. Use a small limit through MCP and page with query.next_before.",
+        "description": "Without filters this is the Origin Trace UI polling window: the newest events of the last 64 MiB plus an independent network window. Its gap and drop counts cover the whole store once the event index has caught up (event_window scope store), and the windows then end where the index does; read older events with before=event_window.next_before. With any filter or cursor it scans complete records from the cursor (default: newest first), returns up to limit matches unchanged, and adds a query object with next_before and next_after cursors. Filters combine with AND. Gap fields then describe only the scanned byte range, and network_events is empty: select network records with category=network. Network requests: request_body (22) gives each body's length, type and digest, and request_target (23) the path and query only when the session retains request content; response_body (33), in those sessions only, says whether each response body was retained, partial, refused or never observed, names its response_body artifact and joins its response_started parent; select one request with request_id. request_headers (30) and response_headers (31) summarize each header block in those sessions; read them with get_request_headers. Invocation sites: js_invocation_start (24), js_invocation_settle (25) and js_invocation_request (26) give armed calls and the requests made inside them. Each also includes js_invocation beside the hex (JsInvocationDecode): status decoded with kind start, settle or request, never a value digest; status invalid has no fields. wasm_execution_outcome (27) records a trap or that an instrumented Wasm call is still executing. A sample refused by a function, module, call-site, or the 16-record stream budget is wasm_dispatch_overflow (28) or wasm_indirect_overflow (29): a compact identity, not a full observation. Payloads stay hex. wasm_dispatch_observation and wasm_indirect_observation also include wasm_observation beside that hex, decoded without an opcode workspace. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. callee_function_index is 0 unless resolution is resolved. status invalid carries no fields. Version 1 decodes as not observed. Any other payload version is invalid with no fields, not a version-2 prefix. The record is protocol 3, category vm, and flags 0.  wasm_dispatch_overflow and wasm_indirect_overflow include wasm_overflow beside that hex. status decoded names kind identity or omitted. An identity names ring_index, function_index, and module_byte_offset, plus selector and arm_count, or table_index, slot, and resolution. An omitted record names omitted_count and no site. status invalid carries no fields. With any filter or cursor, debugger observations, request_watch_match (40) through dom_mutation (45), include debugger_observation beside that hex (DebuggerObservationDecode); the unfiltered polling window does not. status decoded carries the fields get_native_debugger lists, site (the listener, timer callback or throw site, resolved to the retained script's url, line, column and function name, or a reason with its raw script_id and position; every site in up to 4 scripts per page, newest records first, the rest deferred with source_limit until the same cursor is read again) and stack_read, the exact arguments of get_request_stack (stack_read_operation) for its stack; status invalid has no fields. Unknown parameters are rejected. Use a small limit through MCP and page with query.next_before.",
         "tags": [
           "events"
         ],
@@ -2352,7 +2428,7 @@
       "get": {
         "operationId": "get_requests",
         "summary": "Page through every network request of the session",
-        "description": "One row per request of the whole session, from an index the backend folds incrementally from the event store and keeps beside it (protocol/request-index-v1.md), so counts, filters and search cover every request, not the newest event window. A row is a Traffic row: method, path (URL path and query only when the session retained request content, else the host), status, type, time, tab, domain and the root event that get_origin_trace takes. Default order is capture order, oldest first. Page with offset and limit; pass a previous answer's through to keep paging the same requests, and since to count rows added after it. total and matching are exact for the indexed bytes; index.complete is false while a large store is still being indexed, and index counts unreadable records and requests past the request limit. Read one request's records with get_events: for each member pass its session_id, process_id and request_id with category=network, after=first_offset and limit set to that member's records. Each row also carries the recorded transfer and resource sizes, MIME type, protocol, initiator class and response time; the answer adds the matching sizes, hidden_internal and a 120-bucket start timeline. Unknown parameters are rejected. Use a small limit, such as 50, through MCP.",
+        "description": "One row per request of the whole session, from an on-disk index the backend folds incrementally from the event store and keeps beside it (protocol/request-index-v2.md), so counts, filters, search and paging cover every request of the session with no row limit. A row is a Traffic row: method, path (URL path and query only when the session retained request content, else the host), status, type, time, tab, domain and the root event that get_origin_trace takes. Default order is capture order, oldest first. Page with offset and limit; pass a previous answer's through to keep paging the same requests, and since to count rows added after it. total and matching are exact for the indexed bytes; index.complete is false while a large store is still being indexed in the background, and index counts unreadable records. Read one request's records with get_events: for each member pass its session_id, process_id and request_id with category=network, after=first_offset and limit set to that member's records. Each row also carries the recorded transfer and resource sizes, MIME type, protocol, initiator class and response time; the answer adds the matching sizes, hidden_internal and a 120-bucket start timeline. Unknown parameters are rejected. Use a small limit, such as 50, through MCP.",
         "tags": [
           "events"
         ],
@@ -2676,6 +2752,324 @@
             {
               "path": "apps/origin-trace-backend/src/request_index.rs",
               "symbol": "respond"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
+    "/api/requests/har": {
+      "get": {
+        "operationId": "export_requests_har",
+        "summary": "Export the selected Traffic rows as one HAR archive",
+        "description": "Every Traffic row the query selects, in list order with no row limit, as one HAR 1.2 archive (protocol/http-api.md, Request HAR export). It is streamed with one batch of rows and one row's records in memory, so a session of any length exports whole. Each hop is one entry: a redirect keeps its own entry with its status and redirectURL, and a request that failed, was interrupted or is still open keeps its entry with status 0. Each entry's _reb names its row, hop and outcome (redirect, failed, incomplete, pending, complete or unlinked) and which header block it wrote; the log's _reb gives the row and entry counts, the outcomes, the index state the rows came from, and complete false with the error when the export stopped after it began. Headers come from the hop's header blocks, the sent (network) block over the browser's provisional one. The request body and the final response body are written when their artifacts were retained whole and verify; a response body that is not UTF-8 is base64 (content.encoding) and a request body that is not is in postData._reb_base64. Native capture keeps a monotonic clock only: startedDateTime is that clock written as an offset from the Unix epoch, exact in order and spacing and not a calendar date. Takes the get_requests filter and sort parameters, with no page, or rows with the exact row IDs to export in their order. Through MCP it is a content read, listed only with --allow-content, and a large archive returns a structural summary.",
+        "tags": [
+          "events"
+        ],
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "parameters": [
+          {
+            "name": "through",
+            "in": "query",
+            "required": false,
+            "description": "Only requests indexed before this count. A previous answer's through keeps later pages to the same requests; their fields stay live, so while capture runs a sort or filter on a changing field (status, size, type) can move rows across pages. Capture order does not move.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "description": "Sort key. size is the transferred size, start the first record's time, initiator and protocol their labels. Rows that tie, and rows without a value, keep capture order; rows without a value sort last.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "capture",
+                "name",
+                "status",
+                "type",
+                "method",
+                "time",
+                "size",
+                "initiator",
+                "start",
+                "protocol"
+              ],
+              "default": "capture"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "description": "asc or desc.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "default": "asc"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "description": "Traffic filter text, case-insensitive. Words match method, path and status; -word excludes them. domain:host (* is a wildcard), method:, status-code:, larger-than:N (k and m are 1,024 multiples, of the transferred size) and mime-type: match exactly, and a leading - negates them.",
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "tab_id",
+            "in": "query",
+            "required": false,
+            "description": "Requests of one browser tab, extension:<id> for the extension traffic one extension made, or unattributed for requests without an owner.",
+            "schema": {
+              "type": "string",
+              "pattern": "^(unattributed|[1-9][0-9]{0,9}|extension:[a-p]{32})$"
+            }
+          },
+          {
+            "name": "domain",
+            "in": "query",
+            "required": false,
+            "description": "Requests whose domain, as listed in facets.domains, is exactly this.",
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "description": "Requests of one Traffic resource type.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "xhr",
+                "doc",
+                "css",
+                "js",
+                "font",
+                "img",
+                "media",
+                "socket",
+                "wasm",
+                "other"
+              ]
+            }
+          },
+          {
+            "name": "named",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated session:process:sequence root events, at most 64, that match q as well: researcher names live in the UI, not the index.",
+            "schema": {
+              "type": "string",
+              "maxLength": 4096
+            }
+          },
+          {
+            "name": "failed",
+            "in": "query",
+            "required": false,
+            "description": "1 keeps only failed requests.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "invert",
+            "in": "query",
+            "required": false,
+            "description": "1 keeps the requests the q filter does not match; without q it has no effect.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "hide_internal",
+            "in": "query",
+            "required": false,
+            "description": "1 hides browser-internal requests (browser_internal) and counts them in hidden_internal.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "third_party",
+            "in": "query",
+            "required": false,
+            "description": "1 keeps requests whose site differs from their tab's latest top-level document at their start. Sites are the last two host labels, or three after a short second level and a two-letter country code; there is no public suffix list.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "from_ns",
+            "in": "query",
+            "required": false,
+            "description": "Keeps requests whose last record is at or after this monotonic time.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "to_ns",
+            "in": "query",
+            "required": false,
+            "description": "Keeps requests whose first record is at or before this monotonic time.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "rows",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated row IDs (get_requests id) to export, in this order, in place of a selection: Traffic's selected request. No other selection parameter may be passed with it; an ID no row has is 404.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "credential_values",
+            "in": "query",
+            "required": false,
+            "description": "1 writes credential header values and cookie values as captured. Default 0 writes each such header with an empty value marked _reb_withheld and its byte length, and leaves its cookies out. reb-api mcp never lists this parameter and passes 1 only with --allow-content (--permission full) (x-reb-mcp.credential_values).",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The archive, streamed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestHar"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              },
+              "Content-Disposition": {
+                "schema": {
+                  "const": "attachment; filename=\"origin-trace.har\"",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid, duplicate or unknown query parameter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "A rows ID names no request row.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Two request exports are already running. Retry when one ends.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read, validation, or internal failure before the archive began.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Folds new records into the in-memory request index as get_requests does, then reads each row's byte range of the event store and the artifacts it names. At most two exports run at once. Stored events and artifacts are never changed. No browser mutation is requested.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/request_har.rs",
+              "symbol": "export"
             }
           ]
         },
@@ -3146,7 +3540,7 @@
       "get": {
         "operationId": "get_vm_analysis",
         "summary": "get vm analysis",
-        "description": "May calculate and write local analysis cache even on GET. Optional exact native request projection requires request_id, session_id, root_process_id and root_sequence_number together, or all four omitted. It selects only an explicit request-start to response-start to acknowledged captured response-body chain; absent or ambiguous linkage yields no matching results, never a URL/time/CDP heuristic or related_request_ids fallback. related_request_ids remains correlation, not causation. A 304 check happens after loading analysis; the full selector is included in the ETag.",
+        "description": "May calculate and write local analysis cache even on GET. Lists every analyzed artifact: the full document is streamed from the published canonical bytes, so a long session's read costs no more memory than a short one's. view=findings lists only failed results and candidate or likely-vm tiers and counts the rest in results_view. Optional exact native request projection requires request_id, session_id, root_process_id and root_sequence_number together, or all four omitted. It selects only an explicit request-start to response-start to acknowledged captured response-body chain; absent or ambiguous linkage yields no matching results, never a URL/time/CDP heuristic or frame-correlation fallback. runtime_context counts frame records as correlation, not causation. A 304 check happens after loading analysis; the full selector and the view are included in the ETag.",
         "tags": [
           "analysis"
         ],
@@ -3221,7 +3615,7 @@
             }
           },
           "400": {
-            "description": "Invalid, blank, duplicate, zero, out-of-range, or incomplete exact request selectors; supply all four selectors together or omit all four.",
+            "description": "Invalid, blank, duplicate, zero, out-of-range, or incomplete exact request selectors, or a view other than findings; supply all four selectors together or omit all four.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3269,6 +3663,16 @@
             "description": "Exact native request-start sequence number. Canonical nonzero uint64 decimal string. Optional only as a complete set with request_id, session_id, root_process_id and root_sequence_number; otherwise omit all four. Invalid, blank, duplicate, zero, or out-of-range values return 400.",
             "schema": {
               "$ref": "#/components/schemas/VmAnalysis/$defs/nonzeroUint64"
+            }
+          },
+          {
+            "name": "view",
+            "in": "query",
+            "required": false,
+            "description": "findings lists only failed results and those with a candidate or likely-vm tier, and counts the tier-none results in results_view. Omit it for every result. Combines with an exact request selection.",
+            "schema": {
+              "const": "findings",
+              "type": "string"
             }
           },
           {
@@ -3466,7 +3870,7 @@
       "get": {
         "operationId": "search_artifact_text",
         "summary": "Search retained artifacts for text or a regular expression",
-        "description": "Captured content: finds q, literal text or (with regex true) a regular expression, on one line, in every selected retained artifact, oldest artifact first, as Sources Search does. Each artifact is searched whole, whatever its size, and verified against its manifest digest; nothing is skipped for size and there is no deadline. Regular expressions use the Rust regex syntax, whose matching time is linear in the text, so captured text cannot make a search backtrack; ^ and $ match at line breaks, and an empty match is not counted. Without match_case, letters fold by Unicode simple case folding. Header blocks and cookie lists are never searched, so no match shows a credential or cookie value. kind, artifact_id, session_id, navigation_id, frame_id, execution_context_id, sha256 and host select artifacts as get_artifacts filters do. total_matches counts every match exactly; matches is one page of them from offset, and next_offset continues. Each match has its artifact, byte_offset and byte_length, 1-based line, column (characters) and utf16_column, utf16_length, at most 256 bytes of the match, and up to 48 bytes of the same line before and after it. files gives each artifact on the page its exact match count. coverage names each artifact that could not be read or verified, and each whose bytes are not valid UTF-8. The count is kept for the query and artifact set, so a later page reads only the files it lists. A request that goes away stops the search (499). The MCP projection lists this operation only with --allow-content (--permission full).",
+        "description": "Captured content: finds q, literal text or (with regex true) a regular expression, on one line, in every selected retained artifact, oldest artifact first, as Sources Search does. Each artifact is searched whole, whatever its size, and verified against its manifest digest; nothing is skipped for size and there is no deadline. Regular expressions use the Rust regex syntax, whose matching time is linear in the text, so captured text cannot make a search backtrack; ^ and $ match at line breaks, and an empty match is not counted. Without match_case, letters fold by Unicode simple case folding. Header blocks and cookie lists are searched only with credential_values=1, which reb-api mcp passes only with --allow-content, so no other match shows a credential or cookie value. kind, artifact_id, session_id, navigation_id, frame_id, execution_context_id, sha256 and host select artifacts as get_artifacts filters do. total_matches counts every match exactly; matches is one page of them from offset, and next_offset continues. Each match has its artifact, byte_offset and byte_length, 1-based line, column (characters) and utf16_column, utf16_length, at most 256 bytes of the match, and up to 48 bytes of the same line before and after it. files gives each artifact on the page its exact match count. coverage names each artifact that could not be read or verified, and each whose bytes are not valid UTF-8. The count is kept for the query and artifact set, so a later page reads only the files it lists. A request that goes away stops the search (499). The MCP projection lists this operation only with --allow-content (--permission full).",
         "tags": [
           "artifacts"
         ],
@@ -3589,6 +3993,20 @@
               "type": "integer",
               "default": 50
             }
+          },
+          {
+            "name": "credential_values",
+            "in": "query",
+            "required": false,
+            "description": "1 also searches header blocks and cookie lists (request_headers, response_headers, cookie_list), which hold credential and cookie values. Default 0 leaves them out. reb-api mcp never lists this parameter and passes 1 only with --allow-content (--permission full), so a model below Full access cannot ask for them (x-reb-mcp.credential_values).",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
           }
         ],
         "responses": {
@@ -3697,7 +4115,7 @@
       "get": {
         "operationId": "get_artifact_text",
         "summary": "Read one bounded page of an artifact's bytes as text",
-        "description": "Captured content: returns one page of a retained artifact (JavaScript source, request and response bodies, Wasm module bytes, stacks and the other kinds) as UTF-8 text, hex or base64, verified against the manifest digest. Header blocks and cookie lists (request_headers, response_headers, cookie_list) are refused with 400: read them with get_request_headers and get_request_cookies, which withhold credential and cookie values. A page covers at most 65,536 source bytes for utf-8, 32,768 for hex and 49,152 for base64, and stops earlier so its text costs at most 98,304 JSON bytes with escapes, so the whole document always fits the 128 KiB MCP inline limit. next_offset continues the read and is null at the end; complete is true when one page held the whole artifact. A utf-8 page that starts inside a character begins at the next one, and invalid bytes become U+FFFD and are counted in replacements. The MCP projection lists this operation only with --allow-content (--permission full), because its result is captured content that goes to the model provider.",
+        "description": "Captured content: returns one page of a retained artifact (JavaScript source, request and response bodies, Wasm module bytes, stacks and the other kinds) as UTF-8 text, hex or base64, verified against the manifest digest. Header blocks and cookie lists (request_headers, response_headers, cookie_list) are refused with 400 unless credential_values=1, which reb-api mcp passes only with --allow-content: below that, read them with get_request_headers and get_request_cookies, which withhold credential and cookie values. A page covers at most 65,536 source bytes for utf-8, 32,768 for hex and 49,152 for base64, and stops earlier so its text costs at most 98,304 JSON bytes with escapes, so the whole document always fits the 128 KiB MCP inline limit. next_offset continues the read and is null at the end; complete is true when one page held the whole artifact. A utf-8 page that starts inside a character begins at the next one, and invalid bytes become U+FFFD and are counted in replacements. The MCP projection lists this operation only with --allow-content (--permission full), because its result is captured content that goes to the model provider.",
         "tags": [
           "artifacts"
         ],
@@ -3746,6 +4164,20 @@
                 "base64"
               ],
               "default": "utf-8"
+            }
+          },
+          {
+            "name": "credential_values",
+            "in": "query",
+            "required": false,
+            "description": "1 also reads header blocks and cookie lists (request_headers, response_headers, cookie_list), which hold credential and cookie values. Default 0 refuses them. reb-api mcp never lists this parameter and passes 1 only with --allow-content (--permission full), so a model below Full access cannot ask for them (x-reb-mcp.credential_values).",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
             }
           }
         ],
@@ -4564,7 +4996,7 @@
       "get": {
         "operationId": "get_wasm_functions",
         "summary": "List a captured WebAssembly module's functions",
-        "description": "Inert, bounded function list for a hash-verified core WASM artifact: each defined function's index, byte range and type index, without decoding an instruction. Names come from the name section, then exports, as escaped single-line text. The list is limited by a byte budget; a partial status and omissions name what was left out. Researcher names of this module's functions are listed separately in analyst_names as [index, name] pairs, beside the captured names.",
+        "description": "Inert function list for a hash-verified core WASM artifact: each defined function's index, byte range and type index, without decoding an instruction. Names come from the name section, then exports, as escaped single-line text. Every defined function is listed; a partial status and omissions say when the module's sections could not be read to the end. Researcher names of this module's functions are listed separately in analyst_names as [index, name] pairs, beside the captured names.",
         "tags": [
           "artifacts"
         ],
@@ -4650,6 +5082,16 @@
                 }
               }
             }
+          },
+          "408": {
+            "description": "The artifact manifest index did not reach the end of the manifest within 5 s. It keeps its progress, so retry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "x-reb-execution": {
@@ -4687,7 +5129,7 @@
       "get": {
         "operationId": "get_wasm_function_graph",
         "summary": "Basic blocks for one WebAssembly function",
-        "description": "Declared static control flow for one defined function of a hash-verified core WASM artifact. Blocks and edges come from the same decoder as inspect_wasm; every edge carries a kind and an unresolved target stays labeled with a null destination. complete is always false: reachable here is not observed execution and the drawing is not a proof. Responses are bounded by the row text and structure byte budgets, and a partial status with omissions names what was cut. Never executes the module. The function's researcher name is analyst_name and its module's names are analyst_names, so a call row's target index resolves.",
+        "description": "Declared static control flow for one defined function of a hash-verified core WASM artifact. Blocks and edges come from the same decoder as inspect_wasm; every edge carries a kind and an unresolved target stays labeled with a null destination. complete is always false: reachable here is not observed execution and the drawing is not a proof. Every block, edge and row is returned, for a body up to the 7,654,321-byte limit web engines enforce, and the document streams once the function has decoded. Exception edges run from each instruction that may throw to the handlers that may catch it; a throw no clause certainly catches is also an unresolved edge. A partial status with omissions names a label that points past the frames. Never executes the module. The function's researcher name is analyst_name and its module's names are analyst_names, so a call row's target index resolves.",
         "tags": [
           "artifacts"
         ],
@@ -4777,6 +5219,16 @@
           },
           "499": {
             "description": "The request went away and its analysis stopped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The artifact manifest index did not reach the end of the manifest within 5 s. It keeps its progress, so retry.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5501,6 +5953,16 @@
           },
           "499": {
             "description": "The request went away and its analysis stopped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The artifact manifest index did not reach the end of the manifest within 5 s. It keeps its progress, so retry.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6233,6 +6695,16 @@
           },
           "499": {
             "description": "The request went away and its decode stopped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The artifact manifest index did not reach the end of the manifest within 5 s. It keeps its progress, so retry.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9087,7 +9559,7 @@
             },
             {
               "path": "apps/origin-trace-backend/src/evidence.rs",
-              "symbol": "find_artifact_bounded"
+              "symbol": "find_artifact"
             }
           ]
         }
@@ -10073,6 +10545,16 @@
                 }
               }
             }
+          },
+          "408": {
+            "description": "The artifact manifest index did not reach the end of the manifest within 5 s. It keeps its progress, so retry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "x-source": "apps/origin-trace-backend/src/app.rs",
@@ -10108,8 +10590,8 @@
     "/api/analysis/vm/host-links": {
       "get": {
         "operationId": "get_vm_host_links",
-        "summary": "Read bounded host-event links to retained guest dispatch positions",
-        "description": "May calculate and write the local derived workspace on GET. A workspace failure does not hide the base VM analysis document. A 304 check happens after loading analysis. state=unknown, reason=dispatch-samples-unavailable, and guest_position null means no dispatch samples were retained. That is static-only correlation for the shared session, navigation, and frame, not an empty workspace and not a guest program counter.",
+        "summary": "Read host-event links to retained guest dispatch positions",
+        "description": "May calculate and write the local derived workspace on GET. A workspace failure does not hide the base VM analysis document. A 304 check happens after loading analysis. state=unknown, reason=dispatch-samples-unavailable, and guest_position null means no dispatch samples were retained. That is static-only correlation for the shared session, navigation, and frame, not an empty workspace and not a guest program counter. Rows list host events whose direct parent is a VM record; frame_host_records and attributed_host_records count the rest, and events_filter lists them through get_events.",
         "tags": [
           "analysis"
         ],
@@ -12006,7 +12488,7 @@
         "properties": {
           "index_behind": {
             "type": "boolean",
-            "description": "With outside_scan: the request index had not reached the end of the store, so a later read can name this request's bytes. False means another read would scan the same range."
+            "description": "With outside_scan: the index the read goes through (the request index for request_id, the event index for navigation_sequence and observation_sequence) had not reached the end of the store, so a later read can find the record. False means another read would scan the same range."
           },
           "coverage": {
             "$ref": "#/components/schemas/DetailCoverage"
@@ -12381,9 +12863,17 @@
           "hops",
           "malformed_records",
           "unattached_records",
-          "coverage"
+          "coverage",
+          "credential_values"
         ],
         "properties": {
+          "credential_values": {
+            "enum": [
+              "withheld",
+              "returned"
+            ],
+            "description": "Whether credential header values, cookie values and received lines were withheld or, with credential_values=1, returned."
+          },
           "coverage": {
             "$ref": "#/components/schemas/DetailCoverage"
           },
@@ -12582,6 +13072,10 @@
           "value_withheld": {
             "const": true
           },
+          "credential": {
+            "const": true,
+            "description": "A credential name's value, returned only with credential_values=1."
+          },
           "value_bytes": {
             "type": "integer",
             "minimum": 0
@@ -12610,9 +13104,17 @@
           "hops",
           "malformed_records",
           "unattached_records",
-          "coverage"
+          "coverage",
+          "credential_values"
         ],
         "properties": {
+          "credential_values": {
+            "enum": [
+              "withheld",
+              "returned"
+            ],
+            "description": "Whether credential header values, cookie values and received lines were withheld or, with credential_values=1, returned."
+          },
           "coverage": {
             "$ref": "#/components/schemas/DetailCoverage"
           },
@@ -12807,6 +13309,10 @@
           "line_withheld": {
             "const": true
           },
+          "line": {
+            "type": "string",
+            "description": "The received Set-Cookie line as captured, invalid UTF-8 replaced; only with credential_values=1."
+          },
           "line_bytes": {
             "type": "integer",
             "minimum": 0
@@ -12816,6 +13322,10 @@
           },
           "value_withheld": {
             "const": true
+          },
+          "value": {
+            "type": "string",
+            "description": "The cookie value as captured, invalid UTF-8 replaced; only with credential_values=1. value_bytes and value_sha256 describe the captured bytes."
           },
           "value_bytes": {
             "type": "integer",
@@ -12966,9 +13476,17 @@
           "read_coverage",
           "malformed_records",
           "coverage",
-          "script_coverage"
+          "script_coverage",
+          "credential_values"
         ],
         "properties": {
+          "credential_values": {
+            "enum": [
+              "withheld",
+              "returned"
+            ],
+            "description": "Whether credential header values, cookie values and received lines were withheld or, with credential_values=1, returned."
+          },
           "coverage": {
             "$ref": "#/components/schemas/DetailCoverage"
           },
@@ -12980,16 +13498,16 @@
               "located_outside_window",
               "unreadable"
             ],
-            "description": "How script lists every script_cookie record of the session: the request index locates each one, so a call older than coverage's window is read too. An absent call is proof only when complete is true and read_coverage.complete is true.",
+            "description": "How script lists every script_cookie record of the session: the request index locates each one. An absent call is proof only when complete is true and read_coverage.complete is true.",
             "properties": {
               "complete": {
                 "type": "boolean",
-                "description": "The index has caught up with the store, located every script_cookie record (at most 65536), and each one older than the window was read back."
+                "description": "The index has caught up with the store, located every script_cookie record, and each one was read back."
               },
               "located_outside_window": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "Located records older than coverage.scan_start, read back by byte range; script lists those of them that concern this name."
+                "description": "Located records older than coverage.scan_start. The read starts at byte 0, so this is 0; backends that read a newest-record window counted the older calls read back here."
               },
               "unreadable": {
                 "type": "integer",
@@ -13025,17 +13543,17 @@
           "lists_read": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 256
+            "description": "Distinct retained lists read. Backends before every list was read stopped at 256."
           },
           "lists_unread": {
             "type": "integer",
             "minimum": 0,
-            "description": "Distinct retained lists past the 256 read."
+            "description": "Distinct retained lists whose manifest record could not be read in time, so their cookies are unknown; a later read asks again. Backends before every list was read counted the lists past 256 here."
           },
           "stacks_unresolved": {
             "type": "integer",
             "minimum": 0,
-            "description": "Script calls not resolved to source because 64 distinct positions already were."
+            "description": "Script calls not resolved to source because the artifact manifest could not be read in time. Backends before every position was resolved counted the calls past 64 distinct positions here."
           },
           "read_coverage": {
             "type": "object",
@@ -13077,7 +13595,7 @@
               "records_dropped": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "Records a full queue dropped, from the drop counts of the session's gap records of any category at or after the oldest record read (a renderer's gap takes the category of the last record it drained, and a named reason is no loss); one may have named this cookie."
+                "description": "Records a full queue dropped, from the drop counts of the session's gap records of any category anywhere in the session (a renderer's gap takes the category of the last record it drained, and a named reason is no loss); one may have named this cookie."
               }
             }
           },
@@ -18067,14 +18585,13 @@
           },
           "results": {
             "type": "array",
-            "maxItems": 10000,
             "items": {
               "$ref": "#/components/schemas/VmAnalysis/$defs/result"
-            }
+            },
+            "description": "Every analyzed artifact, in manifest order. Producers before 1.11.0 listed at most 10,000."
           },
           "mixed_findings": {
             "type": "array",
-            "maxItems": 10000,
             "items": {
               "$ref": "#/components/schemas/VmAnalysis/$defs/mixedFinding"
             }
@@ -18139,6 +18656,29 @@
               }
             },
             "description": "Optional exact native request projection metadata outside the stored document digest. Only results with a matching exact_request_links request_id and full root_event are retained; mixed_findings is empty. related_request_ids remains correlation only and is not used for this projection."
+          },
+          "results_view": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "listed_results",
+              "omitted_results"
+            ],
+            "properties": {
+              "kind": {
+                "const": "findings"
+              },
+              "listed_results": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "omitted_results": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "description": "Optional view metadata outside the stored document digest, present in producer 1.11.0 and later when a read asks for view=findings. results then lists only failed results and those with a candidate or likely-vm tier, and omitted_results counts the tier-none results left out. The full document, or the selection without the view, lists them. summary still counts every result of the document or selection."
           }
         },
         "$defs": {
@@ -18367,6 +18907,93 @@
               }
             }
           },
+          "runtimeContext": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "session_id",
+              "navigation_id",
+              "frame_id",
+              "frame_attribution",
+              "request_records",
+              "signal_records",
+              "events_filter"
+            ],
+            "description": "Present in producer 1.11.0 and later. Records sharing the artifact's session, navigation and nonzero frame are counted here and listed by get_events with events_filter, never copied into each result. Correlation only: it establishes neither script attribution nor causation.",
+            "properties": {
+              "session_id": {
+                "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
+              },
+              "navigation_id": {
+                "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
+              },
+              "frame_id": {
+                "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
+              },
+              "frame_attribution": {
+                "enum": [
+                  "available",
+                  "unavailable"
+                ],
+                "description": "unavailable when frame_id is 0, for example in a worker: only records naming the artifact are counted, and coverage names the rest as runtime-frame-attribution-unavailable."
+              },
+              "request_records": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Native request_started and request_initiated records with a nonzero request ID in the frame."
+              },
+              "signal_records": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "rule_id",
+                    "observed",
+                    "correlated"
+                  ],
+                  "properties": {
+                    "rule_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "observed": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Records of this browser-signal rule naming the artifact."
+                    },
+                    "correlated": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Other records of this rule in the frame."
+                    }
+                  }
+                }
+              },
+              "events_filter": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "session_id"
+                ],
+                "description": "get_events parameters listing the frame's records, or the artifact's own records when frame attribution is unavailable.",
+                "properties": {
+                  "session_id": {
+                    "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
+                  },
+                  "navigation_id": {
+                    "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
+                  },
+                  "frame_id": {
+                    "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
+                  },
+                  "artifact_id": {
+                    "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
+                  }
+                }
+              }
+            }
+          },
           "exactRequestLink": {
             "type": "object",
             "additionalProperties": false,
@@ -18553,12 +19180,9 @@
                   "max_js_region_work_bytes",
                   "max_wasm_sections",
                   "max_wasm_section_bytes",
-                  "max_graph_edges",
                   "max_bytecode_snapshot_bytes",
                   "max_manifest_line_bytes",
                   "max_event_line_bytes",
-                  "max_artifact_records",
-                  "max_event_records",
                   "max_wasm_functions",
                   "max_wasm_instructions"
                 ],
@@ -18587,10 +19211,6 @@
                     "type": "integer",
                     "minimum": 1
                   },
-                  "max_graph_edges": {
-                    "type": "integer",
-                    "minimum": 1
-                  },
                   "max_bytecode_snapshot_bytes": {
                     "type": "integer",
                     "minimum": 1
@@ -18603,14 +19223,6 @@
                     "type": "integer",
                     "minimum": 1
                   },
-                  "max_artifact_records": {
-                    "type": "integer",
-                    "minimum": 1
-                  },
-                  "max_event_records": {
-                    "type": "integer",
-                    "minimum": 1
-                  },
                   "max_wasm_functions": {
                     "type": "integer",
                     "minimum": 1
@@ -18618,6 +19230,21 @@
                   "max_wasm_instructions": {
                     "type": "integer",
                     "minimum": 1
+                  },
+                  "max_graph_edges": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Producers before 1.11.0 only: per-artifact runtime graph edges. Frame context is now counted in runtime_context."
+                  },
+                  "max_artifact_records": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Producers before 1.11.0 only: newest manifest records read. The whole manifest is now read."
+                  },
+                  "max_event_records": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Producers before 1.11.0 only: newest event records read. The whole event store is now read."
                   }
                 }
               }
@@ -18958,7 +19585,11 @@
                 "uniqueItems": true,
                 "items": {
                   "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
-                }
+                },
+                "description": "Producers before 1.11.0 only: request IDs sharing the artifact's session context. Replaced by runtime_context."
+              },
+              "runtime_context": {
+                "$ref": "#/components/schemas/VmAnalysis/$defs/runtimeContext"
               },
               "exact_request_links": {
                 "type": "array",
@@ -19163,7 +19794,6 @@
                     "observations",
                     "anti_bot_score",
                     "anti_bot_observations",
-                    "related_request_ids",
                     "graph",
                     "frontend"
                   ]
@@ -20191,14 +20821,14 @@
           },
           "sequence_gaps": {
             "$ref": "#/components/schemas/Uint64String",
-            "description": "Count of absent sequence IDs between observed minimum and maximum per session/process within event_window scope, including gap markers. Late arrivals close holes; duplicate IDs do not create gaps. Unknown prefixes and tails are not counted."
+            "description": "Count of absent sequence IDs between observed minimum and maximum per session/process within event_window scope, including gap markers. Late arrivals close holes; duplicate IDs do not create gaps. Unknown prefixes and tails are not counted. Scope store counts the whole store."
           },
           "sequence_gaps_saturated": {
             "type": "boolean"
           },
           "queue_drops": {
             "$ref": "#/components/schemas/Uint64String",
-            "description": "Sum of validated gap-record drop counts within event_window scope. May overlap sequence gaps; a bounded tail is not a whole-capture total."
+            "description": "Sum of validated gap-record drop counts within event_window scope. May overlap sequence gaps. Scope store is the whole-capture total; a bounded tail is not."
           },
           "queue_drops_saturated": {
             "type": "boolean"
@@ -20251,7 +20881,18 @@
               "malformed_lines": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "Whole lines in the scanned bytes skipped because they are not valid events. Present on the polling answer. A torn tail still being written is not counted."
+                "description": "Whole lines in the scope skipped because they are not valid events. Present on the polling answer. A torn tail still being written is not counted."
+              },
+              "next_before": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/Uint64String"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Present on the polling answer. The start of the oldest event in events, or of the scanned tail, when older records exist: pass it as before to read them, newest first. Null when events reach the start of the store."
               }
             },
             "required": [
@@ -20262,7 +20903,7 @@
               "events_limited",
               "network_events_limited"
             ],
-            "description": "Half-open complete-record byte scope of both windows and summaries. A bounded tail excludes the older prefix and is not a session-total claim. bounded_range is a filtered read's scanned range, which can start or end inside the store."
+            "description": "scan_start and scan_end are the half-open complete-record byte scope of the summaries: sequence_gaps, queue_drops, named_gaps and malformed_lines. store is the whole store, counted by the event index, and can exceed scan_limit. bounded_tail is the newest scan_limit bytes while the index catches up, which excludes the older prefix and is not a session-total claim. bounded_range is a filtered read's scanned range, which can start or end inside the store. The events and network_events windows are the newest records of at most scan_limit bytes that end at scan_end; next_before reads older ones."
           },
           "named_gaps": {
             "$ref": "#/components/schemas/NamedGaps"
@@ -20318,7 +20959,6 @@
           "domain",
           "root",
           "members",
-          "members_limited",
           "first_offset",
           "end_offset",
           "records",
@@ -20397,7 +21037,7 @@
             "type": "boolean"
           },
           "status": {
-            "description": "The HTTP status, or failed, incomplete (observation ended or a service worker's end was lost), pending, or finished: a memory-cache reuse that carried no HTTP status, such as an MHTML archive resource (protocol/request-index-v1.md).",
+            "description": "The HTTP status, or failed, incomplete (observation ended or a service worker's end was lost), pending, or finished: a memory-cache reuse that carried no HTTP status, such as an MHTML archive resource (protocol/request-index-v2.md).",
             "oneOf": [
               {
                 "type": "integer",
@@ -20585,9 +21225,6 @@
               }
             },
             "description": "Each session, process and request ID whose records form this row, with its record count."
-          },
-          "members_limited": {
-            "type": "boolean"
           },
           "first_offset": {
             "$ref": "#/components/schemas/Uint64String",
@@ -20839,6 +21476,452 @@
           }
         }
       },
+      "RequestHar": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "log"
+        ],
+        "description": "HAR 1.2 (export_requests_har). Custom fields start with _reb.",
+        "properties": {
+          "log": {
+            "type": "object",
+            "required": [
+              "version",
+              "creator",
+              "comment",
+              "pages",
+              "entries",
+              "_reb"
+            ],
+            "properties": {
+              "version": {
+                "const": "1.2"
+              },
+              "creator": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "version"
+                ]
+              },
+              "comment": {
+                "type": "string"
+              },
+              "pages": {
+                "type": "array",
+                "maxItems": 0
+              },
+              "entries": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/RequestHarEntry"
+                }
+              },
+              "_reb": {
+                "type": "object",
+                "required": [
+                  "format",
+                  "complete",
+                  "error",
+                  "rows",
+                  "entries",
+                  "outcomes",
+                  "index",
+                  "credential_values"
+                ],
+                "properties": {
+                  "format": {
+                    "const": "reb-request-har-v1"
+                  },
+                  "complete": {
+                    "type": "boolean"
+                  },
+                  "error": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "rows": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "entries": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "outcomes": {
+                    "type": "object",
+                    "propertyNames": {
+                      "enum": [
+                        "redirect",
+                        "failed",
+                        "incomplete",
+                        "pending",
+                        "complete",
+                        "unlinked"
+                      ]
+                    },
+                    "additionalProperties": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  },
+                  "index": {
+                    "type": "object",
+                    "required": [
+                      "epoch",
+                      "indexed_end",
+                      "store_end",
+                      "complete",
+                      "through"
+                    ]
+                  },
+                  "credential_values": {
+                    "enum": [
+                      "returned",
+                      "withheld"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "RequestHarEntry": {
+        "type": "object",
+        "description": "One hop of one Traffic row, as HAR 1.2 entry fields plus _reb.",
+        "required": [
+          "startedDateTime",
+          "time",
+          "request",
+          "response",
+          "cache",
+          "timings",
+          "_reb"
+        ],
+        "properties": {
+          "startedDateTime": {
+            "type": "string",
+            "description": "The hop's monotonic start as an offset from the Unix epoch, ISO 8601 UTC with milliseconds."
+          },
+          "time": {
+            "type": "number",
+            "minimum": 0
+          },
+          "serverIPAddress": {
+            "type": "string"
+          },
+          "request": {
+            "type": "object",
+            "required": [
+              "method",
+              "url",
+              "httpVersion",
+              "cookies",
+              "headers",
+              "queryString",
+              "headersSize",
+              "bodySize"
+            ],
+            "properties": {
+              "method": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              },
+              "httpVersion": {
+                "type": "string"
+              },
+              "cookies": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "name",
+                    "value"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    },
+                    "_reb_withheld": {
+                      "const": true
+                    },
+                    "_reb_value_bytes": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              },
+              "headers": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "name",
+                    "value"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    },
+                    "_reb_withheld": {
+                      "const": true
+                    },
+                    "_reb_value_bytes": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              },
+              "queryString": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "name",
+                    "value"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    },
+                    "_reb_withheld": {
+                      "const": true
+                    },
+                    "_reb_value_bytes": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              },
+              "headersSize": {
+                "const": -1
+              },
+              "bodySize": {
+                "type": "integer",
+                "minimum": -1
+              },
+              "postData": {
+                "type": "object",
+                "required": [
+                  "mimeType",
+                  "text",
+                  "_reb_state"
+                ],
+                "properties": {
+                  "mimeType": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "comment": {
+                    "type": "string"
+                  },
+                  "_reb_state": {
+                    "type": "string"
+                  },
+                  "_reb_base64": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "response": {
+            "type": "object",
+            "required": [
+              "status",
+              "statusText",
+              "httpVersion",
+              "cookies",
+              "headers",
+              "content",
+              "redirectURL",
+              "headersSize",
+              "bodySize"
+            ],
+            "properties": {
+              "status": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "statusText": {
+                "type": "string"
+              },
+              "httpVersion": {
+                "type": "string"
+              },
+              "cookies": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "name",
+                    "value"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    },
+                    "_reb_withheld": {
+                      "const": true
+                    },
+                    "_reb_value_bytes": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              },
+              "headers": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "name",
+                    "value"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    },
+                    "_reb_withheld": {
+                      "const": true
+                    },
+                    "_reb_value_bytes": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              },
+              "content": {
+                "type": "object",
+                "required": [
+                  "size",
+                  "mimeType"
+                ],
+                "properties": {
+                  "size": {
+                    "type": "integer"
+                  },
+                  "mimeType": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "encoding": {
+                    "const": "base64"
+                  }
+                }
+              },
+              "redirectURL": {
+                "type": "string"
+              },
+              "headersSize": {
+                "const": -1
+              },
+              "bodySize": {
+                "const": -1
+              }
+            }
+          },
+          "cache": {
+            "type": "object"
+          },
+          "timings": {
+            "type": "object",
+            "required": [
+              "send",
+              "wait",
+              "receive"
+            ],
+            "properties": {
+              "send": {
+                "type": "number"
+              },
+              "wait": {
+                "type": "number"
+              },
+              "receive": {
+                "type": "number"
+              }
+            }
+          },
+          "_reb": {
+            "type": "object",
+            "required": [
+              "row_id",
+              "hop",
+              "hops",
+              "outcome",
+              "monotonic_time_ns",
+              "url_complete"
+            ],
+            "properties": {
+              "row_id": {
+                "type": "string"
+              },
+              "hop": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "hops": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "outcome": {
+                "enum": [
+                  "redirect",
+                  "failed",
+                  "incomplete",
+                  "pending",
+                  "complete",
+                  "unlinked"
+                ]
+              },
+              "monotonic_time_ns": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "url_complete": {
+                "type": "boolean",
+                "description": "false when the URL is a host or a target prefix: the session kept no request content, or no verified full-target artifact."
+              },
+              "credential_values": {
+                "enum": [
+                  "returned",
+                  "withheld"
+                ]
+              }
+            }
+          }
+        }
+      },
       "Requests": {
         "type": "object",
         "additionalProperties": false,
@@ -20863,7 +21946,7 @@
         ],
         "properties": {
           "format": {
-            "const": "reb-request-index-v1"
+            "const": "reb-request-index-v2"
           },
           "total": {
             "type": "integer",
@@ -20993,8 +22076,7 @@
             "type": "object",
             "required": [
               "tabs",
-              "domains",
-              "domains_truncated"
+              "domains"
             ],
             "additionalProperties": false,
             "properties": {
@@ -21031,14 +22113,15 @@
                       }
                     },
                     "domains_truncated": {
-                      "type": "boolean"
+                      "type": "boolean",
+                      "description": "The tab has more domains than the eight its preview names; the domain facet with this tab_id lists every one."
                     }
                   }
                 }
               },
               "domains": {
                 "type": "array",
-                "description": "Domains within the tab_id filter, with counts; at most 512 plus the domain filter.",
+                "description": "Every domain within the tab_id filter, in byte order, with its count.",
                 "items": {
                   "type": "object",
                   "required": [
@@ -21056,9 +22139,6 @@
                     }
                   }
                 }
-              },
-              "domains_truncated": {
-                "type": "boolean"
               }
             }
           },
@@ -21071,8 +22151,6 @@
               "store_end",
               "complete",
               "malformed_records",
-              "unindexed_records",
-              "request_limit",
               "reopened",
               "persisted",
               "persist_error"
@@ -21095,25 +22173,20 @@
                 "$ref": "#/components/schemas/Uint64String",
                 "description": "Network records the index could not read."
               },
-              "unindexed_records": {
-                "$ref": "#/components/schemas/Uint64String",
-                "description": "Records of requests past request_limit."
-              },
-              "request_limit": {
-                "type": "integer"
-              },
               "reopened": {
                 "type": "boolean",
-                "description": "The index was read from its sidecar, not rebuilt."
+                "description": "The index was reopened from disk, not rebuilt."
               },
               "persisted": {
-                "type": "boolean"
+                "type": "boolean",
+                "description": "The index is beside the store, so a restart reopens it."
               },
               "persist_error": {
                 "type": [
                   "string",
                   "null"
-                ]
+                ],
+                "description": "Why the index lives in a private temporary directory instead, such as a read-only evidence directory."
               }
             }
           },
@@ -25302,7 +26375,7 @@
                     "string",
                     "null"
                   ],
-                  "maxLength": 512
+                  "description": "A table edge's cases, an exception edge's clause, or what an unresolved edge leaves for: a tail call, an exception that may escape, or a label past the decoded frames."
                 }
               ],
               "minItems": 4,
@@ -31053,7 +32126,7 @@
                 "$ref": "#/components/schemas/DebuggerObservationDetail"
               },
               "site": {
-                "description": "The record's own frame: the listener of a listener_dispatch, the callback of a timer_observation or the throw site of an exception_observation, resolved alone as get_request_stack resolves a frame, to the retained script's url, one-based line and UTF-16 column and the function name, or a reason with the raw script_id and position. Null for the other three types, for an object or native listener and for a rejection. A read resolves every site in up to 4 scripts per page, newest records first on a backward page; every outcome is kept, one still waiting for its source artifact or its identity (source_artifact_missing, script_identity_outside_scan) until the artifact manifest or the request index moves, so reading the same cursor again resolves the next scripts at no cost for the ones already read. script_identity_outside_scan means the request index has not folded the identity yet or holds its 16,384 and keeps no more: read again once it moves, or read stack_read, which also scans the newest 4,096 identities.",
+                "description": "The record's own frame: the listener of a listener_dispatch, the callback of a timer_observation or the throw site of an exception_observation, resolved alone as get_request_stack resolves a frame, to the retained script's url, one-based line and UTF-16 column and the function name, or a reason with the raw script_id and position. Null for the other three types, for an object or native listener and for a rejection. A read resolves every site in up to 4 scripts per page, newest records first on a backward page; every outcome is kept, one still waiting for its source artifact or its identity (source_artifact_missing, script_identity_outside_scan) until the artifact manifest or the request index moves, so reading the same cursor again resolves the next scripts at no cost for the ones already read. script_identity_outside_scan means the request index, which keeps every identity of the session, has not folded this one yet: read again once it moves, or read stack_read, which while the index is behind also scans the newest 4,096 identities in the store's newest 64 MiB.",
                 "oneOf": [
                   {
                     "type": "null"
@@ -31117,7 +32190,7 @@
                               "source_limit",
                               "site_read_failed"
                             ],
-                            "description": "source_limit: the page's sites name more than 4 scripts not yet resolved, and this one was past them; read the same cursor again (resolved sites are kept, so the next scripts are read, and a page holding a deferred site has a tag no later read matches), or with a smaller limit. site_read_failed: the script identities or the artifact manifest could not be read, or the event store or manifest was replaced during the read; read again. Neither is answered by get_request_stack for a record older than the newest 64 MiB of the store, which that read covers."
+                            "description": "source_limit: the page's sites name more than 4 scripts not yet resolved, and this one was past them; read the same cursor again (resolved sites are kept, so the next scripts are read, and a page holding a deferred site has a tag no later read matches), or with a smaller limit. site_read_failed: the script identities or the artifact manifest could not be read, or the event store or manifest was replaced during the read; read again. get_request_stack with stack_read reads the record wherever it sits in the store."
                           }
                         }
                       }
@@ -31130,7 +32203,7 @@
                 "description": "The operation stack_read is the arguments of."
               },
               "stack_read": {
-                "description": "The exact arguments of get_request_stack (stack_read_operation) that read this record's whole stack, resolved like a request's, with its site again under observation; pass it as it is. That read covers the newest 64 MiB of the store: an older record answers outside_scan.",
+                "description": "The exact arguments of get_request_stack (stack_read_operation) that read this record's whole stack, resolved like a request's, with its site again under observation; pass it as it is. That read finds the record by its identity anywhere in the store; it answers outside_scan, with index_behind, only while the event index is still catching up.",
                 "oneOf": [
                   {
                     "type": "null"
@@ -31329,6 +32402,10 @@
             ],
             "description": "Console documents (frames, including out-of-process frames), the workers whose requests the renderer recorded, and the native frames that observation records came from. Console documents carry no native frame ID, so only observed frames scope observations exactly. Not a pausable thread list.",
             "properties": {
+              "coverage": {
+                "$ref": "#/components/schemas/DetailCoverage",
+                "description": "What workers, observed and observation_budget_gaps cover: the whole store (scope store) once the event index has caught up, else its indexed prefix."
+              },
               "console": {
                 "type": "string",
                 "maxLength": 32
@@ -31376,7 +32453,6 @@
               },
               "workers": {
                 "type": "array",
-                "maxItems": 64,
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -31415,16 +32491,14 @@
                     },
                     "requests": {
                       "type": "integer",
-                      "minimum": 1,
-                      "maximum": 2048
+                      "minimum": 1
                     }
                   }
                 }
               },
               "observed": {
                 "type": "array",
-                "maxItems": 64,
-                "description": "Native frames of the observation records among the newest 2,048 records that are observations or gaps of any kind, within the newest 64 MiB of the store, newest first: the exact identity a thread scope filters by.",
+                "description": "The native frame of every valid observation record of the store, from the event index, newest first: the exact identity a thread scope filters by. records counts that frame's records.",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -31455,8 +32529,7 @@
                     },
                     "records": {
                       "type": "integer",
-                      "minimum": 1,
-                      "maximum": 2048
+                      "minimum": 1
                     }
                   }
                 }
@@ -31679,8 +32752,7 @@
           },
           "observation_budget_gaps": {
             "type": "array",
-            "maxItems": 16,
-            "description": "debugger_observation_budget gap records in the newest observation scan, newest first: that renderer admitted 1,024 records in one capture configuration and refused the rest.",
+            "description": "Every debugger_observation_budget gap record of the store, from the event index, newest first: that renderer admitted 1,024 records in one capture configuration and refused the rest.",
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -33455,12 +34527,16 @@
             "required": [
               "items",
               "window_truncated",
-              "items_omitted"
+              "items_omitted",
+              "scope",
+              "scan_end",
+              "store_end"
             ],
             "properties": {
               "items": {
                 "type": "array",
                 "maxItems": 16,
+                "description": "The newest Wasm artifacts of the manifest, newest first.",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -33505,13 +34581,32 @@
                 }
               },
               "window_truncated": {
-                "type": "boolean"
+                "type": "boolean",
+                "description": "True while scope is not store: the inventory covers the manifest only up to scan_end."
               },
               "items_omitted": {
-                "$ref": "#/components/schemas/SafeInteger"
+                "$ref": "#/components/schemas/SafeInteger",
+                "description": "Wasm artifacts of the indexed manifest that items does not list. list_artifacts with kind=wasm pages every one."
+              },
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "store",
+                  "indexing",
+                  "stopped"
+                ],
+                "description": "store: the whole manifest is indexed. indexing: the lookup index is still catching up, so read again shortly. stopped: the index cannot read past scan_end."
+              },
+              "scan_end": {
+                "$ref": "#/components/schemas/Uint64String",
+                "description": "Manifest bytes the lookup index covers."
+              },
+              "store_end": {
+                "$ref": "#/components/schemas/Uint64String",
+                "description": "The manifest's length when read."
               }
             },
-            "description": "Retained store inventory, not restricted or linked to a live target. May contain another session."
+            "description": "Retained store inventory over the whole artifact manifest, found through the artifact lookup index; not restricted or linked to a live target. May contain another session."
           },
           "debugger_etag": {
             "type": "string",
@@ -33598,7 +34693,7 @@
           "consistency": {
             "type": "string",
             "const": "independent_debugger_snapshot_and_manifest_tail",
-            "description": "Historical constant: the context and the manifest tail are read independently."
+            "description": "Historical constant: the context and the artifact inventory are read independently."
           },
           "capture_options": {
             "type": "object",
@@ -33623,50 +34718,6 @@
               "request_content": {
                 "type": "boolean",
                 "description": "Request paths, queries, headers and bodies, and response bodies, are retained (request_target, request_headers, response_headers and response_body events, request_body, header and response_body artifacts)."
-              },
-              "content_limits": {
-                "type": [
-                  "object",
-                  "null"
-                ],
-                "additionalProperties": false,
-                "required": [
-                  "version",
-                  "request_content_budget_mib",
-                  "response_body_budget_mib",
-                  "response_media"
-                ],
-                "description": "Version 1 of the limits a content session runs with, named as the LiveSessionStart options: set by the app's start panel, the start options or the launcher's REB_REQUEST_CONTENT_BUDGET_MIB, REB_RESPONSE_BODY_BUDGET_MIB and REB_CAPTURE_RESPONSE_MEDIA. Null when request_content is false or the backend is not live. Not required: a backend from before this object omits it, which a reader treats as not reported; every backend that knows it reports it.",
-                "properties": {
-                  "version": {
-                    "const": 1
-                  },
-                  "request_content_budget_mib": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ],
-                    "minimum": 1,
-                    "maximum": 4096,
-                    "description": "MiB of unique request bodies and full targets this session keeps. Null when the launcher did not name it."
-                  },
-                  "response_body_budget_mib": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ],
-                    "minimum": 1,
-                    "maximum": 16384,
-                    "description": "MiB of unique response bodies this session keeps. Null when the launcher did not name it."
-                  },
-                  "response_media": {
-                    "type": [
-                      "boolean",
-                      "null"
-                    ],
-                    "description": "Element images, audio, video and fonts are kept too, against the response body budget. Null when the launcher did not name the choice."
-                  }
-                }
               },
               "canvas_images": {
                 "type": "boolean"
@@ -40810,6 +41861,9 @@
               "interpreter_artifact_id",
               "source_artifact_sha256",
               "links",
+              "frame_host_records",
+              "attributed_host_records",
+              "events_filter",
               "omissions"
             ],
             "properties": {
@@ -40823,19 +41877,52 @@
               },
               "links": {
                 "type": "array",
-                "maxItems": 256,
                 "items": {
                   "$ref": "#/components/schemas/VmHostLinks/$defs/link"
+                },
+                "description": "Host events naming the interpreter artifact whose direct parent is a VM record: the only host events a dispatch sample can position."
+              },
+              "frame_host_records": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Host events sharing the interpreter's session, navigation and frame, listed or not."
+              },
+              "attributed_host_records": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Those of them naming the interpreter artifact."
+              },
+              "events_filter": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "session_id",
+                  "navigation_id",
+                  "frame_id"
+                ],
+                "description": "get_events parameters that list the frame's records.",
+                "properties": {
+                  "session_id": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,19})$"
+                  },
+                  "navigation_id": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,19})$"
+                  },
+                  "frame_id": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,19})$"
+                  }
                 }
               },
               "omissions": {
                 "type": "array",
-                "maxItems": 4,
+                "maxItems": 3,
                 "items": {
                   "enum": [
                     "dispatch-samples-unavailable",
                     "dispatch-sample-retention-limit",
-                    "host-link-limit",
                     "host-events-unavailable"
                   ]
                 },
@@ -41278,8 +42365,7 @@
       },
       "NamedGaps": {
         "type": "array",
-        "maxItems": 64,
-        "description": "Gap markers whose payload names a producer reason, such as native_guest_sample_limit, in first-seen order. They also count in queue_drops.",
+        "description": "Every (category, reason) pair of the gap markers whose payload names a producer reason, such as native_guest_sample_limit, in first-seen order. They also count in queue_drops.",
         "items": {
           "type": "object",
           "additionalProperties": false,
@@ -41607,6 +42693,7 @@
                 "not_captured_artifact_unavailable",
                 "not_captured_transfer_refused",
                 "not_captured_session_budget",
+                "not_captured_disk_reserve",
                 "malformed",
                 "source_artifact",
                 "no_record",
@@ -41781,7 +42868,8 @@
         ],
         "properties": {
           "protocol_version": {
-            "const": 1,
+            "const": 2,
+            "description": "2: every count covers the whole session from the backend's disk indexes, not the newest 64 MiB.",
             "type": "integer"
           },
           "instance_id": {
@@ -41837,8 +42925,7 @@
               "scope",
               "scan_start",
               "scan_end",
-              "scan_limit",
-              "budget_exhausted",
+              "store_end",
               "total",
               "first_time_ns",
               "last_time_ns",
@@ -41847,7 +42934,7 @@
               "sessions_omitted",
               "frames",
               "frames_omitted",
-              "untracked_frame_events",
+              "malformed_lines",
               "sequence_gaps",
               "sequence_gaps_saturated",
               "queue_drops",
@@ -41859,8 +42946,10 @@
                 "type": "string",
                 "enum": [
                   "store",
-                  "bounded_range"
-                ]
+                  "indexing",
+                  "stopped"
+                ],
+                "description": "store: every complete record of the event store is counted. indexing: the backend is still indexing a long store, so the counts cover [scan_start, scan_end) of store_end bytes, and a summary_indexing check says so. stopped: the index cannot read the record at scan_end, which an events_unreadable check names, so nothing after it is counted."
               },
               "scan_start": {
                 "$ref": "#/components/schemas/Uint64String"
@@ -41868,14 +42957,9 @@
               "scan_end": {
                 "$ref": "#/components/schemas/Uint64String"
               },
-              "scan_limit": {
-                "type": "integer",
-                "enum": [
-                  67108864
-                ]
-              },
-              "budget_exhausted": {
-                "type": "boolean"
+              "store_end": {
+                "$ref": "#/components/schemas/Uint64String",
+                "description": "The event store's length when the summary was read."
               },
               "total": {
                 "$ref": "#/components/schemas/Uint64String"
@@ -42019,8 +43103,9 @@
                 "type": "integer",
                 "minimum": 0
               },
-              "untracked_frame_events": {
-                "$ref": "#/components/schemas/Uint64String"
+              "malformed_lines": {
+                "$ref": "#/components/schemas/Uint64String",
+                "description": "Stored lines that are not valid events, which no count includes."
               },
               "sequence_gaps": {
                 "$ref": "#/components/schemas/Uint64String"
@@ -42042,15 +43127,14 @@
           "request_tabs": {
             "type": "object",
             "additionalProperties": false,
-            "description": "Whether each request row of the scanned events has a browser tab (protocol/native-network-v3.md). Rows join records as Traffic does; a row is linked when a record has a tab or a request_tab_link or request_extension_link names it. An unlinked row is a capture error, reported by the network_tab_unresolved check. Read one with get_events process_id and request_id.",
+            "description": "Whether each request row of the whole event store has a browser tab (protocol/native-network-v3.md). Rows join records as Traffic does; a row is linked when a record has a tab or a request_tab_link or request_extension_link names it. An unlinked row is a capture error, reported by the network_tab_unresolved check. Read one with get_events process_id and request_id.",
             "required": [
               "rows",
               "extension_rows",
               "unresolved",
               "unresolved_reasons",
               "unresolved_requests",
-              "unresolved_omitted",
-              "untracked_records"
+              "unresolved_omitted"
             ],
             "properties": {
               "rows": {
@@ -42076,6 +43160,7 @@
               "unresolved_requests": {
                 "type": "array",
                 "maxItems": 16,
+                "description": "The unresolved rows first seen most recently; unresolved_omitted counts the rest.",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -42100,9 +43185,6 @@
                 }
               },
               "unresolved_omitted": {
-                "$ref": "#/components/schemas/Uint64String"
-              },
-              "untracked_records": {
                 "$ref": "#/components/schemas/Uint64String"
               }
             }
@@ -42156,7 +43238,8 @@
             "additionalProperties": false,
             "required": [
               "scope",
-              "budget_exhausted",
+              "scan_end",
+              "store_end",
               "total",
               "by_kind",
               "items",
@@ -42167,11 +43250,16 @@
                 "type": "string",
                 "enum": [
                   "store",
-                  "bounded_range"
-                ]
+                  "indexing",
+                  "stopped"
+                ],
+                "description": "store: every complete record of the artifact manifest is counted. indexing: the counts cover its first scan_end of store_end bytes. stopped: the index cannot read the record at scan_end, which an artifact_manifest_unreadable check names."
               },
-              "budget_exhausted": {
-                "type": "boolean"
+              "scan_end": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "store_end": {
+                "$ref": "#/components/schemas/Uint64String"
               },
               "total": {
                 "$ref": "#/components/schemas/Uint64String"
@@ -42252,7 +43340,6 @@
                 "reason",
                 "complete",
                 "requests",
-                "unindexed_records",
                 "cases",
                 "snapshots_withheld",
                 "earlier_snapshots"
@@ -42274,9 +43361,6 @@
                   "description": "The index had read the whole store; otherwise the counts cover the part read so far."
                 },
                 "requests": {
-                  "$ref": "#/components/schemas/Uint64String"
-                },
-                "unindexed_records": {
                   "$ref": "#/components/schemas/Uint64String"
                 },
                 "cases": {
@@ -42306,6 +43390,7 @@
                           "not_captured_artifact_unavailable",
                           "not_captured_transfer_refused",
                           "not_captured_session_budget",
+                          "not_captured_disk_reserve",
                           "malformed",
                           "source_artifact",
                           "no_record",
@@ -42368,7 +43453,6 @@
                     "request_content_not_retained",
                     "network_headers_unattributed",
                     "final_headers_missing",
-                    "final_headers_untracked",
                     "queue_drops",
                     "sequence_gaps",
                     "named_gap",
@@ -42379,7 +43463,11 @@
                     "response_snapshots_withheld",
                     "network_tab_unresolved",
                     "network_tab_no_document",
-                    "bounded_scope"
+                    "malformed_lines",
+                    "events_unreadable",
+                    "artifact_manifest_unreadable",
+                    "artifact_manifest_damaged",
+                    "summary_indexing"
                   ]
                 },
                 "severity": {
@@ -42409,22 +43497,6 @@
                 "lists": {
                   "$ref": "#/components/schemas/Uint64String",
                   "description": "network_headers_unattributed: cookie lists that arrived for a request no longer tracked."
-                },
-                "budget_mib": {
-                  "type": [
-                    "integer",
-                    "null"
-                  ],
-                  "minimum": 1,
-                  "description": "On a request_content_not_retained check for a session budget: the budget in force in MiB, as get_session_context capture_options.content_limits reports it, or null when this backend does not know it."
-                },
-                "retained_bytes": {
-                  "$ref": "#/components/schemas/Uint64String",
-                  "description": "On a session budget check: the unique bytes of that budget's artifacts (request_body and request_target, or response_body) in the scanned manifest, identical content counted once as the browser charges it."
-                },
-                "retained_complete": {
-                  "type": "boolean",
-                  "description": "False when the manifest scan stopped at its bound, so retained_bytes is a lower bound."
                 }
               }
             }
@@ -43298,24 +44370,7 @@
           },
           "request_content": {
             "type": "boolean",
-            "description": "Retain request paths, queries and bodies (at most 16 MiB each, 256 MiB of unique content per session unless request_content_budget_mib) as request_target events, request_target artifacts for targets past the 116-byte prefix, and request_body artifacts, plus response bodies (at most 16 MiB each, 512 MiB of unique content per session; element images, audio, video and fonts are skipped) as response_body events and artifacts, and request and response headers (at most 64 MiB of blocks per session) as request_headers and response_headers events and artifacts. Sensitive capture, on by default for a confirmed start (start_live_session always is; reb-api session start with --confirm-sensitive-capture) when category_mask holds 256 and 1024. Set to true through the CLI, it requires confirm_sensitive_capture and those category bits. Off, Network capture still records each body's length, type and digest."
-          },
-          "request_content_budget_mib": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 4096,
-            "description": "MiB of unique request bodies and full targets this content session retains, default 256. Identical bytes are stored once; a request past the budget keeps its length, type and digest and names the refusal. Requires request_content."
-          },
-          "response_body_budget_mib": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 16384,
-            "description": "MiB of unique response bodies this content session retains, default 512. A response past the budget keeps its length, type and digest. Requires request_content."
-          },
-          "response_media": {
-            "type": "boolean",
-            "default": false,
-            "description": "Also retain the images, audio, video and fonts that page elements load, which content sessions otherwise skip. They count against response_body_budget_mib and can hold sensitive page content. Requires request_content, so it is sensitive capture behind confirm_sensitive_capture."
+            "description": "Retain request paths, queries and bodies as request_target events, request_target artifacts for targets past the 116-byte prefix, and request_body artifacts, plus every response body, element images, audio, video and fonts included, as response_body events and artifacts, and request and response headers as request_headers and response_headers events and artifacts. Every body is kept whole, at any length; the artifact receiver refuses only what would leave less free disk than its reserve, and names that refusal. Sensitive capture, on by default for a confirmed start (start_live_session always is; reb-api session start with --confirm-sensitive-capture) when category_mask holds 256 and 1024. Set to true through the CLI, it requires confirm_sensitive_capture and those category bits. Off, Network capture still records each body's length, type and digest."
           },
           "request_stacks": {
             "type": "boolean",

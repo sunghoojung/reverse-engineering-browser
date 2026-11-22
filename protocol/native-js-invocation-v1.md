@@ -301,10 +301,10 @@ the overlay's `common/native_js_invocation.h` is the renderer copy.
 `tests/js_invocation_test.cpp` sets every field through both copies, requires
 identical bytes and checks every rule, the Wasm context versions and the
 rolling hash reference (`"abc"` is `0x014a08000118b972`). The broker,
-`tools/validate-evidence-store.py`, the Rust backend, the shipped viewer and
-the native app's Swift trace builder apply the same rules.
-`tools/check-native-js-invocation.py` drives authored records through the
-real broker and backend; `origin-trace-invocation-cases.json` is shared by
-the Rust and Swift trace builders; the portable admission suite drives the
+`tools/validate-evidence-store.py`, the Rust backend and the shipped viewer
+apply the same rules; the native app answers Origin Trace through its bundled
+Rust backend. `tools/check-native-js-invocation.py` drives authored records
+through the real broker and backend; `origin-trace-invocation-cases.json`
+holds the trace builder's shared cases; the portable admission suite drives the
 real renderer sink; and the `RebNativeJsInvocation*` cctests run in the native
 V8 runtime workflow. None of these is a rebuilt-Brave run.

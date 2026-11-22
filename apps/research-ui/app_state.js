@@ -69,10 +69,6 @@
         canvasRenderCaptures: [],
         canvasImageCaptureEnabled,
         requestContentCaptureEnabled,
-        // capture_options.content_limits from the session context (app.js);
-        // null until that read answers, and for a session without content.
-        sessionContentLimits: null,
-        sessionContentLimitsRead: null,
         nativeRequests: [],
         requests: standalonePreview ? [...sampleRequests] : [],
         artifacts: standalonePreview ? [...sampleArtifacts] : [],
@@ -148,6 +144,10 @@
         trafficReloaded: null,
         trafficScrollFrame: 0,
         trafficDetailOpen: false,
+        // The row menu (traffic_copy.js), the control that opened it, and the Copy label's reset.
+        trafficRowMenu: null,
+        trafficRowMenuOpener: null,
+        trafficCopyTimer: 0,
         // Written only by setEventConnection(); broker and eventFailureKind
         // are its projections for existing readers.
         connection: 'connecting',
@@ -155,6 +155,8 @@
         eventFailureKind: null,
         sessionMode: standalonePreview ? 'preview' : 'live',
         eventsLimited: false,
+        eventNextBefore: null,
+        eventStoreEnd: null,
         sequenceGaps: null,
         queueDrops: null,
         // Named gap reasons per category; null means derive from visible events.

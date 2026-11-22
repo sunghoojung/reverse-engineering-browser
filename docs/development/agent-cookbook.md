@@ -317,21 +317,20 @@ bodies; read headers with `get_request_headers` and cookies with
 named sites, invocation value digests are kept by default, because the
 researcher's Full access is the consent for them; name `"request_content":
 false`, `"canvas_images": false` or `"js_invocation_digests": false` when the
-question does not need what they keep. `"request_content_budget_mib": 1024` raises the request content
-kept from the default 256 MiB, `"response_body_budget_mib": 2048` the response
-bodies kept from the default 512 MiB, and `"response_media": true` also keeps
-element images, audio, video and fonts. Request stacks (the stack that
-started each renderer request, for `get_request_stack`) and document-start
-Console scripts (recipe 19) are on by default; `"browser_internal": true` and
-`"extension_traffic": true` record browser-page and extension-worker requests,
-and `"fresh_profile": true` starts signed out instead of in the agent
-sessions' shared research profile. `"js_invocation_sites": "/absolute/path/sites.json"`, or
+question does not need what they keep. Request content keeps every request and
+response body whole, element images, audio, video and fonts included, with no
+size or count limit; the artifact receiver refuses a body only to keep its
+free-disk reserve, and the session summary counts each one it refused. Request
+stacks (the stack that started each renderer request, for `get_request_stack`)
+and document-start Console scripts (recipe 19) are on by default;
+`"browser_internal": true` and `"extension_traffic": true` record browser-page
+and extension-worker requests, and `"fresh_profile": true` starts signed out
+instead of in the agent sessions' shared research profile. `"js_invocation_sites": "/absolute/path/sites.json"`, or
 `"js_invocation_saved_sites": true` for the sites agent sessions saved with
 `js_invocation_site_action`, arms invocation tracking. None of these is ever
 taken from the environment; `options` in the result and
-`capture_options` in `get_session_context` show what the session runs with,
-its budgets and media choice in `capture_options.content_limits` (null without
-request content). A guest adapter
+`capture_options` in `get_session_context` show what the session runs with.
+A guest adapter
 needs `"guest_adapter": "/absolute/path/recipe.json"` with `wasm_dispatch`.
 An error names the launcher's reason, for example a Brave build that lacks a
 requested V8 flag; nothing is left running. From a shell, `reb-api session
@@ -503,9 +502,10 @@ bytecode buffers and binary bodies. Request and response bodies are
 named in its `get_events` records. For readable JavaScript, page
 `get_source_format {"session_id": "1", "artifact_id": "41", "start_line": 1,
 "line_count": 400}` instead, which at Full access also lays out JSON and
-JavaScript bodies. `replacements` counts bytes that were not UTF-8. Header blocks and cookie
-lists are refused: read them with `get_request_headers` and
-`get_request_cookies`, which withhold credential and cookie values.
+JavaScript bodies. `replacements` counts bytes that were not UTF-8. At Full
+access header blocks and cookie lists read as text too, and
+`get_request_headers` and `get_request_cookies` return credential and cookie
+values; below it the blocks are refused and the values withheld.
 
 ## 22. Find text across every retained file
 
@@ -596,8 +596,8 @@ or cursor adds it; the unfiltered `get_events` window does not:
   armed set, `request_id` is the request, and `site` is null. Read the stack
   that started it with `get_request_stack`, passing `stack_read` as it is
   (`stack_read_operation` names that tool): `frames`, innermost first, with
-  `resolution.url`, `line`, `column` and `function_name`. That read covers
-  the newest 64 MiB of the store; an older record answers `outside_scan`.
+  `resolution.url`, `line`, `column` and `function_name`. That read finds
+  the record anywhere in the store.
 - `listener_dispatch`: `detail.event_type`,
   `detail.target`, and `site.resolution` is the listener's file, line and
   column. A click listener usually runs with no script on the stack, so

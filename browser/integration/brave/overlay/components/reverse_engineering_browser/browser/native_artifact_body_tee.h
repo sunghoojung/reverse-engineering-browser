@@ -32,8 +32,13 @@ enum class NativeArtifactBodyEnd : std::uint8_t {
 class NativeArtifactBodyTee final : public base::RefCounted<NativeArtifactBodyTee> {
  public:
   using Completion = base::OnceCallback<void(NativeArtifactBodyEnd end)>;
-  // Receives every forwarded chunk.
-  using Observer = base::RepeatingCallback<void(std::span<const std::uint8_t> chunk)>;
+  // Sees each chunk before it is forwarded and returns how many of its leading
+  // bytes it took; only those are forwarded, so the body waits for capture
+  // instead of passing bytes capture could not keep. Taking fewer means the
+  // observer is out of room, and it runs `resume` on this sequence once it can
+  // take more. An observer that stopped capturing takes every byte.
+  using Observer = base::RepeatingCallback<std::size_t(std::span<const std::uint8_t> chunk,
+                                                       base::OnceClosure resume)>;
 
   // Returns the original source unchanged when a forwarding pipe cannot be
   // created. Otherwise, the returned consumer receives exactly the original
@@ -65,6 +70,7 @@ class NativeArtifactBodyTee final : public base::RefCounted<NativeArtifactBodyTe
   void Start();
   void OnReadable(MojoResult result, const mojo::HandleSignalsState& state);
   void OnDataWritten(MojoResult result);
+  void Resume();
   void Finish(NativeArtifactBodyEnd end);
 
   mojo::ScopedDataPipeConsumerHandle source_;
@@ -72,6 +78,8 @@ class NativeArtifactBodyTee final : public base::RefCounted<NativeArtifactBodyTe
   std::unique_ptr<mojo::DataPipeProducer> target_;
   std::string write_buffer_;
   bool write_pending_ = false;
+  // The observer took part of a chunk; the rest waits for its resume.
+  bool waiting_ = false;
   Completion completion_;
   Observer observer_;
   scoped_refptr<NativeArtifactBodyTee> keep_alive_;

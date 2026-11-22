@@ -144,8 +144,8 @@ sensitive header block artifacts, one per hop and source; type 32
 `cookie_list` (sent and received cookies per hop with inclusion status, and
 the sensitive `cookie_list` artifact); and type 39 `script_cookie`
 (`document.cookie` and Cookie Store API calls).
-[Request index v1](request-index-v1.md) defines the backend's one-row-per-request
-index of a whole session, its private sidecar beside the store and
+[Request index v2](request-index-v2.md) defines the backend's one-row-per-request
+index of a whole session, its private database beside the store and
 `GET /api/requests`, which Traffic pages instead of the newest network window.
 [Flow graph v1](flow-graph-v1.md) folds every recorded stack of a session into
 one graph across realms, JavaScript, eval and Wasm for the Flow workspace's Flow
@@ -387,7 +387,7 @@ pages and the local HTTP/CLI contract.
 method, target, experiment, digest and expiry format. Offline preparation remains;
 live fulfillment and CLI arming/disarming were removed with CDP.
 
-[Native compiled scripts](native-compiled-scripts-v1.md) adds artifact capture
+[Native compiled scripts](native-compiled-scripts-v2.md) adds artifact capture
 origin 14, `compiled_script`, valid only for JavaScript with a nonzero execution
 context, and retires Blink's code generation hook as the producer of origin 2.
 
@@ -466,7 +466,7 @@ use the names.
 | 47 | `navigation_initiator_link` | `include/reb/request_stack.hpp` | [native network v3](native-network-v3.md#navigation_initiator_link-type-47) |
 | 48 | `async_task_stack` | `include/reb/request_stack.hpp` | [native network v3](native-network-v3.md#async_task_stack-type-48) |
 | 50 | `request_extension_link` | `include/reb/tab_link.hpp` | [native network v3](native-network-v3.md#request_extension_link-type-50) |
-| 51 | `script_compiled` | `include/reb/compiled_script.hpp` | [native compiled scripts](native-compiled-scripts-v1.md) |
+| 51 | `script_compiled` | `include/reb/compiled_script.hpp` | [native compiled scripts](native-compiled-scripts-v2.md) |
 | 52 | `memory_cache_reuse` | `include/reb/network_scope.hpp` | [native network v3](native-network-v3.md#memory_cache_reuse-type-52) |
 | 66 | `debugger_attached` | `include/reb/debugger_pause.hpp` | [native debugger pause v1](native-debugger-pause-v1.md) |
 | 67 | `debugger_paused` | `include/reb/debugger_pause.hpp` | [native debugger pause v1](native-debugger-pause-v1.md) |

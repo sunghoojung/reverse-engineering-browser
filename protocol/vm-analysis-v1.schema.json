@@ -31,8 +31,8 @@
       }
     },
     "input_coverage": {"$ref": "#/$defs/coverage"},
-    "results": {"type": "array", "maxItems": 10000, "items": {"$ref": "#/$defs/result"}},
-    "mixed_findings": {"type": "array", "maxItems": 10000, "items": {"$ref": "#/$defs/mixedFinding"}},
+    "results": {"type": "array", "items": {"$ref": "#/$defs/result"}, "description": "Every analyzed artifact, in manifest order. Producers before 1.11.0 listed at most 10,000."},
+    "mixed_findings": {"type": "array", "items": {"$ref": "#/$defs/mixedFinding"}},
     "summary": {
       "type": "object",
       "additionalProperties": false,
@@ -57,6 +57,17 @@
         "edge_semantics": {"const": "exact-captured-response-body"}
       },
       "description": "Optional exact native request projection metadata outside the stored document digest. Only results with a matching exact_request_links request_id and full root_event are retained; mixed_findings is empty. related_request_ids remains correlation only and is not used for this projection."
+    },
+    "results_view": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "listed_results", "omitted_results"],
+      "properties": {
+        "kind": {"const": "findings"},
+        "listed_results": {"type": "integer", "minimum": 0},
+        "omitted_results": {"type": "integer", "minimum": 0}
+      },
+      "description": "Optional view metadata outside the stored document digest, present in producer 1.11.0 and later when a read asks for view=findings. results then lists only failed results and those with a candidate or likely-vm tier, and omitted_results counts the tier-none results left out. The full document, or the selection without the view, lists them. summary still counts every result of the document or selection."
     }
   },
   "$defs": {
@@ -218,6 +229,7 @@
     "eventReference": {"type": "object", "additionalProperties": false, "required": ["session_id", "process_id", "sequence_number"], "properties": {"session_id": {"allOf": [{"$ref": "#/$defs/uint64"}, {"not": {"const": "0"}}]}, "process_id": {"type": "integer", "minimum": 1, "maximum": 4294967295}, "sequence_number": {"allOf": [{"$ref": "#/$defs/uint64"}, {"not": {"const": "0"}}]}}},
     "nonzeroUint64": {"type": "string", "minLength": 1, "maxLength": 20, "pattern": "^(?:[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]|1844674407370955161[0-4]|18446744073709551615)$", "not": {"pattern": "[^0-9]"}, "description": "Canonical decimal integer from 1 through 18446744073709551615; keep as a string."},
     "exactEventReference": {"type": "object", "additionalProperties": false, "required": ["session_id", "process_id", "sequence_number"], "properties": {"session_id": {"$ref": "#/$defs/nonzeroUint64"}, "process_id": {"type": "integer", "minimum": 1, "maximum": 4294967295}, "sequence_number": {"$ref": "#/$defs/nonzeroUint64"}}},
+    "runtimeContext": {"type": "object", "additionalProperties": false, "required": ["session_id", "navigation_id", "frame_id", "frame_attribution", "request_records", "signal_records", "events_filter"], "description": "Present in producer 1.11.0 and later. Records sharing the artifact's session, navigation and nonzero frame are counted here and listed by get_events with events_filter, never copied into each result. Correlation only: it establishes neither script attribution nor causation.", "properties": {"session_id": {"$ref": "#/$defs/uint64"}, "navigation_id": {"$ref": "#/$defs/uint64"}, "frame_id": {"$ref": "#/$defs/uint64"}, "frame_attribution": {"enum": ["available", "unavailable"], "description": "unavailable when frame_id is 0, for example in a worker: only records naming the artifact are counted, and coverage names the rest as runtime-frame-attribution-unavailable."}, "request_records": {"type": "integer", "minimum": 0, "description": "Native request_started and request_initiated records with a nonzero request ID in the frame."}, "signal_records": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["rule_id", "observed", "correlated"], "properties": {"rule_id": {"type": "string", "minLength": 1}, "observed": {"type": "integer", "minimum": 0, "description": "Records of this browser-signal rule naming the artifact."}, "correlated": {"type": "integer", "minimum": 0, "description": "Other records of this rule in the frame."}}}}, "events_filter": {"type": "object", "additionalProperties": false, "required": ["session_id"], "description": "get_events parameters listing the frame's records, or the artifact's own records when frame attribution is unavailable.", "properties": {"session_id": {"$ref": "#/$defs/uint64"}, "navigation_id": {"$ref": "#/$defs/uint64"}, "frame_id": {"$ref": "#/$defs/uint64"}, "artifact_id": {"$ref": "#/$defs/uint64"}}}}},
     "exactRequestLink": {"type": "object", "additionalProperties": false, "required": ["request_id", "root_event", "response_event", "capture_event", "relation"], "properties": {"request_id": {"$ref": "#/$defs/nonzeroUint64"}, "root_event": {"$ref": "#/$defs/exactEventReference"}, "response_event": {"$ref": "#/$defs/exactEventReference"}, "capture_event": {"$ref": "#/$defs/exactEventReference"}, "relation": {"const": "captured-response-body"}}, "description": "Explicit native request-start to response-start to acknowledged artifact-capture chain. All event references share a session and process, with strictly increasing sequence numbers, checked by the producer and consumer. No URL, timestamp, CDP identifier, or related_request_ids heuristic establishes this relation."},
     "findingId": {"type": "string", "pattern": "^[0-9a-f]{24}$"},
     "uint64": {"type": "string", "minLength": 1, "maxLength": 20, "pattern": "^(?:0|[1-9][0-9]*)$"},
@@ -256,7 +268,7 @@
         "limits": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["max_artifact_bytes", "max_js_matches_per_rule", "max_js_function_regions", "max_js_region_work_bytes", "max_wasm_sections", "max_wasm_section_bytes", "max_graph_edges", "max_bytecode_snapshot_bytes", "max_manifest_line_bytes", "max_event_line_bytes", "max_artifact_records", "max_event_records", "max_wasm_functions", "max_wasm_instructions"],
+          "required": ["max_artifact_bytes", "max_js_matches_per_rule", "max_js_function_regions", "max_js_region_work_bytes", "max_wasm_sections", "max_wasm_section_bytes", "max_bytecode_snapshot_bytes", "max_manifest_line_bytes", "max_event_line_bytes", "max_wasm_functions", "max_wasm_instructions"],
           "properties": {
             "max_artifact_bytes": {"type": "integer", "minimum": 1},
             "max_js_matches_per_rule": {"type": "integer", "minimum": 1},
@@ -264,14 +276,14 @@
             "max_js_region_work_bytes": {"type": "integer", "minimum": 1},
             "max_wasm_sections": {"type": "integer", "minimum": 1},
             "max_wasm_section_bytes": {"type": "integer", "minimum": 1},
-            "max_graph_edges": {"type": "integer", "minimum": 1},
             "max_bytecode_snapshot_bytes": {"type": "integer", "minimum": 1},
             "max_manifest_line_bytes": {"type": "integer", "minimum": 1},
             "max_event_line_bytes": {"type": "integer", "minimum": 1},
-            "max_artifact_records": {"type": "integer", "minimum": 1},
-            "max_event_records": {"type": "integer", "minimum": 1},
             "max_wasm_functions": {"type": "integer", "minimum": 1},
-            "max_wasm_instructions": {"type": "integer", "minimum": 1}
+            "max_wasm_instructions": {"type": "integer", "minimum": 1},
+            "max_graph_edges": {"type": "integer", "minimum": 1, "description": "Producers before 1.11.0 only: per-artifact runtime graph edges. Frame context is now counted in runtime_context."},
+            "max_artifact_records": {"type": "integer", "minimum": 1, "description": "Producers before 1.11.0 only: newest manifest records read. The whole manifest is now read."},
+            "max_event_records": {"type": "integer", "minimum": 1, "description": "Producers before 1.11.0 only: newest event records read. The whole event store is now read."}
           }
         }
       }
@@ -384,7 +396,8 @@
         "observations": {"type": "array", "items": {"$ref": "#/$defs/observation"}},
         "anti_bot_score": {"type": "integer", "minimum": 0, "maximum": 100},
         "anti_bot_observations": {"type": "array", "items": {"$ref": "#/$defs/observation"}},
-        "related_request_ids": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/uint64"}},
+        "related_request_ids": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/uint64"}, "description": "Producers before 1.11.0 only: request IDs sharing the artifact's session context. Replaced by runtime_context."},
+        "runtime_context": {"$ref": "#/$defs/runtimeContext"},
         "exact_request_links": {"type": "array", "maxItems": 1, "items": {"$ref": "#/$defs/exactRequestLink"}, "description": "Optional exact captured response-body linkage, present in producer 1.4.0 and later. Empty or absent means no exact link is established; this does not establish execution or causation."},
         "graph": {
           "type": "object",
@@ -446,7 +459,7 @@
         {
           "if": {"properties": {"status": {"const": "failed"}}, "required": ["status"]},
           "then": {"required": ["error"]},
-          "else": {"required": ["finding_id", "tier", "vm_score", "vm_threshold", "required_family_count", "evidence_families", "observations", "anti_bot_score", "anti_bot_observations", "related_request_ids", "graph", "frontend"]}
+          "else": {"required": ["finding_id", "tier", "vm_score", "vm_threshold", "required_family_count", "evidence_families", "observations", "anti_bot_score", "anti_bot_observations", "graph", "frontend"]}
         }
       ]
     },

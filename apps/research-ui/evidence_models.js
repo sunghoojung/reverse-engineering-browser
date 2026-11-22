@@ -216,10 +216,9 @@
         return drops;
       }
 
-      // Same identifier rule and 64-pair bound as both stored-window readers.
+      // Same identifier rule as both stored-window readers, which list every pair.
       const namedGapCategoryPattern = /^[a-z][a-z0-9_]{0,31}$/;
       const namedGapReasonPattern = /^[a-z][a-z0-9_]{0,127}$/;
-      const namedGapLimit = 64;
       // Configured per-configuration sampling caps in the native dispatch and
       // guest contracts: retained observations stay exact and later ones were
       // not sampled. Filter reasons are policy exclusions. Every other reason,
@@ -262,13 +261,13 @@
           if (!named) continue;
           const existing = gaps.find(gap => gap.category === named.category && gap.reason === named.reason);
           if (existing) existing.count += 1n;
-          else if (gaps.length < namedGapLimit) gaps.push({...named, count: 1n});
+          else gaps.push({...named, count: 1n});
         }
         return gaps;
       }
 
       function isNamedGapList(value) {
-        if (!Array.isArray(value) || value.length > namedGapLimit) return false;
+        if (!Array.isArray(value)) return false;
         const keys = new Set();
         return value.every(gap => isPlainObject(gap) && Object.keys(gap).length === 3 &&
           namedGapCategoryPattern.test(gap.category) && namedGapReasonPattern.test(gap.reason) &&
@@ -365,6 +364,9 @@
         state.eventCountScope = body.event_window?.scope ??
           (state.sequenceGaps !== null && state.queueDrops !== null ? 'store' : 'rendered_window');
         state.eventsLimited = body.event_window?.events_limited ?? body.count >= 5000;
+        // Evidence reads older records from these cursors (protocol/http-api.md).
+        state.eventNextBefore = body.event_window?.next_before ?? null;
+        state.eventStoreEnd = body.event_window?.scan_end ?? null;
         state.networkEventsAvailable = Array.isArray(body.network_events);
         state.networkEventsLimited = body.event_window?.network_events_limited === true;
         state.eventMalformedLines = body.event_window?.malformed_lines ?? 0;
@@ -395,12 +397,16 @@
         return `Fingerprint activity is visible with partial coverage: ${limits.join('; ')}.`;
       }
 
+      // A store scope comes from the event index and can span more than the
+      // scan limit; a bounded tail is at most that limit and starts inside it.
       function isEventWindow(value) {
         return isPlainObject(value) && ['store', 'bounded_tail'].includes(value.scope) &&
           isCaptureTotal(value.scan_start) && isCaptureTotal(value.scan_end) &&
           BigInt(value.scan_start) <= BigInt(value.scan_end) && value.scan_limit === 64 * 1024 * 1024 &&
-          BigInt(value.scan_end) - BigInt(value.scan_start) <= BigInt(value.scan_limit) &&
+          (value.scope === 'store' || BigInt(value.scan_end) - BigInt(value.scan_start) <= BigInt(value.scan_limit)) &&
           (value.scope === 'store') === (value.scan_start === '0') &&
+          (value.next_before === undefined || value.next_before === null ||
+            (isCaptureTotal(value.next_before) && BigInt(value.next_before) <= BigInt(value.scan_end))) &&
           typeof value.events_limited === 'boolean' && typeof value.network_events_limited === 'boolean' &&
           (value.malformed_lines === undefined || (Number.isSafeInteger(value.malformed_lines) && value.malformed_lines >= 0));
       }
@@ -622,8 +628,78 @@
       const requestBodyStates = [null, 'no_body', 'empty', 'metadata_only', 'captured', 'captured_truncated',
         'not_captured_body_kind', 'not_captured_artifact_unavailable', 'not_captured_transfer_refused',
         'not_captured_url', 'not_captured_session_budget', 'not_captured_credential_form',
-        'not_captured_read_incomplete'];
+        'not_captured_read_incomplete', 'not_captured_disk_reserve'];
       const requestTokenCharacters = /^[a-z0-9!#$%&'*+.^_`|~-]+\/[a-z0-9!#$%&'*+.^_`|~-]+$/;
+      // Version 1 only: in-memory bodies past this were not hashed, and a read
+      // kept at most the second as a prefix.
+      const requestBodyDigestBytes = 4n * 1024n * 1024n;
+      const requestBodyReadBytes = 16n * 1024n * 1024n;
+
+      // Version 1 rules (protocol/native-network-v2.md), kept for older sessions.
+      function validRequestBodyV1({kind, state, flags, bodyLength, captured, elements, hasArtifact, zeroDigest}) {
+        const [content, digest, sizeLimit, partial, read] = [1, 2, 4, 8, 64].map(bit => (flags & bit) !== 0);
+        const isBytes = kind === 1, isNone = kind === 0, readable = kind >= 2 && kind <= 5;
+        if ((flags & 0x80) !== 0) return false;
+        if (read) {
+          // File, blob or stream parts the browser read.
+          const exact = [2, 4, 5].includes(state), retained = state === 4 || state === 5;
+          if (!content || !readable || partial === exact || hasArtifact !== retained ||
+              (!retained && captured !== 0n) || digest === zeroDigest ||
+              (kind === 5 && elements < 2) || (kind === 4 && elements !== 1)) return false;
+          return {
+            2: digest && !sizeLimit && bodyLength === 0n,
+            4: digest && !sizeLimit && bodyLength !== 0n && bodyLength <= requestBodyReadBytes && captured === bodyLength,
+            5: !digest && sizeLimit && bodyLength > requestBodyReadBytes && captured === requestBodyReadBytes,
+            8: !digest && !sizeLimit, 10: !digest && !sizeLimit, 12: !digest && !sizeLimit
+          }[state] ?? false;
+        }
+        if (state === 12 || state === 13 ||
+            (digest && (!isBytes || sizeLimit || bodyLength > requestBodyDigestBytes)) || (!digest && !zeroDigest) ||
+            (sizeLimit && (!isBytes || bodyLength <= requestBodyDigestBytes)) ||
+            (isBytes && state !== 11 && digest === sizeLimit) || (state === 11 && (digest || sizeLimit)) ||
+            partial !== (!isNone && !isBytes) || isNone !== (state === 1) ||
+            (isNone && (elements !== 0 || bodyLength !== 0n)) || (!isNone && elements === 0)) return false;
+        const retained = state === 4 || state === 5;
+        if (hasArtifact !== retained || (!retained && captured !== 0n)) return false;
+        return {
+          1: true, 11: true,
+          2: isBytes && bodyLength === 0n,
+          3: !content && (!isBytes || bodyLength !== 0n),
+          4: content && isBytes && bodyLength !== 0n && captured === bodyLength,
+          5: content && isBytes && captured !== 0n && captured < bodyLength,
+          6: content && !isNone && !isBytes
+        }[state] ?? (content && ((isBytes && bodyLength !== 0n) || readable));
+      }
+
+      // Version 2 rules (protocol/native-network-v3.md): every body is read and
+      // hashed whole, and bit 7 marks a credential form.
+      function validRequestBodyV2({kind, state, flags, bodyLength, captured, elements, hasArtifact, zeroDigest}) {
+        const [content, digest, sizeLimit, partial, read, credential] =
+          [1, 2, 4, 8, 64, 128].map(bit => (flags & bit) !== 0);
+        const isBytes = kind === 1, isNone = kind === 0, unknown = kind === 6, retained = state === 4;
+        // Retired: nothing is truncated, budgeted or too large to hash.
+        if (sizeLimit || state === 5 || state === 10 || digest === zeroDigest || hasArtifact !== retained ||
+            (!retained && captured !== 0n) || isNone !== (state === 1) ||
+            (isNone && (credential || elements !== 0 || bodyLength !== 0n)) || (!isNone && elements === 0) ||
+            (kind === 4 && elements !== 1)) return false;
+        if (read) {
+          const exact = [2, 3, 4].includes(state);
+          if (unknown || isNone || digest !== exact || partial !== (!exact && !isBytes)) return false;
+          // A Metadata only session hashes in-memory bodies and keeps no bytes.
+          if (!content) return state === 3 && isBytes && !credential && bodyLength !== 0n;
+          return {2: bodyLength === 0n, 4: bodyLength !== 0n && captured === bodyLength, 8: true, 12: true, 13: true}[state] ??
+            false;
+        }
+        // Without a read only an empty in-memory body has a digest, and only a
+        // read learns of these.
+        if (digest !== (state === 2) || partial !== (!isNone && !isBytes) || [4, 12, 13].includes(state) ||
+            (!content && credential !== (state === 11))) return false;
+        const refused = content && !unknown && (!isBytes || bodyLength !== 0n);
+        return {
+          1: true, 2: isBytes && bodyLength === 0n, 3: !content && (!isBytes || bodyLength !== 0n),
+          6: content && !isBytes, 7: refused, 8: refused, 9: refused, 11: !content
+        }[state] ?? false;
+      }
 
       // Every rule of the request_body payload, shared with the C++ core and the
       // Python evidence validator through tools/check-network-request-wire.mjs.
@@ -633,6 +709,7 @@
         const bytes = bytesFromHex(event.payload);
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
         const [kindCode, stateCode, flags, typeLength] = [bytes[4], bytes[5], bytes[6], bytes[7]];
+        const version = view.getUint16(0, true);
         const bodyLength = view.getBigUint64(8, true);
         const captured = view.getBigUint64(16, true);
         const elements = view.getUint32(24, true);
@@ -640,67 +717,33 @@
         const typeBytes = bytes.slice(64, 128);
         const contentType = String.fromCharCode(...typeBytes.slice(0, Math.min(typeLength, 64)));
         const has = bit => (flags & bit) !== 0;
-        const [content, hasDigest, sizeLimit, partial, typePresent, typeOmitted, read] =
-          [1, 2, 4, 8, 16, 32, 64].map(has);
-        const digestLimit = 4n * 1024n * 1024n;
-        const readLimit = 16n * 1024n * 1024n;
-        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || view.getUint32(28, true) !== 0 ||
-            kindCode > 6 || stateCode < 1 || stateCode > 12 || (flags & ~0x7f) !== 0 || typeLength > 64 ||
-            (typePresent && typeOmitted) || typePresent !== (typeLength !== 0) ||
-            typeBytes.slice(typeLength).some(byte => byte !== 0) ||
-            (typePresent && !requestTokenCharacters.test(contentType)) || captured > bodyLength) return null;
-        const isBytes = kindCode === 1, isNone = kindCode === 0, state = requestBodyStates[stateCode];
-        const readable = kindCode >= 2 && kindCode <= 5;
-        const decoded = () => ({
-          kind: requestBodyKinds[kindCode], state, contentCapture: content, lengthPartial: partial, read,
+        const [content, hasDigest, sizeLimit, partial, typePresent, typeOmitted, read, credentialForm] =
+          [1, 2, 4, 8, 16, 32, 64, 128].map(has);
+        if (![1, 2].includes(version) || view.getUint16(2, true) !== 128 || view.getUint32(28, true) !== 0 ||
+            kindCode > 6 || stateCode < 1 || stateCode > 13 || typeLength > 64 || (typePresent && typeOmitted) ||
+            typePresent !== (typeLength !== 0) || typeBytes.slice(typeLength).some(byte => byte !== 0) ||
+            (typePresent && !requestTokenCharacters.test(contentType)) || captured > bodyLength ||
+            (kindCode === 5 && elements < 2)) return null;
+        const record = {kind: kindCode, state: stateCode, flags, bodyLength, captured, elements,
+          hasArtifact: event.artifact_id !== '0', zeroDigest: digest.every(byte => byte === 0)};
+        if (!(version === 1 ? validRequestBodyV1(record) : validRequestBodyV2(record))) return null;
+        return {
+          version, kind: requestBodyKinds[kindCode], state: requestBodyStates[stateCode], contentCapture: content,
+          lengthPartial: partial, read, credentialForm,
           contentType: typePresent ? contentType : null, contentTypeOmitted: typeOmitted,
           bodyLength: String(bodyLength), capturedLength: String(captured), elementCount: elements,
           sha256: hasDigest ? Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('') : null,
           digestSizeLimit: sizeLimit, artifactId: event.artifact_id,
           sequenceNumber: event.sequence_number, sessionId: event.session_id, processId: event.process_id
-        });
-        if (read) {
-          // File, blob or stream parts the browser read (native-network-v3.md).
-          const exact = [2, 4, 5].includes(stateCode), kept = stateCode === 4 || stateCode === 5;
-          if (!content || !readable || partial === exact || (event.artifact_id !== '0') !== kept ||
-              (!kept && captured !== 0n) || hasDigest !== digest.some(byte => byte !== 0) ||
-              (kindCode === 5 && elements < 2) || (kindCode === 4 && elements !== 1)) return null;
-          const readValid = {
-            2: hasDigest && !sizeLimit && bodyLength === 0n,
-            4: hasDigest && !sizeLimit && bodyLength !== 0n && bodyLength <= readLimit && captured === bodyLength,
-            5: !hasDigest && sizeLimit && bodyLength > readLimit && captured === readLimit,
-            8: !hasDigest && !sizeLimit, 10: !hasDigest && !sizeLimit, 12: !hasDigest && !sizeLimit
-          }[stateCode];
-          return readValid ? decoded() : null;
-        }
-        if (stateCode === 12) return null;
-        if ((hasDigest && (!isBytes || sizeLimit || bodyLength > digestLimit)) ||
-            (!hasDigest && digest.some(byte => byte !== 0)) ||
-            (sizeLimit && (!isBytes || bodyLength <= digestLimit)) ||
-            (isBytes && stateCode !== 11 && hasDigest === sizeLimit) ||
-            (stateCode === 11 && (hasDigest || sizeLimit)) ||
-            partial !== (!isNone && !isBytes) || isNone !== (stateCode === 1) ||
-            (isNone && (elements !== 0 || bodyLength !== 0n)) || (!isNone && elements === 0) ||
-            (kindCode === 5 && elements < 2)) return null;
-        const retained = stateCode === 4 || stateCode === 5;
-        if ((event.artifact_id !== '0') !== retained || (!retained && captured !== 0n)) return null;
-        const stateValid = {
-          no_body: true, not_captured_credential_form: true,
-          empty: isBytes && bodyLength === 0n,
-          metadata_only: !content && (!isBytes || bodyLength !== 0n),
-          captured: content && isBytes && bodyLength !== 0n && captured === bodyLength,
-          captured_truncated: content && isBytes && captured !== 0n && captured < bodyLength,
-          not_captured_body_kind: content && !isNone && !isBytes
-        }[state] ?? (content && ((isBytes && bodyLength !== 0n) || readable));
-        if (!stateValid) return null;
-        return decoded();
+        };
       }
 
       const responseBodyStates = [null, 'captured', 'captured_truncated', 'partial', 'aborted', 'cancelled', 'empty',
         'not_modified', 'redirected', 'not_captured_type', 'not_captured_artifact_unavailable',
-        'not_captured_transfer_refused', 'not_captured_session_budget'];
+        'not_captured_transfer_refused', 'not_captured_session_budget', 'not_captured_disk_reserve'];
       const responseCodings = new Map([[1, 'gzip'], [2, 'deflate'], [3, 'br'], [4, 'zstd'], [5, 'dcb'], [6, 'dcz'],
         [7, 'compress'], [15, 'other']]);
+      // Versions 1 and 2 only: a body kept at most this prefix.
       const responseCaptureBytes = 16n * 1024n * 1024n;
 
       // Every rule of the response_body payload (protocol/native-network-v3.md),
@@ -721,26 +764,32 @@
         const contentType = String.fromCharCode(...typeBytes.slice(0, Math.min(typeLength, 64)));
         const has = bit => (flags & bit) !== 0;
         const typePresent = has(0x40);
-        // Version 2 adds bit 7, snapshots withheld by a byte bound.
+        // Version 2 adds bit 7, snapshots withheld by a byte bound. Version 3
+        // keeps every body whole and every media type.
         const version = view.getUint16(0, true);
-        if (![1, 2].includes(version) || view.getUint16(2, true) !== 128 || view.getUint16(30, true) !== 0 ||
-            stateCode < 1 || stateCode > 12 || (flags & ~(version === 2 ? 0xff : 0x7f)) !== 0 || typeLength > 64 ||
+        const limited = version < 3;
+        if (![1, 2, 3].includes(version) || view.getUint16(2, true) !== 128 || view.getUint16(30, true) !== 0 ||
+            stateCode < 1 || stateCode > 13 || (flags & ~(version === 1 ? 0x7f : 0xff)) !== 0 || typeLength > 64 ||
             typePresent !== (typeLength !== 0) || typeBytes.slice(typeLength).some(byte => byte !== 0) ||
             (typePresent && !requestTokenCharacters.test(contentType)) || codingCount > 4 ||
             (has(0x10) && codingCount !== 4) ||
             codings.some((coding, index) => index < codingCount ? !responseCodings.has(coding) : coding !== 0)) return null;
         const retained = captured !== 0n;
-        const whole = bodyLength < responseCaptureBytes ? bodyLength : responseCaptureBytes;
+        const whole = limited && bodyLength > responseCaptureBytes ? responseCaptureBytes : bodyLength;
         if (captured > bodyLength || (event.artifact_id !== '0') !== retained || digest.some(byte => byte !== 0) !== retained ||
             (has(1) && !retained) || (partialIndex !== 0) !== (stateCode === 3) ||
             (has(0x20) && ![1, 2, 6].includes(stateCode))) return null;
-        const valid = stateCode === 1 ? bodyLength !== 0n && captured === bodyLength
-          : stateCode === 2 ? bodyLength > responseCaptureBytes && captured === responseCaptureBytes
-            : stateCode === 3 ? bodyLength !== 0n && captured === whole
-              : stateCode <= 5 ? !retained || captured === whole
-                : stateCode <= 9 ? bodyLength === 0n : !retained;
+        const valid = {
+          1: bodyLength !== 0n && captured === bodyLength,
+          2: limited && bodyLength > responseCaptureBytes && captured === responseCaptureBytes,
+          3: bodyLength !== 0n && captured === whole,
+          4: !retained || captured === whole, 5: !retained || captured === whole,
+          6: bodyLength === 0n, 7: bodyLength === 0n, 8: bodyLength === 0n, 9: limited && bodyLength === 0n,
+          10: !retained, 11: !retained, 12: limited && !retained, 13: !limited && !retained
+        }[stateCode];
         if (!valid) return null;
         return {
+          version,
           state: responseBodyStates[stateCode], shared: has(1), fromCache: has(2), serviceWorker: has(4),
           stillEncoded: has(8), codingsOmitted: has(0x10), completionUnobserved: has(0x20), snapshotsWithheld: has(0x80),
           contentType: typePresent ? contentType : null,
@@ -1947,6 +1996,22 @@
           typeof observation.detail === 'string';
       }
 
+      // Frame context is counted, never listed: get_events with events_filter
+      // lists the records, so a busy frame never grows a result.
+      function isVmRuntimeContext(context) {
+        const id = value => isCanonicalInteger(value, 0n, uint64Max);
+        const count = value => isSafeIntegerInRange(value, 0, Number.MAX_SAFE_INTEGER);
+        const filter = context?.events_filter;
+        return isPlainObject(context) && id(context.session_id) && id(context.navigation_id) && id(context.frame_id) &&
+          ['available', 'unavailable'].includes(context.frame_attribution) &&
+          (context.frame_attribution === 'unavailable') === (context.frame_id === '0') &&
+          count(context.request_records) && Array.isArray(context.signal_records) &&
+          context.signal_records.every(signal => isPlainObject(signal) && typeof signal.rule_id === 'string' &&
+            signal.rule_id.length > 0 && count(signal.observed) && count(signal.correlated)) &&
+          isPlainObject(filter) && id(filter.session_id) && Object.entries(filter).every(([key, value]) =>
+            ['session_id', 'navigation_id', 'frame_id', 'artifact_id'].includes(key) && id(value));
+      }
+
       function isVmAnalysisResult(result) {
         if (!isPlainObject(result) || !isCanonicalInteger(result.artifact_id, 0n, uint64Max) ||
             (result.artifact_sha256 !== undefined && !vmWorkspaceDigest(result.artifact_sha256)) ||
@@ -1965,14 +2030,23 @@
           isSafeIntegerInRange(result.anti_bot_score, 0, 100) &&
           Array.isArray(result.evidence_families) && result.evidence_families.every(value => typeof value === 'string') &&
           Array.isArray(result.observations) && result.observations.every(isVmAnalysisObservation) &&
-          Array.isArray(result.related_request_ids) && result.related_request_ids.every(value => isCanonicalInteger(value, 0n, uint64Max)) &&
+          isVmRuntimeContext(result.runtime_context) &&
           isPlainObject(result.coverage) && typeof result.coverage.complete === 'boolean';
+      }
+
+      // A findings view lists failures and VM-like tiers and counts the rest.
+      function isVmResultsView(view, results) {
+        return isPlainObject(view) && Object.keys(view).length === 3 && view.kind === 'findings' &&
+          view.listed_results === results.length && isSafeIntegerInRange(view.omitted_results, 0, Number.MAX_SAFE_INTEGER) &&
+          results.every(result => result.tier !== 'none');
       }
 
       function isVmAnalysisDocument(document) {
         return isPlainObject(document) && document.contract_version === 1 &&
           document.document_kind === 'vm-analysis' &&
           (document.selection === undefined || isVmRequestSelection(document.selection)) &&
+          (document.results_view === undefined ||
+            (Array.isArray(document.results) && isVmResultsView(document.results_view, document.results))) &&
           (document.capture_mode === undefined || vmWorkspaceMode(document.capture_mode)) &&
           (document.inputs?.capture_provenance_digest === undefined ||
             document.inputs.capture_provenance_digest === null ||
@@ -2020,6 +2094,26 @@
           analysis: result
         }));
         return findings.sort((left, right) => (right.analysis?.vm_score ?? 0) - (left.analysis?.vm_score ?? 0));
+      }
+
+      // A failed analysis is listed in every view but is never a finding, so
+      // VM Lab counts failures by error code. Counted once per document.
+      const vmAnalysisFailureNotices = new WeakMap();
+      function vmAnalysisFailureNotice(document) {
+        if (!document) return '';
+        if (!vmAnalysisFailureNotices.has(document)) {
+          const codes = new Map();
+          for (const result of document.results) {
+            if (result.status === 'failed') codes.set(result.error.code, (codes.get(result.error.code) ?? 0) + 1);
+          }
+          let total = 0;
+          for (const count of codes.values()) total += count;
+          const byCode = [...codes].sort((left, right) => right[1] - left[1] || (left[0] < right[0] ? -1 : 1))
+            .map(([code, count]) => `${code} ${count.toLocaleString('en-US')}`).join(', ');
+          vmAnalysisFailureNotices.set(document, total === 0 ? ''
+            : `${total.toLocaleString('en-US')} ${total === 1 ? 'artifact' : 'artifacts'} could not be analyzed (${byCode}).`);
+        }
+        return vmAnalysisFailureNotices.get(document);
       }
 
       function hasOnlyKeys(value, allowed) {
@@ -3473,12 +3567,19 @@
           !Array.isArray(document.workspaces) || document.workspaces.length > 256) return false;
         const categories = ['canvas', 'webgl', 'web_audio', 'navigator', 'permissions', 'storage', 'webrtc', 'network', 'runtime'];
         const types = ['api_call', 'property_read', 'request_started', 'request_initiated', 'request_redirected', 'response_started', 'response_completed', 'request_completed', 'request_failed'];
-        const omissions = ['dispatch-samples-unavailable', 'dispatch-sample-retention-limit', 'host-link-limit', 'host-events-unavailable'];
-        const sources = new Set(); let total = 0;
+        const omissions = ['dispatch-samples-unavailable', 'dispatch-sample-retention-limit', 'host-events-unavailable'];
+        const count = value => isSafeIntegerInRange(value, 0, Number.MAX_SAFE_INTEGER);
+        const id = value => isCanonicalInteger(value, 0n, uint64Max);
+        const sources = new Set();
         for (const row of document.workspaces) {
-          if (!vmWorkspaceExact(row, ['interpreter_artifact_id', 'source_artifact_sha256', 'links', 'omissions']) ||
-            sources.has(row.interpreter_artifact_id) || !Array.isArray(row.links) || row.links.length > 256 ||
-            !Array.isArray(row.omissions) || row.omissions.length > 4 || new Set(row.omissions).size !== row.omissions.length ||
+          if (!vmWorkspaceExact(row, ['interpreter_artifact_id', 'source_artifact_sha256', 'links', 'frame_host_records',
+            'attributed_host_records', 'events_filter', 'omissions']) ||
+            sources.has(row.interpreter_artifact_id) || !Array.isArray(row.links) ||
+            !count(row.frame_host_records) || !count(row.attributed_host_records) ||
+            row.attributed_host_records > row.frame_host_records || row.links.length > row.attributed_host_records ||
+            !vmWorkspaceExact(row.events_filter, ['session_id', 'navigation_id', 'frame_id']) ||
+            !Object.values(row.events_filter).every(id) ||
+            !Array.isArray(row.omissions) || row.omissions.length > 3 || new Set(row.omissions).size !== row.omissions.length ||
             !row.omissions.every(reason => omissions.includes(reason))) return false;
           sources.add(row.interpreter_artifact_id);
           const workspace = workspaceDocument.workspaces.find(item => item.interpreter_artifact_id === row.interpreter_artifact_id &&
@@ -3509,9 +3610,8 @@
                 sample.invocation_id === position.invocation_id && sample.instruction_pointer === position.instruction_pointer &&
                 sample.instruction_pointer_units === position.instruction_pointer_units)) return false;
           }
-          total += row.links.length;
         }
-        return total <= 4096;
+        return true;
       }
 
       function vmBrowserInternalSourceUrl(url) {
@@ -3526,7 +3626,6 @@
         return {
           'dispatch-samples-unavailable': 'No retained native dispatch samples. guest_position stays null. Static handlers can still be listed. This is the missing sampler, not an empty workspace.',
           'dispatch-sample-retention-limit': 'Accepted samples were dropped from the retained set, so those samples cannot prove a guest position.',
-          'host-link-limit': 'Host-link retention reached its cap. Further same-scope events are omitted.',
           'host-events-unavailable': 'No host event shared this interpreter session, navigation, and frame.'
         }[reason] ?? String(reason ?? '');
       }
@@ -3538,6 +3637,19 @@
           ? `guest_position PC ${position.instruction_pointer} (${position.instruction_pointer_units})`
           : 'guest_position null';
         return `${link?.category}/${link?.type} · event ${event.session_id}:${event.process_id}:${event.sequence_number} · state ${link?.state} · reason ${link?.reason} · ${positionText}`;
+      }
+
+      // Rows are the host events a retained VM record directly parents; the
+      // rest of the frame is a count the Events API lists with events_filter.
+      function vmHostRecordCountText(row) {
+        const frame = Number.isSafeInteger(row?.frame_host_records) ? row.frame_host_records : 0;
+        const named = Number.isSafeInteger(row?.attributed_host_records) ? row.attributed_host_records : 0;
+        const listed = Array.isArray(row?.links) ? row.links.length : 0;
+        const records = value => `${value.toLocaleString('en-US')} host event${value === 1 ? '' : 's'}`;
+        if (frame === 0) return null;
+        const share = frame === 1 ? 'shares' : 'share', name = named === 1 ? 'names' : 'name';
+        return `${records(frame)} ${share} this frame and ${named.toLocaleString('en-US')} ${name} this interpreter. ` +
+          `${listed.toLocaleString('en-US')} with a VM-record parent ${listed === 1 ? 'is' : 'are'} listed; the others have no guest position to show.`;
       }
 
       function vmHostLinksView(row) {
@@ -3555,9 +3667,10 @@
         const staticOnly = omissions.includes('dispatch-samples-unavailable') && links.every(link =>
           link?.state === 'unknown' && link?.reason === 'dispatch-samples-unavailable' &&
           (link.guest_position === null || link.guest_position === undefined));
+        const frameHosts = Number.isSafeInteger(row.frame_host_records) ? row.frame_host_records : 0;
         let headline;
-        if (staticOnly && links.length > 0) {
-          headline = 'Static only. Reason dispatch-samples-unavailable. guest_position is null on every row. Same session, navigation, and frame is correlation, not a proven Wasm loader and not request-value provenance. Static handlers stay listed. This is the missing sampler, not an empty workspace. Session sources lists stored artifacts only.';
+        if (staticOnly && frameHosts > 0) {
+          headline = 'Static only. Reason dispatch-samples-unavailable. guest_position is null on every listed row and unknown for every counted host event. Same session, navigation, and frame is correlation, not a proven Wasm loader and not request-value provenance. Static handlers stay listed. This is the missing sampler, not an empty workspace. Session sources lists stored artifacts only.';
         } else if (staticOnly) {
           headline = 'Static only. Reason dispatch-samples-unavailable. guest_position is null because no native dispatch samples were retained, and no host event shared this session, navigation, and frame (host-events-unavailable). This is not an empty workspace.';
         } else if (links.length === 0) {
@@ -3569,6 +3682,7 @@
           bound: true,
           staticOnly,
           headline,
+          countLine: vmHostRecordCountText(row),
           omissionLines: omissions.map(reason => ({reason, detail: vmHostLinkOmissionText(reason)})),
           lines: links.map(vmHostLinkLine)
         };

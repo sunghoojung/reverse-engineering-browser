@@ -245,7 +245,7 @@ assert.doesNotMatch(older.textContent, /No recorded document\.cookie/, 'A partia
 panel.querySelector('.traffic-cookie-provenance button').dispatchEvent(new window.Event('click'));
 await settle();
 // Script calls are located across the session, so they can be complete while the lists are not.
-provenanceAnswer = {...provenanceAnswer, set_by: [], script_coverage: {complete: true, located_outside_window: 4, unreadable: 0}};
+provenanceAnswer = {...provenanceAnswer, set_by: [], script_coverage: {complete: true, located_outside_window: 0, unreadable: 0}};
 await new Promise(resolve => setTimeout(resolve, 5100));
 [...panel.querySelectorAll('.traffic-cookie-name')].find(node => node.textContent === 'pref')
   .dispatchEvent(new window.Event('click'));
@@ -253,7 +253,7 @@ await settle();
 api.renderTrafficCookies(panel, request, rerender, {...ui, storeRevision: '"pref-script"'});
 await settle();
 older = panel.querySelector('.traffic-cookie-provenance');
-assert.match(older.textContent, /Set by responses \(0\)Not in the scanned range: the backend reads the newest retained network records/);
+assert.match(older.textContent, /Set by responses \(0\)Not in the records read so far: the request index is still catching up with the store\./);
 assert.match(older.textContent, /Script access \(0\)No recorded document\.cookie or Cookie Store call used this name\./);
 panel.querySelector('.traffic-cookie-provenance button').dispatchEvent(new window.Event('click'));
 await settle();
@@ -290,6 +290,23 @@ another.dispatchEvent(new window.Event('click'));
 await settle();
 await new Promise(resolve => setTimeout(resolve, 0));
 assert.match(panel.querySelector('.traffic-cookie-provenance').textContent, /Provenance of track/);
+assert.doesNotMatch(panel.querySelector('.traffic-cookie-provenance').textContent, /could not read|not resolved to source/);
+panel.querySelector('.traffic-cookie-provenance button').dispatchEvent(new window.Event('click'));
+await settle();
+// A list or source the store could not read in time is named, never a limit.
+provenanceAnswer = {...provenanceAnswer, lists_unread: 2, stacks_unresolved: 1};
+await new Promise(resolve => setTimeout(resolve, 5100));
+[...panel.querySelectorAll('.traffic-cookie-name')].find(node => node.textContent === 'track')
+  .dispatchEvent(new window.Event('click'));
+await settle();
+api.renderTrafficCookies(panel, request, rerender, {...ui, storeRevision: '"track-unread"'});
+await settle();
+{
+  const text = panel.querySelector('.traffic-cookie-provenance').textContent;
+  assert.match(text, /The store could not read 2 retained cookie lists yet; the next refresh asks again\./);
+  assert.match(text, /1 script call was not resolved to source: the artifact manifest could not be read in time\./);
+  assert.doesNotMatch(text, /limit/);
+}
 panel.querySelector('.traffic-cookie-provenance button').dispatchEvent(new window.Event('click'));
 await settle();
 // Keyboard focus survives sort and the filter switch, moves into provenance, and returns on Close.
@@ -504,7 +521,7 @@ statesRender();
 await settle();
 assert.match(panel.textContent, /(size|SHA-256)/);
 assert.match(panel.textContent, /receiver refused this list: sensitive_capture_disabled/);
-assert.match(panel.textContent, /already retained 64 MiB of header blocks and cookie lists/);
+assert.match(panel.textContent, /after 64 MiB of header blocks and cookie lists were retained, a limit of the browser that recorded this session/);
 assert.match(panel.textContent, /2 MiB list limit/);
 
 // A partial store read must not state that nothing was retained.

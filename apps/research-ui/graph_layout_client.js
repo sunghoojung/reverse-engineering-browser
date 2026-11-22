@@ -3,7 +3,8 @@
  * graph and block graph layout workers, which load it with importScripts; the
  * page loads it for the flow graph's on-thread fallback. It sends the graphs
  * it is given, checks each answer's shape, and keeps Triskel's drawing only
- * where it is not much wider or taller than the caller's own layout. A graph
+ * where it is not much wider or taller than the caller's own layout, unless
+ * the caller asked to keep any well-formed drawing (`keep`). A graph
  * it does not lay out gets a reason, `{code}` with the detail its code
  * names, which each view words for itself:
  *   large           past AUTOMATIC, so only sent when the caller asks (`all`)
@@ -95,13 +96,15 @@ const graphLayoutClient = (() => {
     return response.json();
   }
 
-  /** Triskel's drawing of `graph`, or why the caller's own layout stays. */
-  function judge(result, graph) {
+  /** Triskel's drawing of `graph`, or why the caller's own layout stays.
+   * `keep` keeps a well-formed drawing of any size. */
+  function judge(result, graph, keep = false) {
     if (!result) return {reason: {code: 'mismatch'}};
     if (result.status !== 'laid_out') return {reason: {code: 'failed', status: result.status, detail: result.reason ?? null}};
     const nodes = Array.isArray(result.nodes) && result.nodes.length === graph.nodes.length && result.nodes.every(point => Number.isFinite(point?.[0]) && Number.isFinite(point?.[1]));
     const edges = Array.isArray(result.edges) && result.edges.length === graph.edges.length && result.edges.every(list => Array.isArray(list) && list.length >= 4 && list.every(Number.isFinite));
     if (!nodes || !edges) return {reason: {code: 'mismatch'}};
+    if (keep) return {result};
     if (result.width > Math.max(graph.width * ACCEPT.widen, ACCEPT.freeWidth)) return {reason: {code: 'wider', ratio: result.width / Math.max(1, graph.width)}};
     if (result.height > Math.max(graph.height * ACCEPT.widen, graph.height + ACCEPT.freeHeight)) return {reason: {code: 'taller', ratio: result.height / Math.max(1, graph.height)}};
     return {result};
@@ -113,10 +116,12 @@ const graphLayoutClient = (() => {
    * to {outcomes, revision, failure}: per graph either {result}, Triskel's
    * laid-out graph to use, or {reason}; the engine revision; and why the
    * whole request failed, or null. `all` sends graphs past AUTOMATIC too;
-   * `signal` stops the request, which leaves each graph sent `cancelled`;
-   * `onSend` is called once a request is sent, never for cached answers.
+   * `keep` keeps every well-formed drawing however it compares, for a
+   * caller that says how it compares; `signal` stops the request, which
+   * leaves each graph sent `cancelled`; `onSend` is called once a request is
+   * sent, never for cached answers.
    */
-  async function layOut(graphs, {all = false, signal = null, onSend = null} = {}) {
+  async function layOut(graphs, {all = false, keep = false, signal = null, onSend = null} = {}) {
     const planned = plan(graphs, all);
     const body = {graphs: []};
     planned.forEach((entry, index) => {
@@ -124,7 +129,7 @@ const graphLayoutClient = (() => {
       body.graphs.push({nodes: graphs[index].nodes.map(([w, h]) => [round(w), round(h)]), edges: graphs[index].edges});
     });
     // A cached answer is judged afresh: the caller's own layout may differ.
-    const unsent = (entry, index) => (entry.cached ? judge(entry.cached.result, graphs[index]) : entry);
+    const unsent = (entry, index) => (entry.cached ? judge(entry.cached.result, graphs[index], keep) : entry);
     const revision = planned.find(entry => entry.cached)?.cached.revision ?? null;
     // Every graph that was sent shares the request's fate.
     const everySent = (reason, failure) => ({outcomes: planned.map((entry, index) => (entry.position === undefined ? unsent(entry, index) : {reason})), revision, failure});
@@ -147,7 +152,7 @@ const graphLayoutClient = (() => {
       const result = entry.position === undefined ? null : answer.graphs[entry.position];
       if (result?.status === 'laid_out') remember(entry.key, {result, revision: fresh});
     });
-    const outcomes = planned.map((entry, index) => (entry.position === undefined ? unsent(entry, index) : judge(answer.graphs[entry.position], graphs[index])));
+    const outcomes = planned.map((entry, index) => (entry.position === undefined ? unsent(entry, index) : judge(answer.graphs[entry.position], graphs[index], keep)));
     return {outcomes, revision: fresh ?? revision, failure: null};
   }
 

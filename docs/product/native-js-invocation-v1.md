@@ -522,13 +522,13 @@ Live (needs a rebuilt Brave, on the build machine):
 | V8 | patch `v8/0011`: flag (implies the dispatch flag), embedder interface, arming table and statuses, entry/exit/handler emission, frame record, CPED wrapper and API rules, settle reaction, digests, `GetCurrentJsInvocation`, cctests |
 | Chromium | patch `chromium/0021`: install the callbacks, admit live documents, read the current invocation for Wasm records and `SendAsync` |
 | Overlay | wire header, site-file parsing for `function-entry`, renderer budgets and gaps, Mojo configuration, browser forwarding of Wasm context |
-| Protocol and backend | events 24 to 26, Wasm payload versions, C++/Python/Rust/JavaScript validators, origin-trace relations in the broker index, the value-flow join in both the Rust and the native app's Swift trace builders, viewer labels |
+| Protocol and backend | events 24 to 26, Wasm payload versions, C++/Python/Rust/JavaScript validators, origin-trace relations in the broker index, the value-flow join in the Rust trace builder, which the native app also answers through, viewer labels |
 | Tooling | `tools/native-js-invocation-site.py` writes the site file; the launcher's `REB_NATIVE_JS_INVOCATION_SITES`, `REB_NATIVE_JS_INVOCATION_DIGESTS` and `REB_NATIVE_JS_INVOCATION_IF_SUPPORTED` |
 | Saved sites | the worker's `invocation_site` query, the backend's site key, saved set and routes (`js_invocation_sites.rs`), Sources **Track calls**, the titlebar, and the app's start panel and `captureDefaults` |
 
 What runs in this repository's gate: the C++ parity and rule test, the Python
-validator, the Rust readers and value search, the shared Rust and Swift trace
-cases, the broker-to-backend relation check, the real renderer sink under the
+validator, the Rust readers and value search, the shared trace cases over slices
+and over indexed stores, the broker-to-backend relation check, the real renderer sink under the
 portable admission suite, the browser host's configuration and forwarding, and
 the launcher. What runs only elsewhere: the `RebNativeJsInvocation*` cctests
 (native V8 runtime workflow) and a rebuilt Brave, for which the live checklist

@@ -165,6 +165,10 @@ void NativeProbeTransport::NativeStackArtifactRefused(const std::uint64_t creato
   NativeRequestStackWalk::StackArtifactRefused(creator_event_id);
 }
 
+void NativeProbeTransport::ReleaseArtifactCredit(const std::uint64_t bytes) {
+  NativeProbeSink::Get().ReleaseArtifactCredit(bytes);
+}
+
 void NativeProbeTransport::NativeGuestModuleStatus(const std::uint64_t wasm_capture_epoch,
                                                    const std::uint64_t module_token,
                                                    const bool accepted) {
@@ -299,9 +303,10 @@ void NativeProbeTransport::EmitArtifact(const NativeArtifactKind kind,
                                         const std::uint64_t frame_id,
                                         const std::string_view source_url,
                                         const std::span<const std::uint8_t> content,
-                                        const NativeRuntimeScript& script) noexcept {
+                                        const NativeRuntimeScript& script,
+                                        const std::uint64_t credit_bytes) noexcept {
   Get().EmitGeneratedArtifact(kind, capture_origin, creator_event_id, execution_context_id,
-                              frame_id, source_url, content, script);
+                              frame_id, source_url, content, script, credit_bytes);
 }
 
 NativeProbeEmitStatus NativeProbeTransport::EmitEvent(
@@ -361,20 +366,23 @@ void NativeProbeTransport::EmitGeneratedArtifact(const NativeArtifactKind kind,
                                                  const std::uint64_t frame_id,
                                                  const std::string_view source_url,
                                                  const std::span<const std::uint8_t> content,
-                                                 const NativeRuntimeScript& script) noexcept {
-  if (script.capture_generation != 0 &&
-      script.capture_generation != NativeProbeSink::Get().RuntimeCaptureGeneration()) {
+                                                 const NativeRuntimeScript& script,
+                                                 const std::uint64_t credit_bytes) noexcept {
+  auto* const thread_host = HostForCurrentSequence();
+  if ((script.capture_generation != 0 &&
+       script.capture_generation != NativeProbeSink::Get().RuntimeCaptureGeneration()) ||
+      !*thread_host) {
+    NativeProbeSink::Get().ReleaseArtifactCredit(credit_bytes);
     return;
   }
-  auto* const thread_host = HostForCurrentSequence();
-  if (*thread_host) {
-    (*thread_host)
-        ->CaptureGeneratedArtifact(static_cast<std::uint16_t>(kind),
-                                   static_cast<std::uint16_t>(capture_origin), creator_event_id,
-                                   execution_context_id, frame_id, std::string(source_url),
-                                   mojo_base::BigBuffer(content), script.script_id, script.is_eval,
-                                   mojo_base::BigBuffer(script.source), script.session_id);
-  }
+  // The browser releases credit_bytes once it has copied the content out, on
+  // every path, including a buffer it could not map.
+  (*thread_host)
+      ->CaptureGeneratedArtifact(
+          static_cast<std::uint16_t>(kind), static_cast<std::uint16_t>(capture_origin),
+          creator_event_id, execution_context_id, frame_id, std::string(source_url),
+          mojo_base::BigBuffer(content), script.script_id, script.is_eval,
+          mojo_base::BigBuffer(script.source), script.session_id, credit_bytes);
 }
 
 mojo::SharedRemote<mojom::NativeProbeHost>* NativeProbeTransport::HostForCurrentSequence() {

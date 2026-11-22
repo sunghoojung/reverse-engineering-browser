@@ -691,7 +691,7 @@ fn compare_float32_returns_no_bytes_of_a_sensitive_artifact_through_mcp() {
     let mut mcp = Mcp::start(&server.url, false);
     let secret = b"SYNTHETIC-SECRET-BYTES-0123456!!";
     assert_eq!(secret.len() % 4, 0);
-    let words: Vec<String> = secret.chunks(4).map(|word| hex::encode(word)).collect();
+    let words: Vec<String> = secret.chunks(4).map(hex::encode).collect();
     let readable = retained_artifact(&server, "1", "bytecode_buffer", secret);
     let answer = mcp.request(
         "tools/call",
@@ -776,7 +776,8 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
             "search_artifact_text",
             "search_wasm_inspection",
             "run_wasm_function",
-            "get_wasm_runs"
+            "get_wasm_runs",
+            "export_requests_har"
         ])
     );
     let mut mcp = Mcp::start(&server.url, false);
@@ -1496,7 +1497,8 @@ fn fixture_session_context(health: &Value) -> Value {
         "target": null,
         "wasm_scripts": [],
         "wasm_scripts_omitted": 0,
-        "wasm_artifacts": {"items": [], "window_truncated": false, "items_omitted": 0},
+        "wasm_artifacts": {"items": [], "window_truncated": false, "items_omitted": 0,
+            "scope": "store", "scan_end": "0", "store_end": "0"},
         "debugger_etag": "\"debugger-0\"",
         "allow_effects": null,
         "effects_admission": "caller_specific_unknown",
@@ -1943,7 +1945,6 @@ mkdir -p "$dir/profile" "$dir/artifacts"
 printf '%s\n' "$REB_NATIVE_WASM_DISPATCH $REB_CAPTURE_CATEGORY_MASK $REB_USE_SYSTEM_KEYCHAIN $REB_CONSOLE_DOCUMENT_START $REB_CAPTURE_REQUEST_CONTENT ${{REB_NATIVE_JS_INVOCATION_SITES-unset}} ${{REB_NATIVE_JS_INVOCATION_DIGESTS-unset}}" > "$dir/options"
 printf '%s\n' "${{REB_NATIVE_JS_INVOCATION_IF_SUPPORTED-unset}} ${{REB_JS_INVOCATION_SITE_STORE-unset}}" > "$dir/site-store"
 printf '%s\n' "${{REB_NATIVE_REQUEST_STACKS-unset}} ${{REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED-unset}} ${{REB_NATIVE_PROMISE_STACKS-unset}}" > "$dir/stacks"
-printf '%s\n' "${{REB_REQUEST_CONTENT_BUDGET_MIB-unset}}" > "$dir/content-budget"
 printf '%s\n' "${{REB_RESEARCH_PROFILE_ROOT-unset}} ${{REB_FRESH_PROFILE-unset}} ${{REB_CAPTURE_DURATION_SECONDS-unset}} ${{REB_NATIVE_QUIET_MODE-unset}} ${{REB_CAPTURE_CANVAS_IMAGES-unset}} ${{REB_CAPTURE_BROWSER_INTERNAL-unset}} ${{REB_CAPTURE_EXTENSION_TRAFFIC-unset}}" > "$dir/session"
 labels=()
 if [[ -n "${{REB_NATIVE_JS_INVOCATION_SITES-}}" ]]; then
@@ -1951,13 +1952,8 @@ if [[ -n "${{REB_NATIVE_JS_INVOCATION_SITES-}}" ]]; then
   labels+=(--js-invocation-session-sites "$REB_NATIVE_JS_INVOCATION_SITES" --js-invocation-session-state armed)
   [[ "$REB_NATIVE_JS_INVOCATION_DIGESTS" == 1 ]] && labels+=(--js-invocation-session-digests)
 fi
-# The real launcher's labels: a content session's limits, with its defaults.
-if [[ "$REB_CAPTURE_REQUEST_CONTENT" == 1 ]]; then
-  labels+=(--session-request-content
-    --session-request-content-budget-mib "${{REB_REQUEST_CONTENT_BUDGET_MIB:-256}}"
-    --session-response-body-budget-mib "${{REB_RESPONSE_BODY_BUDGET_MIB:-512}}"
-    --session-response-media "${{REB_CAPTURE_RESPONSE_MEDIA:-0}}")
-fi
+# The real launcher's labels.
+[[ "$REB_CAPTURE_REQUEST_CONTENT" == 1 ]] && labels+=(--session-request-content)
 [[ "$REB_CONSOLE_DOCUMENT_START" == 1 ]] && labels+=(--session-document-start)
 [[ "${{REB_NATIVE_REQUEST_STACKS-0}}" == 1 ]] && labels+=(--session-request-stacks)
 ln -s "test-host-$$" "$dir/profile/SingletonLock"
@@ -2044,7 +2040,6 @@ wait "$backend"
             .env("REB_NATIVE_REQUEST_STACKS", "1")
             .env("REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED", "1")
             .env("REB_NATIVE_PROMISE_STACKS", "1")
-            .env("REB_REQUEST_CONTENT_BUDGET_MIB", "999")
             .env("REB_CAPTURE_DURATION_SECONDS", "60")
             .env(
                 "REB_RESEARCH_PROFILE_ROOT",
@@ -2177,7 +2172,7 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
             .any(|line| line == "https://example.test/page")
     );
     // The app's defaults, and nothing inherited: not the shell's invocation
-    // sites, digests, budget, duration, profile or browser-internal capture.
+    // sites, digests, duration, profile or browser-internal capture.
     // The default request stacks are dropped by a Brave without the flag.
     assert_eq!(
         std::fs::read_to_string(fixture.session("4242").join("options")).unwrap(),
@@ -2194,10 +2189,6 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
             fixture.agent_sessions().join("research-profiles").display()
         ),
         "the agent sessions' own profile, no time limit"
-    );
-    assert_eq!(
-        std::fs::read_to_string(fixture.session("4242").join("content-budget")).unwrap(),
-        "unset\n"
     );
     // Nor may it read or change the app's saved invocation sites.
     let store = std::fs::read_to_string(fixture.session("4242").join("site-store")).unwrap();
@@ -2332,9 +2323,16 @@ fn agent_session_options_are_named_never_inherited() {
             json!({"js_invocation_saved_sites": true}),
             "saved set, which is empty",
         ),
+        // The removed content budgets and media choice are unknown options.
         (
-            json!({"request_content_budget_mib": 64, "request_content": false}),
-            "requires request_content",
+            json!({"request_content": true, "confirm_sensitive_capture": true,
+                "request_content_budget_mib": 64}),
+            "Unknown argument: request_content_budget_mib",
+        ),
+        (
+            json!({"request_content": true, "confirm_sensitive_capture": true,
+                "response_media": true}),
+            "Unknown argument: response_media",
         ),
         (json!({"duration_seconds": 59}), "duration_seconds"),
         (
@@ -2379,8 +2377,7 @@ fn agent_session_options_are_named_never_inherited() {
     let started = call(
         &mut mcp,
         json!({"document_start": true, "request_content": true,
-            "request_content_budget_mib": 64, "response_body_budget_mib": 1024,
-            "response_media": true, "request_stacks": true,
+            "request_stacks": true,
             "js_invocation_sites": agent_file, "js_invocation_digests": false,
             "canvas_images": false, "wasm_dispatch": false, "duration_seconds": 7200,
             "fresh_profile": true, "browser_internal": true, "timeout_seconds": 30}),
@@ -2397,9 +2394,6 @@ fn agent_session_options_are_named_never_inherited() {
     for (option, value) in [
         ("document_start", json!(true)),
         ("request_content", json!(true)),
-        ("request_content_budget_mib", json!(64)),
-        ("response_body_budget_mib", json!(1024)),
-        ("response_media", json!(true)),
         ("request_stacks", json!(true)),
         ("js_invocation_saved_sites", json!(false)),
         ("js_invocation_digests", json!(false)),
@@ -2438,10 +2432,6 @@ fn agent_session_options_are_named_never_inherited() {
         "1 0 unset\n",
         "named stacks are strict"
     );
-    assert_eq!(
-        std::fs::read_to_string(fixture.session("4242").join("content-budget")).unwrap(),
-        "64\n"
-    );
     let log = std::fs::read_to_string(launch_logs().last().unwrap()).unwrap();
     let first = log.lines().next().unwrap();
     let named: Value =
@@ -2454,8 +2444,6 @@ fn agent_session_options_are_named_never_inherited() {
     assert_eq!(
         context["capture_options"],
         json!({"source":"launcher","request_content":true,
-            "content_limits":{"version":1,"request_content_budget_mib":64,
-                "response_body_budget_mib":1024,"response_media":true},
             "canvas_images":false,"request_stacks":true,"document_start":"permitted",
             "js_invocation":{"state":"armed","count":1,"digests":false}})
     );
@@ -2493,10 +2481,6 @@ fn agent_session_options_are_named_never_inherited() {
         std::fs::read_to_string(fixture.session("4243").join("sites")).unwrap(),
         site_file(&[120, 200])
     );
-    assert_eq!(
-        std::fs::read_to_string(fixture.session("4243").join("content-budget")).unwrap(),
-        "unset\n"
-    );
     let context = mcp.request("tools/call", json!({"name": "get_session_context"}));
     let context: Value = serde_json::from_str(tool_text(&context)).unwrap();
     assert_eq!(
@@ -2508,7 +2492,6 @@ fn agent_session_options_are_named_never_inherited() {
         "not_permitted"
     );
     assert_eq!(context["capture_options"]["request_content"], false);
-    assert_eq!(context["capture_options"]["content_limits"], Value::Null);
     assert_eq!(context["capture_options"]["request_stacks"], false);
 
     let ended = mcp.request(
@@ -2519,28 +2502,21 @@ fn agent_session_options_are_named_never_inherited() {
     fixture.wait_ended("4243");
 }
 
-/// The CLI keeps the start tool's gates: a request content budget needs
-/// request content, which needs the sensitive-capture confirmation.
+/// The CLI keeps the start tool's gate: request content needs the
+/// sensitive-capture confirmation, and the removed budget is no option.
 #[cfg(unix)]
 #[test]
-fn session_start_cli_gates_the_request_content_budget() {
+fn session_start_cli_gates_request_content() {
     for (arguments, needle) in [
-        (
-            &["--request-content-budget-mib", "64"][..],
-            "--request-content",
-        ),
-        (
-            &["--request-content", "--request-content-budget-mib", "64"][..],
-            "--confirm-sensitive-capture",
-        ),
+        (&["--request-content"][..], "--confirm-sensitive-capture"),
         (
             &[
                 "--request-content",
                 "--confirm-sensitive-capture",
                 "--request-content-budget-mib",
-                "4097",
+                "64",
             ][..],
-            "from 1 to 4096",
+            "--request-content-budget-mib",
         ),
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
@@ -2572,13 +2548,19 @@ fn session_start_cli_switches_name_or_leave_their_defaults() {
             &["--js-invocation-digests"][..],
             "--confirm-sensitive-capture",
         ),
+        // The budgets and the media switch are gone, so no switch still
+        // requires request content.
         (
             &[
                 "--request-content=false",
-                "--request-content-budget-mib",
+                "--response-body-budget-mib",
                 "64",
             ][..],
-            "requires request_content",
+            "unexpected argument '--response-body-budget-mib'",
+        ),
+        (
+            &["--request-content=false", "--response-media"][..],
+            "unexpected argument '--response-media'",
         ),
         (
             &["--request-stacks", "--category-mask", "256"][..],
@@ -2772,13 +2754,12 @@ fn full_permission_starts_sessions_with_the_app_content_defaults() {
     let mut mcp = fixture.mcp_with(&["--permission", "full"]);
     let started = mcp.request(
         "tools/call",
-        json!({"name": "start_live_session", "arguments": {"response_media": true}}),
+        json!({"name": "start_live_session", "arguments": {"request_content": true, "canvas_images": true}}),
     );
     assert_eq!(started["result"]["isError"], false, "{started}");
     let options = &started["result"]["structuredContent"]["options"];
     assert_eq!(options["request_content"], true);
     assert_eq!(options["canvas_images"], true);
-    assert_eq!(options["response_media"], true);
     assert_eq!(options["confirm_sensitive_capture"], true);
     assert_eq!(
         mcp.request("tools/call", end.clone())["result"]["isError"],
@@ -3691,5 +3672,123 @@ fn paused_page_values_and_their_names_need_allow_content() {
             3,
             "{level}: the count is not a secret"
         );
+    }
+}
+
+/// Credential header values reach the model only at Full access: below it the
+/// projection never asks for them, and no tool schema lets a model ask.
+#[test]
+fn credential_values_reach_the_model_only_at_full_access() {
+    use sha2::{Digest, Sha256};
+    let server = Server::start();
+    let block = b"Accept: */*\r\nAuthorization: Bearer SYNTHETIC-CREDENTIAL\r\n";
+    let hash = hex::encode(Sha256::digest(block));
+    let artifacts = server._root.path().join("artifacts");
+    std::fs::create_dir_all(artifacts.join("blobs")).unwrap();
+    std::fs::write(artifacts.join(format!("blobs/{hash}.bin")), block).unwrap();
+    let artifact = json!({"protocol_version": 1, "artifact_id": "6", "session_id": "1",
+        "navigation_id": "0", "frame_id": "9", "parent_artifact_id": "0", "creator_event_id": "2",
+        "execution_context_id": "0", "capture_origin": "network_request", "kind": "request_headers",
+        "url": "https://owned.test/", "mime_type": "text/plain", "byte_size": block.len(),
+        "sha256": hash, "sensitive": true, "content_path": format!("blobs/{hash}.bin")});
+    std::fs::write(artifacts.join("manifest.jsonl"), format!("{artifact}\n")).unwrap();
+    // A captured network block (native-network-v3.md): 2 lines, hop 0.
+    let mut payload = [0u8; 128];
+    (payload[0], payload[2], payload[4], payload[5]) = (1, 128, 2, 1);
+    payload[8..12].copy_from_slice(&2u32.to_le_bytes());
+    payload[12..16].copy_from_slice(&(block.len() as u32).to_le_bytes());
+    payload[48..80].copy_from_slice(&Sha256::digest(block));
+    let event = |sequence: u64, kind: &str, parent: u64, artifact: &str, payload: &[u8]| {
+        json!({"protocol_version":3,"session_id":"1","sequence_number":sequence.to_string(),
+            "monotonic_time_ns":(1000 * sequence).to_string(),"navigation_id":"0","frame_id":"9",
+            "artifact_id":artifact,"parent_event_id":parent.to_string(),"request_id":"17",
+            "process_id":7,"thread_id":1,"tab_id":1,"category":"network","type":kind,"flags":0,
+            "status_code":0,"error_code":0,"encoded_data_length":"0","decoded_body_length":"0",
+            "resource_type":0,"initiator_process_id":0,"initiator_request_id":0,
+            "payload_encoding":"hex","payload":hex::encode(payload),"payload_size":payload.len(),
+            "payload_truncated":false})
+    };
+    std::fs::write(
+        server._root.path().join("events.jsonl"),
+        format!(
+            "{}\n{}\n",
+            event(1, "request_started", 0, "0", b""),
+            event(2, "request_headers", 1, "6", &payload)
+        ),
+    )
+    .unwrap();
+    let reads = [
+        "get_request_headers",
+        "get_request_cookies",
+        "get_cookie_provenance",
+        "get_artifact_text",
+        "search_artifact_text",
+    ];
+    for (level, returned) in [("read-only", false), ("auto", false), ("full", true)] {
+        let mut mcp = at_level(&server, level);
+        let tools = mcp.request("tools/list", json!({}));
+        for tool in tools["result"]["tools"].as_array().unwrap() {
+            if reads.iter().any(|name| tool["name"] == *name) {
+                assert!(
+                    tool["inputSchema"]["properties"]["credential_values"].is_null(),
+                    "{level}: {tool}"
+                );
+            }
+        }
+        let arguments = json!({"session_id": "1", "request_id": "17"});
+        let headers = mcp.request(
+            "tools/call",
+            json!({"name": "get_request_headers", "arguments": arguments}),
+        );
+        let document = &headers["result"]["structuredContent"];
+        assert_eq!(
+            document["credential_values"],
+            if returned { "returned" } else { "withheld" },
+            "{level}: {headers}"
+        );
+        let shown = &document["hops"][0]["request"][0]["headers"];
+        assert_eq!(
+            headers.to_string().contains("SYNTHETIC-CREDENTIAL"),
+            returned,
+            "{level}: {headers}"
+        );
+        if returned {
+            assert_eq!(shown[0], json!({"name": "Accept", "value": "*/*"}));
+            assert_eq!(
+                shown[1],
+                json!({"name": "Authorization", "value": "Bearer SYNTHETIC-CREDENTIAL", "credential": true})
+            );
+        } else {
+            // Below Full every other value is omitted as content too.
+            assert_eq!(shown[1]["value_withheld"], true, "{level}");
+        }
+        // A model that asks for the values is refused before any request.
+        let mut asked = arguments.clone();
+        asked["credential_values"] = json!("1");
+        let refused = mcp.request(
+            "tools/call",
+            json!({"name": "get_request_headers", "arguments": asked}),
+        );
+        assert_eq!(refused["result"]["isError"], true, "{level}: {refused}");
+        assert!(!refused.to_string().contains("SYNTHETIC-CREDENTIAL"));
+        // At Full the block itself is read in pages and searched.
+        if returned {
+            let text = mcp.request(
+                "tools/call",
+                json!({"name": "get_artifact_text", "arguments": {"artifact_id": "6"}}),
+            );
+            assert!(
+                tool_text(&text).contains("Bearer SYNTHETIC-CREDENTIAL"),
+                "{text}"
+            );
+            let search = mcp.request(
+                "tools/call",
+                json!({"name": "search_artifact_text", "arguments": {"q": "SYNTHETIC-CREDENTIAL"}}),
+            );
+            assert_eq!(
+                search["result"]["structuredContent"]["matches"][0]["artifact_id"], "6",
+                "{search}"
+            );
+        }
     }
 }

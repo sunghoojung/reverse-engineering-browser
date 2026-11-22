@@ -2,8 +2,9 @@
 //!
 //! Wasm control flow is structured, so every branch names a label whose target
 //! is a byte position in the same body and this module never guesses. What it
-//! cannot resolve from the body (tail calls, throws, a label past the frames it
-//! decoded) stays an explicit unresolved edge with a label. Nothing here runs
+//! cannot resolve from the body (tail calls, a throw that may leave the
+//! function, a label past the frames it decoded) stays an explicit unresolved
+//! edge with a label. Nothing here runs
 //! the module, and a graph is one function at a time: nothing retains a
 //! whole-module structure.
 use crate::{
@@ -16,11 +17,7 @@ use wasmparser::{ExternalKind, KnownCustom, Name, Operator, Parser, Payload};
 
 /// Web engines reject a body above this size, so a longer one cannot have run.
 pub(crate) const MAX_BODY_BYTES: usize = 7_654_321;
-/// Instruction rows are the bulk of a large function's response.
-const MAX_ROW_TEXT_BYTES: usize = 16 * 1024 * 1024;
-const MAX_STRUCTURE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_NAME_BYTES: usize = 128;
-const MAX_LABEL_BYTES: usize = 96;
 /// Edge kinds in the order `edge_kinds` lists them.
 const EDGE_KINDS: [&str; 8] = [
     "fallthrough",
@@ -44,8 +41,6 @@ const ENTRY: u32 = 1;
 const REACHABLE: u32 = 2;
 const EXIT: u32 = 4;
 const TRAP: u32 = 8;
-/// Some of this block's rows fell outside the row text budget.
-const ROWS_CUT: u32 = 32;
 
 fn bad(error: wasmparser::BinaryReaderError) -> Error {
     Error::protocol(format!("WASM decoding failed: {error}"))
@@ -59,10 +54,7 @@ pub(crate) struct Artifact {
 
 pub(crate) fn artifact(root: &Path, id: &str) -> Result<Artifact> {
     validation::canonical(&serde_json::json!(id), 64, true, "Artifact ID")?;
-    let record = evidence::artifacts(root, 10000)?
-        .into_iter()
-        .find(|a| a["artifact_id"] == id)
-        .ok_or_else(|| Error::new(404, "Artifact not found"))?;
+    let record = evidence::find_artifact(root, id)?;
     if record["kind"] != "wasm" {
         return Err(Error::bad("Artifact is not WebAssembly"));
     }
@@ -290,10 +282,50 @@ enum Flow {
     Catch(u32),
     Return,
     Trap,
-    /// A transfer this function's bytes cannot resolve (tail call, throw).
+    /// A transfer this function's bytes cannot resolve (tail call).
     Out(&'static str),
+    /// `throw`, `throw_ref` or `rethrow`: its edges are the handlers in
+    /// `Decoded::throws`, and only an exception that may leave the function
+    /// is unresolved.
+    Throw,
     /// A label deeper than the frames decoded so far.
     BadDepth,
+}
+
+/// One exception handler scope: a legacy `try` body or a `try_table`.
+struct Scope {
+    /// The `try` or `try_table` instruction, so scopes are ordered by it.
+    start: u32,
+    /// The scope an exception goes to when no clause here catches it: the one
+    /// covering this scope's opening, or NONE for the caller.
+    outer: u32,
+    /// A legacy `try ... delegate` hands its exceptions to this scope (NONE
+    /// for the caller) instead of to clauses.
+    delegate: Option<u32>,
+    clauses: Vec<Clause>,
+}
+
+struct Clause {
+    /// None catches every tag.
+    tag: Option<u32>,
+    /// A legacy catch's instruction (its handler starts after it), or a
+    /// try_table clause's label frame with FRAME_REF set, or NONE for a label
+    /// past the open frames.
+    handler: u32,
+    name: &'static str,
+}
+
+/// An instruction that may raise an exception into a local handler.
+struct Throw {
+    at: u32,
+    /// The innermost scope covering the instruction, or NONE.
+    scope: u32,
+    /// The tag thrown, when the instruction names it.
+    tag: Option<u32>,
+    /// A call's callee may throw; a call outside every scope adds no edge,
+    /// since any call can leave the function that way.
+    call: bool,
+    what: &'static str,
 }
 
 struct Decoded {
@@ -301,7 +333,13 @@ struct Decoded {
     flows: Vec<(u32, Flow)>,
     frames: Vec<Frame>,
     arms: Vec<u32>,
-    exceptions: Vec<(u32, u32)>,
+    scopes: Vec<Scope>,
+    throws: Vec<Throw>,
+    /// Imported tags take the lowest indices, and two of them can be one tag.
+    /// The body alone does not say how many there are, so `decode` starts at
+    /// u32::MAX (any two tags may be one) and a caller that read the import
+    /// section narrows it.
+    imported_tags: u32,
     byte_end: u32,
     omissions: Vec<String>,
 }
@@ -317,11 +355,17 @@ fn decode(body: &wasmparser::FunctionBody<'_>, cancelled: &AtomicBool) -> Result
             else_at: NONE,
         }],
         arms: Vec::new(),
-        exceptions: Vec::new(),
+        scopes: Vec::new(),
+        throws: Vec::new(),
+        imported_tags: u32::MAX,
         byte_end: body.range().end as u32,
         omissions: Vec::new(),
     };
     let mut stack: Vec<u32> = vec![0];
+    // The scopes whose handlers cover the current instruction, innermost
+    // last, each with its frame's position in `stack`. A legacy try leaves it
+    // at its first catch: an exception in a catch body goes further out.
+    let mut covering: Vec<(u32, usize)> = Vec::new();
     let mut reader = body.get_operators_reader().map_err(bad)?;
     let mut ended_function = false;
     while !reader.eof() {
@@ -389,6 +433,9 @@ fn decode(body: &wasmparser::FunctionBody<'_>, cancelled: &AtomicBool) -> Result
                     .pop()
                     .ok_or_else(|| Error::protocol("WASM end without a block"))?;
                 decoded.frames[id as usize].end = index;
+                if covering.last().is_some_and(|(_, at)| *at == stack.len()) {
+                    covering.pop();
+                }
                 if stack.is_empty() {
                     ended_function = true;
                 }
@@ -438,8 +485,56 @@ fn decode(body: &wasmparser::FunctionBody<'_>, cancelled: &AtomicBool) -> Result
             Operator::ReturnCallIndirect { .. } | Operator::ReturnCallRef { .. } => {
                 flow = Some(Flow::Out("indirect tail call"));
             }
-            Operator::Throw { .. } | Operator::ThrowRef | Operator::Rethrow { .. } => {
-                flow = Some(Flow::Out("throw"));
+            Operator::Throw { tag_index } => {
+                decoded.throws.push(Throw {
+                    at: index,
+                    scope: covering.last().map_or(NONE, |(scope, _)| *scope),
+                    tag: Some(tag_index),
+                    call: false,
+                    what: "throw",
+                });
+                flow = Some(Flow::Throw);
+            }
+            Operator::ThrowRef => {
+                decoded.throws.push(Throw {
+                    at: index,
+                    scope: covering.last().map_or(NONE, |(scope, _)| *scope),
+                    tag: None,
+                    call: false,
+                    what: "throw_ref",
+                });
+                flow = Some(Flow::Throw);
+            }
+            Operator::Rethrow { relative_depth } => {
+                // The exception is the one its catch caught, so a `catch t`
+                // rethrows tag t. It starts outside that try, which no longer
+                // covers its own catch bodies.
+                let tag = frame_at(&stack, relative_depth)
+                    .filter(|frame| decoded.frames[*frame as usize].kind == FrameKind::Try)
+                    .and_then(|frame| {
+                        scope_of(&decoded.scopes, decoded.frames[frame as usize].start)
+                    })
+                    .and_then(|scope| decoded.scopes[scope as usize].clauses.last())
+                    .and_then(|clause| clause.tag);
+                decoded.throws.push(Throw {
+                    at: index,
+                    scope: covering.last().map_or(NONE, |(scope, _)| *scope),
+                    tag,
+                    call: false,
+                    what: "rethrow",
+                });
+                flow = Some(Flow::Throw);
+            }
+            Operator::Call { .. } | Operator::CallIndirect { .. } | Operator::CallRef { .. } => {
+                if let Some((scope, _)) = covering.last() {
+                    decoded.throws.push(Throw {
+                        at: index,
+                        scope: *scope,
+                        tag: None,
+                        call: true,
+                        what: "call",
+                    });
+                }
             }
             Operator::Try { .. } => {
                 decoded.frames.push(Frame {
@@ -449,6 +544,14 @@ fn decode(body: &wasmparser::FunctionBody<'_>, cancelled: &AtomicBool) -> Result
                     else_at: NONE,
                 });
                 stack.push(decoded.frames.len() as u32 - 1);
+                let outer = covering.last().map_or(NONE, |(scope, _)| *scope);
+                covering.push((decoded.scopes.len() as u32, stack.len() - 1));
+                decoded.scopes.push(Scope {
+                    start: index,
+                    outer,
+                    delegate: None,
+                    clauses: Vec::new(),
+                });
             }
             Operator::Catch { .. } | Operator::CatchAll => {
                 let id = *stack
@@ -458,14 +561,49 @@ fn decode(body: &wasmparser::FunctionBody<'_>, cancelled: &AtomicBool) -> Result
                 if frame.kind != FrameKind::Try {
                     return Err(Error::protocol("WASM catch does not match a try"));
                 }
-                decoded.exceptions.push((frame.start, index));
+                let scope = scope_of(&decoded.scopes, frame.start).expect("a try opens a scope");
+                if covering
+                    .last()
+                    .is_some_and(|(_, at)| *at == stack.len() - 1)
+                {
+                    covering.pop();
+                }
+                let tag = match op {
+                    Operator::Catch { tag_index } => Some(tag_index),
+                    _ => None,
+                };
+                decoded.scopes[scope as usize].clauses.push(Clause {
+                    tag,
+                    handler: index,
+                    name: if tag.is_some() { "catch" } else { "catch_all" },
+                });
                 flow = Some(Flow::Catch(id));
             }
-            Operator::Delegate { .. } => {
+            Operator::Delegate { relative_depth } => {
                 let id = stack
                     .pop()
                     .ok_or_else(|| Error::protocol("WASM delegate without a try"))?;
                 decoded.frames[id as usize].end = index;
+                if covering.last().is_some_and(|(_, at)| *at == stack.len()) {
+                    covering.pop();
+                }
+                // The label counts from the frame around the try. An
+                // exception goes on as if thrown just inside that frame: to
+                // its own handlers when it is a try still in its body, else
+                // to the scope covering it. The function's label is the caller.
+                let target = stack.len().checked_sub(relative_depth as usize + 1);
+                if target.is_none() {
+                    decoded.omissions.push(format!(
+                        "A delegate at byte {offset} names a label past the open frames; its exceptions are shown leaving the function."
+                    ));
+                }
+                let to = target
+                    .filter(|position| *position > 0)
+                    .and_then(|position| covering.iter().rev().find(|(_, at)| *at <= position))
+                    .map_or(NONE, |(scope, _)| *scope);
+                if let Some(scope) = scope_of(&decoded.scopes, decoded.frames[id as usize].start) {
+                    decoded.scopes[scope as usize].delegate = Some(to);
+                }
             }
             Operator::TryTable { try_table } => {
                 decoded.frames.push(Frame {
@@ -475,22 +613,35 @@ fn decode(body: &wasmparser::FunctionBody<'_>, cancelled: &AtomicBool) -> Result
                     else_at: NONE,
                 });
                 stack.push(decoded.frames.len() as u32 - 1);
+                let mut clauses = Vec::with_capacity(try_table.catches.len());
                 for catch in &try_table.catches {
-                    let label = match catch {
-                        wasmparser::Catch::One { label, .. }
-                        | wasmparser::Catch::OneRef { label, .. }
-                        | wasmparser::Catch::All { label }
-                        | wasmparser::Catch::AllRef { label } => *label,
+                    let (tag, label, name) = match *catch {
+                        wasmparser::Catch::One { tag, label } => (Some(tag), label, "catch"),
+                        wasmparser::Catch::OneRef { tag, label } => (Some(tag), label, "catch_ref"),
+                        wasmparser::Catch::All { label } => (None, label, "catch_all"),
+                        wasmparser::Catch::AllRef { label } => (None, label, "catch_all_ref"),
                     };
                     // A catch clause names a label outside this try_table,
                     // relative to the frame around it.
-                    match frame_at(&stack[..stack.len() - 1], label) {
-                        Some(frame) => decoded.exceptions.push((index, encode_frame(frame))),
-                        None => decoded.omissions.push(format!(
-                            "A try_table catch at byte {offset} names a label past the open frames; that handler stays unresolved."
-                        )),
-                    }
+                    let handler = match frame_at(&stack[..stack.len() - 1], label) {
+                        Some(frame) => encode_frame(frame),
+                        None => {
+                            decoded.omissions.push(format!(
+                                "A try_table catch at byte {offset} names a label past the open frames; that handler stays unresolved."
+                            ));
+                            NONE
+                        }
+                    };
+                    clauses.push(Clause { tag, handler, name });
                 }
+                let outer = covering.last().map_or(NONE, |(scope, _)| *scope);
+                covering.push((decoded.scopes.len() as u32, stack.len() - 1));
+                decoded.scopes.push(Scope {
+                    start: index,
+                    outer,
+                    delegate: None,
+                    clauses,
+                });
             }
             _ => {}
         }
@@ -524,6 +675,59 @@ fn frame_target(frames: &[Frame], frame: u32) -> Option<u32> {
     (target != NONE).then_some(target)
 }
 
+/// The instruction a clause's handler starts at. A try's handler is the
+/// instruction after its catch; a try_table's is a frame's target, known once
+/// frames have closed.
+fn clause_target(decoded: &Decoded, clause: &Clause) -> Option<u32> {
+    if clause.handler == NONE {
+        None
+    } else if clause.handler & FRAME_REF != 0 {
+        frame_target(&decoded.frames, clause.handler & !FRAME_REF)
+    } else {
+        ((clause.handler as usize) + 1 < decoded.offsets.len()).then_some(clause.handler + 1)
+    }
+}
+
+/// The scope a `try` or `try_table` at instruction `start` opened.
+fn scope_of(scopes: &[Scope], start: u32) -> Option<u32> {
+    scopes
+        .binary_search_by_key(&start, |scope| scope.start)
+        .ok()
+        .map(|position| position as u32)
+}
+
+/// Where one throw site's exception can go: `clause(scope, clause)` for every
+/// clause that may catch it, innermost first. True when one of them certainly
+/// catches it; false when it may also leave the function.
+fn raise(decoded: &Decoded, site: &Throw, mut clause: impl FnMut(&Clause)) -> bool {
+    let mut scope = site.scope;
+    while scope != NONE {
+        let current = &decoded.scopes[scope as usize];
+        if let Some(to) = current.delegate {
+            scope = to;
+            continue;
+        }
+        for candidate in &current.clauses {
+            match (candidate.tag, site.tag) {
+                (None, _) => {
+                    clause(candidate);
+                    return true;
+                }
+                (Some(caught), Some(thrown)) if caught == thrown => {
+                    clause(candidate);
+                    return true;
+                }
+                // Only imported tags can alias: each defined tag is its own.
+                (Some(caught), Some(thrown))
+                    if caught >= decoded.imported_tags || thrown >= decoded.imported_tags => {}
+                _ => clause(candidate),
+            }
+        }
+        scope = current.outer;
+    }
+    false
+}
+
 struct Bits(Vec<u64>);
 impl Bits {
     fn new(size: usize) -> Self {
@@ -545,7 +749,8 @@ struct Graph {
     omissions: Vec<String>,
 }
 
-/// Turns an ordered list of case numbers into a bounded `0-3,9` label.
+/// Turns an ordered list of case numbers into a `0-3,9` label. Every case is
+/// named: the arms are in the body, so the label is no longer than it.
 fn case_label(cases: &[u32]) -> String {
     let mut text = String::new();
     let mut position = 0;
@@ -557,19 +762,14 @@ fn case_label(cases: &[u32]) -> String {
             stop = cases[position];
         }
         position += 1;
-        let piece = if stop == start {
-            start.to_string()
-        } else {
-            format!("{start}-{stop}")
-        };
-        if text.len() + piece.len() + 1 > MAX_LABEL_BYTES {
-            text.push_str(",...");
-            break;
-        }
         if !text.is_empty() {
             text.push(',');
         }
-        text.push_str(&piece);
+        let _ = if stop == start {
+            write!(text, "{start}")
+        } else {
+            write!(text, "{start}-{stop}")
+        };
     }
     text
 }
@@ -627,21 +827,17 @@ fn build(decoded: &Decoded) -> Graph {
                 mark_next(&mut leader_bits, index);
                 mark_target(&mut leader_bits, frame);
             }
-            Flow::Return | Flow::Trap | Flow::Out(_) | Flow::BadDepth => {
+            Flow::Return | Flow::Trap | Flow::Out(_) | Flow::Throw | Flow::BadDepth => {
                 mark_next(&mut leader_bits, index);
             }
         }
     }
-    for &(_, to) in &decoded.exceptions {
-        // A try's handler is the instruction after its catch; a try_table's
-        // handler is a frame's target, known now that frames have closed.
-        let position = if to & FRAME_REF != 0 {
-            target(to & !FRAME_REF)
-        } else {
-            ((to as usize) + 1 < count).then_some(to + 1)
-        };
-        if let Some(position) = position {
-            leader_bits.set(position as usize);
+    let handler = |clause: &Clause| clause_target(decoded, clause);
+    for scope in &decoded.scopes {
+        for clause in &scope.clauses {
+            if let Some(position) = handler(clause) {
+                leader_bits.set(position as usize);
+            }
         }
     }
     let mut leaders: Vec<u32> = Vec::new();
@@ -818,6 +1014,7 @@ fn build(decoded: &Decoded) -> Graph {
             }
             Some(Flow::Return) => flags[block as usize] |= EXIT,
             Some(Flow::Trap) => flags[block as usize] |= TRAP,
+            Some(Flow::Throw) => {}
             Some(Flow::Out(what)) => edges.push((block, None, UNRESOLVED, Some(what.to_owned()))),
             Some(Flow::BadDepth) => {
                 edges.push((
@@ -829,25 +1026,61 @@ fn build(decoded: &Decoded) -> Graph {
             }
         }
     }
-    for &(from, to) in &decoded.exceptions {
-        let from_block = block_of(from);
-        if to & FRAME_REF != 0 {
-            resolve(
-                &mut edges,
-                from_block,
-                to & !FRAME_REF,
-                EXCEPTION,
-                Some("catch".into()),
-                &mut unresolved_frame,
-            );
-        } else if (to as usize) + 1 < count {
-            edges.push((
-                from_block,
-                Some(block_of(to + 1)),
-                EXCEPTION,
-                Some("catch".into()),
-            ));
+    // Exception edges run from the block of each instruction that may throw
+    // to every handler that may catch it. A block keeps one edge per handler,
+    // named by the clause; one only a call reaches says so.
+    let mut raised: Vec<(u32, Option<u32>, u8, String, bool)> = Vec::new();
+    for site in &decoded.throws {
+        let block = block_of(site.at);
+        let before = raised.len();
+        let caught = raise(decoded, site, |clause| {
+            let name = match clause.tag {
+                Some(tag) => format!("{} {tag}", clause.name),
+                None => clause.name.to_owned(),
+            };
+            match handler(clause) {
+                Some(position) => {
+                    raised.push((block, Some(block_of(position)), EXCEPTION, name, site.call));
+                }
+                None if clause.handler == NONE => raised.push((
+                    block,
+                    None,
+                    UNRESOLVED,
+                    format!("{name}: label out of range"),
+                    site.call,
+                )),
+                None => {
+                    unresolved_frame = true;
+                    raised.push((
+                        block,
+                        None,
+                        UNRESOLVED,
+                        format!("{name}: target past the decoded range"),
+                        site.call,
+                    ));
+                }
+            }
+        });
+        if !caught && !site.call {
+            let label = if raised.len() == before {
+                site.what.to_owned()
+            } else {
+                format!("{}: may escape", site.what)
+            };
+            raised.push((block, None, UNRESOLVED, label, false));
         }
+    }
+    raised.sort_unstable_by(|a, b| (a.0, a.1, a.2, &a.3, a.4).cmp(&(b.0, b.1, b.2, &b.3, b.4)));
+    raised.dedup_by(|later, kept| {
+        (later.0, later.1, later.2, &later.3) == (kept.0, kept.1, kept.2, &kept.3)
+    });
+    for (block, to, kind, label, call) in raised {
+        let label = if call {
+            format!("call: {label}")
+        } else {
+            label
+        };
+        edges.push((block, to, kind, Some(label)));
     }
     if unresolved_frame {
         omissions
@@ -924,17 +1157,38 @@ pub(crate) fn operands(op: &Operator<'_>) -> String {
         Operator::BrTable { targets } => {
             format!("[{} targets] default {}", targets.len(), targets.default())
         }
-        Operator::Block { blockty } | Operator::Loop { blockty } | Operator::If { blockty } => {
-            match blockty {
-                wasmparser::BlockType::Empty => String::new(),
-                wasmparser::BlockType::Type(ty) => ty.to_string(),
-                wasmparser::BlockType::FuncType(index) => format!("type {index}"),
+        Operator::Block { blockty }
+        | Operator::Loop { blockty }
+        | Operator::If { blockty }
+        | Operator::Try { blockty } => block_type(blockty),
+        // Clauses read as in the text format: `(catch tag label)`.
+        Operator::TryTable { try_table } => {
+            let mut text = block_type(&try_table.ty);
+            for catch in &try_table.catches {
+                if !text.is_empty() {
+                    text.push(' ');
+                }
+                let _ = match catch {
+                    wasmparser::Catch::One { tag, label } => write!(text, "(catch {tag} {label})"),
+                    wasmparser::Catch::OneRef { tag, label } => {
+                        write!(text, "(catch_ref {tag} {label})")
+                    }
+                    wasmparser::Catch::All { label } => write!(text, "(catch_all {label})"),
+                    wasmparser::Catch::AllRef { label } => write!(text, "(catch_all_ref {label})"),
+                };
             }
+            text
+        }
+        Operator::Catch { tag_index } | Operator::Throw { tag_index } => tag_index.to_string(),
+        Operator::Rethrow { relative_depth } | Operator::Delegate { relative_depth } => {
+            relative_depth.to_string()
         }
         Operator::End
         | Operator::Else
         | Operator::Return
         | Operator::Unreachable
+        | Operator::CatchAll
+        | Operator::ThrowRef
         | Operator::Nop => String::new(),
         other => {
             let debug = format!("{other:?}");
@@ -958,15 +1212,23 @@ pub(crate) fn operands(op: &Operator<'_>) -> String {
                     field("align: ").unwrap_or("0")
                 )
             } else {
-                body.chars().take(MAX_LABEL_BYTES).collect()
+                body.to_owned()
             }
         }
     }
 }
 
+fn block_type(blockty: &wasmparser::BlockType) -> String {
+    match blockty {
+        wasmparser::BlockType::Empty => String::new(),
+        wasmparser::BlockType::Type(ty) => ty.to_string(),
+        wasmparser::BlockType::FuncType(index) => format!("type {index}"),
+    }
+}
+
 /// A float's plain decimal form, or its shortest round-trip exponent form
-/// when the decimal one is long: `1e-308` prints as hundreds of zeros, and a
-/// capped row or label would keep only those.
+/// when the decimal one is long: `1e-308` prints as hundreds of zeros that
+/// would hide the value on a card.
 fn float_text(decimal: String, exponent: impl FnOnce() -> String) -> String {
     if decimal.len() > MAX_FLOAT_DECIMAL {
         exponent()
@@ -990,26 +1252,100 @@ fn block_run_text(operand: &str, count: u32) -> String {
     text
 }
 
-fn json_string(out: &mut String, value: &str) {
-    out.push_str(&serde_json::to_string(value).expect("JSON string"));
+/// Where a graph document goes: a string, or the chunks of a streamed answer.
+pub(crate) trait Out {
+    /// False once the reader has gone, which stops the writer.
+    fn put(&mut self, text: &str) -> bool;
+}
+impl Out for String {
+    fn put(&mut self, text: &str) -> bool {
+        self.push_str(text);
+        true
+    }
+}
+impl Out for crate::request_har::Sink {
+    fn put(&mut self, text: &str) -> bool {
+        self.write(text.as_bytes())
+    }
+}
+
+/// Document text bound for `out`, handed over a piece at a time, so a graph
+/// of any size is never held whole.
+struct Writer<'a, O: Out> {
+    out: &'a mut O,
+    text: String,
+    open: bool,
+}
+const PIECE_BYTES: usize = 64 * 1024;
+impl<O: Out> Writer<'_, O> {
+    /// Hands over a full piece; false once the reader has gone.
+    fn spill(&mut self) -> bool {
+        if self.text.len() >= PIECE_BYTES {
+            self.flush();
+        }
+        self.open
+    }
+    fn flush(&mut self) -> bool {
+        if self.open && !self.text.is_empty() {
+            self.open = self.out.put(&self.text);
+        }
+        self.text.clear();
+        self.open
+    }
+}
+
+/// Appends `text` as the inside of a JSON string.
+fn escape_into(out: &mut String, text: &str) {
+    if !text
+        .bytes()
+        .any(|byte| byte < 0x20 || byte == b'"' || byte == b'\\')
+    {
+        out.push_str(text);
+        return;
+    }
+    for character in text.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            control if (control as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", control as u32);
+            }
+            other => out.push(other),
+        }
+    }
 }
 
 /// Basic blocks for one defined function, or a provider error a caller shows.
 pub fn function_graph(root: &Path, id: &str, function: u32) -> Result<String> {
-    function_graph_named(root, id, function, None, &AtomicBool::new(false))
+    function_graph_to(
+        root,
+        id,
+        function,
+        None,
+        &AtomicBool::new(false),
+        String::new,
+    )
 }
 
 /// The block graph with the function's researcher name as `analyst_name` and
 /// every name of its module as `analyst_names`, so a `call N` row resolves.
-pub(crate) fn function_graph_named(
+/// It is written to the `Out` that `open` returns, which runs only once the
+/// graph is known to succeed: an error before it is an ordinary error answer,
+/// and nothing after it can fail.
+pub(crate) fn function_graph_to<O: Out>(
     root: &Path,
     id: &str,
     function: u32,
     analyst: Option<&wasm_names::Names>,
     cancelled: &AtomicBool,
-) -> Result<String> {
+    open: impl FnOnce() -> O,
+) -> Result<O> {
     let artifact = artifact(root, id)?;
     let mut imported = 0u32;
+    let mut imported_tags = 0u32;
     let mut types = Vec::new();
     let mut position = 0u32;
     for payload in Parser::new(0).parse_all(&artifact.bytes) {
@@ -1017,8 +1353,10 @@ pub(crate) fn function_graph_named(
         match payload {
             Payload::ImportSection(reader) => {
                 for import in reader {
-                    if matches!(import.map_err(bad)?.ty, wasmparser::TypeRef::Func(_)) {
-                        imported += 1;
+                    match import.map_err(bad)?.ty {
+                        wasmparser::TypeRef::Func(_) => imported += 1,
+                        wasmparser::TypeRef::Tag(_) => imported_tags += 1,
+                        _ => {}
                     }
                 }
             }
@@ -1040,20 +1378,25 @@ pub(crate) fn function_graph_named(
                         range.len()
                     )));
                 }
-                let ty = types.get(position as usize - 1).copied();
-                let out = graph_document(&artifact, function, ty, &body, cancelled)?;
-                let (Some(names), Some(sha)) = (analyst, artifact.sha256.as_str()) else {
-                    return Ok(out);
-                };
                 let mut members = Vec::new();
-                if let Some(name) = names.function(sha, function) {
-                    members.push(("analyst_name", serde_json::json!(name)));
+                if let (Some(names), Some(sha)) = (analyst, artifact.sha256.as_str()) {
+                    if let Some(name) = names.function(sha, function) {
+                        members.push(("analyst_name", serde_json::json!(name)));
+                    }
+                    members.push((
+                        "analyst_names",
+                        names.module_member(sha, u64::from(imported) + types.len() as u64),
+                    ));
                 }
-                members.push((
-                    "analyst_names",
-                    names.module_member(sha, u64::from(imported) + types.len() as u64),
-                ));
-                return Ok(wasm_names::append_members(out, &members));
+                let graph = Function {
+                    artifact: &artifact,
+                    function,
+                    ty: types.get(position as usize - 1).copied(),
+                    imported_tags,
+                    body: &body,
+                    members: &members,
+                };
+                return graph.write(cancelled, open);
             }
             Payload::End(_) => break,
             _ => {}
@@ -1071,183 +1414,222 @@ pub(crate) fn function_graph_named(
     ))
 }
 
-fn graph_document(
-    artifact: &Artifact,
+/// One function body and what its document says around the graph.
+struct Function<'a> {
+    artifact: &'a Artifact,
     function: u32,
     ty: Option<u32>,
-    body: &wasmparser::FunctionBody<'_>,
-    cancelled: &AtomicBool,
-) -> Result<String> {
-    let decoded = decode(body, cancelled)?;
-    let mut graph = build(&decoded);
-    let mut omissions = decoded.omissions.clone();
-    omissions.append(&mut graph.omissions);
-    let count = decoded.offsets.len();
-    // Structure is ordered by leader, so a prefix keeps the entry and every
-    // edge between retained blocks. An edge leaving the prefix stays labeled.
-    let mut structure_bytes = 0usize;
-    let mut kept = graph.leaders.len();
-    let mut edges_by_block = vec![0usize; graph.leaders.len()];
-    for edge in &graph.edges {
-        edges_by_block[edge.0 as usize] += 1;
-    }
-    for (block, edge_count) in edges_by_block.iter().enumerate() {
-        structure_bytes += 64 + edge_count * 56;
-        if structure_bytes > MAX_STRUCTURE_BYTES {
-            kept = block;
-            omissions.push(format!(
-                "Structure byte budget reached; {} blocks after byte {} are not in this graph.",
-                graph.leaders.len() - block,
-                decoded.offsets[graph.leaders[block] as usize]
-            ));
-            break;
+    imported_tags: u32,
+    body: &'a wasmparser::FunctionBody<'a>,
+    members: &'a [(&'static str, Value)],
+}
+
+impl Function<'_> {
+    /// Structure first, then rows: a block lists its first row and row count
+    /// before any row text, so the rows are counted in one pass and written
+    /// in a second. Both read the body that decoded, so neither can fail.
+    fn write<O: Out>(&self, cancelled: &AtomicBool, open: impl FnOnce() -> O) -> Result<O> {
+        let mut decoded = decode(self.body, cancelled)?;
+        decoded.imported_tags = self.imported_tags;
+        let graph = build(&decoded);
+        let mut omissions = std::mem::take(&mut decoded.omissions);
+        omissions.extend(graph.omissions.iter().cloned());
+        let blocks = graph.leaders.len();
+        let mut row_counts = vec![0u32; blocks];
+        let mut counted = 0u32;
+        let finished = each_row(self.body, &decoded, &graph, false, |block, _, _| {
+            row_counts[block] += 1;
+            counted += 1;
+            counted & 4095 != 0 || !cancelled.load(std::sync::atomic::Ordering::Relaxed)
+        })?;
+        if !finished {
+            check_cancelled(cancelled, "WASM block graph")?;
         }
-    }
-    let mut block_rows: Vec<(u32, u32, u32)> = Vec::with_capacity(kept);
-    let mut rows = String::new();
-    let mut reader = body.get_operators_reader().map_err(bad)?;
-    let mut row_index = 0u32;
-    let mut text_stopped = false;
-    for block in 0..kept {
-        let leader = graph.leaders[block];
-        let end = graph
-            .leaders
-            .get(block + 1)
-            .map_or(count as u32, |next| *next);
-        let first_row = row_index;
-        let mut included = 0u32;
-        let mut emit = |rows: &mut String, offset: usize, text: String| {
-            if rows.len() + text.len() + 16 > MAX_ROW_TEXT_BYTES {
-                if !text_stopped {
-                    text_stopped = true;
-                    omissions.push(format!(
-                        "Instruction row byte budget reached at byte {offset:x}; later rows are not displayed. Block structure is unaffected."
-                    ));
-                }
-                return;
-            }
-            let _ = writeln!(rows, "{offset:x} {text}");
-            row_index += 1;
-            included += 1;
+        let mut out = open();
+        let mut w = Writer {
+            out: &mut out,
+            text: String::with_capacity(PIECE_BYTES + 4096),
+            open: true,
         };
-        // A run of identical `block` openers is structure, not behavior: a
-        // dispatcher opens hundreds before its br_table. One row carries the
-        // run's first offset and count, and the card's badge stays exact.
+        let count = decoded.offsets.len();
+        let range = self.body.range();
+        w.text
+            .push_str("{\"schema\":\"wasm-block-graph-v1\",\"artifact_id\":");
+        w.text
+            .push_str(&serde_json::to_string(&self.artifact.artifact_id).expect("JSON value"));
+        w.text.push_str(",\"sha256\":");
+        w.text
+            .push_str(&serde_json::to_string(&self.artifact.sha256).expect("JSON value"));
+        let _ = write!(
+            w.text,
+            ",\"function_index\":{},\"byte_offset\":{},\"byte_end\":{},\"type_index\":{},\"evidence\":\"declared_static\",\"complete\":false,\"status\":\"{}\",\"block_count\":{blocks},\"edge_count\":{},\"instruction_count\":{count},\"edge_kinds\":{},\"block_fields\":[\"byte_offset\",\"byte_end\",\"first_row\",\"row_count\",\"instruction_count\",\"flags\"],\"flag_bits\":{{\"entry\":1,\"reachable\":2,\"exit\":4,\"trap\":8}},\"edge_fields\":[\"from\",\"to\",\"kind\",\"label\"],\"blocks\":[",
+            self.function,
+            range.start,
+            range.end,
+            self.ty.map_or_else(|| "null".to_owned(), |t| t.to_string()),
+            if omissions.is_empty() {
+                "decoded"
+            } else {
+                "partial"
+            },
+            graph.edges.len(),
+            serde_json::to_string(&EDGE_KINDS).expect("JSON strings"),
+        );
+        let mut first_row = 0u32;
+        for (block, (&leader, &rows)) in graph.leaders.iter().zip(&row_counts).enumerate() {
+            if block > 0 {
+                w.text.push(',');
+            }
+            let next = graph.leaders.get(block + 1).copied();
+            let start = decoded.offsets[leader as usize];
+            let end = next.map_or(decoded.byte_end, |next| decoded.offsets[next as usize]);
+            let instructions = next.unwrap_or(count as u32) - leader;
+            let _ = write!(
+                w.text,
+                "[{start},{end},{first_row},{rows},{instructions},{}]",
+                graph.flags[block]
+            );
+            first_row += rows;
+            if !w.spill() {
+                return Ok(out);
+            }
+        }
+        w.text.push_str("],\"edges\":[");
+        for (position, (from, to, kind, label)) in graph.edges.iter().enumerate() {
+            if position > 0 {
+                w.text.push(',');
+            }
+            let _ = write!(
+                w.text,
+                "[{from},{},{kind},",
+                to.map_or_else(|| "null".to_owned(), |t| t.to_string())
+            );
+            match label {
+                Some(text) => {
+                    w.text.push('"');
+                    escape_into(&mut w.text, text);
+                    w.text.push('"');
+                }
+                None => w.text.push_str("null"),
+            }
+            w.text.push(']');
+            if !w.spill() {
+                return Ok(out);
+            }
+        }
+        w.text.push_str("],\"rows\":\"");
+        let written = each_row(self.body, &decoded, &graph, true, |_, offset, text| {
+            let _ = write!(w.text, "{offset:x} ");
+            escape_into(&mut w.text, text);
+            w.text.push_str("\\n");
+            w.spill()
+        })?;
+        if !written {
+            return Ok(out);
+        }
+        let _ = write!(
+            w.text,
+            "\",\"row_count\":{first_row},\"omissions\":{},\"limits\":{{\"max_body_bytes\":{MAX_BODY_BYTES}}},\"notice\":\"Declared static control flow. Reachable here is not observed execution, and a complete drawing is not a proof.\"",
+            serde_json::to_string(&omissions).expect("JSON strings"),
+        );
+        for (key, value) in self.members {
+            w.text.push(',');
+            w.text
+                .push_str(&serde_json::to_string(key).expect("JSON key"));
+            w.text.push(':');
+            w.text
+                .push_str(&serde_json::to_string(value).expect("JSON value"));
+        }
+        w.text.push('}');
+        w.flush();
+        Ok(out)
+    }
+}
+
+/// Each row of each block in order, as `row(block, offset, text)`, until
+/// `row` returns false. A run of identical `block` openers is structure, not
+/// behavior: a dispatcher opens hundreds before its br_table, so one row
+/// carries the run's first offset and count, and the card's badge stays
+/// exact. Without `text` only openers are formatted, enough to count rows.
+fn each_row(
+    body: &wasmparser::FunctionBody<'_>,
+    decoded: &Decoded,
+    graph: &Graph,
+    text: bool,
+    mut row: impl FnMut(usize, usize, &str) -> bool,
+) -> Result<bool> {
+    let mut reader = body.get_operators_reader().map_err(bad)?;
+    let count = decoded.offsets.len() as u32;
+    let mut line = String::new();
+    for block in 0..graph.leaders.len() {
+        let leader = graph.leaders[block];
+        let end = graph.leaders.get(block + 1).map_or(count, |next| *next);
         let mut run: Option<(usize, String, u32)> = None;
         for instruction in leader..end {
             let (op, offset) = reader.read_with_offset().map_err(bad)?;
             if let Operator::Block { .. } = op {
-                let text = operands(&op);
+                let operand = operands(&op);
                 match &mut run {
-                    Some((_, current, count)) if *current == text => *count += 1,
+                    Some((_, current, count)) if *current == operand => *count += 1,
                     _ => {
-                        if let Some((at, text, count)) = run.take() {
-                            emit(&mut rows, at, block_run_text(&text, count));
+                        if let Some((at, operand, count)) = run.replace((offset, operand, 1))
+                            && !row(block, at, &block_run_text(&operand, count))
+                        {
+                            return Ok(false);
                         }
-                        run = Some((offset, text, 1));
                     }
                 }
                 continue;
             }
-            if let Some((at, text, count)) = run.take() {
-                emit(&mut rows, at, block_run_text(&text, count));
+            if let Some((at, operand, count)) = run.take()
+                && !row(block, at, &block_run_text(&operand, count))
+            {
+                return Ok(false);
             }
-            let mut text = wasm::mnemonic(&op);
-            let args = operands(&op);
-            if !args.is_empty() {
-                text.push(' ');
-                text.push_str(&args);
+            line.clear();
+            if text {
+                line.push_str(&wasm::mnemonic(&op));
+                let args = operands(&op);
+                if !args.is_empty() {
+                    line.push(' ');
+                    line.push_str(&args);
+                }
+                if let Some(target) = branch_target(decoded, instruction, graph) {
+                    let _ = write!(line, " -> {target:x}");
+                }
+                if let Operator::TryTable { .. } = op {
+                    handler_targets(&mut line, decoded, instruction);
+                }
             }
-            if let Some(target) = branch_target(&decoded, instruction, &graph) {
-                let _ = write!(text, " -> {target:x}");
+            if !row(block, offset, &line) {
+                return Ok(false);
             }
-            emit(&mut rows, offset, text);
         }
-        if let Some((at, text, count)) = run.take() {
-            emit(&mut rows, at, block_run_text(&text, count));
+        if let Some((at, operand, count)) = run.take()
+            && !row(block, at, &block_run_text(&operand, count))
+        {
+            return Ok(false);
         }
-        if text_stopped {
-            graph.flags[block] |= ROWS_CUT;
-        }
-        block_rows.push((first_row, included, end - leader));
     }
-    let mut out =
-        String::with_capacity(structure_bytes.min(MAX_STRUCTURE_BYTES) + rows.len() + 2048);
-    out.push_str("{\"schema\":\"wasm-block-graph-v1\",\"artifact_id\":");
-    out.push_str(&serde_json::to_string(&artifact.artifact_id).expect("JSON value"));
-    out.push_str(",\"sha256\":");
-    out.push_str(&serde_json::to_string(&artifact.sha256).expect("JSON value"));
-    let range = body.range();
-    let _ = write!(
-        out,
-        ",\"function_index\":{function},\"byte_offset\":{},\"byte_end\":{},\"type_index\":{},\"evidence\":\"declared_static\",\"complete\":false,\"status\":\"{}\",\"block_count\":{kept},\"edge_count\":{},\"instruction_count\":{count},\"edge_kinds\":{},\"block_fields\":[\"byte_offset\",\"byte_end\",\"first_row\",\"row_count\",\"instruction_count\",\"flags\"],\"flag_bits\":{{\"entry\":1,\"reachable\":2,\"exit\":4,\"trap\":8,\"rows_cut\":32}},\"edge_fields\":[\"from\",\"to\",\"kind\",\"label\"],\"blocks\":[",
-        range.start,
-        range.end,
-        ty.map_or_else(|| "null".to_owned(), |t| t.to_string()),
-        if omissions.is_empty() {
-            "decoded"
-        } else {
-            "partial"
-        },
-        graph.edges.len(),
-        serde_json::to_string(&EDGE_KINDS).expect("JSON strings"),
-    );
-    for (block, &(first, included, instructions)) in block_rows.iter().enumerate() {
-        if block > 0 {
-            out.push(',');
+    Ok(true)
+}
+
+/// A try_table row names where each clause lands, in clause order, as a
+/// branch row names its target: `-> 3a, 51`, or `?` for a label past the
+/// open frames.
+fn handler_targets(line: &mut String, decoded: &Decoded, instruction: u32) {
+    let Some(scope) = scope_of(&decoded.scopes, instruction) else {
+        return;
+    };
+    for (position, clause) in decoded.scopes[scope as usize].clauses.iter().enumerate() {
+        line.push_str(if position == 0 { " -> " } else { ", " });
+        match clause_target(decoded, clause) {
+            Some(target) => {
+                let _ = write!(line, "{:x}", decoded.offsets[target as usize]);
+            }
+            None => line.push('?'),
         }
-        let leader = graph.leaders[block];
-        let start = decoded.offsets[leader as usize];
-        let end = graph
-            .leaders
-            .get(block + 1)
-            .map_or(decoded.byte_end, |next| decoded.offsets[*next as usize]);
-        let _ = write!(
-            out,
-            "[{start},{end},{first},{included},{instructions},{}]",
-            graph.flags[block]
-        );
     }
-    out.push_str("],\"edges\":[");
-    let mut wrote = 0usize;
-    for (from, to, kind, label) in &graph.edges {
-        if (*from as usize) >= kept {
-            continue;
-        }
-        if wrote > 0 {
-            out.push(',');
-        }
-        wrote += 1;
-        let (to, kind, label) = match to {
-            Some(target) if (*target as usize) >= kept => (
-                None,
-                UNRESOLVED,
-                Some(label.as_deref().map_or_else(
-                    || "target outside the block budget".to_owned(),
-                    |text| format!("{text}: target outside the block budget"),
-                )),
-            ),
-            other => (*other, *kind, label.clone()),
-        };
-        let _ = write!(
-            out,
-            "[{from},{},{kind},",
-            to.map_or_else(|| "null".to_owned(), |t| t.to_string())
-        );
-        match label {
-            Some(text) => json_string(&mut out, &text),
-            None => out.push_str("null"),
-        }
-        out.push(']');
-    }
-    out.push_str("],\"rows\":");
-    json_string(&mut out, &rows);
-    let _ = write!(
-        out,
-        ",\"row_count\":{row_index},\"omissions\":{},\"limits\":{{\"max_body_bytes\":{MAX_BODY_BYTES},\"max_row_text_bytes\":{MAX_ROW_TEXT_BYTES},\"max_structure_bytes\":{MAX_STRUCTURE_BYTES}}},\"notice\":\"Declared static control flow. Reachable here is not observed execution, and a complete drawing is not a proof.\"}}",
-        serde_json::to_string(&omissions).expect("JSON strings"),
-    );
-    Ok(out)
 }
 
 /// The byte offset a direct branch resolves to, shown on its row.
@@ -1452,7 +1834,7 @@ mod tests {
                 .iter()
                 .any(|edge| edge.2 == "table_default" && edge.3.as_deref() == Some("default"))
         );
-        assert_eq!(document["instruction_count"].as_u64().unwrap() > 900, true);
+        assert!(document["instruction_count"].as_u64().unwrap() > 900);
     }
 
     use std::collections::BTreeSet;
@@ -1577,12 +1959,12 @@ mod tests {
     }
 
     #[test]
-    fn case_labels_compress_and_stay_bounded() {
+    fn case_labels_compress_and_name_every_case() {
         assert_eq!(case_label(&[0, 1, 2, 5, 9, 10]), "0-2,5,9-10");
         let many: Vec<u32> = (0..2000).step_by(2).collect();
         let label = case_label(&many);
-        assert!(label.len() <= MAX_LABEL_BYTES + 4, "{label}");
-        assert!(label.ends_with(",..."), "{label}");
+        assert_eq!(label.split(',').count(), 1000, "{label}");
+        assert!(label.ends_with(",1996,1998"), "{label}");
     }
 
     #[test]
@@ -1605,5 +1987,476 @@ mod tests {
             .unwrap()
             .to_owned();
         assert!(rows.contains("f32.const 3.4028235e38\n"), "{rows}");
+    }
+
+    /// Edges out of the block whose rows hold `needle`.
+    fn edges_from(document: &Value, needle: &str) -> Vec<(Option<i64>, String, Option<String>)> {
+        let rows: Vec<&str> = document["rows"].as_str().unwrap().lines().collect();
+        let block = document["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|block| {
+                let first = block[2].as_u64().unwrap() as usize;
+                let count = block[3].as_u64().unwrap() as usize;
+                rows[first..first + count]
+                    .iter()
+                    .any(|row| row.contains(needle))
+            })
+            .unwrap_or_else(|| panic!("no block holds {needle}: {rows:?}"));
+        kinds(document)
+            .into_iter()
+            .filter(|edge| edge.0 == block as i64)
+            .map(|edge| (edge.1, edge.2, edge.3))
+            .collect()
+    }
+    /// The first block whose rows hold `needle`.
+    fn block_at(document: &Value, needle: &str) -> i64 {
+        let rows: Vec<&str> = document["rows"].as_str().unwrap().lines().collect();
+        document["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|block| {
+                let first = block[2].as_u64().unwrap() as usize;
+                let count = block[3].as_u64().unwrap() as usize;
+                rows[first..first + count]
+                    .iter()
+                    .any(|row| row.contains(needle))
+            })
+            .unwrap_or_else(|| panic!("no block holds {needle}: {rows:?}")) as i64
+    }
+
+    #[test]
+    fn a_throw_reaches_its_try_table_handler_and_a_call_inside_may() {
+        let document = graph_for(
+            r#"(module (import "env" "g" (func $g)) (tag $e (param i32)) (tag $f)
+              (func (result i32)
+                (block $h (result i32)
+                  (try_table (catch $e $h)
+                    call $g
+                    i32.const 7
+                    throw $e)
+                  unreachable)
+                i32.const 1
+                i32.add)
+              (func
+                (block $h
+                  (try_table (catch $e $h) (throw $f))
+                  unreachable)))"#,
+            1,
+        );
+        let rows = document["rows"].as_str().unwrap();
+        assert!(rows.contains(" try_table (catch 0 0) -> "), "{rows}");
+        assert!(rows.contains(" throw 0\n"), "{rows}");
+        assert!(
+            !rows.contains("TryTable") && !rows.contains("tag_index"),
+            "{rows}"
+        );
+        let handler = block_at(&document, "i32.const 1");
+        // The throw is certainly caught, so nothing leaves the function, and
+        // the call's possible exception is the same edge.
+        assert_eq!(
+            edges_from(&document, "throw 0"),
+            vec![(
+                Some(handler),
+                "exception".to_owned(),
+                Some("catch 0".to_owned())
+            )]
+        );
+        let flags = document["blocks"][handler as usize][5].as_u64().unwrap();
+        assert_eq!(flags & REACHABLE as u64, REACHABLE as u64);
+        // A defined tag never matches another one: the throw leaves.
+        let other = graph_for(
+            r#"(module (tag $e (param i32)) (tag $f)
+              (func (block $h (result i32) (try_table (catch $e $h) (throw $f)) unreachable) drop))"#,
+            0,
+        );
+        assert_eq!(
+            edges_from(&other, "throw 1"),
+            vec![(None, "unresolved".to_owned(), Some("throw".to_owned()))]
+        );
+    }
+
+    #[test]
+    fn legacy_try_resolves_throws_rethrows_and_calls() {
+        let document = graph_for(
+            r#"(module (import "env" "g" (func $g)) (tag $e (param i32))
+              (func (param i32)
+                try
+                  local.get 0
+                  if
+                    i32.const 1
+                    throw $e
+                  end
+                  call $g
+                catch $e
+                  drop
+                  rethrow 0
+                end))"#,
+            1,
+        );
+        let rows = document["rows"].as_str().unwrap();
+        assert!(
+            rows.contains(" catch 0\n") && rows.contains(" rethrow 0\n"),
+            "{rows}"
+        );
+        let handler = block_at(&document, "drop");
+        assert_eq!(
+            edges_from(&document, "throw 0"),
+            vec![(
+                Some(handler),
+                "exception".to_owned(),
+                Some("catch 0".to_owned())
+            )]
+        );
+        // A call may throw any tag: it may reach the handler, and leaving the
+        // function is what any call can do, so it adds no stub.
+        let call = edges_from(&document, "call 0");
+        assert!(
+            call.contains(&(
+                Some(handler),
+                "exception".to_owned(),
+                Some("call: catch 0".to_owned())
+            )),
+            "{call:?}"
+        );
+        assert!(call.iter().all(|edge| edge.1 != "unresolved"), "{call:?}");
+        // A rethrow in a catch body starts outside its own try.
+        assert_eq!(
+            edges_from(&document, "rethrow 0"),
+            vec![(None, "unresolved".to_owned(), Some("rethrow".to_owned()))]
+        );
+    }
+
+    #[test]
+    fn an_exception_moves_outward_until_a_catch_all_and_may_escape_without_one() {
+        let document = graph_for(
+            r#"(module (tag $e) (tag $f)
+              (func (param exnref)
+                try
+                  try
+                    local.get 0
+                    throw_ref
+                  catch $e
+                  end
+                catch_all
+                end)
+              (func (param exnref)
+                try
+                  local.get 0
+                  throw_ref
+                catch $f
+                end))"#,
+            0,
+        );
+        // The inner catch may take it; the outer catch_all certainly does.
+        let edges = edges_from(&document, "throw_ref");
+        assert_eq!(edges.len(), 2, "{edges:?}");
+        assert_ne!(edges[0].0, edges[1].0, "{edges:?}");
+        assert!(
+            edges
+                .iter()
+                .any(|edge| edge.2.as_deref() == Some("catch 0")),
+            "{edges:?}"
+        );
+        assert!(
+            edges
+                .iter()
+                .any(|edge| edge.2.as_deref() == Some("catch_all")),
+            "{edges:?}"
+        );
+        assert!(edges.iter().all(|edge| edge.1 == "exception"), "{edges:?}");
+        // With no catch_all an exception of an unknown tag may also leave.
+        let single = graph_for(
+            r#"(module (tag $f) (func (param exnref) try local.get 0 throw_ref catch $f end))"#,
+            0,
+        );
+        let edges = edges_from(&single, "throw_ref");
+        assert!(
+            edges
+                .iter()
+                .any(|edge| edge.1 == "exception" && edge.2.as_deref() == Some("catch 0")),
+            "{edges:?}"
+        );
+        assert!(
+            edges.contains(&(
+                None,
+                "unresolved".to_owned(),
+                Some("throw_ref: may escape".to_owned())
+            )),
+            "{edges:?}"
+        );
+    }
+
+    #[test]
+    fn a_delegate_hands_exceptions_to_the_scope_it_names() {
+        let document = graph_for(
+            r#"(module (import "env" "g" (func $g)) (tag $e)
+              (func
+                try
+                  try
+                    call $g
+                  delegate 0
+                catch_all
+                  nop
+                end)
+              (func
+                try
+                  throw $e
+                delegate 0))"#,
+            1,
+        );
+        let rows = document["rows"].as_str().unwrap();
+        assert!(rows.contains(" delegate 0\n"), "{rows}");
+        let handler = block_at(&document, "nop");
+        // The try body's normal end goes past the catch_all to the end.
+        assert_eq!(
+            edges_from(&document, "call 0"),
+            vec![
+                (
+                    Some(handler + 1),
+                    "branch".to_owned(),
+                    Some("end".to_owned())
+                ),
+                (
+                    Some(handler),
+                    "exception".to_owned(),
+                    Some("call: catch_all".to_owned())
+                )
+            ]
+        );
+        // Delegating to the function's label hands the exception to the caller.
+        let out = graph_for(r#"(module (tag $e) (func try throw $e delegate 0))"#, 0);
+        assert_eq!(
+            edges_from(&out, "throw 0"),
+            vec![(None, "unresolved".to_owned(), Some("throw".to_owned()))]
+        );
+    }
+
+    #[test]
+    fn imported_tags_may_be_one_tag() {
+        let document = graph_for(
+            r#"(module (import "env" "a" (tag $a)) (import "env" "b" (tag $b))
+              (func (block $h (try_table (catch $a $h) (throw $b)))))"#,
+            0,
+        );
+        let edges = edges_from(&document, "throw 1");
+        assert!(
+            edges
+                .iter()
+                .any(|edge| edge.1 == "exception" && edge.2.as_deref() == Some("catch 0")),
+            "{edges:?}"
+        );
+        assert!(
+            edges.contains(&(
+                None,
+                "unresolved".to_owned(),
+                Some("throw: may escape".to_owned())
+            )),
+            "{edges:?}"
+        );
+    }
+
+    fn fixtures() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/fixtures/wasm-block-graph")
+    }
+
+    /// Each block's exception and unresolved edges, by an instruction one of
+    /// its rows ends with (`throw 1`, never the end of `rethrow 1`).
+    fn raised_from(document: &Value, instruction: &str) -> Vec<Vec<(Option<i64>, String, String)>> {
+        let rows: Vec<&str> = document["rows"].as_str().unwrap().lines().collect();
+        let needle = format!(" {instruction}");
+        let edges = kinds(document);
+        document["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .filter(|(_, block)| {
+                let first = block[2].as_u64().unwrap() as usize;
+                let count = block[3].as_u64().unwrap() as usize;
+                rows[first..first + count]
+                    .iter()
+                    .any(|row| row.ends_with(&needle))
+            })
+            .map(|(index, _)| {
+                edges
+                    .iter()
+                    .filter(|edge| {
+                        edge.0 == index as i64 && (edge.2 == "exception" || edge.2 == "unresolved")
+                    })
+                    .map(|edge| (edge.1, edge.2.clone(), edge.3.clone().unwrap_or_default()))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The checked-in module is exactly what the pinned assembler makes from
+    /// its source, and its graph draws the edges README.md lists. Run
+    /// `make wasm-block-graph-fixtures` after editing the `.wat`.
+    #[test]
+    fn the_exception_fixture_matches_its_source_and_draws_its_edges() {
+        let built = wat::parse_file(fixtures().join("exceptions.wat")).unwrap();
+        let bytes = std::fs::read(fixtures().join("exceptions.wasm")).unwrap();
+        assert!(
+            built == bytes,
+            "exceptions.wasm drifted from its source; run make wasm-block-graph-fixtures"
+        );
+        let (document, _) = graph_of(&bytes, 1).unwrap();
+        assert_eq!(document["status"], "decoded");
+        let labels = |edges: &Vec<(Option<i64>, String, String)>| {
+            let mut labels: Vec<String> = edges
+                .iter()
+                .map(|edge| format!("{}{}", if edge.0.is_some() { "" } else { "! " }, edge.2))
+                .collect();
+            labels.sort();
+            labels
+        };
+        let calls = raised_from(&document, "call 0");
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(
+            labels(&calls[0]),
+            ["call: catch 2", "call: catch_all"],
+            "a call reaches every clause"
+        );
+        assert_eq!(
+            labels(&calls[1]),
+            ["call: catch_all"],
+            "a delegated call reaches the try around it"
+        );
+        assert_eq!(
+            labels(&raised_from(&document, "throw 2")[0]),
+            ["catch 2"],
+            "a defined tag reaches only its clause"
+        );
+        assert_eq!(
+            labels(&raised_from(&document, "throw 0")[0]),
+            ["catch 1", "catch_all"],
+            "an imported tag may be another"
+        );
+        assert_eq!(
+            labels(&raised_from(&document, "rethrow 1")[0]),
+            ["! rethrow"],
+            "a catch body is not covered"
+        );
+        assert_eq!(
+            labels(&raised_from(&document, "throw 1")[0]),
+            ["! throw: may escape", "catch 0"]
+        );
+        let halts = raised_from(&document, "throw 3");
+        assert_eq!(
+            labels(&halts[0]),
+            ["! throw"],
+            "no handler: it leaves the function"
+        );
+        assert_eq!(labels(&halts[1]), ["catch_all_ref"]);
+        assert_eq!(
+            labels(&raised_from(&document, "throw_ref")[0]),
+            ["! throw_ref"]
+        );
+        // Every handler edge lands on a block, never past the decoded range.
+        assert!(
+            kinds(&document)
+                .iter()
+                .all(|edge| edge.2 != "exception" || edge.1.is_some())
+        );
+    }
+
+    #[test]
+    #[ignore = "writes the checked-in fixture; run make wasm-block-graph-fixtures"]
+    fn write_block_graph_fixtures() {
+        let built = wat::parse_file(fixtures().join("exceptions.wat")).unwrap();
+        std::fs::write(fixtures().join("exceptions.wasm"), built).unwrap();
+    }
+
+    #[test]
+    fn a_large_body_keeps_every_row_and_streams_the_same_document() {
+        // 300,000 rows of text, past the 16 MiB row budget this replaces once
+        // operands are long: every row and every block stays in the graph.
+        let body =
+            "(drop (i64.const -9223372036854775808)) (br_if 0 (i32.const 0)) ".repeat(60_000);
+        let bytes = wat::parse_str(format!("(module (func {body}))")).unwrap();
+        let (document, length) = graph_of(&bytes, 0).unwrap();
+        assert_eq!(document["status"], "decoded");
+        assert_eq!(document["omissions"], json!([]));
+        assert_eq!(
+            document["limits"],
+            json!({"max_body_bytes": MAX_BODY_BYTES})
+        );
+        assert!(document["flag_bits"].get("rows_cut").is_none());
+        let rows = document["rows"].as_str().unwrap();
+        assert_eq!(
+            rows.lines().count() as u64,
+            document["row_count"].as_u64().unwrap()
+        );
+        assert_eq!(
+            document["row_count"].as_u64().unwrap(),
+            document["instruction_count"].as_u64().unwrap()
+        );
+        assert_eq!(document["block_count"].as_u64().unwrap(), 60_001);
+        assert!(length > PIECE_BYTES * 4, "{length}");
+        // The same writer into many small pieces yields the same bytes.
+        struct Pieces(Vec<String>);
+        impl Out for Pieces {
+            fn put(&mut self, text: &str) -> bool {
+                self.0.push(text.to_owned());
+                true
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(directory.path().join("blobs")).unwrap();
+        let hash = sha2_hex(&bytes);
+        std::fs::write(directory.path().join(format!("blobs/{hash}.bin")), &bytes).unwrap();
+        let record = json!({"protocol_version":1,"artifact_id":"7","session_id":"1","navigation_id":"1","frame_id":"1",
+            "parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":"https://example.test/module.wasm",
+            "mime_type":"application/wasm","byte_size":bytes.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
+        std::fs::write(
+            directory.path().join("manifest.jsonl"),
+            format!("{record}\n"),
+        )
+        .unwrap();
+        let pieces = function_graph_to(
+            directory.path(),
+            "7",
+            0,
+            None,
+            &AtomicBool::new(false),
+            || Pieces(Vec::new()),
+        )
+        .unwrap();
+        assert!(pieces.0.len() > 4);
+        let joined: String = pieces.0.concat();
+        assert_eq!(serde_json::from_str::<Value>(&joined).unwrap(), document);
+        // A reader that goes away stops the writer at its next piece.
+        struct Gone(usize);
+        impl Out for Gone {
+            fn put(&mut self, _: &str) -> bool {
+                self.0 += 1;
+                false
+            }
+        }
+        let gone = function_graph_to(
+            directory.path(),
+            "7",
+            0,
+            None,
+            &AtomicBool::new(false),
+            || Gone(0),
+        )
+        .unwrap();
+        assert_eq!(gone.0, 1);
+        // Cancelled before the answer starts, the graph is an error answer.
+        let error = function_graph_to(
+            directory.path(),
+            "7",
+            0,
+            None,
+            &AtomicBool::new(true),
+            String::new,
+        )
+        .unwrap_err();
+        assert_eq!(error.status, 499, "{}", error.message);
     }
 }

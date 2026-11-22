@@ -10,12 +10,19 @@
   --graph-edge-branch: var(--muted);
   --graph-edge-taken: var(--green);
   --graph-edge-not-taken: var(--amber);
-  --graph-edge-table: var(--accent);
+  --graph-edge-table: var(--syntax-keyword);
   --graph-edge-exception: var(--syntax-number);
   --graph-edge-unresolved: var(--red);
-  --graph-edge-call: var(--accent);
+  --graph-edge-call: var(--syntax-number);
   --graph-edge-assumed: var(--faint);
   --graph-edge-sequence: var(--text);
+  /* The selection owns the accent: no edge kind is drawn in it. */
+  --graph-selection: var(--accent);
+  --graph-selection-soft: var(--accent-soft);
+  --graph-match: var(--amber);
+  /* Overview cards are filled, so they read against the canvas at any zoom. */
+  --graph-card-overview: var(--faint);
+  --graph-card-overview-unreached: var(--line);
   /* Mnemonics: control flow strongest, calls next, the rest plain text. */
   --syntax-control: var(--syntax-support-function);
   --syntax-function: var(--syntax-type);
@@ -54,12 +61,14 @@
 .block-graph-tools { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-left: auto; }
 .block-graph-tool[aria-pressed="true"] { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: var(--accent-soft); color: var(--text); }
 .block-graph-zoom-bar { display: flex; align-items: center; gap: 2px; }
+.block-graph-zoom-bar[hidden], .block-graph-key-toggle[hidden] { display: none !important; }
 .block-graph-zoom { min-width: 38px; color: var(--muted); font: 11px var(--mono); text-align: center; }
 .block-graph-layers { display: flex; gap: 2px; margin-right: 6px; }
 .block-graph-fn-wrap { position: relative; display: flex; align-items: center; gap: 2px; margin-right: 6px; }
 .block-graph-fn-menu { position: absolute; z-index: 5; top: 28px; left: 0; width: min(320px, 80vw); display: grid; gap: 6px; padding: 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); box-shadow: 0 8px 22px var(--shadow); }
 .block-graph-fn-menu input { width: 100%; height: 26px; padding: 0 8px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel-2); color: var(--text); font: 11px var(--mono); }
-.block-graph-fn-list { position: relative; height: 240px; overflow: auto; }
+/* As tall as its rows, up to ten: a short module leaves no empty rows. */
+.block-graph-fn-list { position: relative; max-height: 240px; overflow: auto; }
 .block-graph-fn-spacer { width: 1px; }
 .block-graph-fn-row { position: absolute; left: 0; right: 0; height: 24px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 6px; border: 0; background: transparent; color: var(--text); font: 11px var(--mono); cursor: pointer; }
 .block-graph-fn-row:hover { background: var(--panel-3); }
@@ -69,8 +78,6 @@
 .block-graph-fn-count { margin: 0; color: var(--faint); font: 10px var(--mono); }
 .block-graph-fn-wrap button:focus-visible, .block-graph-tool:focus-visible, .block-graph-fn-menu :focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .block-graph-stage { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: var(--graph-canvas); container-type: size; }
-@container (max-height: 280px) { .block-graph-minimap, .block-graph-minimap-canvas { width: 110px; height: 80px; } .block-graph-hud { max-width: calc(100% - 150px); } }
-@container (max-height: 140px) { .block-graph-minimap { display: none; } }
 .block-graph-canvas { display: block; cursor: grab; touch-action: none; }
 .block-graph-canvas:active { cursor: grabbing; }
 .block-graph-canvas:focus { outline: none; }
@@ -95,6 +102,7 @@
 .block-graph-hud > span { max-width: 100%; overflow: hidden; padding: 3px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--text); font: 11px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
 .block-graph-hud > span:empty, .block-graph-hud > span[hidden] { display: none; }
 .block-graph-hud > .block-graph-lod { color: var(--muted); }
+.block-graph-hud > .block-graph-find { border-color: color-mix(in srgb, var(--graph-match) 60%, var(--line)); }
 .block-graph-limits { color: var(--faint); }
 .block-graph-legend { display: inline-flex; gap: 10px; }
 .block-graph-key { display: inline-flex; align-items: center; gap: 4px; }
@@ -106,6 +114,10 @@
 .block-graph-key-table line { stroke: var(--graph-edge-table); stroke-dasharray: 2 3; }
 .block-graph-key-exception line { stroke: var(--graph-edge-exception); stroke-dasharray: 8 4; }
 .block-graph-key-unresolved line { stroke: var(--graph-edge-unresolved); stroke-dasharray: 4 2 1 2; }
+.block-graph-key-branch line { stroke: var(--graph-edge-branch); }
+.block-graph-key-call line { stroke: var(--graph-edge-call); stroke-dasharray: 1 3; }
+.block-graph-key-assumed line { stroke: var(--graph-edge-assumed); stroke-dasharray: 1 3; }
+.block-graph-key-sequence line { stroke: var(--graph-edge-sequence); }
 #vm-static-workspace:has(> .vm-static-graph:not([hidden])) .vm-static-body { display: none; }
 /* The narrow VM layout scrolls the page around a fixed-height listing. The
    graph pans itself, so in Graph mode the workspace fits the screen instead
@@ -122,7 +134,8 @@
 #vm-static-workspace .vm-static-toolbar > button[aria-pressed="true"] { background: var(--vm-selected-bg); color: var(--vm-selected-fg); border-color: var(--vm-selected-line); }
 .source-line[data-graph-reveal="true"] { animation: block-graph-reveal 1.6s ease-out; }
 @keyframes block-graph-reveal { from { background: var(--accent-soft); } to { background: transparent; } }
-@media (max-width: 720px) {
-  .block-graph-minimap { width: 110px; height: 80px; }
-  .block-graph-minimap-canvas { width: 110px; height: 80px; }
-}
+/* Small stages shrink, then drop, the minimap. The stage measures itself
+   because the sidebar and navigator decide how much of the window it gets.
+   These follow every base rule so they win the cascade. */
+@container (max-width: 600px) or (max-height: 280px) { .block-graph-minimap, .block-graph-minimap-canvas { width: 110px; height: 80px; } .block-graph-hud { max-width: calc(100% - 150px); } }
+@container (max-height: 140px) { .block-graph-minimap { display: none; } .block-graph-hud { max-width: calc(100% - 20px); } }

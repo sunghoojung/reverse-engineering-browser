@@ -234,6 +234,23 @@ final class Harness {
     try await settle()
   }
 
+  // A native secondary click: WebKit turns it into the page's contextmenu event.
+  func rightClick(_ selector: String, containing text: String? = nil) async throws {
+    try await activate()
+    let point = try await reveal(selector, containing: text)
+    try await activate()
+    let location = NSPoint(x: point.x, y: webView.isFlipped ? point.y : webView.bounds.height - point.y)
+    let windowPoint = webView.convert(location, to: nil)
+    for type in [NSEvent.EventType.rightMouseDown, .rightMouseUp] {
+      guard let event = NSEvent.mouseEvent(
+        with: type, location: windowPoint, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+        windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: type == .rightMouseDown ? 1 : 0)
+      else { throw HarnessError("Could not create a mouse event") }
+      window.sendEvent(event)
+    }
+    try await settle()
+  }
+
   // A native press, move and release between two CSS points, as a researcher
   // drags a pane divider. Each move settles so the page sees every step.
   func drag(from start: NSPoint, to end: NSPoint, steps: Int = 8) async throws {
@@ -421,6 +438,7 @@ struct Expectations: Decodable {
   let responseBodyHost: String
   let responseBodyMarker: String
   let budgetHost: String
+  let diskReserveHost: String
   let headerValueMarker: String
   let cookieValueMarker: String
   let cachedHeadersHost: String
@@ -852,6 +870,14 @@ final class OriginTraceRenderedUITests: XCTestCase {
     XCTAssertEqual(droppedColumnsRead, 0, "\(context): a column the width dropped must not read as shown")
     try await assertLayout(ui, ".column-menu", "\(context) column menu")
     try await ui.screenshot("traffic-column-menu-\(context)")
+    // A mouse click toggles a column and keeps the menu open: WebKit does not
+    // focus a clicked button, so the press must not read as focus leaving.
+    let protocolItem = ".column-menu [data-column-id=\"protocol\"]"
+    try await ui.click(protocolItem)
+    try await ui.waitUntil("document.querySelector('\(protocolItem)')?.getAttribute('aria-checked') !== 'false'", "\(context): a click did not turn the Protocol column on")
+    try await ui.click(protocolItem)
+    try await ui.waitUntil("document.querySelector('\(protocolItem)')?.getAttribute('aria-checked') === 'false'", "\(context): a second click did not turn the Protocol column off")
+    _ = try await ui.value("document.querySelector('.column-menu [role=menuitemcheckbox]:not(:disabled)').focus()")
     try await ui.key(53, "\u{1B}")
     try await ui.waitUntil("document.querySelector('.column-menu') === null && document.activeElement?.dataset.column === 'name'",
       "\(context): Escape did not close the column menu and return focus")
@@ -1669,17 +1695,26 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#open-captured-export")
       try await ui.waitUntil("document.querySelector('#captured-export-dialog').open", "export dialog did not open")
       let exportState = try await ui.json("""
-        ({formatHidden: document.querySelector('[data-export-format-field]').hidden,
-          sourceHidden: document.querySelector('[data-export-source-field]').hidden,
+        ({formats: [...document.querySelector('[data-export-format]').options].filter(option => !option.hidden).map(option => option.value),
+          format: document.querySelector('[data-export-format]').value,
+          scope: document.querySelector('[data-export-scope]').value,
+          scopes: [...document.querySelector('[data-export-scope]').options].filter(option => !option.hidden).map(option => option.textContent),
+          policy: document.querySelector('[data-export-policy]').value,
+          policies: [...document.querySelector('[data-export-policy]').options].filter(option => !option.hidden).map(option => option.value),
           fileShown: !document.querySelector('[data-export-file-field]').hidden,
           title: document.querySelector('#captured-export-title').innerText,
           context: document.querySelector('#captured-export-context').innerText})
         """)
-      XCTAssertEqual(exportState["formatHidden"] as? Bool, true, "\(size.name): no format choice when only one mode works")
-      XCTAssertEqual(exportState["sourceHidden"] as? Bool, true, "\(size.name): no schema-source choice")
-      XCTAssertEqual(exportState["fileShown"] as? Bool, true, "\(size.name): local introspection file stays available")
-      XCTAssertEqual(exportState["title"] as? String, "Export GraphQL schema")
-      XCTAssertTrue((exportState["context"] as? String ?? "").contains("HAR exports are unavailable here"), "\(size.name): unavailable modes are explained: \(exportState)")
+      XCTAssertEqual(exportState["formats"] as? [String], ["traffic_har", "sdl"], "\(size.name): Traffic exports its HAR, or converts a local schema: \(exportState)")
+      XCTAssertEqual(exportState["format"] as? String, "traffic_har")
+      XCTAssertEqual(exportState["scope"] as? String, "list", "\(size.name): the list's Export starts on the list")
+      XCTAssertEqual((exportState["scopes"] as? [String])?.first, "Selected request", "\(size.name): \(exportState)")
+      XCTAssertTrue((exportState["scopes"] as? [String])?.last?.hasPrefix("All requests · ") == true, "\(size.name): \(exportState)")
+      XCTAssertEqual(exportState["policy"] as? String, "raw", "\(size.name): Raw is the default")
+      XCTAssertEqual(exportState["policies"] as? [String], ["raw", "credentials_withheld"], "\(size.name): \(exportState)")
+      XCTAssertEqual(exportState["fileShown"] as? Bool, false, "\(size.name): the file field is the SDL format's")
+      XCTAssertEqual(exportState["title"] as? String, "Export Traffic")
+      XCTAssertTrue((exportState["context"] as? String ?? "").hasPrefix("Selected: GET "), "\(size.name): the selected row is named: \(exportState)")
       try await assertLayout(ui, "#captured-export-dialog", "\(size.name) export dialog")
       try await ui.screenshot("export-native-\(size.name)")
       try await ui.key(53, "\u{1B}")
@@ -1717,6 +1752,102 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // protocol/native-network-v3.md: a service worker's install-time fetch sits in
   // the tab that registered it, marked as such, and requests no page caused are
   // named in the footer instead of listed.
+  // The row menu copies what the request sent, read from its HAR entry, and
+  // the dialog exports that HAR. Each copy is read back from the pasteboard.
+  @MainActor
+  func test43TrafficCopyMenuAndHarExport() async throws {
+    let expected = try Expectations.load()
+    let pasteboard = NSPasteboard.general
+    let saved = pasteboard.string(forType: .string)
+    defer { pasteboard.clearContents(); if let saved { pasteboard.setString(saved, forType: .string) } }
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "traffic")
+      try await ui.click("#screen-traffic .request-row", containing: expected.requestBodyHost)
+      try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
+      try await ui.click("#request-copy-url")
+      try await ui.waitUntil("document.querySelector('.traffic-row-menu') !== null", "the Copy menu did not open")
+      let menu = try await ui.json("""
+        ({items: [...document.querySelectorAll('.traffic-row-menu [role=menuitem]')].map(item => item.textContent + (item.disabled ? ' (disabled)' : '')),
+          focused: document.activeElement?.textContent, expanded: document.querySelector('#request-copy-url').getAttribute('aria-expanded')})
+        """)
+      XCTAssertEqual(menu["items"] as? [String], ["Copy URL", "Copy as cURL", "Copy as fetch", "Export HAR…"], "\(size.name): \(menu)")
+      XCTAssertEqual(menu["focused"] as? String, "Copy URL", "\(size.name): the first action takes focus")
+      XCTAssertEqual(menu["expanded"] as? String, "true")
+      try await assertLayout(ui, ".traffic-row-menu", "\(size.name) copy menu")
+      try await ui.screenshot("traffic-copy-menu-\(size.name)")
+      pasteboard.clearContents()
+      try await ui.click(".traffic-row-menu [role=menuitem]", containing: "Copy as cURL")
+      try await ui.waitUntil("document.querySelector('#request-copy-url').textContent !== 'Copy'", "Copy as cURL did not finish")
+      let copied = try await ui.json("({label: document.querySelector('#request-copy-url').textContent, notice: document.querySelector('#investigation-notice')?.textContent ?? ''})")
+      XCTAssertEqual(copied["label"] as? String, "Copied", "\(size.name): \(copied)")
+      let curl = pasteboard.string(forType: .string) ?? ""
+      XCTAssertTrue(curl.hasPrefix("curl 'https://\(expected.requestBodyHost)/getcaptcha/site-key?s="), "\(size.name): \(curl)")
+      for part in ["-H 'cookie: sid=fixture'", "-H 'x-note: \(expected.headerValueMarker)'", "--data-raw '"] {
+        XCTAssertTrue(curl.contains(part), "\(size.name): cURL carries \(part): \(curl)")
+      }
+      XCTAssertFalse(curl.contains(":method") || curl.contains(" -X "), "\(size.name): pseudo-headers and a redundant -X are left out: \(curl)")
+      let focus = try await ui.value("document.activeElement?.id ?? ''") as? String
+      XCTAssertEqual(focus, "request-copy-url", "\(size.name): focus returns to Copy")
+      try await assertInert(ui, "\(size.name) copy menu")
+
+      // Shift+F10 on the focused row opens the same menu; Escape returns focus to the row.
+      _ = try await ui.value("document.querySelector('#screen-traffic .request-row[aria-selected=\"true\"]').focus({focusVisible:true})")
+      try await ui.key(109, "\u{F70D}", modifiers: [.shift, .function])
+      try await ui.waitUntil("document.querySelector('.traffic-row-menu') !== null", "Shift+F10 did not open the row menu")
+      try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad])
+      let moved = try await ui.value("document.activeElement?.textContent") as? String
+      XCTAssertEqual(moved, "Copy as cURL", "\(size.name): Down moves through the actions")
+      try await ui.key(53, "\u{1B}")
+      try await ui.waitUntil("document.querySelector('.traffic-row-menu') === null", "Escape did not close the row menu")
+      let rowFocus = try await ui.value("document.activeElement?.classList.contains('request-row') ?? false") as? Bool
+      XCTAssertEqual(rowFocus, true, "\(size.name): Escape returns focus to the row")
+
+      // A right-click selects the row it is on and opens its menu: a host-only row has no URL to copy.
+      try await ui.rightClick("#screen-traffic .request-row", containing: "item-3.scroll.test")
+      try await ui.waitUntil("document.querySelector('.traffic-row-menu') !== null", "right-click did not open the row menu")
+      let other = try await ui.json("""
+        ({selected: document.querySelector('#screen-traffic .request-row[aria-selected=\"true\"]')?.innerText ?? '',
+          url: document.querySelector('.traffic-row-menu [role=menuitem]').disabled})
+        """)
+      XCTAssertTrue((other["selected"] as? String ?? "").contains("item-3.scroll.test"), "\(size.name): right-click selects its row: \(other)")
+      XCTAssertEqual(other["url"] as? Bool, true, "\(size.name): a host-only row has no URL to copy")
+      try await ui.screenshot("traffic-row-menu-\(size.name)")
+      try await ui.key(53, "\u{1B}")
+      try await ui.waitUntil("document.querySelector('.traffic-row-menu') === null", "Escape did not close the right-click menu")
+
+      // Export HAR… opens the dialog on that row; Copy puts its archive on the pasteboard.
+      try await ui.click("#screen-traffic .request-row", containing: expected.requestBodyHost)
+      try await ui.waitUntil("document.querySelector('#selected-url').textContent.includes('\(expected.requestBodyHost)')", "the body row was not selected again")
+      try await ui.click("#request-copy-url")
+      try await ui.waitUntil("document.querySelector('.traffic-row-menu') !== null", "the Copy menu did not reopen")
+      try await ui.click(".traffic-row-menu [role=menuitem]", containing: "Export HAR")
+      try await ui.waitUntil("document.querySelector('#captured-export-dialog').open", "Export HAR… did not open the dialog")
+      let dialog = try await ui.json("""
+        ({scope: document.querySelector('[data-export-scope]').value, policy: document.querySelector('[data-export-policy]').value,
+          context: document.querySelector('#captured-export-context').innerText})
+        """)
+      XCTAssertEqual(dialog["scope"] as? String, "selected", "\(size.name): \(dialog)")
+      XCTAssertEqual(dialog["policy"] as? String, "raw")
+      XCTAssertTrue((dialog["context"] as? String ?? "").hasPrefix("Selected: POST https://\(expected.requestBodyHost)/"), "\(size.name): \(dialog)")
+      try await assertInert(ui, "\(size.name) Traffic export")
+      try await assertLayout(ui, "#captured-export-dialog", "\(size.name) Traffic export")
+      try await ui.screenshot("traffic-har-export-\(size.name)")
+      _ = try await ui.value("(() => { const field = document.querySelector('[data-export-destination]'); field.value = 'copy'; field.dispatchEvent(new Event('change')); return true; })()")
+      pasteboard.clearContents()
+      try await ui.click("[data-export-submit]")
+      try await ui.waitUntil("document.querySelector('[data-export-status]').textContent.includes('Copied locally')", "the HAR was not copied")
+      let har = try JSONSerialization.jsonObject(with: Data((pasteboard.string(forType: .string) ?? "").utf8)) as? [String: Any]
+      let log = har?["log"] as? [String: Any]
+      let entries = log?["entries"] as? [[String: Any]] ?? []
+      XCTAssertEqual((log?["_reb"] as? [String: Any])?["complete"] as? Bool, true, "\(size.name): \(String(describing: log?["_reb"]))")
+      XCTAssertEqual(entries.count, 1, "\(size.name): one hop, one entry")
+      XCTAssertEqual((entries.first?["request"] as? [String: Any])?["method"] as? String, "POST")
+      try await ui.key(53, "\u{1B}")
+      try await ui.waitUntil("!document.querySelector('#captured-export-dialog').open", "Escape did not close export")
+    }
+  }
+
   @MainActor
   func test28ServiceWorkerRegistrantAndNoPageCounts() async throws {
     let expected = try Expectations.load()
@@ -2849,6 +2980,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("!document.querySelector('#source-graph').hidden", "Graph is offered for a captured WASM artifact")
       try await ui.click("#source-graph")
       try await ui.waitUntil("(document.querySelector('#source-graph-host .block-graph-stats')?.textContent ?? '').includes('blocks')", timeout: 30, "the block graph did not finish laying out")
+      // The stage's ResizeObserver sizes the canvas in the next rendering
+      // update, before it paints, so layout is measured as it is first shown.
+      try await ui.settle()
       let evidence = try await ui.value("document.querySelector('#source-graph-host .block-graph-evidence').textContent") as? String ?? ""
       XCTAssertEqual(evidence, "declared", "\(size.name): the header says declared")
       let limits = try await ui.value("(() => { const box = document.querySelector('#source-graph-host .block-graph-limits'); const rect = box.getBoundingClientRect(); return {text: box.textContent, w: rect.width, right: rect.right, windowWidth: innerWidth}; })()") as? [String: Any] ?? [:]
@@ -2875,6 +3009,160 @@ final class OriginTraceRenderedUITests: XCTestCase {
       _ = try await ui.value("(document.documentElement.dataset.theme = 'dark', 1)")
       try await ui.click("#source-graph")
     }
+  }
+
+  // The block graph shapes of artifacts 341 to 345, cold at each size: the
+  // time from the native click on Graph to the frame after the first drawing
+  // (decode, transfer, layout and draw), and frames while Shift+Arrow pans at
+  // the opening zoom and fitted whole: the interval between frames, and the
+  // time a frame spent before this test's callback, which is the graph's
+  // draw. The numbers are printed as RENDERED_UI_GRAPH lines. A median
+  // interval fails past three display frames, or past twice the slower median
+  // of the 25-block exceptions shape at that size where that is longer: a
+  // display without a GPU, as on a CI host, holds even that shape to 30-50 ms
+  // a frame while its draw takes 1 ms, so the floor is the machine's, not the
+  // graph's. A single long frame does not fail, since a hidden or sleeping
+  // display stops frames whatever the page does. Then Shift+Arrow pushes the
+  // fitted view far past the bottom right, where it must stop on the drawing.
+  @MainActor
+  func test25bBlockGraphShapes() async throws {
+    let shapes = [("341", "ladder"), ("342", "dispatch256"), ("343", "loops"), ("344", "exceptions"), ("345", "large")]
+    for size in windowSizes + [("wide", 1440, 900)] {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      var medians: [(context: String, median: Double, result: [String: Any])] = []
+      for (id, name) in shapes {
+        let context = "\(size.name) \(name)"
+        try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"\(id)\"]")
+        try await ui.waitUntil("!document.querySelector('#source-graph').hidden && document.querySelector('#source-graph').getAttribute('aria-pressed') !== 'true'", "\(context): Graph is offered and closed")
+        _ = try await ui.value("""
+          (() => { const host = document.querySelector('#source-graph-host'); window.__rebGraphPaint = null;
+            document.querySelector('#source-graph').addEventListener('click', () => {
+              const started = performance.now();
+              const ready = () => host.querySelector('.block-graph-state').hidden && (host.querySelector('.block-graph-stats')?.textContent ?? '').includes('blocks');
+              const poll = () => requestAnimationFrame(() => {
+                if (!ready()) { if (performance.now() - started < 60000) poll(); return; }
+                requestAnimationFrame(() => { window.__rebGraphPaint = performance.now() - started; });
+              });
+              poll();
+            }, {capture: true, once: true});
+            return true; })()
+          """)
+        try await ui.click("#source-graph")
+        try await ui.waitUntil("typeof window.__rebGraphPaint === 'number'", timeout: 60, "\(context): the graph did not draw")
+        let paint = try await ui.value("window.__rebGraphPaint") as? Double ?? -1
+        let stats = try await ui.value("document.querySelector('#source-graph-host .block-graph-stats').textContent") as? String ?? ""
+        let error = try await ui.value("document.querySelector('#source-graph-host .block-graph-state').dataset.kind") as? String ?? ""
+        XCTAssertNotEqual(error, "error", "\(context): the graph drew without an error")
+        if name == "exceptions" {
+          let key = try await ui.value("document.querySelector('#source-graph-host .block-graph-legend').textContent") as? String ?? ""
+          XCTAssertTrue(key.contains("exception") && key.contains("unresolved"), "\(context): the key names exception and unresolved edges: \(key)")
+        }
+        try await assertLayout(ui, "#screen-sources", context)
+        try await assertInert(ui, context)
+        try await ui.screenshot("block-graph-\(name)-\(size.name)")
+        var frames: [String: Any] = [:]
+        for view in ["open", "fit"] {
+          if view == "fit" {
+            _ = try await ui.value("document.querySelector('#source-graph-host .block-graph-canvas').dispatchEvent(new KeyboardEvent('keydown', {key: '0', bubbles: true, cancelable: true}))")
+            try await ui.settle()
+            // Fit leaves the overlays clear: under the overview cue and the
+            // minimap the graph's canvas holds only its background. The CSS
+            // pixel at each side is skipped, where a card that ends on the
+            // clear area's edge may antialias.
+            let covered = try await ui.json("""
+              (() => { const host = document.querySelector('#source-graph-host'), canvas = host.querySelector('.block-graph-canvas'), box = canvas.getBoundingClientRect();
+                const sx = canvas.width / box.width, sy = canvas.height / box.height, context = canvas.getContext('2d');
+                const drawn = selector => { const element = host.querySelector(selector); if (!element || element.hidden) return -1;
+                  const r = element.getBoundingClientRect(), x = Math.max(0, Math.ceil((r.left - box.left + 1) * sx)), y = Math.max(0, Math.ceil((r.top - box.top + 1) * sy));
+                  const w = Math.min(canvas.width, Math.floor((r.right - box.left - 1) * sx)) - x, h = Math.min(canvas.height, Math.floor((r.bottom - box.top - 1) * sy)) - y;
+                  if (w <= 0 || h <= 0) return -1;
+                  const data = context.getImageData(x, y, w, h).data; let other = 0;
+                  for (let i = 4; i < data.length; i += 4) if (data[i] !== data[0] || data[i + 1] !== data[1] || data[i + 2] !== data[2]) other += 1;
+                  return other; };
+                return {cue: drawn('.block-graph-lod'), minimap: drawn('.block-graph-minimap')}; })()
+              """)
+            XCTAssertLessThanOrEqual(covered["cue"] as? Int ?? 1, 0, "\(context): Fit draws nothing under the overview cue: \(covered)")
+            XCTAssertLessThanOrEqual(covered["minimap"] as? Int ?? 1, 0, "\(context): Fit draws nothing under the minimap: \(covered)")
+            try await assertLayout(ui, "#screen-sources", "\(context) fitted")
+            try await ui.screenshot("block-graph-\(name)-fit-\(size.name)")
+          }
+          // Shift+Arrow is dispatched once a frame, after this callback asks
+          // for the next one, so the graph draws each pan first in the next
+          // frame. It steps right, down, left and up in turn, so every frame
+          // draws a new view and none reaches the edge a pan stops at.
+          let result = try await ui.json("""
+            (async () => { const canvas = document.querySelector('#source-graph-host .block-graph-canvas');
+              const press = key => canvas.dispatchEvent(new KeyboardEvent('keydown', {key, shiftKey: true, bubbles: true, cancelable: true}));
+              const zoom = document.querySelector('#source-graph-host .block-graph-zoom').textContent, intervals = [], draws = [];
+              await new Promise(done => { let last = 0, count = 0;
+                const tick = now => { if (last) { intervals.push(now - last); draws.push(performance.now() - now); } last = now;
+                  if (count++ === 90) { done(); return; } press(['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'][count % 4]); requestAnimationFrame(tick); };
+                requestAnimationFrame(tick); });
+              const stats = list => { list.sort((a, b) => a - b); return {p50: Math.round(list[list.length >> 1]), p95: Math.round(list[Math.floor(list.length * 0.95)]), max: Math.round(list[list.length - 1])}; };
+              return {zoom, interval: stats(intervals), draw: stats(draws)}; })()
+            """)
+          frames[view] = result
+          medians.append(("\(context) \(view)", (result["interval"] as? [String: Any])?["p50"] as? Double ?? .infinity, result))
+        }
+        print("RENDERED_UI_GRAPH \(size.name) \(name) firstPaintMs=\(Int(paint)) stats=\(String(reflecting: stats)) frames=\(frames)")
+        // Fitted whole, Shift+Arrow far past the bottom right stops on the
+        // drawing: the canvas holds more than its background.
+        _ = try await ui.value("""
+          (() => { const canvas = document.querySelector('#source-graph-host .block-graph-canvas');
+            for (const key of ['ArrowRight', 'ArrowDown']) for (let i = 0; i < 400; i += 1) canvas.dispatchEvent(new KeyboardEvent('keydown', {key, shiftKey: true, bubbles: true, cancelable: true}));
+            return true; })()
+          """)
+        try await ui.settle()
+        let colors = try await ui.value("""
+          (() => { const canvas = document.querySelector('#source-graph-host .block-graph-canvas'), data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data, seen = new Set();
+            for (let i = 0; i < data.length && seen.size < 2; i += 4) seen.add((data[i] << 16) | (data[i + 1] << 8) | data[i + 2]);
+            return seen.size; })()
+          """) as? Int ?? 0
+        XCTAssertGreaterThan(colors, 1, "\(context): a pan far past the drawing left the canvas blank")
+        if name == "dispatch256" { try await assertEdgeKey(ui, context) }
+        try await ui.click("#source-graph")
+      }
+      let floor = medians.filter { $0.context.hasPrefix("\(size.name) exceptions ") }.map(\.median).max() ?? .infinity
+      let bound = max(50, 2 * floor)
+      print("RENDERED_UI_GRAPH_BOUND \(size.name) floorMs=\(floor) boundMs=\(bound)")
+      for entry in medians {
+        XCTAssertLessThanOrEqual(entry.median, bound, "\(entry.context): panning is not smooth against this machine's \(floor) ms floor: \(entry.result)")
+      }
+    }
+  }
+
+  // The footer's key names the edge kinds drawn, here the loop's table edges,
+  // beside the graph and linear divider. Where the footer is too narrow to
+  // show it inline, Space on Key opens it whole and Escape returns a visible
+  // focus ring to Key, clear of the divider. A short window opens the graph
+  // without Linear; it is shown for the check and hidden again, so the
+  // shapes after this one draw as before.
+  @MainActor
+  private func assertEdgeKey(_ ui: Harness, _ context: String) async throws {
+    let linearHidden = try await ui.value("document.querySelector('.sources-editor').hasAttribute('data-graph-linear-hidden')") as? Bool == true
+    if linearHidden { try await ui.click("#source-graph-host .block-graph-tool", containing: "Linear") }
+    try await ui.waitUntil("!document.querySelector('#pane-divider-source-graph').hidden", "\(context): the graph and linear split has no divider")
+    let kinds = try await ui.value("document.querySelector('#source-graph-host .block-graph-legend').textContent") as? String ?? ""
+    XCTAssertTrue(kinds.contains("table"), "\(context): the key names table edges: \(kinds)")
+    let key = "#source-graph-host .block-graph-key-toggle"
+    if try await ui.value("getComputedStyle(document.querySelector('\(key)')).display === 'none'") as? Bool == true {
+      try await assertFullyVisible(ui, "#source-graph-host .block-graph-legend", "\(context) inline edge key")
+    } else {
+      _ = try await ui.value("(document.querySelector('\(key)').focus(), 1)")
+      try await ui.key(49, " ")
+      try await ui.waitUntil("document.querySelector('\(key)').getAttribute('aria-expanded') === 'true'", "\(context): Space did not open the edge key")
+      try await assertFullyVisible(ui, "#source-graph-host .block-graph-foot[data-key-open] > .block-graph-legend", "\(context) edge key")
+      try await ui.screenshot("block-graph-edge-key-\(context.replacingOccurrences(of: " ", with: "-"))")
+      try await ui.key(53, "\u{1B}")
+      try await ui.waitUntil("document.querySelector('\(key)').getAttribute('aria-expanded') === 'false' && document.activeElement === document.querySelector('\(key)')",
+        "\(context): Escape did not close the edge key onto Key")
+      let keyFocus = try await ui.json("__rebUiProbe.focusState()")
+      XCTAssertEqual(keyFocus["focusVisible"] as? Bool, true, "\(context): Key shows keyboard focus: \(keyFocus)")
+      XCTAssertNotEqual(keyFocus["indicator"] as? String, "none", "\(context): Key draws a focus ring: \(keyFocus)")
+    }
+    try await assertGraphDividerClear(ui, "\(context) Key beside the divider")
+    if linearHidden { try await ui.click("#source-graph-host .block-graph-tool", containing: "Linear") }
   }
 
   // Run offline: the dialog names the local sandbox above every field, sends
@@ -3027,20 +3315,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("!document.querySelector('#pane-divider-source-graph').hidden", "\(size.name): the graph and linear split has no divider")
       try await assertGraphDividerClear(ui, "\(size.name) wasm identification divider")
       try await ui.screenshot("wasm-identification-divider-\(size.name)")
-      // Key sits in the footer beside the divider. Space opens the edge key
-      // and Escape returns a visible focus ring to Key, clear of the divider.
-      let key = "#source-graph-host .block-graph-key-toggle"
-      _ = try await ui.value("(document.querySelector('\(key)').focus(), 1)")
-      try await ui.key(49, " ")
-      try await ui.waitUntil("document.querySelector('\(key)').getAttribute('aria-expanded') === 'true'", "\(size.name): Space did not open the edge key")
-      try await assertFullyVisible(ui, "#source-graph-host .block-graph-foot[data-key-open] > .block-graph-legend", "\(size.name) edge key")
-      try await ui.key(53, "\u{1B}")
-      try await ui.waitUntil("document.querySelector('\(key)').getAttribute('aria-expanded') === 'false' && document.activeElement === document.querySelector('\(key)')",
-        "\(size.name): Escape did not close the edge key onto Key")
-      let keyFocus = try await ui.json("__rebUiProbe.focusState()")
-      XCTAssertEqual(keyFocus["focusVisible"] as? Bool, true, "\(size.name): Key shows keyboard focus: \(keyFocus)")
-      XCTAssertNotEqual(keyFocus["indicator"] as? String, "none", "\(size.name): Key draws a focus ring: \(keyFocus)")
-      try await assertGraphDividerClear(ui, "\(size.name) Key focused beside the divider")
+      // The key names the edge kinds a drawing has. This module's functions
+      // are single blocks, so with no edge drawn the footer offers no Key
+      // (test25b opens it on the interpreter loop's table edges).
+      let footer = try await ui.json("(() => { const host = document.querySelector('#source-graph-host'); return {key: host.querySelector('.block-graph-key-toggle').hidden, kinds: host.querySelectorAll('.block-graph-legend .block-graph-key').length}; })()")
+      XCTAssertEqual(footer["key"] as? Bool, true, "\(size.name): a drawing without edges offers no Key: \(footer)")
+      XCTAssertEqual(footer["kinds"] as? Int, 0, "\(size.name): a drawing without edges names no edge kind: \(footer)")
       // Drag the divider with the pointer to the graph's minimum, where the
       // Functions menu must still open whole, and then to the linear view's
       // minimum. Home on the divider restores the default split and forgets
@@ -4249,7 +4529,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
         try await openStartPanel(ui)
         try await ui.activate()
         let opened = try await ui.json(
-          "({mode: document.querySelector('#session-panel input[name=\"session-panel-mode\"]:checked')?.value, checkboxes: document.querySelectorAll('#session-panel input[type=checkbox]:not(#session-panel-media):not([id^=\"session-panel-option-\"])').length, keychain: /keychain/i.test(document.querySelector('#session-panel').innerText)})")
+          "({mode: document.querySelector('#session-panel input[name=\"session-panel-mode\"]:checked')?.value, checkboxes: document.querySelectorAll('#session-panel input[type=checkbox]:not([id^=\"session-panel-option-\"])').length, keychain: /keychain/i.test(document.querySelector('#session-panel').innerText)})")
         XCTAssertEqual(opened["mode"] as? String, plan.from, "\(name): the panel opens with this run's last mode: \(opened)")
         XCTAssertEqual(opened["checkboxes"] as? Int, 0, "\(name): the panel has no Keychain checkbox: \(opened)")
         XCTAssertEqual(opened["keychain"] as? Bool, false, "\(name): the panel says nothing about the Keychain: \(opened)")
@@ -4276,11 +4556,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
           if stops.last?.hasPrefix("session-panel-mode-") == true { break }
         }
         print("RENDERED_UI_START_PANEL_FOCUS \(name) \(stops)")
-        // Content's limits sit between the mode and the session options;
-        // Metadata has none. Advanced options stays collapsed.
-        let limits = ["session-panel-media", "session-panel-response-budget", "session-panel-request-budget"]
+        // Content keeps every body whole, so neither mode has a field between
+        // the mode and the session options. Advanced options stays collapsed.
         let options = ["session-panel-advanced", "session-panel-option-fresh-profile"]
-        XCTAssertEqual(stops, ["session-panel-offline"] + options + (plan.from == "content" ? limits : []) + ["session-panel-mode-\(plan.from)"],
+        XCTAssertEqual(stops, ["session-panel-offline"] + options + ["session-panel-mode-\(plan.from)"],
           "\(name): the panel's controls in reverse order")
         try await ui.screenshot("start-panel-focus-\(name)")
         // Arrow keys choose within the mode group.
@@ -4288,7 +4567,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
         let moved = try await ui.json(
           "({focus: document.activeElement?.id, text: document.querySelector('#session-panel').innerText})")
         XCTAssertEqual(moved["focus"] as? String, "session-panel-mode-\(plan.to)", "\(name): the arrow moved the choice: \(moved)")
-        for _ in 0..<(plan.to == "content" ? 7 : 4) { try await ui.tab() }
+        for _ in 0..<4 { try await ui.tab() }
         let start = try await focus()
         XCTAssertEqual(start["id"] as? String, "session-panel-start", "\(name): Tab returns to Start Session: \(start)")
         try await ui.screenshot("start-panel-chosen-\(name)")
@@ -4332,28 +4611,24 @@ final class OriginTraceRenderedUITests: XCTestCase {
     try await returnToHarness(ui, harnessURL)
   }
 
-  // The start panel's Content limits (#428, #436): only for Content, with the
-  // launcher's bounds and defaults. An out-of-bounds value is named at its
-  // field and starts nothing; native refuses one the page did not check; a
-  // raised budget and media capture reach the start, whose failure (the named
-  // Brave does not exist) names them, and they hold for the run. Keyboard
-  // entry, focus rings, both window sizes and both themes. Traffic then names
-  // each used budget, its size, what it kept and the control in its footer,
-  // and the Payload and Response tabs name the control for the next session.
+  // A Content session keeps every body whole: the start panel offers the mode
+  // and the session options but no size or media choice, says the free-disk
+  // reserve is the only bound, and native refuses the removed budget and media
+  // keys. Both window sizes and both
+  // themes. Traffic then names bodies the disk reserve refused and an older
+  // browser's budget refusals in its footer, and the General, Payload and
+  // Response tabs say why, naming no control to raise.
   @MainActor
-  func test36StartPanelContentLimits() async throws {
+  func test36StartPanelContentWithoutLimits() async throws {
     let ui = try await prepare(windowSizes[0])
     let harnessURL = try XCTUnwrap(ui.webView.url)
     let expected = try Expectations.load()
     try await clearSavedSites(ui)
-    let focus = { try await ui.json("__rebUiProbe.focusState()") }
-    let fields = """
-      ({request: document.querySelector('#session-panel-request-budget')?.value ?? null,
-        response: document.querySelector('#session-panel-response-budget')?.value ?? null,
-        media: document.querySelector('#session-panel-media')?.checked ?? null,
-        state: document.querySelector('#session-panel')?.dataset.state,
-        error: document.querySelector('#session-panel-request-budget-error')?.textContent ?? null,
-        invalid: document.querySelector('#session-panel-request-budget')?.getAttribute('aria-invalid') ?? null})
+    let diskNote = "Content stays on this Mac with the session and has no size limit. Capture keeps 4 GiB of disk free by default "
+      + "and names each body it could not store."
+    let panelState = """
+      ({state: document.querySelector('#session-panel')?.dataset.state,
+        inputs: [...document.querySelectorAll('#session-panel input:not([id^="session-panel-option-"])')].map(input => input.type)})
       """
     // Both themes, set the way the theme toggle sets it.
     let theme = { (light: Bool) in
@@ -4365,8 +4640,6 @@ final class OriginTraceRenderedUITests: XCTestCase {
           else document.documentElement.dataset.theme = window.__rebDarkTheme; delete window.__rebDarkTheme; return true; })()
         """)
     }
-    // Replaces the focused field's text, as a triple click would.
-    let selectAll = { _ = try await ui.value("(document.activeElement.select(), true)") }
     do {
       for (index, size) in windowSizes.enumerated() {
         let name = size.name
@@ -4376,122 +4649,61 @@ final class OriginTraceRenderedUITests: XCTestCase {
         if try await ui.value("document.querySelector('#session-panel-mode-content').checked") as? Bool != true {
           try await ui.click("#session-panel .session-panel-mode[data-mode='content']")
         }
-        // Normal opens with the defaults; narrow with what normal started, held for the run.
-        let opened = try await ui.json(fields)
-        XCTAssertEqual(opened["request"] as? String, index == 0 ? "256" : "1024", "\(name): request content budget: \(opened)")
-        XCTAssertEqual(opened["response"] as? String, "512", "\(name): response body budget: \(opened)")
-        XCTAssertEqual(opened["media"] as? Bool, index == 1, "\(name): media and fonts: \(opened)")
+        let opened = try await ui.json(panelState)
+        XCTAssertEqual(opened["inputs"] as? [String], ["radio", "radio"], "\(name): besides the session options, the capture mode is the only choice: \(opened)")
         let text = try await panelText(ui)
-        for phrase in ["Content limits", "Request content budget", "Response body budget", "Capture media and fonts",
-                       "1 to 4,096 MiB; default 256 MiB.", "1 to 16,384 MiB; default 512 MiB.",
-                       "They count against the response body budget.", "Both budgets stay on this Mac with the session"] {
-          XCTAssertTrue(text.contains(phrase), "\(name): the limits say \(phrase): \(text)")
+        XCTAssertTrue(text.contains(diskNote), "\(name): Content names the disk reserve: \(text)")
+        XCTAssertTrue(text.contains("every response body whole with media and fonts"), "\(name): \(text)")
+        for removed in ["budget", "Budget", "Capture media and fonts", "Content limits", "16 MiB"] {
+          XCTAssertFalse(text.contains(removed), "\(name): the panel no longer says \(removed): \(text)")
         }
         XCTAssertNil(text.range(of: "keychain", options: .caseInsensitive), "\(name): no Keychain choice: \(text)")
-        try await assertStartPanelFits(ui, "\(name) start panel limits")
-        _ = try await ui.reveal("#session-panel .session-panel-limits", block: "start")
-        try await assertLayout(ui, "#session-panel", "\(name) start panel limits revealed")
-        try await ui.screenshot("start-panel-limits-\(name)")
+        try await assertStartPanelFits(ui, "\(name) start panel content")
+        try await ui.screenshot("start-panel-content-\(name)")
         try await theme(true)
-        try await assertLayout(ui, "#session-panel", "\(name) start panel limits light")
-        try await ui.screenshot("start-panel-limits-light-\(name)")
+        try await assertLayout(ui, "#session-panel", "\(name) start panel content light")
+        try await ui.screenshot("start-panel-content-light-\(name)")
         try await theme(false)
-
-        // Keyboard: each limit is a stop with a visible ring.
-        _ = try await ui.value("(document.querySelector('#session-panel-start').focus(), true)")
-        for expectedStop in ["session-panel-offline", "session-panel-advanced", "session-panel-option-fresh-profile",
-                             "session-panel-media", "session-panel-response-budget", "session-panel-request-budget"] {
-          try await ui.tab(shift: true)
-          let stop = try await focus()
-          XCTAssertEqual(stop["id"] as? String, expectedStop, "\(name): \(stop)")
-          XCTAssertEqual(stop["focusVisible"] as? Bool, true, "\(name): \(stop)")
-          XCTAssertEqual(stop["inViewport"] as? Bool, true, "\(name): \(stop)")
-          let ring = try await ui.value("""
-            (() => { const shown = getComputedStyle(document.activeElement);
-              return shown.outlineStyle !== 'none' && parseFloat(shown.outlineWidth) > 0; })()
-            """) as? Bool
-          XCTAssertEqual(ring, true, "\(name): a focus ring shows around \(expectedStop)")
-        }
-        try await ui.screenshot("start-panel-limit-focus-\(name)")
-
-        // Out of bounds, typed and sent with Return: named at the field, nothing starts.
-        try await selectAll()
-        try await ui.type("5000")
-        try await ui.key(36, "\r")
-        try await ui.waitUntil("document.querySelector('#session-panel-request-budget-error') !== null", "\(name): the refusal was not named")
-        try await Task.sleep(nanoseconds: 1_000_000_000)
-        let refused = try await ui.json(fields)
-        XCTAssertEqual(refused["state"] as? String, "choose", "\(name): an out-of-bounds budget starts nothing: \(refused)")
-        XCTAssertEqual(refused["error"] as? String, "Request content budget must be a whole number from 1 to 4096 MiB.", "\(name): \(refused)")
-        XCTAssertEqual(refused["invalid"] as? String, "true", "\(name): \(refused)")
-        let refusedFocus = try await focus()
-        XCTAssertEqual(refusedFocus["id"] as? String, "session-panel-request-budget", "\(name): focus stays on the field: \(refusedFocus)")
-        try await assertLayout(ui, "#session-panel", "\(name) refused budget")
-        try await ui.screenshot("start-panel-limit-refused-\(name)")
-        // Native checks what the page sends, as the agent path checks its options.
-        // Each start names every session option, as the page's does, so the
-        // limits are what native refuses.
+        // Native takes the session options and the mode alone; the removed keys
+        // are refused as any other key. Each start names every session option,
+        // as the page's does, so the removed keys are what native refuses.
         let native = try await ui.json("""
           (async () => { const post = message => webkit.messageHandlers.rebSession.postMessage(message);
             const panel = await post({op: 'state'});
             const options = Object.fromEntries(Object.entries(panel.options).map(([key, option]) => [key, option.value]));
             const ask = body => post({op: 'start', options, ...body}).then(() => 'accepted', error => error.message);
-            return {over: await ask({mode: 'content', request_content_budget_mib: 5000, response_body_budget_mib: 512, response_media: false}),
-              fraction: await ask({mode: 'content', request_content_budget_mib: 256, response_body_budget_mib: 12.5, response_media: false}),
-              metadata: await ask({mode: 'metadata', response_media: true}),
-              missing: await ask({mode: 'content'})}; })()
+            return {request: await ask({mode: 'content', request_content_budget_mib: 256}),
+              response: await ask({mode: 'content', response_body_budget_mib: 512}),
+              media: await ask({mode: 'metadata', response_media: true}),
+              missing: await ask({})}; })()
           """)
-        XCTAssertEqual(native["over"] as? String, "Request content budget must be a whole number from 1 to 4096 MiB.", "\(name): \(native)")
-        XCTAssertEqual(native["fraction"] as? String, "Response body budget must be a whole number from 1 to 16384 MiB.", "\(name): \(native)")
-        XCTAssertEqual(native["metadata"] as? String, "Budgets and media capture apply only to a Content session.", "\(name): \(native)")
-        XCTAssertEqual(native["missing"] as? String,
-          "A Content session needs a request content budget, a response body budget and the media choice.", "\(name): \(native)")
+        for key in ["request", "response", "media"] {
+          XCTAssertEqual(native[key] as? String, "The start panel offers only the capture mode.", "\(name): \(key): \(native)")
+        }
+        XCTAssertEqual(native["missing"] as? String, "Choose Content or Metadata only.", "\(name): \(native)")
         try await Task.sleep(nanoseconds: 500_000_000)
-        let stillOpen = try await ui.json(fields)
+        let stillOpen = try await ui.json(panelState)
         XCTAssertEqual(stillOpen["state"] as? String, "choose", "\(name): a refused start launches nothing: \(stillOpen)")
 
         if index == 0 {
-          // A raised budget and media capture, from the keyboard.
-          _ = try await ui.value("(document.querySelector('#session-panel-request-budget').focus(), true)")
-          try await selectAll()
-          try await ui.type("1024")
-          let fixed = try await ui.json(fields)
-          XCTAssertNil(fixed["error"] as? String, "\(name): a fixed value clears its error: \(fixed)")
-          try await ui.tab()
-          try await ui.tab()
-          try await ui.key(49, " ")
-          let raised = try await ui.json(fields)
-          XCTAssertEqual(raised["media"] as? Bool, true, "\(name): Space checks media and fonts: \(raised)")
-          // Fresh profile, Advanced options and Continue Offline come before Start.
-          for _ in 0..<4 { try await ui.tab() }
-          let start = try await focus()
-          XCTAssertEqual(start["id"] as? String, "session-panel-start", "\(name): \(start)")
-          try await ui.key(36, "\r")
+          try await ui.click("#session-panel-start")
           try await ui.waitUntil("document.querySelector('#session-panel')?.dataset.state === 'failed'", "\(name): Start did not report its failure")
           let failure = try await panelText(ui)
-          XCTAssertTrue(failure.contains("Retry starts a new session with the same capture mode: Content (default). "
-            + "Same limits: request content budget 1,024 MiB, response body budget 512 MiB, media and fonts kept."),
-            "\(name): native started with the limits chosen in the panel: \(failure)")
-          try await assertStartPanelFits(ui, "\(name) start failure with limits")
-          try await ui.screenshot("start-panel-limits-failure-\(name)")
+          XCTAssertTrue(failure.contains("Retry starts a new session with the same capture mode: Content (default)."), "\(name): \(failure)")
+          XCTAssertNil(failure.range(of: "limit|budget", options: [.regularExpression, .caseInsensitive]), "\(name): \(failure)")
+          try await assertStartPanelFits(ui, "\(name) content start failure")
+          try await ui.screenshot("start-panel-content-failure-\(name)")
         } else {
-          // Metadata keeps no content: no limits shown, none named by its start.
-          _ = try await ui.value("(document.querySelector('#session-panel-request-budget').focus(), true)")
-          try await selectAll()
-          try await ui.type("1024")
+          // Metadata keeps no content, so it names no reserve.
           try await ui.click("#session-panel .session-panel-mode[data-mode='metadata']")
-          let metadata = try await ui.json(fields)
-          XCTAssertNil(metadata["request"] as? String, "\(name): Metadata shows no request content budget: \(metadata)")
-          XCTAssertNil(metadata["media"] as? Bool, "\(name): Metadata shows no media choice: \(metadata)")
           let metadataText = try await panelText(ui)
-          XCTAssertFalse(metadataText.contains("Content limits"), "\(name): \(metadataText)")
+          XCTAssertFalse(metadataText.contains(diskNote), "\(name): \(metadataText)")
           try await assertStartPanelFits(ui, "\(name) metadata start panel")
-          try await ui.screenshot("start-panel-limits-metadata-\(name)")
+          try await ui.screenshot("start-panel-metadata-\(name)")
           try await ui.click("#session-panel-start")
           try await ui.waitUntil("document.querySelector('#session-panel')?.dataset.state === 'failed'", "\(name): Start did not report its failure")
           let failure = try await panelText(ui)
           XCTAssertTrue(failure.contains("the same capture mode: Metadata only."), "\(name): \(failure)")
-          XCTAssertFalse(failure.contains("Same limits"), "\(name): a Metadata start names no limits: \(failure)")
         }
         try await ui.click("#session-panel-offline")
         try await ui.waitUntil("document.querySelector('#session-panel').hidden", "\(name): Continue Offline did not close the panel")
@@ -4502,111 +4714,112 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
     try await returnToHarness(ui, harnessURL)
 
-    // Traffic: the fixture's budget row, a POST whose target, body and
-    // response met their budgets. This backend is not live, so the session
-    // context names no size, and neither does anything drawn; the counts are
-    // the summary's (two request records, one response), not the loaded rows'.
+    // Traffic: the fixture's disk reserve row, a POST whose body and response
+    // the receiver refused, and its older budget row, a POST whose target,
+    // body and response an older browser's budgets refused. The counts are the
+    // summary's (two disk reserve records, three budget records), not the
+    // loaded rows'.
+    let footerText = "Disk reserve reached: 2 bodies not stored, to keep the free-disk reserve. Free disk space to keep later bodies · "
+      + "Older content budget: 3 bodies or URLs not kept by the browser that recorded this session. Current capture keeps every body whole."
+    let olderBudget = "the request content budget was used, a limit of the browser that recorded this session. Current capture keeps every body and target whole"
+    let diskRefusal = "storing it would have left less free disk than the artifact receiver's reserve. Free disk space to keep later bodies."
     for size in windowSizes {
       let traffic = try await prepare(size)
       try await show(traffic, "traffic")
-      let line = "document.querySelector('#request-budget-text')"
-      try await traffic.waitUntil("!document.querySelector('#request-budget').hidden && \(line).textContent.includes(' kept:')",
-        "\(size.name): the footer did not name the used budgets")
-      let unsized = try await traffic.value("\(line).textContent") as? String ?? ""
-      // The bytes kept depend on the fixture's other artifacts, in KiB below 0.1 MiB.
-      let kept = #"(?:\d+ KiB|\d+\.\d MiB)"#
-      let pattern = #"^Request content budget used, "# + kept + #" kept: 2 request bodies or URLs not kept · "#
-        + #"Response body budget used, "# + kept + #" kept: 1 response body not kept · Raise them in New Live Session… for the next session\.$"#
-      XCTAssertNotNil(unsized.range(of: pattern, options: .regularExpression), "\(size.name): footer: \(unsized)")
-      let context = try await traffic.json("({read: state.sessionContentLimitsRead, limits: state.sessionContentLimits})")
-      XCTAssertEqual(context["read"] as? String, "answered", "\(size.name): the session context was read: \(context)")
-      XCTAssertTrue(context["limits"] is NSNull, "\(size.name): a backend that is not live names no limits: \(context)")
-      // A live session's context names the sizes, and everything drawn follows it.
-      _ = try await traffic.value("""
-        (() => { window.__rebContextFetch ??= window.fetch;
-          window.fetch = (input, init) => String(input).startsWith('/api/session/context')
-            ? Promise.resolve(new Response(JSON.stringify({capture_options: {content_limits: {version: 1, request_content_budget_mib: 64,
-                response_body_budget_mib: 128, response_media: false}}}), {status: 200, headers: {'Content-Type': 'application/json'}}))
-            : window.__rebContextFetch(input, init);
-          state.sessionContentLimitsRead = null; refreshSessionContentLimits(); return true; })()
-        """)
-      try await traffic.waitUntil("\(line).textContent.startsWith('Request content budget (64 MiB) used')", "\(size.name): the footer did not take the context's sizes")
-      let sized = try await traffic.value("\(line).textContent") as? String ?? ""
-      XCTAssertTrue(sized.contains(" · Response body budget (128 MiB) used, "), "\(size.name): footer: \(sized)")
-      try await assertLayout(traffic, "#screen-traffic .request-window", "\(size.name) budget footer")
-      try await assertFullyVisible(traffic, "#request-budget-text", "\(size.name) budget footer")
-      try await traffic.screenshot("traffic-budget-footer-\(size.name)")
-      try await traffic.click("#screen-traffic .request-row", containing: expected.budgetHost)
+      let line = "document.querySelector('#request-not-kept-text')"
+      try await traffic.waitUntil("!document.querySelector('#request-not-kept').hidden && \(line).textContent.includes('Older content budget')",
+        "\(size.name): the footer did not name the bodies not kept")
+      let footer = try await traffic.value("\(line).textContent") as? String ?? ""
+      XCTAssertEqual(footer, footerText, "\(size.name): footer")
+      try await assertLayout(traffic, "#screen-traffic .request-window", "\(size.name) not-kept footer")
+      try await assertFullyVisible(traffic, "#request-not-kept-text", "\(size.name) not-kept footer")
+      try await traffic.screenshot("traffic-not-kept-footer-\(size.name)")
+      // The disk reserve row: Payload and Response say the reserve refused them.
+      try await traffic.click("#screen-traffic .request-row", containing: expected.diskReserveHost)
       try await traffic.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "\(size.name): request detail did not open")
-      // General: the Request URL row says why the rest of the target is missing.
+      try await traffic.click("#inspector-tab-payload")
+      try await traffic.waitUntil("(document.querySelector('#payload-inspector')?.innerText ?? '').includes('Not captured')", "\(size.name): Payload did not say why")
+      let reservedPayload = try await traffic.value("document.querySelector('#payload-inspector').innerText") as? String ?? ""
+      XCTAssertTrue(reservedPayload.contains("Not captured: \(diskRefusal)"), "\(size.name): Payload: \(reservedPayload)")
+      try await assertLayout(traffic, "#screen-traffic .detail-pane", "\(size.name) disk reserve payload")
+      try await traffic.screenshot("traffic-disk-reserve-payload-\(size.name)")
+      try await traffic.click("#inspector-tab-response")
+      try await traffic.waitUntil("(document.querySelector('#response-inspector')?.innerText ?? '').includes('Not retained')", "\(size.name): Response did not say why")
+      let reservedResponse = try await traffic.value("document.querySelector('#response-inspector').innerText") as? String ?? ""
+      XCTAssertTrue(reservedResponse.contains("Not retained: \(diskRefusal)"), "\(size.name): Response: \(reservedResponse)")
+      try await assertLayout(traffic, "#screen-traffic .detail-pane", "\(size.name) disk reserve response")
+      try await traffic.screenshot("traffic-disk-reserve-response-\(size.name)")
+      // The older budget row: each tab names the recording browser's limit.
+      try await traffic.click("#screen-traffic .request-row", containing: expected.budgetHost)
       try await traffic.click("#inspector-tab-general")
       try await traffic.waitUntil("(document.querySelector('#exchange-inspector')?.innerText ?? '').includes('the full target was not retained')",
         "\(size.name): the Request URL row did not say why")
       let general = try await traffic.value("document.querySelector('#exchange-inspector').innerText") as? String ?? ""
-      XCTAssertTrue(general.contains("the full target was not retained: this session had used its 64 MiB request content budget. "
-        + "Raise Request content budget in New Live Session… for the next session)"), "\(size.name): Request URL: \(general)")
+      XCTAssertTrue(general.contains("the full target was not retained: \(olderBudget))"), "\(size.name): Request URL: \(general)")
       try await traffic.click("#inspector-tab-payload")
       try await traffic.waitUntil("(document.querySelector('#payload-inspector')?.innerText ?? '').includes('Not captured')", "\(size.name): Payload did not say why")
       let payload = try await traffic.value("document.querySelector('#payload-inspector').innerText") as? String ?? ""
-      XCTAssertTrue(payload.contains("Not captured: this session had used its 64 MiB request content budget. Raise Request content budget in New Live Session… for the next session."),
-        "\(size.name): Payload: \(payload)")
+      XCTAssertTrue(payload.contains("Not captured: \(olderBudget)."), "\(size.name): Payload: \(payload)")
       XCTAssertFalse(payload.contains("recorded only in content capture sessions"), "\(size.name): a content session's row: \(payload)")
-      try await assertLayout(traffic, "#screen-traffic .detail-pane", "\(size.name) budget payload")
-      try await traffic.screenshot("traffic-budget-payload-\(size.name)")
+      try await assertLayout(traffic, "#screen-traffic .detail-pane", "\(size.name) older budget payload")
+      try await traffic.screenshot("traffic-older-budget-payload-\(size.name)")
       try await traffic.click("#inspector-tab-response")
       try await traffic.waitUntil("(document.querySelector('#response-inspector')?.innerText ?? '').includes('Not retained')", "\(size.name): Response did not say why")
       let response = try await traffic.value("document.querySelector('#response-inspector').innerText") as? String ?? ""
-      XCTAssertTrue(response.contains("Not retained: this session had used its response body budget. Raise Response body budget in New Live Session… for the next session."),
-        "\(size.name): Response: \(response)")
-      XCTAssertFalse((general + payload + response + sized).contains("REB_"), "\(size.name): no environment variable is the remedy")
-      try await assertInert(traffic, "\(size.name) budget row")
-      try await assertLayout(traffic, "#screen-traffic .detail-pane", "\(size.name) budget response")
-      try await traffic.screenshot("traffic-budget-used-\(size.name)")
+      XCTAssertTrue(response.contains("Not retained: it arrived after the response body budget was used, a limit of the browser that recorded this session. "
+        + "Current capture keeps every body whole."), "\(size.name): Response: \(response)")
+      let drawn = general + payload + response + reservedPayload + reservedResponse + footer
+      for removed in ["REB_", "Raise", "New Live Session"] {
+        XCTAssertFalse(drawn.contains(removed), "\(size.name): no control to raise is the remedy: \(removed)")
+      }
+      try await assertInert(traffic, "\(size.name) older budget row")
+      try await assertLayout(traffic, "#screen-traffic .detail-pane", "\(size.name) older budget response")
+      try await traffic.screenshot("traffic-older-budget-response-\(size.name)")
       if size.name == "normal" {
         // Side by side, the whole line stays beside the open request.
-        try await assertFullyVisible(traffic, "#request-budget-text", "\(size.name) budget footer with a request open")
+        try await assertFullyVisible(traffic, "#request-not-kept-text", "\(size.name) not-kept footer with a request open")
       } else {
         // The short stacked inspector: a one-line button that cannot clip, and
         // the whole sentence from the keyboard.
         let stacked = try await traffic.json("""
-          ({toggle: getComputedStyle(document.querySelector('#request-budget-toggle')).display, text: getComputedStyle(\(line)).display,
-            label: document.querySelector('#request-budget-toggle').textContent, expanded: document.querySelector('#request-budget-toggle').getAttribute('aria-expanded')})
+          ({toggle: getComputedStyle(document.querySelector('#request-not-kept-toggle')).display, text: getComputedStyle(\(line)).display,
+            label: document.querySelector('#request-not-kept-toggle').textContent, expanded: document.querySelector('#request-not-kept-toggle').getAttribute('aria-expanded')})
           """)
-        XCTAssertNotEqual(stacked["toggle"] as? String, "none", "\(size.name): the budget button shows: \(stacked)")
+        XCTAssertNotEqual(stacked["toggle"] as? String, "none", "\(size.name): the not-kept button shows: \(stacked)")
         XCTAssertEqual(stacked["text"] as? String, "none", "\(size.name): the sentence waits behind the button: \(stacked)")
-        XCTAssertEqual(stacked["label"] as? String, "Budgets used", "\(size.name): \(stacked)")
+        XCTAssertEqual(stacked["label"] as? String, "Bodies not kept", "\(size.name): \(stacked)")
         XCTAssertEqual(stacked["expanded"] as? String, "false", "\(size.name): \(stacked)")
-        try await assertFullyVisible(traffic, "#request-budget-toggle", "\(size.name) budget button")
-        try await assertLayout(traffic, "#screen-traffic .request-window", "\(size.name) budget button")
-        _ = try await traffic.value("(document.querySelector('#request-budget-toggle').focus(), true)")
+        try await assertFullyVisible(traffic, "#request-not-kept-toggle", "\(size.name) not-kept button")
+        try await assertLayout(traffic, "#screen-traffic .request-window", "\(size.name) not-kept button")
+        _ = try await traffic.value("(document.querySelector('#request-not-kept-toggle').focus(), true)")
         try await traffic.key(36, "\r")
-        try await traffic.waitUntil("document.querySelector('#request-budget-toggle').getAttribute('aria-expanded') === 'true'",
+        try await traffic.waitUntil("document.querySelector('#request-not-kept-toggle').getAttribute('aria-expanded') === 'true'",
           "\(size.name): Return did not open the sentence")
         let opened = try await traffic.json("({display: getComputedStyle(\(line)).display, focus: document.activeElement?.id})")
         XCTAssertNotEqual(opened["display"] as? String, "none", "\(size.name): \(opened)")
-        XCTAssertEqual(opened["focus"] as? String, "request-budget-toggle", "\(size.name): \(opened)")
-        try await assertFullyVisible(traffic, "#request-budget-text", "\(size.name) budget sentence")
-        try await traffic.screenshot("traffic-budget-sentence-\(size.name)")
+        XCTAssertEqual(opened["focus"] as? String, "request-not-kept-toggle", "\(size.name): \(opened)")
+        try await assertFullyVisible(traffic, "#request-not-kept-text", "\(size.name) not-kept sentence")
+        try await traffic.screenshot("traffic-not-kept-sentence-\(size.name)")
         try await traffic.key(53, "\u{1B}")
-        try await traffic.waitUntil("document.querySelector('#request-budget-toggle').getAttribute('aria-expanded') === 'false'",
+        try await traffic.waitUntil("document.querySelector('#request-not-kept-toggle').getAttribute('aria-expanded') === 'false'",
           "\(size.name): Escape did not close the sentence")
         let closed = try await traffic.value("document.activeElement?.id") as? String
-        XCTAssertEqual(closed, "request-budget-toggle", "\(size.name): Escape keeps focus on the button")
-        let expanded = "document.querySelector('#request-budget-toggle').getAttribute('aria-expanded')"
+        XCTAssertEqual(closed, "request-not-kept-toggle", "\(size.name): Escape keeps focus on the button")
+        let expanded = "document.querySelector('#request-not-kept-toggle').getAttribute('aria-expanded')"
         // Space opens it too; focus leaving the notice closes it.
         try await traffic.key(49, " ")
         try await traffic.waitUntil("\(expanded) === 'true'", "\(size.name): Space did not open the sentence")
-        try await assertFullyVisible(traffic, "#request-budget-text", "\(size.name) budget sentence after Space")
+        try await assertFullyVisible(traffic, "#request-not-kept-text", "\(size.name) not-kept sentence after Space")
         try await traffic.tab()
         try await traffic.waitUntil("\(expanded) === 'false'", "\(size.name): focus leaving did not close the sentence")
         // A press anywhere else closes it.
-        _ = try await traffic.value("(document.querySelector('#request-budget-toggle').focus(), true)")
+        _ = try await traffic.value("(document.querySelector('#request-not-kept-toggle').focus(), true)")
         try await traffic.key(36, "\r")
         try await traffic.waitUntil("\(expanded) === 'true'", "\(size.name): Return did not open the sentence again")
         try await traffic.click("#request-window-status")
         try await traffic.waitUntil("\(expanded) === 'false'", "\(size.name): a press elsewhere did not close the sentence")
         // Closing the request closes it, and a request opened again starts closed.
-        _ = try await traffic.value("(document.querySelector('#request-budget-toggle').focus(), true)")
+        _ = try await traffic.value("(document.querySelector('#request-not-kept-toggle').focus(), true)")
         try await traffic.key(36, "\r")
         try await traffic.waitUntil("\(expanded) === 'true'", "\(size.name): Return did not open the sentence a third time")
         try await traffic.click("#request-detail-close")
@@ -4617,34 +4830,34 @@ final class OriginTraceRenderedUITests: XCTestCase {
         XCTAssertEqual(reopened["expanded"] as? String, "false", "\(size.name): the sentence does not reappear unasked: \(reopened)")
         XCTAssertEqual(reopened["text"] as? String, "none", "\(size.name): \(reopened)")
         // Beside the footer's header gaps item: its breakdown opens in the
-        // footer and the budget sentence above it, never over each other, and
-        // each Escape closes only its own.
+        // footer and the not-kept sentence above it, never over each other,
+        // and each Escape closes only its own.
         let gapsOpen = "document.querySelector('#request-header-gaps').getAttribute('aria-expanded')"
         try await traffic.waitUntil("!document.querySelector('#request-header-gaps').hidden", "\(size.name): the header gaps item did not show")
-        try await assertFullyVisible(traffic, "#request-header-gaps", "\(size.name) header gaps beside the budget button")
+        try await assertFullyVisible(traffic, "#request-header-gaps", "\(size.name) header gaps beside the not-kept button")
         try await traffic.click("#request-header-gaps")
         try await traffic.waitUntil("\(gapsOpen) === 'true'", "\(size.name): the header gaps breakdown did not open")
-        _ = try await traffic.value("(document.querySelector('#request-budget-toggle').focus(), true)")
+        _ = try await traffic.value("(document.querySelector('#request-not-kept-toggle').focus(), true)")
         try await traffic.key(36, "\r")
         try await traffic.waitUntil("\(expanded) === 'true'", "\(size.name): the sentence did not open beside the breakdown")
         let both = try await traffic.json("""
-          (() => { const a = document.querySelector('#request-budget-text').getBoundingClientRect(),
+          (() => { const a = document.querySelector('#request-not-kept-text').getBoundingClientRect(),
             b = document.querySelector('#request-header-gaps-detail').getBoundingClientRect();
             return {overlap: a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom, gaps: \(gapsOpen)}; })()
           """)
         XCTAssertEqual(both["overlap"] as? Bool, false, "\(size.name): the sentence and the breakdown overlap: \(both)")
         XCTAssertEqual(both["gaps"] as? String, "true", "\(size.name): \(both)")
-        try await assertFullyVisible(traffic, "#request-budget-text", "\(size.name) budget sentence beside the breakdown")
-        try await traffic.screenshot("traffic-budget-sentence-gaps-\(size.name)")
+        try await assertFullyVisible(traffic, "#request-not-kept-text", "\(size.name) not-kept sentence beside the breakdown")
+        try await traffic.screenshot("traffic-not-kept-sentence-gaps-\(size.name)")
         try await traffic.key(53, "\u{1B}")
         try await traffic.waitUntil("\(expanded) === 'false'", "\(size.name): Escape did not close the sentence beside the breakdown")
-        let gapsAfterBudgetEscape = try await traffic.value(gapsOpen) as? String
-        XCTAssertEqual(gapsAfterBudgetEscape, "true", "\(size.name): the budget's Escape leaves the breakdown open")
+        let gapsAfterNoticeEscape = try await traffic.value(gapsOpen) as? String
+        XCTAssertEqual(gapsAfterNoticeEscape, "true", "\(size.name): the notice's Escape leaves the breakdown open")
         _ = try await traffic.value("(document.querySelector('#request-header-gaps').focus(), true)")
         try await traffic.key(53, "\u{1B}")
         try await traffic.waitUntil("\(gapsOpen) === 'false'", "\(size.name): Escape did not close the breakdown")
-        let budgetAfterGapsEscape = try await traffic.value(expanded) as? String
-        XCTAssertEqual(budgetAfterGapsEscape, "false", "\(size.name): \(budgetAfterGapsEscape ?? "")")
+        let noticeAfterGapsEscape = try await traffic.value(expanded) as? String
+        XCTAssertEqual(noticeAfterGapsEscape, "false", "\(size.name): \(noticeAfterGapsEscape ?? "")")
         let request = try await traffic.value("!document.querySelector('#screen-traffic .detail-pane').hidden") as? Bool
         XCTAssertEqual(request, true, "\(size.name): neither Escape closed the request")
       }
@@ -4652,12 +4865,11 @@ final class OriginTraceRenderedUITests: XCTestCase {
         (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null; document.documentElement.dataset.theme = 'light';
           await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
         """)
-      try await assertLayout(traffic, "#screen-traffic .request-window", "\(size.name) budget footer light")
-      try await traffic.screenshot("traffic-budget-used-light-\(size.name)")
+      try await assertLayout(traffic, "#screen-traffic .request-window", "\(size.name) not-kept footer light")
+      try await traffic.screenshot("traffic-not-kept-light-\(size.name)")
       _ = try await traffic.value("""
         (() => { if (window.__rebDarkTheme === null) delete document.documentElement.dataset.theme;
-          else document.documentElement.dataset.theme = window.__rebDarkTheme; delete window.__rebDarkTheme;
-          window.fetch = window.__rebContextFetch; delete window.__rebContextFetch; return true; })()
+          else document.documentElement.dataset.theme = window.__rebDarkTheme; delete window.__rebDarkTheme; return true; })()
         """)
     }
   }
@@ -4906,7 +5118,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // "Missing final blocks" in protocol/native-network-v3.md: a content-session
   // request the HTTP cache answered has only provisional headers. The Headers
   // and Cookies tabs say why, and the Traffic footer counts it with the
-  // header block the session budget refused.
+  // header block an older browser's header budget refused.
   @MainActor
   func test35MissingFinalHeaders() async throws {
     let expected = try Expectations.load()
@@ -4947,7 +5159,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
         """)
       XCTAssertEqual(breakdown["expanded"] as? String, "true", "\(size.name): \(breakdown)")
       XCTAssertEqual(breakdown["items"] as? [String] ?? [],
-        ["1 header block not retained (session budget)", "1 request without final headers (HTTP cache)"],
+        ["1 header block not retained (older header budget)", "1 request without final headers (HTTP cache)"],
         "\(size.name): the breakdown names each gap and why: \(breakdown)")
       try await ui.screenshot("traffic-header-gaps-\(size.name)")
       try await ui.key(53, "\u{1b}")
@@ -4964,7 +5176,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let headers = try await ui.value("document.querySelector('#headers-inspector').innerText") as? String ?? ""
       XCTAssertTrue(headers.contains("The HTTP cache answered it without sending a request"),
         "\(size.name): the Headers tab says why the sent headers are missing: \(headers)")
-      XCTAssertTrue(headers.contains("already retained 64 MiB of header blocks"),
+      XCTAssertTrue(headers.contains("after 64 MiB of header blocks were retained, a limit of the browser that recorded this session"),
         "\(size.name): the refused block reads as not retained: \(headers)")
       try await assertInert(ui, "\(size.name) missing final headers")
       try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) missing final headers")

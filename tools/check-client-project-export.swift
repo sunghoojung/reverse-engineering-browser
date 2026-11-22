@@ -171,6 +171,40 @@ enum ClientProjectExportChecks {
     boundary = files
     boundary[readme].body = Data(repeating: 120, count: ClientProjectArchive.maximumFileBytes + 1)
     reject("entry byte bound") { _ = try ClientProjectArchive.validate(zip(boundary)) }
-    print("PASS native client-project ZIP parity, modes, fixed paths, bounds, CRC, UTF-8, central records and malformed payload refusal (no save panel or writes)")
+
+    // The HAR save names rows by export_requests_har's own keys and nothing else.
+    let save: [String: Any] = ["format": "reb-request-har-save-v1", "query": "rows=R18&credential_values=1",
+                               "filename": "request.raw.har"]
+    let har = try RequestHarSave.decode(save)
+    precondition(har.query == "rows=R18&credential_values=1" && har.filename == "request.raw.har" && har.credentialValues)
+    var list = save; list["query"] = "sort=capture&order=desc&q=api&failed=1&through=42"; list["filename"] = "../../etc/x.har"
+    let listed = try RequestHarSave.decode(list)
+    precondition(!listed.credentialValues && listed.filename == "requests.har", "a page-named path is only a suggestion, and a bad one is dropped")
+    for (key, value) in [("format", "reb-request-har-save-v2"), ("query", ""), ("query", "path=/etc/passwd"),
+      ("query", "rows=a&rows=b"), ("query", "rows=a b")] {
+      var invalid = save; invalid[key] = value
+      do { _ = try RequestHarSave.decode(invalid); preconditionFailure("Accepted invalid HAR save \(key)=\(value)") }
+      catch is RequestHarSaveError { }
+    }
+    var destination = save; destination["path"] = "/tmp/unapproved.har"
+    do { _ = try RequestHarSave.decode(destination); preconditionFailure("Accepted a destination in a HAR save") }
+    catch is RequestHarSaveError { }
+    let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("reb-har-summary-\(UUID().uuidString).har")
+    defer { try? FileManager.default.removeItem(at: scratch) }
+    // An entry's own _reb object never precedes "],", so only the closing object is read.
+    let entry = #"{"_reb":{"outcome":"redirect"},"request":{"headers":[]},"response":{"headers":[]}}"#
+    for (closing, complete, entries, error) in [
+      (#"{"format":"reb-request-har-v1","complete":true,"error":null,"entries":2,"rows":1}"#, true, 2, nil as String?),
+      (#"{"format":"reb-request-har-v1","complete":false,"error":"the store changed","entries":1,"rows":3}"#, false, 1, "the store changed"),
+    ] {
+      try Data((#"{"log":{"version":"1.2","entries":["# + entry + "," + entry + #"],"_reb":"# + closing + "}}").utf8).write(to: scratch)
+      guard let summary = RequestHarSummary.read(scratch) else { preconditionFailure("no summary in \(closing)") }
+      precondition(summary.complete == complete && summary.entries == entries && summary.error == error, "\(summary)")
+    }
+    try Data(#"{"log":{"version":"1.2","entries":["#.utf8).write(to: scratch)
+    precondition(RequestHarSummary.read(scratch) == nil, "an archive cut short has no summary")
+    try Data(#"{"log":{"entries":[],"_reb":{"format":"other","complete":true,"entries":0}}}"#.utf8).write(to: scratch)
+    precondition(RequestHarSummary.read(scratch) == nil, "another format is not a HAR summary")
+    print("PASS native client-project ZIP parity, modes, fixed paths, bounds, CRC, UTF-8, central records and malformed payload refusal, and HAR save requests and summaries (no save panel or writes)")
   }
 }

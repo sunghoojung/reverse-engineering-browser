@@ -402,15 +402,37 @@ so Origin Trace has no in-app report. See
 [Passive security report v1](../../docs/product/passive-security-report-v1.md)
 for the schema, rules, bounds and commands.
 
-## Captured request exports
+## Traffic exports and copies
 
-Live native Traffic has no CDP exchange to replay, so Traffic has no capture
-actions. **Export…** in the Traffic toolbar converts a local
-introspection JSON file (`__schema` or `data.__schema`, up to 1 MiB) to GraphQL
-SDL; duplicate keys, invalid UTF-8, partial/error schemas and unsafe SDL
-literals are refused. Export never queries an introspection endpoint or sends a
-request. SDL is a raw schema export: descriptions and identifiers can be
-sensitive.
+**Export…** in the Traffic toolbar saves the request index's HAR
+(`export_requests_har`, see
+[Request HAR export](../../protocol/http-api.md#request-har-export)): the
+selected request, or the list as shown, with its filters, sort and the index
+position it was read at, so rows indexed later are not added. Every hop is an
+entry, redirects and failures included. **Raw** is the default and asks for
+credential header and cookie values; **Credential values withheld** leaves
+them out. A redacted copy is not offered: the backend withholds credentials but
+does not rewrite URLs or bodies. The browser development UI downloads the
+archive; the native app streams it from the backend to the file chosen in a
+macOS Save panel without passing it through the page, and reports how many
+entries it holds and whether `log._reb.complete` is true. One request can also
+be copied to the clipboard.
+
+The selection strip's **Copy**, a right-click on a row, or the context-menu key
+or Shift+F10 on a focused row, opens the row menu: **Copy URL**, **Copy as
+cURL**, **Copy as fetch** and **Export HAR…**. cURL and fetch are built from
+the first hop of the row's HAR entry, with the headers and body the capture
+kept, credentials included; pseudo-headers, Host, Content-Length, Connection
+and Transfer-Encoding are left to the client. A binary body is decoded from
+base64 by the shell for cURL and by `atob` for fetch. When the capture did not
+keep the body whole, or the URL is not the whole captured target, the copy says
+so. Copying sends nothing.
+
+The same dialog converts a local introspection JSON file (`__schema` or
+`data.__schema`, up to 1 MiB) to GraphQL SDL; duplicate keys, invalid UTF-8,
+partial/error schemas and unsafe SDL literals are refused. Export never queries
+an introspection endpoint or sends a request. SDL is a raw schema export:
+descriptions and identifiers can be sensitive.
 
 Saved `reb-network-request-v1` documents remain usable through offline
 commands: `tools/export-captured-client.mjs` (client projects, see
@@ -418,7 +440,9 @@ commands: `tools/export-captured-client.mjs` (client projects, see
 `tools/export-captured-har.mjs` and `tools/export-graphql-sdl.mjs`. They read
 local files only and never send captured requests.
 `node tools/check-captured-export-ui.mjs` exercises the dialog handlers with an
-in-memory DOM; native Save-panel testing remains a macOS gate.
+in-memory DOM, and `node tools/check-traffic-copy.mjs` runs each generated cURL
+command and fetch call against a loopback server. The packaged native Save-panel
+test saves a Traffic HAR from the bundled backend.
 
 ## Saved investigation notebook
 
@@ -531,7 +555,7 @@ client connected through `scripts/reb-api-mcp.sh` can run at the same level
 | **Read only** (default) | Structural reads | Nothing | Question, pins, structural results |
 | **Ask for actions** | Reads and actions | **Allow once** per action | The same |
 | **Auto-approve actions** | Reads and actions | Nothing; every call and result is in the transcript | The same |
-| **Full access** | Also content reads (`get_artifact_text`, `search_artifact_text`, `search_wasm_inspection`), offline runs of captured Wasm (`run_wasm_function`, `get_wasm_runs`), store-path and draft reads, and its own live sessions (`start_live_session`, `session_action`) | Nothing | Also source, Wasm bytes and disassembly, VM bytecode, request and response bodies and every content field of results |
+| **Full access** | Also content reads (`get_artifact_text`, `search_artifact_text`, `search_wasm_inspection`, `export_requests_har`), offline runs of captured Wasm (`run_wasm_function`, `get_wasm_runs`), store-path and draft reads, and its own live sessions (`start_live_session`, `session_action`) | Nothing | Also source, Wasm bytes and disassembly, VM bytecode, request and response bodies, cookie values and credential headers, and every content field of results |
 
 Below Full access the tool server omits captured content from every result,
 and reads that return local store paths (`get_health`) or the researcher's own
@@ -1006,8 +1030,9 @@ the native app accepts a choice only from the document it loaded and only
 while that decision is open, checks it, and starts the session itself
 ([`SessionPanel.swift`](macos/SessionPanel.swift)). A Dock reopen while the
 panel shows a decision starts nothing behind it. **Content (default)** sets `REB_CAPTURE_REQUEST_CONTENT=1`,
-which retains request paths, queries and request bodies up to 16 MiB each, and
-retains Canvas images. While a live session has either turned on, the titlebar
+which retains request paths, queries and bodies, every response body whole
+with media and fonts, request and response headers, cookies, and Canvas
+images. While a live session has either turned on, the titlebar
 shows **Content capture** and its tooltip names which; a browser built before
 that capture ignores the switch, and each Traffic row and Payload tab still shows what
 was actually captured. **Metadata only** is the
@@ -1024,43 +1049,26 @@ launcher gets `REB_CAPTURE_REQUEST_CONTENT=0`, `REB_CAPTURE_CANVAS_IMAGES=0`
 and `REB_NATIVE_JS_INVOCATION_DIGESTS=0` whatever the environment holds
 ([`LiveCaptureContent`](macos/LiveSessionCoordinator.swift)).
 
-With Content chosen, the panel also shows the session's **Content limits**:
-
-| Control | Range and default | What it means |
-| --- | --- | --- |
-| **Request content budget** | 1 to 4,096 MiB, default 256 | How much of the request bodies and full URLs the session keeps, counting identical content once |
-| **Response body budget** | 1 to 16,384 MiB, default 512 | How much of the response bodies the session keeps, counting identical bodies once |
-| **Capture media and fonts** | Off by default | Also keep the images, audio, video and fonts that pages load; they count against the response body budget |
-
-Past a budget the browser still lists each later body or URL and names it as
-not kept, never silently. The budgets stay on this Mac with the session, and
-the launcher grows the session's artifact store by both, so a raised budget can
-use that much more disk. A value outside its range, or not a whole number, is
-named at its field with the rule, and nothing starts. The native side checks a
-Content start again ([`ContentLimits`](macos/LiveSessionCoordinator.swift)) with
-the rules the agent path applies to `request_content_budget_mib`,
-`response_body_budget_mib` and `response_media`, and passes the values to the
-launcher as `REB_REQUEST_CONTENT_BUDGET_MIB`, `REB_RESPONSE_BODY_BUDGET_MIB`
-and `REB_CAPTURE_RESPONSE_MEDIA`, replacing any inherited value. The panel
-first shows those variables when the launcher would accept them, else the
-defaults; the limits it starts with hold for later Content sessions in the same
-app run, including Retry and a Dock reopen, as the mode does. Until the panel
-starts a Content session, the automatic launch takes the variables as they are.
-**Metadata only** keeps no content, so the panel shows none of the limits, and
-a session that keeps no request content, whatever started it, is given none of
-the three variables, inherited ones included, as the agent path removes them.
-The starting and failed panels name the limits the session runs with, and
-only for a session that keeps request content; the launch log's `Request content capture` and
-`Response body capture` lines record them, and `get_session_context` reports
-them as `capture_options.content_limits`, so a researcher or an agent can tell
-which budgets the session ran with.
+A Content session keeps every body whole: there is no size, count or budget
+to choose, so the panel offers no content limit, and images, audio, video and
+fonts are always kept. Content stays on this Mac with the session. With
+Content chosen the panel names the one bound: the artifact receiver keeps
+4 GiB of disk free by default, and names each body it could not store
+([disk reserve](../../services/artifact-receiver/README.md#disk-reserve)).
+`REB_ARTIFACT_DISK_RESERVE_MIB` in the app's environment sets another reserve;
+like the other session switches, the panel does not name it. Metadata only
+keeps no content and names no reserve. Besides the session options below, the
+native side accepts a start that names only the mode
+([`LivePanelStart`](macos/LiveSessionCoordinator.swift)), and refuses any other
+key, the removed `request_content_budget_mib`, `response_body_budget_mib` and
+`response_media` included, so a stale page starts nothing. The starting and
+failed panels name the mode.
 
 The start panel saves its capture mode and Advanced options for later app runs
 in `~/Library/Application Support/Origin Trace/live-session-preferences-v1.json`
 (user-only; `REB_LIVE_SESSION_PREFERENCES` names another path), and opens with
-them. The content limits are not saved, and neither is **Fresh profile**: it
-holds for the rest of that app run, and the next run's automatic session opens
-the research profile again. While any choice differs from its
+them. **Fresh profile** is not saved: it holds for the rest of that app run,
+and the next run's automatic session opens the research profile again. While any choice differs from its
 default, **Advanced options** says how many (for example **2 changed**).
 `REB_AUTOMATIC_CAPTURE_MODE=metadata`
 selects Metadata for the automatic launch and preselects it in the start panel.
@@ -1266,7 +1274,7 @@ that fails or gets an error status keeps the last read copy and its reason
 and is read again on the next refresh; a size or SHA-256 mismatch, whether the
 bytes differ, the store reports `artifact_integrity`, or the request record's digest
 differs from the artifact's, shows no bytes and is not reread. A path and query past the 116-byte row prefix is loaded from
-its retained full target for General's Request URL and Copy URL, or General
+its retained full target for General's Request URL and the row menu's Copy URL, or General
 says why it was not retained. Sources never lists or opens request bodies or
 full targets.
 
@@ -1416,9 +1424,10 @@ Hex shows 256 KiB at a time with **Previous** and **Next**, paged to the end of
 the retained body, and Copy copies the window shown. Find counts every match of
 the whole text, its layout or every hex row in the background, as Sources does
 (`N of M+ · finding X%` until the exact count), marks only the rows on screen,
-and opens the hex window of a match. A body
-still arriving says how many bytes had arrived, when, and whether it was sealed
-at the 16 MiB limit, and a body whose snapshot a byte bound withheld says so. Text that is
+and opens the hex window of a match. A body still arriving says how many bytes
+had arrived, when, and, in a session an older browser recorded, whether it was
+sealed at that browser's 16 MiB limit, and a body whose snapshot a byte bound
+withheld says so. Text that is
 not valid UTF-8 shows with replacement characters and a notice, and a cut,
 partial, aborted or cancelled body may end inside a character without reading
 as binary. Preview shows the
@@ -1433,7 +1442,8 @@ still pending, and the rest
 A memory-cache reuse that names the request whose response it reused shows
 that request's retained bytes, labelled as the reused request's, with
 **Open the request it reused** and the source's state (complete, cut at
-16 MiB, a snapshot and when it was recorded, stopped, or not retained); a
+16 MiB by an older browser, a snapshot and when it was recorded, stopped, or
+not retained); a
 named row on another host or started after the reuse is not its source, and
 one not recorded says so. A service worker's answer lists the worker's own
 requests for the same URL made while it was open, from the request index, each
@@ -1483,7 +1493,7 @@ The layout follows familiar [network inspection conventions](https://developer.c
 while keeping Origin Trace's own controls and Rosé Pine Moon palette.
 
 Traffic lists every request of the session from the backend request index
-(`get_requests`, [request index v1](../../protocol/request-index-v1.md)). The
+(`get_requests`, [request index v2](../../protocol/request-index-v2.md)). The
 ledger reads one 500-row page of the index around the view and mounts only
 the fixed-height rows in view plus 8 on each side, with spacers for the rest,
 so every request is reachable. Each row names its place in the whole list
@@ -1532,8 +1542,9 @@ footer count them separately from sampling budgets and from reported losses.
 Every other reason, including transport, input, document, module, expiry,
 compiled-before-arming, capacity and parent-link reasons and any reason this
 build does not know, reads as reported lost evidence with its raw reason as text.
-The Swift stored-evidence reader uses the same newest-general and
-newest-network windows, 64 MiB tail, and summary scope as the Rust endpoint.
+Stored-evidence native mode forwards the event poll to the bundled Rust
+backend, so its windows and whole-store counts are the same answer; the app
+adds only its own broker state and capture mode.
 A response that omits those fields is still labeled visible-window-only, and
 no whole-capture count is inferred for it. Filtering
 and sorting cover the whole session through the index. Rows and capture-tab controls are
@@ -1549,7 +1560,7 @@ Arrow keys select adjacent request rows; inspector tabs use Left/Right and
 Home/End. Escape closes the inspector and returns focus to the ledger. The close
 button has the same behavior. A dismissed inspector stays closed across
 refreshes; selecting a request reopens it. Full URLs remain available in General
-and Copy URL, and host-only metadata never implies a captured path or query.
+and the row menu's Copy URL, and host-only metadata never implies a captured path or query.
 
 Collection uses a saved-request library and a template editor; it never sends
 a request. Headers, Body, and Variables are keyboard-accessible request
@@ -1709,34 +1720,33 @@ selects or moves a bucket, Shift+Arrow grows or shrinks the range, and Escape
 or **Clear range** removes it. The footer reads `N / M requests · X transferred
 · Y resources` for the matching requests of the whole session.
 
-When a content session's budget runs out, the browser lists each later body or
-URL and names it as not kept. The footer then adds a line naming each used
-budget, for example `Response body budget (512 MiB) used, 511.8 MiB kept: 2,400
-response bodies not kept · Raise it in New Live Session… for the next session.`
+A content session keeps every body whole. When the artifact receiver refuses a
+body to keep its free-disk reserve, the browser still lists it and names it as
+not kept, and the footer adds a line, for example `Disk reserve reached: 2,400
+bodies not stored, to keep the free-disk reserve. Free disk space to keep later
+bodies.` A session an older browser recorded may name that browser's content
+budgets instead, as `Older content budget: N bodies or URLs not kept by the
+browser that recorded this session. Current capture keeps every body whole.`
 
-- The counts are the whole session's, from `get_session_summary`'s budget
-  checks, like the `N / M requests` beside them. Traffic reads the summary once
-  in every session, a stored one included, so a budget met outside the loaded
-  rows still shows, and again at most every 30 s while it shows in a content
-  session or while a budget shows as used.
+- The counts are the whole session's, from `get_session_summary`'s
+  `request_content_not_retained` checks, like the `N / M requests` beside
+  them. Traffic reads the summary once in every session, a stored one
+  included, so a refusal outside the loaded rows still shows, and again at
+  most every 30 s while it shows in a content session or while a refusal
+  shows.
 - A count is exact only while nothing has arrived since the summary was read:
   it records the event poll's tag then, and in a live session a later change
   of that tag makes it `at least N` until the next read. So do a failed re-read
   (which keeps the last figure), a summary whose scan stopped at its 64 MiB
   bound, and the loaded rows before the first read answers.
-- The size is the session context's `capture_options.content_limits`
-  (`get_session_context`), read once after the first valid poll; a session that
-  is not live, or keeps no content, names the budget without a size. The bytes
-  kept are the unique bytes of that budget's artifacts, from the summary.
-- The Payload tab and the Request URL row name the request content budget the
-  same way, and the Response tab names **Response body budget** and **Capture
-  media and fonts**; each remedy applies to the next session.
+- The Payload and Response tabs and the Request URL row name the same reason
+  for one body; no line asks to raise a setting, since none exists.
 - In the short stacked layout (at most 1,100 by 650 px) with a request open, the
-  line becomes a one-line **Budgets used** button (or the one budget's name)
-  beside the footer's own, so the ledger keeps its rows. Return or Space opens
-  the whole sentence above the footer; Escape, focus leaving it, a press
-  anywhere else or closing the request closes it, so it never stays over the
-  rows unasked.
+  line becomes a one-line **Bodies not kept** button (or the one reason's
+  label) beside the footer's own, so the ledger keeps its rows. Return or
+  Space opens the whole sentence above the footer; Escape, focus leaving it, a
+  press anywhere else or closing the request closes it, so it never stays over
+  the rows unasked.
 
 The filter box matches the method, URL or host and status as literal,
 case-insensitive text. `-text` excludes rows that contain it. `domain:` (with
@@ -1781,6 +1791,7 @@ capture, fetch anything or change a row.
 | `traffic_filter.js` | The filter grammar, Invert, Hide internal, 3rd-party, Failed and the time range over the newest window, mirroring the request index |
 | `traffic_columns.js` | Column widths, hidden columns, the header menu, saved layout and fitting columns to the table width |
 | `traffic_overview.js` | The timing strip and its pointer and keyboard time-range selection |
+| `traffic_copy.js` | The row menu (right-click, Shift+F10 and the strip's Copy): Copy URL, Copy as cURL and Copy as fetch from the row's HAR entry, and Export HAR… |
 | `evidence_names.js` | Researcher names: exact identities, the closed names document, its Analyst-library store, the inline rename editor and the command palette provider |
 | `wasm_function_names.js` | Wasm function names in Inspect, the Graph and its function list, Flow cards, Initiator frames and cross-references: inert name spans, the F2 and Rename entry points, and in-place refresh after a rename |
 | `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |
@@ -1821,7 +1832,7 @@ session budget, queue, channel or URL), network blocks that arrived after
 their request ended ("late header records on no row"), and requests that
 ended with only provisional headers, by reason (HTTP cache, service worker,
 download, failed, not reported); `get_session_summary` has the same counts
-over the newest 64 MiB. Sources reads retained artifact bytes only. A failed
+over the whole session. Sources reads retained artifact bytes only. A failed
 refresh preserves the last valid catalog, and a detached pending load is
 cancelled and cannot restore obsolete source text. Artifact loads, including
 Canvas previews, have no deadline: they show bytes read so far and can be
@@ -2525,68 +2536,127 @@ of the height; drag the divider between them like the other pane splits, or
 use **Linear** to hide the linear pane (hidden at first in a window under 600
 px high). Neither pane keeps a control or a scrolled row under the divider
 (see [Pane sizes](#pane-sizes)). The text view's line window and search
-notice are hidden while Graph is active. A graph opens at actual size, centered
-on the entry block (or the whole graph when it fits), and **Fit** or `0` shows
-all of it. Below the zoom where rows are readable, cards keep a screen-size
-label and an overview cue says rows are hidden. The footer is one line: the
-limits, then the edge legend, which folds behind **Key** in a narrow pane. Selecting a block with the pointer or Enter scrolls the disassembly or hex
-to its offset. **Graph** in Static bytecode draws the same view for a decoded
-image. Declared flow and an imported **Observed path** are separate layers,
-never one graph: the observed layer's cards are retained steps, and a sequence
-gap is a card with no edge on either side.
+notice are hidden while Graph is active. A graph opens at actual size with the
+entry block and the successors on its first screen centered in the part of the
+stage the minimap leaves clear (the entry alone when they are wider, the whole
+graph when it fits), and **Fit** or `0` shows all of it in the part the
+minimap and the status line leave clear, the overview cue included when the
+fit is below row zoom. The minimap is smaller on a stage under 600 px wide or
+280 px high, whatever the window's size, and its outline of the view never
+shrinks below about 8 px, so one screen of a long function is still marked.
+Zoom goes out as far as Fit needs, at any size. A drag, a scroll, Shift+Arrow,
+a minimap click, a zoom or a resized pane stops where half the stage on each
+axis still shows the drawing, or all of a drawing smaller than that, so any
+edge of the graph pans as far as the middle and the stage never goes blank. Edges
+are added to the drawing only where they cross the view, so a long dashed
+edge costs its visible length, and each dash keeps its place along the whole
+edge as the view pans. Below the zoom where
+rows are readable, cards keep a screen-size label and an overview cue says
+rows are hidden; further out, cards are filled boxes drawn one path per kind,
+so a graph of any size stays a few fills, and the selection and the shown Find
+match keep a ring of ten pixels. The zoom controls and the cue are shown only
+over a drawing. The footer is one line: the limits, then the key for the edge
+kinds this graph has, which folds behind **Key** in a narrow pane. Selecting
+a block with the pointer or Enter scrolls the disassembly or hex to its
+offset. **Graph** in Static bytecode draws the same view for a decoded image.
+Declared flow and an imported **Observed path** are separate layers, never one
+graph: the observed layer's cards are retained steps, and a sequence gap is a
+card with no edge on either side.
 
 The header gives the name, block count, instruction count and `declared` (or
 `observed`). Each block shows its first byte offset as `loc_<hex>`, an
 instruction-count badge and rows of offset, mnemonic and operands. A run of
 identical `block` openers is one row with a count; the badge still counts every
-instruction. Edge kind is never color alone: taken is solid, false is dashed,
-table arms are dotted with their case numbers, exception edges are long-dashed,
-and an unresolved target is a labeled stub that adds no block. The footer keeps
-the limits on screen: declared reachability is not observed execution, and a
-complete drawing is not a proof. Nothing here sets `cfg.complete`.
+instruction. A block of only `end`, `block`, `loop`, `try`, `try_table`,
+`delegate` or `nop` runs nothing: it is drawn as the first row of the block it
+falls into, on a tinted band that names what it held (`end ×3, block`), and
+the header counts it, as in `120 blocks (60 folded)`. The folded block keeps
+its first offset, where branches land, and every row stays in the document.
+Edge kind is never color alone: true is solid, false is dashed, table arms are
+dotted, exception edges are long-dashed and calls are dotted. A transfer with
+no target in the function (a tail call, an exception that may leave it, a
+label past the decoded frames) adds no block: it is an exit row at the foot of
+its card, under a hairline, such as `→ throw: may escape`, with a short tick
+out of the card's right side at that row, and the card is sized to hold it.
+Exception edges run from each block that may throw to every handler that may
+catch it, named by the clause (`catch 0`, `catch_all`); a call that may throw
+says `call: catch 0`. The selection owns the accent color, which no edge kind
+uses. A label is a chip beside its stroke where the edge arrives, never over
+it: case lists, exception and call labels always, true and false only for the
+selected block's edges, since the stroke already says which. The footer keeps the limits on screen: declared
+reachability is not observed execution, and a complete drawing is not a proof.
+Nothing here sets `cfg.complete`.
 
 Keyboard: arrows move to the nearest block in that direction, `[` and `]` step
 in byte order, Home returns to the entry, Enter shows the block in the
 disassembly and hex, `+`, `-` and `0` zoom and fit, and Shift+arrows pan.
+Alt+Left and Alt+Right pick one of the selected block's edges, which is drawn
+with a halo and named in the status line; Alt+Down follows an outgoing edge to
+its target and Alt+Up an incoming one to its source, and the edge followed
+stays picked, so the opposite key returns. A click on an edge, or its chip,
+goes to its far end: the target when the click was nearer the source, else the
+source. An exit row is picked like an edge, and goes to the block it names
+when it names one.
 
-The layout runs in a Web Worker. When the backend serves
-`POST /api/graph-layout` ([HTTP API](../../protocol/http-api.md#graph-layout)),
-the function is laid out by [Triskel](https://github.com/triskellib/triskel), a
-CFG layout engine built on single-entry single-exit regions. It is vendored in
-the backend and runs in a separate worker process, with no size limit or
-deadline. While it runs, the view counts its seconds and offers **Use the
-region layout**, which stops it. The project-authored region layout in
-`block_graph_layout.js` draws any function, and stays in four cases:
-- Triskel would draw the function more than 1.6 times wider and over 1,400 px.
-  A flattened dispatcher's fan is the usual case: the region layout stacks it
-  into a grid, where Triskel puts every arm in one row.
-- The function has more than 2,000 blocks or 8,000 edges. Triskel is not run
-  unasked there: on structured control flow it takes about 10 s at 8,000
-  blocks and a minute at 16,000, and at this revision it places nodes on top
-  of each other in most functions over about 1,000 blocks. The region layout,
-  close to linear in the block count, is drawn at once and the header offers **Lay
-  out with Triskel**, which runs it on the drawn function with no size limit.
-  The drawing stays while it runs, the header counts its seconds, and the
-  button becomes **Cancel**.
-- Triskel's answer does not match the function.
-- The route is missing or fails, as in the stored-evidence window.
+**Find** (Cmd+F) searches the drawn function's rows while Graph is open, as a
+case-insensitive, single-line literal. Matched blocks are outlined, matched
+rows banded and each match boxed, in the overview and the minimap too. Typing
+shows the first matched block at or after the selection; Enter and
+Shift+Enter step through the matched blocks and wrap. The status line and the
+graph say `3 of 14 blocks · 52 rows match`. A Find typed before a function is
+drawn runs when it is.
 
-The header says `Triskel layout` when Triskel was used, `region layout` with
-the reason otherwise (stopped, failed, wider or taller), and hovering the
-counts says why the region layout stayed. The region layout also stays when
-Triskel's drawing would be more than 1.6 times taller and over 1,600 px
-taller, as nested loops can make it. Both layout workers reach the route
-through `graph_layout_client.js`, which holds the size Triskel runs on unasked,
-the answer check and this acceptance rule, and gives each graph it does not lay
-out a reason code that each view words for itself. It sets no timeout: the
-caller's signal stops a request, and the backend then stops its worker. Triskel's and fmt's licence
-texts ship as `Contents/Resources/GraphLayoutLicenses.txt`.
+Unreached code never changes how reachable code is drawn: dominators come from
+the blocks the declared entries reach. Each set of connected unreached blocks
+is drawn below the reachable graph, and an edge from it into reachable code is
+an exit row of its card that names the block it reaches (`→ loc_1a2`). A set
+with several entries, such as a dead switch whose unchosen arms have no
+predecessor, nests as its text does: each later entry hangs under the set's
+last block before it, so the joins its arms share stay inside the switch
+instead of the whole set laying out flat.
+
+The layout runs in a Web Worker, and the region layout in
+`block_graph_layout.js` is always what is drawn first, at any size. When the
+backend serves `POST /api/graph-layout` ([HTTP
+API](../../protocol/http-api.md#graph-layout)), the header offers **Lay out
+with Triskel** for any drawn graph of two or more blocks.
+[Triskel](https://github.com/triskellib/triskel) is a CFG layout engine built
+on single-entry single-exit regions, vendored in the backend and run in a
+separate worker process with no size limit or deadline: on structured control
+flow it takes about 10 s at 8,000 blocks and a minute at 16,000. The worker
+sends it only the graph's edges and the drawn cards' sizes. The region layout
+stays drawn while it runs, the header counts its seconds, and the button
+becomes **Cancel**. Its answer is drawn whatever its size, with how it compares
+(`Triskel layout · 2.4× as wide, 0.8× as tall`); both drawings are kept, each
+at the view it was left at, and the button switches between them (**Show
+region layout**, **Show Triskel layout**). A stopped run says `Triskel
+stopped`, and a failure says `Triskel failed` with its reason on hover; both
+can be run again. Both layout workers reach the route through
+`graph_layout_client.js`, which checks each answer's shape and gives each graph
+it does not lay out a reason code that each view words for itself; the block
+graph asks it to keep any well-formed drawing (`keep`). It sets no timeout:
+the caller's signal stops a request, and the backend then stops its worker.
+Triskel's and fmt's licence texts ship as
+`Contents/Resources/GraphLayoutLicenses.txt`.
 
 The region layout uses dominator regions: each subtree is entered once, so it
 lays out alone and only its members' sizes reach its parent. A layer of one
-continues the spine. A wider layer becomes side-by-side boxes and wraps into a
-grid past six. Arms with no way out stack on the spine. Edges leaving a box
-share a bottom port, and every back edge to a loop shares one rail.
+continues the spine. When one member of a layer holds four times the blocks of
+the rest, as the rest of a switch ladder or an else-if chain outweighs its
+case, it continues the spine and the rest sit beside it, so a chain of any
+length stays one column. A wider layer becomes side-by-side boxes, ordered by
+where their edges come from so few cross, and wraps into a grid past six; a
+`br_table`'s arms are ordered by case. Arms with no way out stack on the spine. Edges leaving a
+box share a bottom port, and every back edge to a loop shares one rail. Rails
+reuse columns, but a rail inside another's rows always takes a column inside
+it, so nested rails never cross; two that only overlap cross once, whichever
+way they sit. The dominator tree is computed with Semi-NCA in close to linear
+time, so even a function of 100,000 blocks lays out in about a second.
+
+A failure says why. Retry is offered only when trying again can help: the
+evidence service unreachable or busy, or the layout worker stopped. A refused
+read, an invalid document, or a graph past the memory the layout could
+allocate says so without it.
 
 Memory: one function is decoded on demand, layout runs in one worker per view
 that stays between jobs and is terminated when a job is replaced or the view
@@ -2594,7 +2664,6 @@ closes, and laid-out graphs stay in a
 16 MiB least-recently-used cache that is cleared when the view closes, the
 artifact changes or the screen leaves. The canvas is one bounded backing store
 that does not grow with graph size, and only visible cards and edges are drawn.
-A byte budget cuts row text before structure and labels what it cut.
 
 ## Trace value
 
@@ -3307,7 +3376,7 @@ supply arguments, return values, exceptions or Promise settlement. Observer,
 placement, producer and historical build remain unknown. IDs and original hashes
 are available in **Provenance & exact identifiers**; they do not crowd every row.
 **Coverage & gaps** separates missing parent references, queue markers, sequence
-holes, arrival discontinuities, unavailable request records and the retained-window limit without adding
+holes, arrival discontinuities and which range of the store is in view without adding
 them into a loss total or inventing capture completeness. Numeric holes are counted
 from sorted unique session/process IDs, so a later-arriving record can fill one;
 absent numbers alone do not prove capture loss. Long request headings ellipsize
@@ -3316,9 +3385,19 @@ scrollable disclosure above the workspace and never consumes the pane height;
 Escape closes it and restores the summary focus. Records remain in retained
 order within relationship groups, not a cross-process execution timeline.
 
-The view inspects at most 5,000 events and 500 artifact descriptors, renders 50
-observations per page, bounds each parent lookup to 32 links and does not fetch
-missing evidence. Search filters existing observations only. Arrow keys, Home and
+The view holds one range of up to 5,000 stored records at a time: the newest,
+which each poll replaces, or an older one. When the store holds more, the range
+bar above the list says where the range lies in the stored session, by byte
+position, and **Oldest**, **Earlier**, **Later** and **Newest** move through it
+with the event route's `after` and `before` cursors (`GET /api/events`), one read
+at a time; a newer move supersedes a read still running, a failed read keeps the
+view and says why, and a read that reaches the end of the store is the live newest
+range again. A clear or another store returns to the newest range, since cursors
+do not survive it. The selected request's own lifecycle records, read by ID from
+the request index, stay in view in every range. Artifact references resolve
+against the whole catalog. The view renders 50 observations per page, bounds each
+parent lookup to 32 links and does not fetch a missing parent; the range that holds
+it shows it. Search filters existing observations only. Arrow keys, Home and
 End move through the displayed order. At 760 px and below, **Observations / Selected
 record** switches between full-width panes. Unchanged refreshes preserve inspector
 DOM, disclosures, focus and scroll. Eviction explicitly clears the selected record

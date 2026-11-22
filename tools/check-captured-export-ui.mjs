@@ -6,7 +6,7 @@ import {readFile} from 'node:fs/promises';
 import {runInNewContext} from 'node:vm';
 import {network,savedRequests} from './saved-traffic-fixture.mjs';
 import formats from '../apps/research-ui/captured_export_formats.js';
-const code=(await Promise.all(['traffic_view.js','captured_client.js','captured_export_formats.js'].map(name=>readFile(new URL('../apps/research-ui/'+name,import.meta.url),'utf8')))).join('\n');
+const code=(await Promise.all(['traffic_view.js','traffic_copy.js','captured_client.js','captured_export_formats.js'].map(name=>readFile(new URL('../apps/research-ui/'+name,import.meta.url),'utf8')))).join('\n');
 const schema={data:{__schema:{queryType:{name:'Query'},mutationType:null,subscriptionType:null,types:[{kind:'SCALAR',name:'String',description:null},{kind:'OBJECT',name:'Query',description:'synthetic schema',interfaces:[],fields:[{name:'hello',description:null,args:[],type:{kind:'SCALAR',name:'String',ofType:null},isDeprecated:false,deprecationReason:null}]}],directives:[]}}};
 class Node {
   constructor(dataset={}){this.dataset=dataset;this.events={};this.children=[];this.disabled=false;this.files=[];this.options=[];this.textContent='';this.open=false;this.focused=false;}
@@ -18,13 +18,17 @@ class Node {
   querySelector(selector){return this.options.find(option=>selector==='[value="'+option.value+'"]');}
 }
 function harness(native=false){
-  const fields=Object.fromEntries(['format','provider','source','file','policy','destination','submit','close','cancel','note','status','format-field','provider-field','policy-field','source-field','file-field'].map(name=>[name,new Node()]));fields.file.isFile=true;
-  fields.source.options=['capture','file'].map(value=>({value}));fields.format.options=['json','client','har','sdl'].map(value=>({value}));fields.destination.options=['save','copy'].map(value=>({value}));
+  const fields=Object.fromEntries(['format','provider','source','file','scope','policy','destination','submit','close','cancel','note','status','format-field','provider-field','scope-field','policy-field','source-field','file-field'].map(name=>[name,new Node()]));fields.file.isFile=true;
+  fields.source.options=['capture','file'].map(value=>({value}));fields.format.options=['traffic_har','json','client','har','sdl'].map(value=>({value}));fields.destination.options=['save','copy'].map(value=>({value}));
+  fields.scope.options=['selected','list'].map(value=>({value}));fields.policy.options=['raw','credentials_withheld','redacted_copy'].map(value=>({value}));
   const dialog=new Node(),title=new Node(),context=new Node(),triggers={capture:new Node({exportOpen:'capture'}),run:new Node({exportOpen:'run'})};
   dialog.querySelector=selector=>fields[selector.slice(13,-1)];
-  const downloads=[],clips=[],bridges=[],notices=[],filenames=[];let bridgeResult={status:'saved'},clipboardError=false,bridgeWait=null;
-  const document={querySelector:key=>({'#captured-export-dialog':dialog,'#captured-export-title':title,'#captured-export-context':context})[key],querySelectorAll:key=>key==='[data-export-open]'?Object.values(triggers):[],createElement:()=>{const link=new Node();link.click=()=>filenames.push(link.download);return link;},body:new Node(),documentElement:{classList:{contains:()=>native}},events:{},addEventListener(name,handler){this.events[name]=handler;}};
-  const globals={TextEncoder,TextDecoder,Uint8Array,URL:class extends URL{static createObjectURL(blob){downloads.push(blob);return 'blob:authored';}static revokeObjectURL(){}},Blob,atob,btoa,setTimeout:()=>0,document,navigator:{clipboard:{writeText:async text=>{if(clipboardError)throw Error('authored clipboard denial');clips.push(text);}}},webkit:{messageHandlers:{rebClientProjectExport:{postMessage:async payload=>{bridges.push(payload);if(bridgeWait)await bridgeWait;return bridgeResult;}}}}};
+  const downloads=[],clips=[],bridges=[],notices=[],filenames=[],hrefs=[],harSaves=[],fetches=[],trafficReads=[];let bridgeResult={status:'saved'},clipboardError=false,bridgeWait=null;
+  let traffic=null,harResult={status:'saved',complete:true,entries:3},harAnswer={status:200,body:{log:{entries:[{}],_reb:{complete:true}}}};
+  const document={querySelector:key=>({'#captured-export-dialog':dialog,'#captured-export-title':title,'#captured-export-context':context})[key],querySelectorAll:key=>key==='[data-export-open]'?Object.values(triggers):[],createElement:()=>{const link=new Node();link.click=()=>{filenames.push(link.download);hrefs.push(link.href);};return link;},body:new Node(),documentElement:{classList:{contains:()=>native}},events:{},addEventListener(name,handler){this.events[name]=handler;}};
+  const globals={TextEncoder,TextDecoder,Uint8Array,URLSearchParams,URL:class extends URL{static createObjectURL(blob){downloads.push(blob);return 'blob:authored';}static revokeObjectURL(){}},Blob,atob,btoa,setTimeout:()=>0,document,navigator:{clipboard:{writeText:async text=>{if(clipboardError)throw Error('authored clipboard denial');clips.push(text);}}},webkit:{messageHandlers:{rebClientProjectExport:{postMessage:async payload=>{bridges.push(payload);if(bridgeWait)await bridgeWait;return bridgeResult;}},
+    rebRequestExport:{postMessage:async payload=>{harSaves.push(payload);return harResult;}}}},
+    fetch:async (url,init)=>{fetches.push(url);const text=typeof harAnswer.body==='string'?harAnswer.body:JSON.stringify(harAnswer.body);return {ok:harAnswer.status===200,status:harAnswer.status,text:async()=>text};}};
   const api=runInNewContext(code+'\n;({installCapturedExportDialog,capturedClientCapture,capturedClientRun})',globals);
   const fixture=network(),row=fixture.requests[0];row.protocol='h2';row.started_monotonic_ms=1000;
   row.request.headers=[['X-Private','synthetic-secret']];row.response.headers=[['Content-Type','application/json']];row.response.body.base64='';row.response.body.text=JSON.stringify(schema);
@@ -32,12 +36,14 @@ function harness(native=false){
   row.timing_evidence={format:'reb-network-timing-v1',request_monotonic_seconds:a(1),request_wall_seconds:a(1700000000),response_monotonic_seconds:a(1.06),completion_monotonic_seconds:a(1.1),response_observed:true,completion_observed:true,response_source:'responseReceived',completion_source:'loadingFinished',duplicate_response:false,duplicate_completion:false,response_after_completion:false,resource_timing:{state:'available',fields:{requestTime:a(1.005),proxyStart:u(),proxyEnd:u(),workerStart:u(),dnsStart:a(1),dnsEnd:a(3),connectStart:a(4),connectEnd:a(10),sslStart:a(5),sslEnd:a(9),sendStart:a(12),sendEnd:a(13),receiveHeadersStart:a(40),receiveHeadersEnd:a(45)}}};
   let selected=savedRequests(fixture)[0];const captured=api.capturedClientCapture(selected);
   const run={id:7,started_at_ms:123,request:{...captured.input,headers:captured.input.headers.map(([name,value])=>({name,value}))},response:{status:200,headers:[],body:'synthetic-secret'}};run.resolved_request=run.request;
-  const options={getCaptureRequest:()=>{if(!selected)throw Error('Expired capture');return selected;},getRun:()=>run,getRunCapture:()=>null,contextKey:()=> 'ctx',notice:message=>notices.push(message)};
+  const options={getCaptureRequest:()=>{if(!selected)throw Error('Expired capture');return selected;},getRun:()=>run,getRunCapture:()=>null,contextKey:()=> 'ctx',notice:message=>notices.push(message),
+    getTrafficExport:id=>{trafficReads.push(id);return traffic&&JSON.parse(JSON.stringify(traffic));}};
   const workflow=api.installCapturedExportDialog(options);
   const set=(name,value)=>{fields[name].value=value;fields[name].events.change();};
   const open=(kind='capture')=>{if(dialog.open)workflow.close();triggers[kind].click();assert(dialog.open);};
-  return {api,captured,selected,fields,dialog,triggers,downloads,clips,bridges,notices,filenames,workflow,document,set,open,
-    expire(){selected=null;workflow.sync();},setBridge(value){bridgeResult=value;},setClipboardError(value){clipboardError=value;},holdBridge(promise){bridgeWait=promise;}};
+  return {api,captured,selected,fields,dialog,triggers,downloads,clips,bridges,notices,filenames,hrefs,harSaves,fetches,trafficReads,workflow,document,set,open,
+    expire(){selected=null;workflow.sync();},setBridge(value){bridgeResult=value;},setClipboardError(value){clipboardError=value;},holdBridge(promise){bridgeWait=promise;},
+    setTraffic(value){traffic=value;},setHarResult(value){harResult=value;},setHarAnswer(value){harAnswer=value;}};
 }
 // HTML dialog.close() queues its close event. A new opening can own the dialog
 // before that event arrives; the old event must not erase its capture or file.
@@ -50,10 +56,11 @@ for(const native of [false,true]){
   h.open();h.set('format','sdl');h.set('source','file');
   f.file.files=[{size:bytes.length,arrayBuffer:async()=>bytes.buffer}];await f.file.events.change();
   await f.submit.click();assert.equal(count(),1);
-  h.open();assert.equal(f.format.value,'json');assert.equal(f.policy.value,'redacted_copy');
+  h.open();assert.equal(f.format.value,'json');assert.equal(f.policy.value,'raw');
   flushClose();
   assert(h.dialog.open&&!f.submit.disabled,'A queued close cannot invalidate a reopened capture');
-  assert(f.format.options.every(option=>!option.disabled),'A reopened capture retains every export format');
+  assert(f.format.options.filter(option=>option.value!=='traffic_har').every(option=>!option.disabled),'A reopened capture retains every capture export format');
+  assert(f.format.options[0].hidden,'Traffic HAR needs the request index');
   assert.equal(f.status.textContent,'');
   h.set('format','client');await f.submit.click();assert.equal(count(),2);
   const project=native?Buffer.from(h.bridges.at(-1).base64,'base64'):Buffer.from(await h.downloads.at(-1).arrayBuffer());
@@ -77,9 +84,11 @@ for(const native of [false,true]){
 for(const native of [false,true]){
   const h=harness(native),f=h.fields,before=JSON.stringify(h.selected.captureRecord);
   const count=()=>h.downloads.length+h.clips.length+h.bridges.length;
-  h.open();assert.equal(count(),0);assert.equal(f.policy.value,'redacted_copy');assert.equal(f.format.value,'json');assert(f['provider-field'].hidden);assert(f['source-field'].hidden);assert.equal(f.destination.value,native?'copy':'save');
-  await f.submit.click();let text=native?h.clips.at(-1):await h.downloads.at(-1).text();assert(!text.includes('synthetic-secret'));
-  h.set('policy','raw');await f.submit.click();text=native?h.clips.at(-1):await h.downloads.at(-1).text();assert(text.includes('synthetic-secret'));
+  h.open();assert.equal(count(),0);assert.equal(f.policy.value,'raw','Export defaults to the evidence as seen');assert.equal(f.format.value,'json');assert(f['provider-field'].hidden);assert(f['source-field'].hidden);assert(f['scope-field'].hidden);assert.equal(f.destination.value,native?'copy':'save');
+  assert(f.policy.querySelector('[value="credentials_withheld"]').hidden,'Withholding is the backend HAR policy only');
+  await f.submit.click();let text=native?h.clips.at(-1):await h.downloads.at(-1).text();assert(text.includes('synthetic-secret'));
+  h.set('policy','redacted_copy');await f.submit.click();text=native?h.clips.at(-1):await h.downloads.at(-1).text();assert(!text.includes('synthetic-secret'));
+  h.set('policy','raw');
   if(!native){h.set('destination','copy');await f.submit.click();assert(h.clips.at(-1).includes('synthetic-secret'));}
   h.workflow.close();assert(h.triggers.capture.focused);
   for(const provider of ['standard','requests','httpx'])for(const mode of ['raw','redacted_copy']){
@@ -119,11 +128,55 @@ for(const native of [false,true]){
   assert(f.format.options.filter(option=>option.value!=='sdl').every(option=>option.hidden&&option.disabled),'Capture-only formats are not offered');
   assert(f.source.options.find(option=>option.value==='capture').hidden,'Selected response is not offered');
   const context=h.document.querySelector('#captured-export-context').textContent;
-  assert.match(context,/capture JSON, client project and HAR exports are unavailable/);assert.doesNotMatch(context,/CDP|debugger/i);
+  assert.match(context,/no request index to export from/);assert.doesNotMatch(context,/CDP|debugger/i);
   assert.equal(h.document.querySelector('#captured-export-title').textContent,'Export GraphQL schema');
 }
+// Traffic rows export as the backend's HAR: the exact selected row, or the list's
+// query pinned to the index position it was read at. Raw asks for credential values.
+for(const native of [false,true]){
+  const h=harness(native),f=h.fields;h.expire();
+  const list={query:'sort=capture&order=desc&q=api',through:'41',matching:3,filtered:true};
+  h.setTraffic({selected:{id:'R7',label:'GET https://a.test/x'},list});h.open();
+  assert.equal(f.format.value,'traffic_har');assert.equal(f.policy.value,'raw');assert.equal(f.scope.value,'list');assert.equal(f.destination.value,'save');
+  assert(!f['format-field'].hidden&&!f['scope-field'].hidden&&!f['policy-field'].hidden);
+  assert.equal(h.document.querySelector('#captured-export-title').textContent,'Export Traffic');
+  assert.equal(h.document.querySelector('#captured-export-context').textContent,'Selected: GET https://a.test/x');
+  assert.equal(f.scope.querySelector('[value="list"]').textContent,'Filtered list · 3 requests');
+  assert(f.policy.querySelector('[value="redacted_copy"]').hidden&&!f.policy.querySelector('[value="credentials_withheld"]').hidden,'The backend withholds credentials; it does not redact');
+  assert(f.destination.querySelector('[value="copy"]').disabled,'A list streams to a file, never the clipboard');
+  assert(!f.submit.disabled);
+  await f.submit.click();
+  const listQuery='sort=capture&order=desc&q=api&through=41&credential_values=1';
+  if(native){assert.deepEqual({...h.harSaves.at(-1)},{format:'reb-request-har-save-v1',query:listQuery,filename:'requests.raw.har'});assert.match(f.status.textContent,/Saved 3 HAR entries locally/);}
+  else{assert.equal(h.hrefs.at(-1),'/api/requests/har?'+listQuery,f.status.textContent);assert.equal(h.filenames.at(-1),'requests.raw.har');assert.match(f.status.textContent,/log\._reb\.complete/);}
+  h.set('policy','credentials_withheld');await f.submit.click();
+  const withheld='sort=capture&order=desc&q=api&through=41';
+  if(native)assert.deepEqual({...h.harSaves.at(-1)},{format:'reb-request-har-save-v1',query:withheld,filename:'requests.credentials-withheld.har'});
+  else{assert.equal(h.hrefs.at(-1),'/api/requests/har?'+withheld);assert.equal(h.filenames.at(-1),'requests.credentials-withheld.har');}
+  if(native){h.setHarResult({status:'saved',complete:false,entries:1,error:'the store was replaced'});await f.submit.click();assert.match(f.status.textContent,/incomplete: the store was replaced/);assert.equal(f.status.dataset.kind,'error');
+    h.setHarResult({status:'canceled'});await f.submit.click();assert.match(f.status.textContent,/canceled/);h.setHarResult({status:'saved',complete:true,entries:1});}
+  h.set('scope','selected');h.set('policy','raw');assert(!f.destination.querySelector('[value="copy"]').disabled);h.set('destination','copy');
+  await f.submit.click();assert.equal(h.fetches.at(-1),'/api/requests/har?rows=R7&credential_values=1');assert.match(h.clips.at(-1),/"complete":true/);assert.match(f.status.textContent,/Copied locally/);
+  const copies=h.clips.length;
+  h.setHarAnswer({status:200,body:{log:{entries:[],_reb:{complete:false,error:'the row could not be read'}}}});await f.submit.click();assert.equal(h.clips.length,copies);assert.match(f.status.textContent,/the row could not be read/);
+  h.setHarAnswer({status:404,body:{error:'No request row has ID R7'}});await f.submit.click();assert.equal(h.clips.length,copies);assert.match(f.status.textContent,/No request row has ID R7/);
+  h.setHarAnswer({status:200,body:{log:{entries:[{}],_reb:{complete:true}}}});
+  h.set('scope','list');assert.equal(f.destination.value,'save','The list moves the destination back to a file');
+  h.workflow.close();
+  // The row menu's Export HAR… names its row and starts on it.
+  const opener=new Node();h.workflow.openTraffic(opener,'R9');assert.equal(h.trafficReads.at(-1),'R9');assert.equal(f.scope.value,'selected');
+  h.workflow.close();assert(opener.focused);
+  // Before the index answers this list's query, only the selected row exports.
+  h.setTraffic({selected:{id:'R7',label:'GET /x'},list:null});h.open();
+  assert.equal(f.scope.value,'selected');assert(f.scope.querySelector('[value="list"]').hidden);
+  h.setTraffic({selected:null,list:{...list,filtered:false,matching:1}});h.open();
+  assert.equal(f.scope.value,'list');assert(f.scope.querySelector('[value="selected"]').hidden);assert.equal(f.scope.querySelector('[value="list"]').textContent,'All requests · 1 request');
+  assert.match(h.document.querySelector('#captured-export-context').textContent,/No request is selected/);
+  h.workflow.close();
+}
 const html=await readFile(new URL('../apps/research-ui/index.html',import.meta.url),'utf8');
-for(const token of ['data-export-open="capture"','data-export-format','data-export-policy','data-export-file','captured_export_formats.js'])assert(html.includes(token));
+for(const token of ['data-export-open="capture"','data-export-format','data-export-scope','data-export-policy','data-export-file','captured_export_formats.js','traffic_copy.js','value="traffic_har"','value="credentials_withheld"'])assert(html.includes(token));
+assert.match(html,/<select data-export-policy><option value="raw">/,'Raw is the first and default data policy');
 assert(!html.includes('data-export-open="run"'), 'The retired live repeater has no export action in the shipped UI');
 assert.match(html,/<button id="open-captured-export" type="button" data-export-open="capture"/,'Traffic export uses the compact toolbar button, not inspector exchange-button height');
-console.log('PASS compact export dialog: redacted default, explicit modes and destinations, runtime/capture/run parity, local file preparation without automatic output, exact-source invalidation, strict timing/schema/size bounds, cancel and focus return, native handoff and clipboard failure');
+console.log('PASS compact export dialog: raw default, Traffic HAR of the selected row or the pinned list with credential values asked for or withheld, explicit modes and destinations, runtime/capture/run parity, local file preparation without automatic output, exact-source invalidation, strict timing/schema/size bounds, cancel and focus return, native handoff and clipboard failure');

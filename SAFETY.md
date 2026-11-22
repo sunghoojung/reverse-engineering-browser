@@ -140,31 +140,32 @@ it.
   confirmed by guessing. Source text that no response body carried (`eval` and
   `Function` strings, inline, inserted and `blob:` scripts) is page content and
   is sensitive capture: it is retained only with `REB_CAPTURE_REQUEST_CONTENT=1`,
-  which the packaged app's default content mode sets, at most 16 MiB per script
-  and 64 MiB of distinct text per renderer and configuration. See
-  [Native compiled scripts](protocol/native-compiled-scripts-v1.md).
+  which the packaged app's default content mode sets, whole at any length. See
+  [Native compiled scripts](protocol/native-compiled-scripts-v2.md).
 - Standalone probes remain inactive without an enabled session. Enabled artifact
   capture retains raw source URLs locally; metadata is not necessarily secret-free.
 - With Network capture on, every native request records its body's length,
   normalized content type and SHA-256. A digest of a short or predictable body
-  can be confirmed by guessing; password form posts keep no digest. Request
-  paths, queries and body bytes are sensitive capture: they are retained only
-  with `REB_CAPTURE_REQUEST_CONTENT=1`, which the packaged app's default content
-  mode sets, at most 16 MiB per body and 256 MiB of unique body and full-URL
-  bytes per session unless `REB_REQUEST_CONTENT_BUDGET_MIB` or the start panel's
-  **Request content budget** sets another, from 1 MiB to 4 GiB. Those bytes
-  include uploaded files, blobs and stream bodies, which the
-  browser reads for that purpose. See [Native network v2](protocol/native-network-v2.md). The same
-  sessions retain response bodies, at most 16 MiB each and 512 MiB of unique
-  bytes unless `REB_RESPONSE_BODY_BUDGET_MIB` sets another budget, including
-  partial copies of bodies still arriving, which use at most a quarter of it; images,
-  audio, video and fonts that page elements load need
-  `REB_CAPTURE_RESPONSE_MEDIA=1` or the start panel's **Capture media and
-  fonts**, and the panel's **Response body budget** sets that budget, from
-  1 MiB to 16 GiB. See [Native network v3](protocol/native-network-v3.md).
+  can be confirmed by guessing, so a Metadata only session keeps neither a
+  digest nor bytes of a password form post. Request paths, queries and body
+  bytes are sensitive capture: they are retained only with
+  `REB_CAPTURE_REQUEST_CONTENT=1`, which the packaged app's default content
+  mode sets, whole at any length. Those sessions keep password form posts like
+  any other body, marked as credential forms, so their evidence holds the
+  credentials typed into the page. Those bytes include uploaded files, blobs and
+  stream bodies, which the browser reads for that purpose. The same sessions
+  retain every response body whole, images, audio, video and fonts included,
+  and partial copies of bodies still arriving, which together copy at most four
+  times what the body kept plus 64 MiB. No size or count limits a session's
+  content: the artifact receiver refuses an item, and the evidence names it as
+  not kept, only when storing it would leave less free disk than its reserve,
+  4 GiB unless `REB_ARTIFACT_DISK_RESERVE_MIB` sets another
+  ([disk reserve](services/artifact-receiver/README.md#disk-reserve)). A
+  session an older browser recorded names that browser's budgets and 16 MiB
+  limit as its own. See [Native network v3](protocol/native-network-v3.md).
   The backend's request index keeps a private derived copy of those paths
   beside the event store; capture clear removes it
-  ([request index v1](protocol/request-index-v1.md)).
+  ([request index v2](protocol/request-index-v2.md)).
   A load Blink answers from a resource it already holds (its memory cache, or
   a `data:` URL or MHTML archive resource it decodes itself) makes no request
   and is still recorded as one row: its host, status, decoded size, Blink
@@ -197,7 +198,7 @@ it.
 - Sensitive capture requires an enabled, visibly labeled session. Content mode
   is the default for captures the packaged app starts: for its bounded session
   it turns on retention of request paths, queries and bodies and of response
-  bodies, up to 16 MiB each, of request and response headers, including `Cookie`, `Set-Cookie` and
+  bodies, whole, of request and response headers, including `Cookie`, `Set-Cookie` and
   `Authorization`, of the cookies each request sent and received and the
   cookie names and value digests page script used, and of Canvas images, and
   the titlebar labels that session "Content capture". **Metadata
@@ -426,24 +427,28 @@ it.
   the researcher's Collection and Analyst drafts, local store paths and every
   other content field of a tool result go to the provider. Choose it only when
   the target's authorization and the provider's terms allow that data to leave
-  the machine. The request header and cookie reads withhold cookie values and
-  credential header values (by header name) at every level, and the text reads
-  and search never return header blocks or cookie lists. Other header values,
-  such as `Location` or `Referer`, are returned as captured and can still hold
-  a secret, and script the agent evaluates in a connected document at Full
-  access returns whatever that page can read, such as `document.cookie`. The
-  agent's own sessions capture what the researcher's do, request content and
-  Canvas images included; Full access is the one consent for that, and its
-  warning says so. Consent in the agent dock turns a level on: it shows what
-  leaves the machine for that level, with the warning for Auto-approve
-  actions and Full access, beside a button that names the level, and there is
-  no other confirmation. The native app accepts only a known level, then holds
-  the level and enforces it: it decides every tool call by the running level
-  for every provider and CLI, saves the level last turned on or lowered to for
-  the next consent (which still asks, starting from it), shows the running
-  level on the dock button, and lowers the level at once from the dock menu;
-  raising it goes back through consent. No level authorizes a target, widens
-  session scope or exempts the agent from this policy.
+  the machine. That includes cookie values, received `Set-Cookie` lines and
+  credential header values such as `Authorization` from the request header and
+  cookie reads, and the header blocks and cookie lists the text reads and
+  search return, so a model can rebuild a request or study a signing scheme.
+  Below Full access those values are withheld (credential headers by header
+  name) and no tool lets the model ask for them; other header values, such as
+  `Location` or `Referer`, are withheld only as content is and can still hold
+  a secret on a connection that does not omit it. Script the agent evaluates
+  in a connected document at Full access returns whatever that page can read,
+  such as `document.cookie`. The agent's own sessions capture what the
+  researcher's do, request content and Canvas images included; Full access is
+  the one consent for that, and its warning says so. Consent in the agent dock
+  turns a level on: it shows what leaves the machine for that level, with the
+  warning for Auto-approve actions and Full access, beside a button that names
+  the level, and there is no other confirmation. The native app accepts only a
+  known level, then holds the level and enforces it: it decides every tool
+  call by the running level for every provider and CLI, saves the level last
+  turned on or lowered to for the next consent (which still asks, starting
+  from it), shows the running level on the dock button, and lowers the level
+  at once from the dock menu; raising it goes back through consent. No level
+  authorizes a target, widens session scope or exempts the agent from this
+  policy.
 - `reb-api mcp --permission read-only|ask|auto|full` applies the same levels to
   a local coding agent connected through `scripts/reb-api-mcp.sh`. `full` (or
   `--allow-content`) sends captured content to that client's model provider in
@@ -490,7 +495,7 @@ of the data-handling policy:
 | App-started Metadata content switches, digest default and agent-session exclusion | `LiveCaptureContent.resolve` and `LiveSessionCoordinator.captureDefaults` (Metadata turns request content, Canvas images and digests off; digests by default in Content mode with saved sites only, where an explicit value wins) and `session_launch.rs` (agent sessions remove an inherited site file and digest switch, and arm only named sites from a private copy) |
 | In-app agent permission level and per-call decision for the LangGraph and CLI loops | `AgentPermission.requested` (the level consent sends) and `AgentToolGate` in [`AgentCore.swift`](apps/research-ui/macos/AgentCore.swift), held by `enable` and changed only by `lowerPermission` in [`AgentBridge.swift`](apps/research-ui/macos/AgentBridge.swift), which alone save a level (`AgentPreferences`) |
 | Tool server content, effect and session-start gates (`--permission`, `--allow-content`, `--allow-session-start`) | [`mcp.rs`](apps/origin-trace-backend/src/bin/reb_api/mcp.rs) |
-| Header blocks and cookie lists never returned by the text reads or search, at any level | `WITHHELD_KINDS` in [`artifact_text.rs`](apps/origin-trace-backend/src/artifact_text.rs) |
+| Credential header values, cookie values, and header blocks and cookie lists in the text reads and search, only at Full access | `x-reb-mcp.credential_values` in [`openapi.json`](protocol/openapi.json), applied by `credential_parameter` in [`mcp.rs`](apps/origin-trace-backend/src/bin/reb_api/mcp.rs); `Credentials` in [`request_headers.rs`](apps/origin-trace-backend/src/request_headers.rs) and `WITHHELD_KINDS` in [`artifact_text.rs`](apps/origin-trace-backend/src/artifact_text.rs) withhold them otherwise |
 | Message task origins bounded before they are read and validated before use | `CloneableMessage` traits and `ShallowClone` in Chromium patch `0047-carry-message-task-origins.patch`, then `DecodeNativeTaskOrigin` in the overlay's `common/native_request_stack.h` |
 | Origin allowlisting | Not implemented; the native event envelope lacks trustworthy origin identity |
 

@@ -1,16 +1,34 @@
 /* Basic-block graph view: one function or bytecode image at a time. The drawing
- * is a single canvas, so nothing here scales DOM with graph size. Layout runs in
- * block_graph_layout.js as a Web Worker. Captured text is painted as glyphs. */
+ * is a single canvas, so nothing here scales DOM with graph size. Graphs are
+ * built and laid out in block_graph_layout.js as a Web Worker. Captured text
+ * is painted as glyphs. */
 const BLOCK_GRAPH_KIND = {fallthrough: 0, branch: 1, taken: 2, not_taken: 3, table: 4, table_default: 5, exception: 6, unresolved: 7, call: 8, assumed: 9, sequence: 10};
 const BLOCK_GRAPH_LIMITS = 'Declared flow, not observed execution. A complete drawing is not a proof.';
 /* Rows are drawn only where 11 px text stays readable; below it, labels are
  * painted at screen size and a cue says rows are hidden. */
 const BLOCK_GRAPH_ROW_ZOOM = 0.6;
+/* Below this zoom a card is a filled box, and every card of one kind is drawn
+ * as one path, so a graph of any size stays one fill per kind. */
+const BLOCK_GRAPH_OVERVIEW_ZOOM = 0.18;
 /* Layouts are retained in a small byte budget, never a whole-module set. */
 const BLOCK_GRAPH_CACHE_BYTES = 16 * 1024 * 1024;
 /* The backing store is the view's one allocation that scales with window size. */
 const BLOCK_GRAPH_CANVAS_BYTES = 32 * 1024 * 1024;
+/* The smallest viewport outline on the minimap, in its 300 by 220 backing
+ * pixels: about 8 CSS px at its full size, so a screen of a graph thousands
+ * of screens tall is still marked where one can see it. */
+const BLOCK_GRAPH_MINIMAP_MARK = 16;
+/* The share of the stage, on each axis, that a pan, zoom or resize always
+ * leaves showing the drawing, or the whole drawing where it is smaller: any
+ * edge of a graph pans as far as the middle of the stage, and a graph is
+ * never lost off it into empty canvas. */
+const BLOCK_GRAPH_PAN_KEEP = 0.5;
+/* The flow graph's zoom range. The block graph zooms out as far as Fit needs. */
 const GRAPH_ZOOM = Object.freeze({min: 0.02, max: 2.5});
+/* Kinds whose label says what the stroke cannot (a case list, why a target is
+ * unknown), drawn always. A true or false arm says it by color and dash, so
+ * its label is drawn for the selected block's edges only. */
+const BLOCK_GRAPH_LABELED = new Set([BLOCK_GRAPH_KIND.table, BLOCK_GRAPH_KIND.table_default, BLOCK_GRAPH_KIND.exception, BLOCK_GRAPH_KIND.unresolved, BLOCK_GRAPH_KIND.call, BLOCK_GRAPH_KIND.assumed]);
 
 /* Helpers this view shares with the flow graph (flow_graph.js, which loads
  * after this file). A view is {x, y, z}: the graph point at the canvas's top
@@ -44,9 +62,9 @@ function graphFitCanvas(canvas, stage) {
 }
 
 /** `view` zoomed by `factor` about the screen point (cx, cy), which stays
- * over the same graph point. */
-function graphZoomAt(view, factor, cx, cy) {
-  const z = Math.min(GRAPH_ZOOM.max, Math.max(GRAPH_ZOOM.min, view.z * factor));
+ * over the same graph point, within [min, GRAPH_ZOOM.max]. */
+function graphZoomAt(view, factor, cx, cy, min = GRAPH_ZOOM.min) {
+  const z = Math.min(GRAPH_ZOOM.max, Math.max(min, view.z * factor));
   const gx = view.x + cx / view.z, gy = view.y + cy / view.z;
   return {x: gx - cx / z, y: gy - cy / z, z};
 }
@@ -60,7 +78,7 @@ function graphTriskelElapsed(write) {
   const tick = () => {
     if (!running) return;
     const now = Math.floor((performance.now() - started) / 1000);
-    if (now !== second) { second = now; write(`Laying out with Triskel \u00b7 ${now} s`); }
+    if (now !== second) { second = now; write(`Laying out with Triskel · ${now} s`); }
     frame = requestAnimationFrame(tick);
   };
   tick();
@@ -70,13 +88,32 @@ function graphTriskelElapsed(write) {
 /* Reads Sources and the Flow workspace's CFG pane share. Each throws an Error
  * whose message can be shown; an aborted read throws an AbortError. */
 
-/** The error a failed response carries: its JSON `error`, else `fallback`. */
+/** The error a failed response carries: its JSON `error`, else `fallback`,
+ * with the response's `status`. */
 async function responseError(response, fallback) {
-  try { return Error((await response.json()).error || fallback); } catch { return Error(fallback); }
+  let message = fallback;
+  try { message = (await response.json()).error || fallback; } catch { /* the fallback stands */ }
+  return Object.assign(Error(message), {status: response.status});
+}
+
+/** What a failed read or layout tells the researcher, and whether Retry can
+ * help. Only a failure that can pass offers it: the service unreachable or
+ * busy, or the layout worker stopped. A refused read, an invalid document or
+ * a graph past the memory the layout could allocate fails the same way again. */
+function blockGraphFailure(error) {
+  if (error instanceof TypeError) return {message: 'The evidence service is unreachable. Check that the session is still running.', retry: true};
+  const text = String(error?.message || 'The graph could not be drawn.');
+  if (error?.name === 'RangeError' || /out of memory|allocation failed|invalid (typed )?array length|invalid string length/i.test(text))
+    return {message: `Drawing this graph needs more memory than the layout could allocate (${text}).`, retry: false};
+  if (Number.isInteger(error?.status)) return {message: text, retry: error.status >= 500 || error.status === 408 || error.status === 429};
+  return {message: text, retry: error?.transient === true};
 }
 
 /** What a failed read tells the researcher. */
-const graphReadMessage = error => (error instanceof TypeError ? 'The evidence service is unreachable. Check that the session is still running.' : error.message);
+const graphReadMessage = error => blockGraphFailure(error).message;
+
+/** `count` and its noun: `1 block`, `2 blocks`. */
+const blockGraphCount = (count, one, many = `${one}s`) => `${count.toLocaleString()} ${count === 1 ? one : many}`;
 
 /** A module's function index (wasm-function-index-v1): function indexes in
  * order, each body's size and name, and the index's status and omissions. */
@@ -92,148 +129,90 @@ async function readWasmFunctionIndex(artifactId, signal) {
 }
 
 /** One function's basic blocks (wasm-block-graph-v1), decoded and laid out
- * by `runner` with `view`'s measurements; `view` says when layout starts. */
+ * by `runner` with `view`'s measurements; `view` says when layout starts.
+ * The region layout is the answer: Triskel runs only when asked. */
 async function loadWasmFunctionGraph({artifactId, functionIndex, view, runner, signal}) {
   const response = await fetch(`/api/wasm/graph?artifact_id=${encodeURIComponent(artifactId)}&function=${functionIndex}`, {cache: 'no-store', signal});
   if (!response.ok) throw await responseError(response, `The block graph read returned ${response.status}.`);
   const buffer = await response.arrayBuffer();
   signal?.throwIfAborted();
   view.setState('loading', 'Laying out the graph…');
-  const result = await runner.run({type: 'wasm', buffer, metrics: view.measurements(), engine: blockGraphEngine()}, [buffer], {onProgress: view.progress});
+  const result = await runner.run({type: 'wasm', buffer, metrics: view.measurements()}, [buffer]);
   signal?.throwIfAborted();
   result.graph.functionIndex = functionIndex;
   return result;
 }
 
-/** Why the region layout stayed (a graphLayoutClient reason, or one_block
- * and not_served from the layout worker), as the header's tooltip words it. */
+/** Why Triskel's drawing is not shown (a graphLayoutClient reason, or
+ * one_block from the layout worker), as the header's tooltip words it. */
 function blockGraphLayoutReason(reason) {
   switch (reason?.code) {
-    case 'one_block': return 'one block';
-    case 'large': return `over ${blockGraphAutomatic()}, where Triskel runs only when asked`;
+    case 'one_block': return 'the function is one block';
     case 'cancelled': return 'Triskel was stopped';
-    case 'wider': return `Triskel would draw it ${reason.ratio.toFixed(1)}\u00d7 wider`;
-    case 'taller': return `Triskel would draw it ${reason.ratio.toFixed(1)}\u00d7 taller`;
     case 'mismatch': return 'the Triskel answer did not match the function';
     case 'failed': return `Triskel ${reason.status}${reason.detail ? `: ${reason.detail}` : ''}`;
     case 'status': return `the layout route returned ${reason.status}`;
     case 'route_failed': return `the layout route was unavailable (${reason.detail})`;
     case 'not_served': return 'the layout route is not served here';
+    case 'error': return reason.detail;
     default: return '';
   }
 }
 
-/** What the header adds about the layout engine, if anything. */
-function blockGraphEngineNote(engine) {
-  if (engine?.name === 'triskel') return 'Triskel layout';
-  const code = engine?.reason?.code;
-  if (code === 'wider' || code === 'taller') return `region layout: Triskel ${engine.reason.ratio.toFixed(1)}\u00d7 ${code}`;
-  if (code === 'large') return 'region layout';
-  if (code === 'cancelled') return 'region layout: Triskel stopped';
-  if (code === 'failed') return `region layout: Triskel ${engine.reason.status}`;
-  return '';
+/** `2.4`: a size ratio as the header prints it. */
+const blockGraphRatio = ratio => ratio.toFixed(ratio < 10 ? 1 : 0);
+
+/** Edge indices grouped by `key(e)`, which skips an edge by returning -1. */
+function blockGraphGroups(count, edges, key) {
+  const start = new Int32Array(count + 1);
+  for (let e = 0; e < edges; e += 1) { const k = key(e); if (k >= 0) start[k + 1] += 1; }
+  for (let i = 0; i < count; i += 1) start[i + 1] += start[i];
+  const fill = start.slice(0, count), list = new Int32Array(start[count]);
+  for (let e = 0; e < edges; e += 1) { const k = key(e); if (k >= 0) list[fill[k]++] = e; }
+  return {start, list};
 }
 
-/** The size up to which Triskel lays out a graph unasked, in words. */
-function blockGraphAutomatic() {
-  const {graphNodes, graphEdges} = typeof graphLayoutClient === 'object' ? graphLayoutClient.AUTOMATIC : {graphNodes: 2000, graphEdges: 8000};
-  return `${graphNodes.toLocaleString()} blocks or ${graphEdges.toLocaleString()} edges`;
+/** Distance from (px, py) to the segment (ax, ay)-(bx, by). */
+function blockGraphSegmentDistance(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay, length = dx * dx + dy * dy;
+  const t = length ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / length)) : 0;
+  return Math.hypot(px - ax - t * dx, py - ay - t * dy);
 }
-
-/** Basic blocks for a `reb-vm-static-analysis-v1` report, as declared edges. */
-function vmStaticBlockGraph(report) {
-  const instructions = report.instructions, edges = report.cfg.edges;
-  const hex = value => value.toString(16);
-  const byOffset = new Map(instructions.map((instruction, index) => [instruction.offset, index]));
-  const reachable = new Set(report.cfg.nodes.filter(node => node.reachable).map(node => node.offset));
-  const leaders = new Set();
-  if (instructions.length) leaders.add(instructions[0].offset);
-  for (const entry of report.cfg.entries) if (entry.status === 'resolved' && byOffset.has(entry.offset)) leaders.add(entry.offset);
-  const fallsThrough = new Set();
-  for (const edge of edges) if (edge.kind === 'fallthrough') fallsThrough.add(edge.from_offset);
-  for (const edge of edges) {
-    if (edge.status === 'resolved' && edge.to_offset !== null && edge.kind !== 'fallthrough') leaders.add(edge.to_offset);
-  }
-  instructions.forEach((instruction, index) => {
-    const next = instructions[index + 1];
-    if (next && !fallsThrough.has(instruction.offset)) leaders.add(next.offset);
-  });
-  const blocks = [], blockOf = new Map();
-  let current = null;
-  for (const instruction of instructions) {
-    if (leaders.has(instruction.offset) || !current) {
-      current = {start: instruction.offset, end: instruction.offset + instruction.size, list: []}; blocks.push(current);
-    }
-    current.list.push(instruction); current.end = instruction.offset + instruction.size;
-    blockOf.set(instruction.offset, blocks.length - 1);
-  }
-  const kinds = {fallthrough: BLOCK_GRAPH_KIND.fallthrough, jump: BLOCK_GRAPH_KIND.branch, branch_taken: BLOCK_GRAPH_KIND.taken,
-    branch_not_taken: BLOCK_GRAPH_KIND.not_taken, call: BLOCK_GRAPH_KIND.call, call_continuation: BLOCK_GRAPH_KIND.assumed};
-  const labels = {branch_taken: 'taken', branch_not_taken: 'not taken', call: 'call', call_continuation: 'assumed continuation', return: 'return: unknown destination', unknown: 'unknown target'};
-  const from = [], to = [], kind = [], edgeLabels = [];
-  for (const edge of edges) {
-    const source = blockOf.get(edge.from_offset);
-    if (source === undefined || blocks[source].list.at(-1).offset !== edge.from_offset) continue;
-    const resolved = edge.status === 'resolved' && edge.to_offset !== null && blockOf.has(edge.to_offset) && kinds[edge.kind] !== undefined;
-    from.push(source);
-    if (resolved) { to.push(blockOf.get(edge.to_offset)); kind.push(kinds[edge.kind]); edgeLabels.push(labels[edge.kind] ?? null); }
-    else {
-      to.push(-1); kind.push(BLOCK_GRAPH_KIND.unresolved);
-      edgeLabels.push(edge.to_offset === null ? (labels[edge.kind] ?? 'unresolved') : `${edge.kind} ${edge.status} 0x${hex(edge.to_offset)}`);
-    }
-  }
-  let rows = '';
-  let rowIndex = 0;
-  const firstRow = new Uint32Array(blocks.length), rowCount = new Uint32Array(blocks.length), counts = new Uint32Array(blocks.length), flags = new Uint32Array(blocks.length),
-    offsets = new Float64Array(blocks.length), ends = new Float64Array(blocks.length);
-  blocks.forEach((block, index) => {
-    firstRow[index] = rowIndex; rowCount[index] = block.list.length; counts[index] = block.list.length; offsets[index] = block.start; ends[index] = block.end;
-    if (index === 0) flags[index] |= 1;
-    if (reachable.has(block.start)) flags[index] |= 2;
-    for (const instruction of block.list) {
-      const operands = instruction.operands.map(operand => `${operand.name}=${operand.value}`).join(' ');
-      rows += `${hex(instruction.offset)} ${instruction.mnemonic}${operands ? ` ${operands}` : ''}\n`; rowIndex += 1;
-    }
-  });
-  const roots = [...new Set(report.cfg.entries.filter(entry => entry.status === 'resolved' && blockOf.has(entry.offset)).map(entry => blockOf.get(entry.offset)))];
-  return {count: blocks.length, offsets, ends, firstRow, rowCount, instructionCount: counts, flags,
-    from: Int32Array.from(from), to: Int32Array.from(to), kind: Uint8Array.from(kind), labels: edgeLabels, rows, roots: roots.length ? roots : [0],
-    title: report.image.image_id, status: 'decoded', instructions: instructions.length, omissions: [], evidence: 'declared',
-    notice: 'cfg.complete is false. Declared edges are not observed execution.'};
+/** `view` moved the least that keeps a `width` by `height` drawing on a
+ * `cssW` by `cssH` stage: on each axis, BLOCK_GRAPH_PAN_KEEP of the view's
+ * span of it, or all of it where it is smaller. */
+function blockGraphBoundView(view, width, height, cssW, cssH) {
+  const axis = (at, size, screen) => {
+    const span = screen / view.z, keep = Math.min(size, span * BLOCK_GRAPH_PAN_KEEP);
+    return Math.min(size - keep, Math.max(keep - span, at));
+  };
+  return {x: axis(view.x, width, cssW), y: axis(view.y, height, cssH), z: view.z};
 }
-
-/** Occurrence graph of retained steps. A gap card has no edge on either side. */
-function vmObservedBlockGraph(path) {
-  const cards = [], from = [], to = [], kind = [], labels = [];
-  const indexOf = new Map();
-  let rows = '';
-  path.nodes.forEach((node, index) => {
-    if (index) {
-      const gap = path.gaps.find(item => item.after_sequence === node.sequence);
-      if (gap) { cards.push({gap, text: `${gap.missing_steps} steps not retained`}); rows += `${gap.missing_steps} gap missing execution unknown\n`; }
-    }
-    indexOf.set(node.sequence, cards.length);
-    cards.push({node}); rows += `${node.sequence.toString(16)} pc 0x${node.pc_before.toString(16)} op ${node.opcode}\n`;
-  });
-  for (const edge of path.edges) { from.push(indexOf.get(edge.from_sequence)); to.push(indexOf.get(edge.to_sequence)); kind.push(BLOCK_GRAPH_KIND.sequence); labels.push(null); }
-  const count = cards.length;
-  const offsets = new Float64Array(count), flags = new Uint32Array(count), firstRow = new Uint32Array(count), rowCount = new Uint32Array(count).fill(1);
-  cards.forEach((card, index) => {
-    firstRow[index] = index; offsets[index] = card.node ? card.node.sequence : 0;
-    flags[index] = card.node ? 2 : 16;
-    if (index === 0) flags[index] |= 1;
-  });
-  // Each run of consecutive sequences and each gap card is its own stacked
-  // root, so the layout can never draw an edge across a missing step.
-  const roots = cards.map((card, index) => (index === 0 || card.gap || cards[index - 1].gap) ? index : -1).filter(index => index >= 0);
-  return {count, offsets, ends: offsets.slice(), firstRow, rowCount, instructionCount: rowCount.slice(), flags,
-    from: Int32Array.from(from), to: Int32Array.from(to), kind: Uint8Array.from(kind), labels, rows, roots, stackedRoots: true,
-    title: path.identity.trace_id, status: path.coverage.complete ? 'decoded' : 'partial', instructions: path.nodes.length, omissions: [...path.warnings], evidence: 'observed',
-    notice: 'Retained steps only. No edge crosses a gap. Not a static control-flow graph.', gaps: path.gaps.length};
+/** The scroll offset that shows row `row` (each `rowH` tall) whole in a list
+ * `height` px tall that is scrolled to `scroll`: unchanged when it already
+ * shows, else the least move. An unmeasured list counts as one row tall. */
+function blockGraphRowInView(row, scroll, height, rowH) {
+  const top = row * rowH, view = Math.max(rowH, height);
+  if (top < scroll) return top;
+  return top + rowH > scroll + view ? top + rowH - view : scroll;
+}
+/** The part [t0, t1] of segment `i` of the flat point list `pts` (from point
+ * i to point i + 1) that lies in the rectangle `clip`, or null (Liang-Barsky). */
+function blockGraphClipSegment(pts, i, clip) {
+  const x0 = pts[i * 2], y0 = pts[i * 2 + 1], dx = pts[i * 2 + 2] - x0, dy = pts[i * 2 + 3] - y0;
+  let t0 = 0, t1 = 1;
+  const side = (p, q) => {
+    if (p === 0) return q >= 0;
+    const t = q / p;
+    if (p < 0) { if (t > t1) return false; if (t > t0) t0 = t; } else { if (t < t0) return false; if (t < t1) t1 = t; }
+    return true;
+  };
+  return side(-dx, x0 - clip.l) && side(dx, clip.r - x0) && side(-dy, y0 - clip.t) && side(dy, clip.b - y0) ? [t0, t1] : null;
 }
 
 let blockGraphViews = 0;
 function createBlockGraphView(root, options = {}) {
+  const K = BLOCK_GRAPH_KIND;
   const node = (tag, className = '', text = '') => { const element = document.createElement(tag); if (className) element.className = className; if (text) element.textContent = text; return element; };
   root.classList.add('block-graph');
   const head = node('div', 'block-graph-head');
@@ -244,24 +223,26 @@ function createBlockGraphView(root, options = {}) {
   const tools = node('div', 'block-graph-tools');
   const tool = (label, action, aria) => { const element = node('button', 'source-tool block-graph-tool', label); element.type = 'button'; element.setAttribute('aria-label', aria ?? label); element.addEventListener('click', action); return element; };
   const zoomOut = tool('−', () => zoomAt(0.8), 'Zoom out'), zoomLabel = node('span', 'block-graph-zoom', '100%'), zoomIn = tool('+', () => zoomAt(1.25), 'Zoom in'), fitButton = tool('Fit', fit, 'Fit graph to view');
-  const zoomBar = node('div', 'block-graph-zoom-bar'); zoomBar.append(zoomOut, zoomLabel, zoomIn, fitButton);
-  // Offered where Triskel did not run unasked or was stopped; Cancel while it runs.
-  const triskelButton = tool('Lay out with Triskel', () => { if (explicit) options.runner?.skip(); else layOutWithTriskel(); });
+  const zoomBar = node('div', 'block-graph-zoom-bar'); zoomBar.append(zoomOut, zoomLabel, zoomIn, fitButton); zoomBar.hidden = true;
+  // Triskel runs only when asked. The button lays out with it, is Cancel
+  // while it runs, then switches between the two drawings.
+  const triskelButton = tool('Lay out with Triskel', triskelAction);
   triskelButton.classList.add('block-graph-triskel'); triskelButton.hidden = true;
   tools.append(triskelButton, zoomBar);
   const engineRun = node('span', 'block-graph-engine-run', ''); engineRun.setAttribute('role', 'status'); engineRun.setAttribute('aria-live', 'polite'); engineRun.hidden = true;
   const stage = node('div', 'block-graph-stage');
   const canvas = node('canvas', 'block-graph-canvas');
-  canvas.tabIndex = 0; canvas.setAttribute('role', 'application'); canvas.setAttribute('aria-label', 'Basic-block graph. Arrow keys move between blocks, plus and minus zoom, 0 fits, Shift plus arrows pan, Enter shows the selected block in the disassembly and hex.');
-  const miniWrap = node('div', 'block-graph-minimap'); const minimap = node('canvas', 'block-graph-minimap-canvas'); minimap.width = 300; minimap.height = 220; minimap.setAttribute('aria-hidden', 'true'); miniWrap.append(minimap);
+  canvas.tabIndex = 0; canvas.setAttribute('role', 'application');
+  canvas.setAttribute('aria-label', 'Basic-block graph. Arrow keys move between blocks; ] and [ step through them in address order. Alt with Left and Right picks an edge of the selected block, Alt with Down follows it to its target and Alt with Up to its source. Plus and minus zoom, 0 fits, Shift with the arrows pans, Enter shows the selected block in the disassembly and hex.');
+  const miniWrap = node('div', 'block-graph-minimap'); const minimap = node('canvas', 'block-graph-minimap-canvas'); minimap.width = 300; minimap.height = 220; minimap.setAttribute('aria-hidden', 'true'); miniWrap.append(minimap); miniWrap.hidden = true;
   const stateBox = node('div', 'block-graph-state'); stateBox.setAttribute('role', 'status'); stateBox.setAttribute('aria-live', 'polite'); stateBox.hidden = true;
   const stateText = node('p', '', ''); const retry = node('button', 'secondary-button', 'Retry'); retry.type = 'button'; retry.hidden = true;
-  const skip = node('button', 'secondary-button', 'Use the region layout'); skip.type = 'button'; skip.hidden = true;
-  stateBox.append(stateText, retry, skip);
+  stateBox.append(stateText, retry);
   const hud = node('div', 'block-graph-hud');
   const selection = node('span', 'block-graph-selection', ''); selection.setAttribute('role', 'status'); selection.setAttribute('aria-live', 'polite');
+  const findCue = node('span', 'block-graph-find', ''); findCue.hidden = true;
   const lodCue = node('span', 'block-graph-lod', 'Overview: zoom in to read instructions'); lodCue.hidden = true;
-  hud.append(lodCue, selection);
+  hud.append(lodCue, findCue, selection);
   stage.append(canvas, miniWrap, hud, stateBox);
   const foot = node('div', 'block-graph-foot');
   const limits = node('span', 'block-graph-limits', BLOCK_GRAPH_LIMITS);
@@ -277,62 +258,116 @@ function createBlockGraphView(root, options = {}) {
   const evidence = node('span', 'block-graph-evidence', '');
   head.append(title, analyst, stats, engineRun, evidence, tools);
   root.append(head, stage, foot);
-  const legendItems = [['fallthrough', 'fall'], ['taken', 'true'], ['not-taken', 'false'], ['table', 'table'], ['exception', 'catch'], ['unresolved', 'unresolved']];
-  for (const [kind, label] of legendItems) {
-    const item = node('span', 'block-graph-key');
-    const sample = document.createElementNS?.('http://www.w3.org/2000/svg', 'svg');
-    if (sample?.setAttribute) { sample.setAttribute('width', '22'); sample.setAttribute('height', '6'); sample.setAttribute('aria-hidden', 'true'); sample.classList.add(`block-graph-key-${kind}`); const line = document.createElementNS('http://www.w3.org/2000/svg', 'line'); line.setAttribute('x1', '0'); line.setAttribute('y1', '3'); line.setAttribute('x2', '22'); line.setAttribute('y2', '3'); sample.append(line); item.append(sample); }
-    item.append(node('span', '', label)); legend.append(item);
-  }
   const ctx = canvas.getContext?.('2d'), miniCtx = minimap.getContext?.('2d');
-  const tokenNames = {bg: '--graph-canvas', card: '--graph-card', head: '--graph-card-head', line: '--graph-card-line', text: '--text', muted: '--muted', faint: '--faint', accent: '--accent', soft: '--accent-soft', mono: '--mono', control: '--syntax-control', fn: '--syntax-function', num: '--syntax-number',
+  const tokenNames = {bg: '--graph-canvas', card: '--graph-card', head: '--graph-card-head', line: '--graph-card-line', text: '--text', muted: '--muted', faint: '--faint', mono: '--mono', control: '--syntax-control', fn: '--syntax-function',
+    selection: '--graph-selection', selectionSoft: '--graph-selection-soft', match: '--graph-match', overview: '--graph-card-overview', overviewDead: '--graph-card-overview-unreached',
     fallthrough: '--graph-edge-fallthrough', branch: '--graph-edge-branch', taken: '--graph-edge-taken', notTaken: '--graph-edge-not-taken', table: '--graph-edge-table', exception: '--graph-edge-exception', unresolved: '--graph-edge-unresolved', call: '--graph-edge-call', assumed: '--graph-edge-assumed', sequence: '--graph-edge-sequence', dead: '--graph-card-unreached', gap: '--graph-card-gap'};
   let tokens = {};
   const readTokens = () => { const style = getComputedStyle(root); const result = {}; for (const [key, name] of Object.entries(tokenNames)) result[key] = style.getPropertyValue(name).trim(); tokens = result; miniDirty = true; };
-  let view = {x: 0, y: 0, z: 1}, graph = null, starts = null, layout = null, selectedBlock = -1, selectedRow = -1, frame = 0, active = false, cssW = 0, cssH = 0, dpr = 1, miniDirty = true, onError = null;
+  /* `current` is the drawn result: {graph, starts, layout} from the layout
+   * worker, the region layout, plus `triskel` once Triskel answers, `shown`
+   * (which of the two is drawn) and each drawing's last view. */
+  let view = {x: 0, y: 0, z: 1}, current = null, graph = null, starts = null, layout = null, selectedBlock = -1, selectedRow = -1, focusEdge = -1;
+  let frame = 0, active = false, cssW = 0, cssH = 0, dpr = 1, miniDirty = true, miniImage = null, onError = null, needsFit = false, fitted = false;
+  // Per graph: edges out of and into each block, blocks in address order, and
+  // each stub's slot under its block, so a key press never scans the graph.
+  let outs = null, ins = null, order = null, rank = null, byFirstRow = null, exits = null, lowerRows = null;
+  // The Find in the drawn rows: matched rows and blocks, and the one shown.
+  let find = null;
+  // Label chips drawn in the last frame, in graph units, for pointer hits.
+  let chips = [];
   const edgeStyles = {
-    [BLOCK_GRAPH_KIND.fallthrough]: ['fallthrough', []], [BLOCK_GRAPH_KIND.branch]: ['branch', []], [BLOCK_GRAPH_KIND.taken]: ['taken', []], [BLOCK_GRAPH_KIND.not_taken]: ['notTaken', [6, 3]],
-    [BLOCK_GRAPH_KIND.table]: ['table', [2, 3]], [BLOCK_GRAPH_KIND.table_default]: ['table', [2, 3]], [BLOCK_GRAPH_KIND.exception]: ['exception', [8, 4]], [BLOCK_GRAPH_KIND.unresolved]: ['unresolved', [4, 2, 1, 2]],
-    [BLOCK_GRAPH_KIND.call]: ['call', [1, 3]], [BLOCK_GRAPH_KIND.assumed]: ['assumed', [1, 3]], [BLOCK_GRAPH_KIND.sequence]: ['sequence', []]};
+    [K.fallthrough]: ['fallthrough', []], [K.branch]: ['branch', []], [K.taken]: ['taken', []], [K.not_taken]: ['notTaken', [6, 3]],
+    [K.table]: ['table', [2, 3]], [K.table_default]: ['table', [2, 3]], [K.exception]: ['exception', [8, 4]], [K.unresolved]: ['unresolved', [4, 2, 1, 2]],
+    [K.call]: ['call', [1, 3]], [K.assumed]: ['assumed', [1, 3]], [K.sequence]: ['sequence', []]};
+  const styleOf = kind => edgeStyles[kind] ?? edgeStyles[K.branch];
+  // One repeat of a kind's dash pattern; a canvas repeats an odd list twice.
+  const dashPeriod = kind => { const dash = styleOf(kind)[1]; return dash.reduce((sum, part) => sum + part, 0) * (dash.length % 2 ? 2 : 1); };
   const m = {charW: 6.6, rowH: 16, headerH: 22, padX: 10, padY: 7};
-  const measure = () => { if (!ctx) return; ctx.font = `11px ${tokens.mono || 'monospace'}`; m.charW = ctx.measureText('0').width || 6.6; };
-  let needsFit = false;
-  const requestDraw = () => { if (active && !frame) frame = requestAnimationFrame(() => { frame = 0; draw(); }); };
-  /** The view that shows the whole graph in a canvas of `width` by `height`. */
-  function fitView(width, height) {
-    const z = Math.min(1, Math.max(GRAPH_ZOOM.min, Math.min(width / layout.width, height / layout.height)));
-    return {x: (layout.width - width / z) / 2, y: (layout.height - height / z) / 2, z};
+  let chipCharW = 6;
+  const measure = () => {
+    if (!ctx) return;
+    ctx.font = `11px ${tokens.mono || 'monospace'}`; m.charW = ctx.measureText('0').width || 6.6;
+    ctx.font = `10px ${tokens.mono || 'monospace'}`; chipCharW = ctx.measureText('0').width || 6;
+  };
+  // Every change of view asks for a draw, so the view is kept on the drawing here.
+  const requestDraw = () => {
+    if (layout && cssW) view = blockGraphBoundView(view, layout.width, layout.height, cssW, cssH);
+    if (active && !frame) frame = requestAnimationFrame(() => { frame = 0; draw(); });
+  };
+  /** Rows a card draws: a folded run of structural rows is one summary row. */
+  const shownRows = block => graph.rowCount[block] - (graph.folded?.[block] ?? 0) + (graph.folded?.[block] ? 1 : 0);
+  /** The absolute row a card's `shown` row draws, and back. */
+  const rowOfShown = (block, shown) => { const folded = graph.folded?.[block] ?? 0; return graph.firstRow[block] + (folded ? (shown === 0 ? 0 : folded + shown - 1) : shown); };
+  const shownOfRow = (block, row) => { const folded = graph.folded?.[block] ?? 0, local = row - graph.firstRow[block]; return folded ? (local < folded ? 0 : local - folded + 1) : local; };
+  const rowText = row => graph.rows.slice(starts[row], starts[row + 1] - 1);
+
+  /** The part of the stage the minimap and the HUD leave clear, which Fit
+   * fills: beside the minimap or above it, whichever leaves more room. The
+   * HUD is measured as it will be at the view's zoom: with the overview cue
+   * when `overview`, since a fit that zooms out shows the cue it measured
+   * before. */
+  function clearArea(overview) {
+    const box = stage.getBoundingClientRect?.(), mini = miniWrap.hidden ? null : miniWrap.getBoundingClientRect?.();
+    if (!box?.width) return {w: cssW, h: cssH};
+    const shown = lodCue.hidden; lodCue.hidden = !overview;
+    const cue = hud.getBoundingClientRect?.();
+    lodCue.hidden = shown;
+    const miniW = mini?.width ? box.right - mini.left : 0, miniH = mini?.height ? box.bottom - mini.top : 0;
+    const hudH = cue?.height ? box.bottom - cue.top : 0;
+    const beside = {w: cssW - miniW, h: cssH - hudH}, above = {w: cssW, h: cssH - Math.max(miniH, hudH)};
+    const area = ({w, h}) => Math.max(0, w) * Math.max(0, h);
+    const best = area(beside) >= area(above) ? beside : above;
+    return {w: Math.max(1, best.w), h: Math.max(1, best.h)};
   }
-  const sameView = (a, b) => Math.abs(a.z - b.z) < 1e-9 && Math.abs(a.x - b.x) < 1e-6 && Math.abs(a.y - b.y) < 1e-6;
+  /** The view that shows the whole drawing in the clear part of the stage,
+   * and the overview cue too when the drawing only fits below row zoom. */
+  function fitView() {
+    const zoomIn = ({w, h}) => Math.min(1, w / layout.width, h / layout.height);
+    let clear = clearArea(false), z = zoomIn(clear);
+    if (z < BLOCK_GRAPH_ROW_ZOOM) { clear = clearArea(true); z = zoomIn(clear); }
+    const {w, h} = clear;
+    return {x: layout.width / 2 - w / 2 / z, y: layout.height / 2 - h / 2 / z, z};
+  }
+  /** How far out the view zooms: past Fit for no graph, to Fit for any. */
+  const zoomFloor = () => (layout ? Math.min(GRAPH_ZOOM.min, fitView().z) : GRAPH_ZOOM.min);
   function resize() {
     if (!active) return;
-    // A fitted view stays fitted when the pane resizes (Linear hidden or a
-    // divider dragged), however it came to be fitted.
-    const fitted = Boolean(layout) && cssW > 1 && sameView(view, fitView(cssW, cssH));
     ({cssW, cssH, dpr} = graphFitCanvas(canvas, stage));
     if (needsFit && layout && cssW > 1) { needsFit = false; start(); return; }
-    if (fitted) { fit(); return; }
+    // A fitted view stays fitted when the pane resizes (Linear hidden or a
+    // divider dragged).
+    if (fitted && layout) view = fitView();
     requestDraw();
   }
   const visible = (x, y, w, h) => { const r = view.x + cssW / view.z, b = view.y + cssH / view.z; return x < r && x + w > view.x && y < b && y + h > view.y; };
+  const touches = edge => selectedBlock >= 0 && (graph.from[edge] === selectedBlock || graph.to[edge] === selectedBlock);
+  const isStub = edge => graph.to[edge] < 0 || layout.stub?.[edge] === 1;
+
   function draw() {
     if (!ctx || !active) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.fillStyle = tokens.bg; ctx.fillRect(0, 0, cssW, cssH);
-    if (!layout) { drawMinimap(); return; }
-    ctx.setTransform(dpr * view.z, 0, 0, dpr * view.z, -view.x * view.z * dpr, -view.y * view.z * dpr);
-    const lod = view.z < 0.18 ? 0 : view.z < BLOCK_GRAPH_ROW_ZOOM ? 1 : 2, rv = view.x + cssW / view.z, bv = view.y + cssH / view.z;
-    drawEdges(rv, bv, lod);
+    chips = [];
+    if (!layout) { lodCue.hidden = true; drawMinimap(); return; }
+    const z = view.z;
+    ctx.setTransform(dpr * z, 0, 0, dpr * z, -view.x * z * dpr, -view.y * z * dpr);
+    const lod = z < BLOCK_GRAPH_OVERVIEW_ZOOM ? 0 : z < BLOCK_GRAPH_ROW_ZOOM ? 1 : 2, rv = view.x + cssW / z, bv = view.y + cssH / z;
+    const labeled = drawEdges(rv, bv, lod);
     const shown = [];
-    for (let block = 0; block < graph.count; block += 1) {
-      const x = layout.x[block], y = layout.y[block], w = layout.w[block], h = layout.h[block];
-      if (x >= rv || x + w <= view.x || y >= bv || y + h <= view.y) continue;
-      drawCard(block, x, y, w, h, lod);
-      if (lod < 2) shown.push(block);
+    if (lod === 0) drawOverview(rv, bv, shown);
+    else {
+      for (let block = 0; block < graph.count; block += 1) {
+        const x = layout.x[block], y = layout.y[block], w = layout.w[block], h = layout.h[block];
+        if (x >= rv || x + w <= view.x || y >= bv || y + h <= view.y) continue;
+        drawCard(block, x, y, w, h, lod);
+        if (lod < 2) shown.push(block);
+      }
     }
+    if (lod === 2) drawChips(labeled, rv, bv);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     if (lod < 2) drawScreenLabels(shown);
     lodCue.hidden = lod === 2;
-    zoomLabel.textContent = `${Math.round(view.z * 100)}%`;
+    zoomLabel.textContent = `${z >= 0.1 ? Math.round(z * 100) : Number((z * 100).toPrecision(1))}%`;
     drawMinimap();
   }
   /** Below row zoom, each card that has room keeps a legible label and count. */
@@ -341,304 +376,574 @@ function createBlockGraphView(root, options = {}) {
     for (const block of blocks) {
       const sx = (layout.x[block] - view.x) * view.z, sy = (layout.y[block] - view.y) * view.z, sw = layout.w[block] * view.z, sh = layout.h[block] * view.z;
       if (sw < 48 || sh < 15) continue;
-      const room = Math.floor((sw - 12) / m.charW);
-      const label = blockLabel(block), count = `${graph.instructionCount[block]} ${graph.evidence === 'observed' ? 'step' : 'ins'}`;
+      const room = Math.floor((sw - 12) / m.charW), count = graph.instructionCount[block];
+      const label = blockLabel(block), counted = graph.evidence === 'observed' ? blockGraphCount(count, 'step') : `${count.toLocaleString()} ins`;
       ctx.save(); ctx.beginPath(); ctx.rect(sx, sy, sw, sh); ctx.clip();
+      // A label cut to a few characters names nothing; it is left out.
+      if (label.length > room && room < 10) { ctx.restore(); continue; }
       ctx.fillStyle = block === selectedBlock ? tokens.text : tokens.muted;
-      ctx.fillText(label.length > room ? `${label.slice(0, Math.max(1, room - 1))}…` : label, sx + 6, sy + Math.min(sh / 2, 11));
-      if (sh >= 34 && count.length <= room) { ctx.fillStyle = tokens.faint; ctx.fillText(count, sx + 6, sy + 28); }
+      ctx.fillText(label.length > room ? `${label.slice(0, room - 1)}…` : label, sx + 6, sy + Math.min(sh / 2, 11));
+      if (sh >= 34 && counted.length <= room) { ctx.fillStyle = tokens.faint; ctx.fillText(counted, sx + 6, sy + 28); }
       ctx.restore();
     }
   }
-  function edgePath(edge, lod) {
-    const start = layout.pointStart[edge], end = layout.pointStart[edge + 1];
-    const pts = layout.points, corner = lod === 2 ? 6 : 0;
-    ctx.beginPath(); ctx.moveTo(pts[start * 2], pts[start * 2 + 1]);
-    for (let i = start + 1; i < end; i += 1) {
-      const x = pts[i * 2], y = pts[i * 2 + 1];
-      if (corner && i < end - 1) ctx.arcTo(x, y, pts[(i + 1) * 2], pts[(i + 1) * 2 + 1], corner);
-      else ctx.lineTo(x, y);
+  /** Adds edge `edge`'s polyline to `path`, its corners rounded by `corner`
+   * where the segments beside a corner leave room. An edge that leaves
+   * `clip`, the view grown by more than a dash period, a corner and a stroke,
+   * adds only its runs of segments that meet `clip`: a canvas lays a dash
+   * pattern along the whole path before it clips, so an edge as tall as a
+   * large function cost its full length every frame. Each run starts a whole
+   * number of dash periods (`period`) along the edge from its first point,
+   * where the restarted pattern matches the whole edge's, so the dashes stay
+   * put as the view pans; the tangent distances and arc lengths are those
+   * arcTo draws. */
+  function trace(path, edge, corner, clip = null, period = 0) {
+    const start = layout.pointStart[edge], end = layout.pointStart[edge + 1], pts = layout.points, box = layout.box;
+    if (!clip || (box[edge * 4] >= clip.l && box[edge * 4 + 1] >= clip.t && box[edge * 4 + 2] <= clip.r && box[edge * 4 + 3] <= clip.b)) {
+      path.moveTo(pts[start * 2], pts[start * 2 + 1]);
+      for (let i = start + 1; i < end; i += 1) {
+        const x = pts[i * 2], y = pts[i * 2 + 1];
+        if (corner && i < end - 1) {
+          const nx = pts[(i + 1) * 2], ny = pts[(i + 1) * 2 + 1];
+          const r = Math.min(corner, Math.hypot(x - pts[(i - 1) * 2], y - pts[(i - 1) * 2 + 1]) / 2, Math.hypot(nx - x, ny - y) / 2);
+          if (r > 0.5) { path.arcTo(x, y, nx, ny, r); continue; }
+        }
+        path.lineTo(x, y);
+      }
+      return;
     }
-    ctx.stroke();
+    // `walked` is the stroked length up to where segment i's straight part
+    // starts, `tangentIn` that part's distance from point i.
+    let walked = 0, tangentIn = 0, open = false, next = blockGraphClipSegment(pts, start, clip);
+    for (let i = start; i < end - 1; i += 1) {
+      const span = next;
+      next = i + 2 < end ? blockGraphClipSegment(pts, i + 1, clip) : null;
+      const x0 = pts[i * 2], y0 = pts[i * 2 + 1], x1 = pts[i * 2 + 2], y1 = pts[i * 2 + 3], length = Math.hypot(x1 - x0, y1 - y0);
+      let r = 0, tangentOut = 0, arc = 0;
+      if (corner && i + 2 < end) {
+        const nx = pts[i * 2 + 4], ny = pts[i * 2 + 5];
+        r = Math.min(corner, length / 2, Math.hypot(nx - x1, ny - y1) / 2);
+        // The turn between the two segments; a straight or reversed pair is
+        // drawn as a line through the point.
+        const turn = Math.atan2(Math.abs((x1 - x0) * (ny - y1) - (y1 - y0) * (nx - x1)), (x1 - x0) * (nx - x1) + (y1 - y0) * (ny - y1));
+        if (r > 0.5 && turn > 1e-6 && turn < Math.PI - 1e-6) { tangentOut = r * Math.tan(turn / 2); arc = r * turn; } else r = 0;
+      }
+      if (span) {
+        if (!open) {
+          const along = Math.max(span[0] * length, tangentIn), back = period ? (walked + along - tangentIn) % period : 0, at = length ? (along - back) / length : 0;
+          path.moveTo(x0 + (x1 - x0) * at, y0 + (y1 - y0) * at);
+          open = true;
+        }
+        if (next) { if (r) path.arcTo(x1, y1, pts[i * 2 + 4], pts[i * 2 + 5], r); else path.lineTo(x1, y1); }
+        else { path.lineTo(x0 + (x1 - x0) * span[1], y0 + (y1 - y0) * span[1]); open = false; }
+      }
+      walked += length - tangentIn - tangentOut + arc; tangentIn = tangentOut;
+    }
   }
-  function arrow(edge) {
-    const end = layout.pointStart[edge + 1] - 1, pts = layout.points, x = pts[end * 2], y = pts[end * 2 + 1];
-    const px = pts[(end - 1) * 2], py = pts[(end - 1) * 2 + 1], angle = Math.atan2(y - py, x - px), size = 6;
-    ctx.setLineDash([]); ctx.beginPath(); ctx.moveTo(x, y);
-    ctx.lineTo(x - size * Math.cos(angle - 0.45), y - size * Math.sin(angle - 0.45));
-    ctx.lineTo(x - size * Math.cos(angle + 0.45), y - size * Math.sin(angle + 0.45)); ctx.closePath(); ctx.fill();
+  /** Adds the arrowhead at edge `edge`'s end to `path`. */
+  function arrowhead(path, edge) {
+    const end = layout.pointStart[edge + 1] - 1, pts = layout.points;
+    if (end <= layout.pointStart[edge]) return;
+    const x = pts[end * 2], y = pts[end * 2 + 1], angle = Math.atan2(y - pts[end * 2 - 1], x - pts[end * 2 - 2]), size = 6;
+    path.moveTo(x, y);
+    path.lineTo(x - size * Math.cos(angle - 0.45), y - size * Math.sin(angle - 0.45));
+    path.lineTo(x - size * Math.cos(angle + 0.45), y - size * Math.sin(angle + 0.45)); path.closePath();
   }
+  /** Draws the visible edges, one stroke per kind; the selected block's
+   * edges over the rest, then the focused edge. Returns the edges to label. */
   function drawEdges(rv, bv, lod) {
-    const groups = new Map(), selected = [];
-    const count = graph.from.length;
+    const plain = new Map(), picked = new Map(), labeled = [], corner = lod === 2 ? 6 : 0, count = graph.from.length, box = layout.box;
+    // Past a dash period, a corner and the focus halo, nothing clipped shows.
+    const pad = 32 + 8 / view.z, clip = {l: view.x - pad, t: view.y - pad, r: rv + pad, b: bv + pad};
+    const batch = (map, kind) => { let entry = map.get(kind); if (!entry) map.set(kind, entry = {path: new Path2D(), heads: new Path2D()}); return entry; };
+    let focused = false;
     for (let edge = 0; edge < count; edge += 1) {
-      const minX = layout.box[edge * 4], minY = layout.box[edge * 4 + 1], maxX = layout.box[edge * 4 + 2], maxY = layout.box[edge * 4 + 3];
-      if (minX > rv || maxX < view.x || minY > bv || maxY < view.y) continue;
-      if (graph.from[edge] === selectedBlock || graph.to[edge] === selectedBlock) { selected.push(edge); continue; }
-      const kind = graph.kind[edge]; if (!groups.has(kind)) groups.set(kind, []); groups.get(kind).push(edge);
+      if (box[edge * 4] > rv || box[edge * 4 + 2] < view.x || box[edge * 4 + 1] > bv || box[edge * 4 + 3] < view.y) continue;
+      const kind = graph.kind[edge], near = touches(edge);
+      if (lod === 2 && !isStub(edge) && chipText(edge) && (near || edge === focusEdge || BLOCK_GRAPH_LABELED.has(kind))) labeled.push(edge);
+      if (edge === focusEdge) { focused = true; continue; }
+      const entry = batch(near ? picked : plain, kind);
+      trace(entry.path, edge, corner, clip, lod === 2 ? dashPeriod(kind) : 0);
+      if (lod >= 1 && graph.to[edge] >= 0) arrowhead(entry.heads, edge);
     }
-    ctx.lineJoin = 'round';
-    const styleFor = kind => {
-      const [token, dash] = edgeStyles[kind] ?? edgeStyles[BLOCK_GRAPH_KIND.branch];
-      ctx.strokeStyle = tokens[token]; ctx.fillStyle = tokens[token]; ctx.setLineDash(lod === 2 ? dash : []);
+    ctx.lineJoin = 'round'; ctx.lineCap = 'butt';
+    const paint = (map, width, color) => {
+      for (const [kind, entry] of map) {
+        const [token, dash] = styleOf(kind);
+        ctx.strokeStyle = ctx.fillStyle = color ?? tokens[token]; ctx.lineWidth = width; ctx.setLineDash(lod === 2 ? dash : []);
+        ctx.stroke(entry.path); ctx.setLineDash([]); ctx.fill(entry.heads);
+      }
     };
-    ctx.lineWidth = lod === 2 ? 1.8 : 1 / Math.max(view.z, 0.2);
-    for (const [kind, edges] of groups) {
-      styleFor(kind);
-      for (const edge of edges) { edgePath(edge, lod); if (lod >= 1 && graph.to[edge] >= 0) { arrow(edge); styleFor(kind); } }
+    paint(plain, lod === 2 ? 1.8 : 1 / view.z);
+    paint(picked, lod === 2 ? 2.6 : 2.2 / view.z, tokens.selection);
+    if (focused) {
+      // The focused edge: a soft halo under a full-width selection stroke.
+      const path = new Path2D(), heads = new Path2D();
+      trace(path, focusEdge, corner, clip, lod === 2 ? dashPeriod(graph.kind[focusEdge]) : 0); if (graph.to[focusEdge] >= 0) arrowhead(heads, focusEdge);
+      ctx.setLineDash([]); ctx.strokeStyle = tokens.selectionSoft; ctx.lineWidth = lod === 2 ? 8 : 7 / view.z; ctx.stroke(path);
+      ctx.strokeStyle = ctx.fillStyle = tokens.selection; ctx.lineWidth = lod === 2 ? 3.2 : 3 / view.z; ctx.setLineDash(lod === 2 ? styleOf(graph.kind[focusEdge])[1] : []);
+      ctx.stroke(path); ctx.setLineDash([]); ctx.fill(heads);
     }
-    if (selected.length) {
-      ctx.lineWidth = 2.6 / Math.max(view.z, 0.4);
-      for (const edge of selected) { styleFor(graph.kind[edge]); ctx.strokeStyle = tokens.accent; ctx.fillStyle = tokens.accent; edgePath(edge, lod); if (graph.to[edge] >= 0) arrow(edge); }
-    }
-    if (lod === 2) drawLabels(rv, bv, groups, selected);
+    return labeled;
   }
-  function drawLabels(rv, bv, groups, selected) {
-    ctx.setLineDash([]); ctx.font = `10px ${tokens.mono}`; ctx.textBaseline = 'alphabetic';
-    const paint = (edge) => {
-      const label = graph.labels[edge]; if (!label) return;
-      const kind = graph.kind[edge], text = label.length > 24 ? `${label.slice(0, 23)}…` : label;
-      const start = layout.pointStart[edge], end = layout.pointStart[edge + 1] - 1, pts = layout.points;
+  /** What an edge's chip says. */
+  const chipText = edge => graph.labels[edge] || '';
+  /** An exit row, in the words the layout sized it with. */
+  const exitText = edge => blockGraphLayout.exitText(graph, edge);
+  /** Each label is a chip beside its stroke, never over it: where the edge
+   * arrives, beside its last segment and clear of the card it enters. Edges
+   * arriving at one point stack their chips away from the card. Exits are
+   * labeled in their cards. */
+  function drawChips(edges, rv, bv) {
+    ctx.setLineDash([]); ctx.font = `10px ${tokens.mono}`; ctx.textBaseline = 'middle';
+    const h = 14, taken = new Map(), pts = layout.points;
+    const stack = key => { const n = taken.get(key) ?? 0; taken.set(key, n + 1); return n * (h + 2); };
+    for (const edge of edges) {
+      const full = chipText(edge), text = full.length > 32 ? `${full.slice(0, 31)}…` : full, w = text.length * chipCharW + 8;
+      const end = layout.pointStart[edge + 1] - 1, kind = graph.kind[edge], tx = pts[end * 2], ty = pts[end * 2 + 1];
+      const dx = tx - pts[end * 2 - 2], dy = ty - pts[end * 2 - 1], shift = stack(`${tx},${ty}`);
       let x, y;
-      if (kind === BLOCK_GRAPH_KIND.table) { x = pts[end * 2] + 3; y = pts[end * 2 + 1] - 6; }
-      else if (kind === BLOCK_GRAPH_KIND.unresolved) { x = pts[end * 2] + 4; y = pts[end * 2 + 1] + 2; }
-      else { x = pts[start * 2] + 3; y = pts[start * 2 + 1] + 11; }
-      if (x > rv || y > bv || x < view.x - 100 || y < view.y) return;
-      ctx.fillStyle = tokens[(edgeStyles[kind] ?? edgeStyles[1])[0]]; ctx.fillText(text, x, y);
+      if (Math.abs(dy) >= Math.abs(dx)) { x = tx + 5; y = dy >= 0 ? ty - h - 4 - shift : ty + 4 + shift; }
+      else { x = dx > 0 ? tx - w - 6 : tx + 6; y = ty - h - 3 - shift; }
+      if (x > rv || y > bv || x + w < view.x || y + h < view.y) continue;
+      const near = touches(edge) || edge === focusEdge;
+      ctx.fillStyle = tokens.card; ctx.strokeStyle = near ? tokens.selection : tokens[styleOf(kind)[0]]; ctx.lineWidth = near ? 1.5 : 1;
+      ctx.beginPath(); graphRoundedRect(ctx, x, y, w, h, 3); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = near ? tokens.text : tokens.muted; ctx.fillText(text, x + 4, y + h / 2 + 0.5);
+      chips.push({x, y, w, h, edge});
+    }
+  }
+  /** Overview: every visible card of one kind in one path. A card keeps at
+   * least a pixel, and the selection and the shown match a ring of ten, so
+   * neither disappears at any zoom. */
+  function drawOverview(rv, bv, shown) {
+    const live = new Path2D(), dead = new Path2D(), gaps = new Path2D(), found = new Path2D(), z = view.z, least = 1 / z;
+    for (let block = 0; block < graph.count; block += 1) {
+      const x = layout.x[block], y = layout.y[block], w = Math.max(layout.w[block], least), h = Math.max(layout.h[block], least);
+      if (x >= rv || x + w <= view.x || y >= bv || y + h <= view.y) continue;
+      const flags = graph.flags[block];
+      (flags & 16 ? gaps : flags & 2 ? live : dead).rect(x, y, w, h);
+      if (find?.hit[block]) found.rect(x, y, w, h);
+      if (w * z >= 48 && h * z >= 15) shown.push(block);
+    }
+    ctx.fillStyle = tokens.overview; ctx.fill(live);
+    ctx.fillStyle = tokens.overviewDead; ctx.fill(dead);
+    ctx.fillStyle = tokens.gap; ctx.fill(gaps);
+    if (find) { ctx.fillStyle = tokens.match; ctx.fill(found); }
+    const ring = (block, color) => {
+      if (block < 0) return;
+      const w = Math.max(layout.w[block], 10 / z), h = Math.max(layout.h[block], 10 / z), x = layout.x[block] + layout.w[block] / 2 - w / 2, y = layout.y[block] + layout.h[block] / 2 - h / 2;
+      ctx.setLineDash([]); ctx.strokeStyle = color; ctx.lineWidth = 2 / z; ctx.strokeRect(x - 2 / z, y - 2 / z, w + 4 / z, h + 4 / z);
     };
-    for (const edges of groups.values()) edges.forEach(paint);
-    selected.forEach(paint);
+    if (find?.current >= 0) ring(find.blocks[find.current], tokens.match);
+    ring(selectedBlock, tokens.selection);
   }
   function drawCard(block, x, y, w, h, lod) {
     const flags = graph.flags[block], unreached = !(flags & 2), gapCard = (flags & 16) !== 0, picked = block === selectedBlock;
+    // Outlines stay one screen pixel at every zoom.
+    const matched = find?.hit[block] === 1, shownMatch = find?.current >= 0 && find.blocks[find.current] === block, hair = 1 / view.z;
     ctx.setLineDash([]);
-    ctx.fillStyle = gapCard ? tokens.gap : tokens.card; ctx.strokeStyle = picked ? tokens.accent : tokens.line;
-    ctx.lineWidth = picked ? 2 / Math.max(view.z, 0.5) : 1 / Math.max(view.z, 0.5);
+    ctx.fillStyle = gapCard ? tokens.gap : tokens.card; ctx.strokeStyle = picked ? tokens.selection : matched ? tokens.match : tokens.line;
+    ctx.lineWidth = picked || shownMatch ? 2 * hair : matched ? 1.5 * hair : hair;
     ctx.beginPath(); graphRoundedRect(ctx, x, y, w, h, 4); ctx.fill(); ctx.stroke();
-    if (lod === 0) return;
+    if (picked && shownMatch) { ctx.strokeStyle = tokens.match; ctx.lineWidth = hair; ctx.beginPath(); graphRoundedRect(ctx, x - 3 * hair, y - 3 * hair, w + 6 * hair, h + 6 * hair, 6); ctx.stroke(); }
     ctx.save(); ctx.beginPath(); graphRoundedRect(ctx, x, y, w, h, 4); ctx.clip();
-    if (!gapCard && lod === 2) { ctx.fillStyle = unreached ? tokens.dead : picked ? tokens.soft : tokens.head; ctx.fillRect(x, y, w, m.headerH); }
+    if (!gapCard && lod === 2) { ctx.fillStyle = unreached ? tokens.dead : picked ? tokens.selectionSoft : tokens.head; ctx.fillRect(x, y, w, m.headerH); }
     else if (unreached) { ctx.fillStyle = tokens.dead; ctx.fillRect(x, y, w, h); }
     if (lod === 2) {
       ctx.textBaseline = 'middle'; ctx.font = `11px ${tokens.mono}`; ctx.fillStyle = tokens.muted;
       if (gapCard) ctx.fillText('gap', x + m.padX, y + m.headerH / 2);
       else {
         ctx.fillText(blockLabel(block), x + m.padX, y + m.headerH / 2);
-        const badge = String(graph.instructionCount[block]), bw = badge.length * m.charW + 8;
+        const badge = graph.instructionCount[block].toLocaleString(), bw = badge.length * m.charW + 8;
         // A filled count badge, as in the Flow graph.
         ctx.fillStyle = tokens.head; ctx.fillRect(x + w - bw - 7.5, y + 4.5, bw, 13);
         ctx.strokeStyle = tokens.line; ctx.lineWidth = 1; ctx.strokeRect(x + w - bw - 7.5, y + 4.5, bw, 13); ctx.fillStyle = tokens.muted; ctx.fillText(badge, x + w - bw - 3, y + m.headerH / 2);
       }
+      drawRows(block, x, y, w);
     }
-    if (lod === 2) drawRows(block, x, y, w, h);
     ctx.restore();
   }
-  function drawRows(block, x, y, w, h) {
-    const first = graph.firstRow[block], count = graph.rowCount[block], top = y + m.headerH + m.padY;
+  function drawRows(block, x, y, w) {
+    const folded = graph.folded?.[block] ?? 0, count = shownRows(block), top = y + m.headerH + m.padY;
     ctx.font = `11px ${tokens.mono}`; ctx.textBaseline = 'alphabetic';
     const firstVisible = Math.max(0, Math.floor((view.y - top) / m.rowH)), lastVisible = Math.min(count, Math.ceil((view.y + cssH / view.z - top) / m.rowH));
-    for (let row = firstVisible; row < lastVisible; row += 1) {
-      const text = graph.rows.slice(starts[first + row], starts[first + row + 1] - 1);
-      const ry = top + row * m.rowH;
-      if (selectedRow === first + row) { ctx.fillStyle = tokens.soft; ctx.fillRect(x + 1, ry, w - 2, m.rowH); ctx.fillStyle = tokens.accent; ctx.fillRect(x + 1, ry + 2, 2, m.rowH - 4); }
-      const a = text.indexOf(' '), b = text.indexOf(' ', a + 1);
-      const offset = text.slice(0, a), mnemonic = b < 0 ? text.slice(a + 1) : text.slice(a + 1, b), rest = b < 0 ? '' : text.slice(b + 1);
-      const line = ry + m.rowH - 4;
+    const pickedShown = selectedBlock === block && selectedRow >= 0 ? shownOfRow(block, selectedRow) : -1;
+    for (let shown = firstVisible; shown < lastVisible; shown += 1) {
+      const row = rowOfShown(block, shown), ry = top + shown * m.rowH, line = ry + m.rowH - 4;
+      if (pickedShown === shown) { ctx.fillStyle = tokens.selectionSoft; ctx.fillRect(x + 1, ry, w - 2, m.rowH); ctx.fillStyle = tokens.selection; ctx.fillRect(x + 1, ry + 2, 2, m.rowH - 4); }
+      const text = rowText(row), a = text.indexOf(' ');
+      if (folded && shown === 0) {
+        // The structural rows folded in: the first one's offset and what they were.
+        // A header-tinted band sets it apart from the rows that run.
+        let hit = false; for (let r = row; r < row + folded && !hit; r += 1) hit = find?.rowHit[r] === 1;
+        if (pickedShown !== shown) { ctx.fillStyle = tokens.head; ctx.fillRect(x + 1, ry + 1, w - 2, m.rowH - 2); }
+        if (hit) { ctx.globalAlpha = 0.16; ctx.fillStyle = tokens.match; ctx.fillRect(x + 1, ry, w - 2, m.rowH); ctx.globalAlpha = 1; }
+        ctx.fillStyle = tokens.faint; ctx.fillText(`${text.slice(0, a)} ${graph.foldNote[block]}`, x + m.padX, line);
+        continue;
+      }
+      const spaced = text.indexOf(' ', a + 1), b = spaced < 0 ? text.length : spaced;
+      const offset = text.slice(0, a), mnemonic = text.slice(a + 1, b), rest = spaced < 0 ? '' : text.slice(b + 1);
+      const mnemonicX = x + m.padX + (offset.length + 1) * m.charW, restX = mnemonicX + (Math.max(mnemonic.length, 10) + 1) * m.charW;
+      if (find?.rowHit[row]) {
+        // A matched row is banded, and each match boxed under its glyphs.
+        ctx.globalAlpha = 0.14; ctx.fillStyle = tokens.match; ctx.fillRect(x + 1, ry, w - 2, m.rowH);
+        ctx.globalAlpha = 0.42;
+        const lower = text.toLowerCase(), charX = c => (c < a ? x + m.padX + c * m.charW : c <= b ? mnemonicX + (c - a - 1) * m.charW : restX + (c - b - 1) * m.charW);
+        if (lower.length === text.length) {
+          for (let at = lower.indexOf(find.needle); at >= 0; at = lower.indexOf(find.needle, at + find.needle.length))
+            for (let c = at; c < at + find.needle.length; c += 1) ctx.fillRect(charX(c), ry + 2, m.charW, m.rowH - 3);
+        }
+        ctx.globalAlpha = 1;
+      }
       ctx.fillStyle = tokens.faint; ctx.fillText(offset, x + m.padX, line);
-      const mnemonicX = x + m.padX + (offset.length + 1) * m.charW;
-      ctx.fillStyle = /^(br|if|else|end|loop|block|return|try|catch|throw|unreachable)/.test(mnemonic) ? tokens.control : /^call/.test(mnemonic) ? tokens.fn : tokens.text;
+      ctx.fillStyle = /^(br|if|else|end|loop|block|return|try|catch|throw|rethrow|delegate|unreachable)/.test(mnemonic) ? tokens.control : /^call/.test(mnemonic) ? tokens.fn : tokens.text;
       ctx.fillText(mnemonic, mnemonicX, line);
-      if (rest) { ctx.fillStyle = tokens.muted; ctx.fillText(rest, mnemonicX + (Math.max(mnemonic.length, 10) + 1) * m.charW, line); }
+      if (rest) { ctx.fillStyle = tokens.muted; ctx.fillText(rest, restX, line); }
     }
-    if (graph.flags[block] & 32) { ctx.fillStyle = tokens.faint; ctx.fillText(count ? 'more rows past the byte budget' : 'rows past the byte budget', x + m.padX, top + count * m.rowH + m.rowH - 4); }
+    drawExits(block, x, top + count * m.rowH + m.padY, w);
   }
-  const blockLabel = block => graph.flags[block] & 16 ? 'gap' : options.blockLabel?.(graph, block) ?? `loc_${graph.offsets[block].toString(16)}`;
+  /** A block's exits under a hairline, each a row a click follows: the
+   * arrow in its edge's color, the text bright when the edge is the selected
+   * block's or focused. */
+  function drawExits(block, x, top, w) {
+    const first = exits.start[block], last = exits.start[block + 1];
+    if (first === last) return;
+    ctx.fillStyle = tokens.line; ctx.fillRect(x + m.padX, top - m.padY / 2 - 0.5, w - m.padX * 2, 1);
+    const room = Math.max(4, Math.floor((w - m.padX * 2) / m.charW));
+    for (let i = first; i < last; i += 1) {
+      const edge = exits.list[i], ry = top + (i - first) * m.rowH, line = ry + m.rowH - 4, full = exitText(edge);
+      const text = full.length > room ? `${full.slice(0, room - 1)}…` : full, near = edge === focusEdge || touches(edge);
+      if (edge === focusEdge) { ctx.fillStyle = tokens.selectionSoft; ctx.fillRect(x + 1, ry, w - 2, m.rowH); }
+      ctx.fillStyle = near ? tokens.selection : tokens[styleOf(graph.kind[edge])[0]]; ctx.fillText(text.slice(0, 1), x + m.padX, line);
+      ctx.fillStyle = near ? tokens.text : tokens.muted; ctx.fillText(text.slice(1), x + m.padX + m.charW, line);
+      chips.push({x: x + 1, y: ry, w: w - 2, h: m.rowH, edge});
+    }
+  }
+  // The layout's names, which it also sizes exit rows with.
+  const blockLabel = block => blockGraphLayout.blockName(graph, block);
   function drawMinimap() {
     if (!miniCtx) return;
     miniWrap.hidden = !layout;
     if (!layout) return;
     const w = minimap.width, h = minimap.height, scale = Math.min(w / layout.width, h / layout.height);
+    const ox = (w - layout.width * scale) / 2, oy = (h - layout.height * scale) / 2;
     if (miniDirty) {
       miniCtx.fillStyle = tokens.bg; miniCtx.fillRect(0, 0, w, h);
-      miniCtx.fillStyle = tokens.faint;
-      const ox = (w - layout.width * scale) / 2, oy = (h - layout.height * scale) / 2;
+      miniCtx.fillStyle = tokens.overview;
       for (let block = 0; block < graph.count; block += 1) miniCtx.fillRect(ox + layout.x[block] * scale, oy + layout.y[block] * scale, Math.max(1, layout.w[block] * scale), Math.max(1, layout.h[block] * scale));
+      if (find) {
+        miniCtx.fillStyle = tokens.match;
+        for (const block of find.blocks) miniCtx.fillRect(ox + layout.x[block] * scale - 1, oy + layout.y[block] * scale - 1, Math.max(3, layout.w[block] * scale + 2), Math.max(3, layout.h[block] * scale + 2));
+      }
       miniImage = miniCtx.getImageData?.(0, 0, w, h) ?? null;
       miniDirty = false;
     }
     if (miniImage) miniCtx.putImageData(miniImage, 0, 0);
-    miniCtx.strokeStyle = tokens.accent; miniCtx.lineWidth = 2;
-    const ox = (w - layout.width * scale) / 2, oy = (h - layout.height * scale) / 2;
-    // The viewport can be larger than the whole graph; keep its outline on the minimap.
-    const left = Math.max(1, ox + view.x * scale), top = Math.max(1, oy + view.y * scale);
-    const right = Math.min(w - 1, ox + (view.x + cssW / view.z) * scale), bottom = Math.min(h - 1, oy + (view.y + cssH / view.z) * scale);
-    miniCtx.strokeRect(left, top, Math.max(3, right - left), Math.max(3, bottom - top));
+    miniCtx.strokeStyle = tokens.selection; miniCtx.lineWidth = 2;
+    const [left, width] = minimapSpan(ox + view.x * scale, cssW / view.z * scale, w);
+    const [top, height] = minimapSpan(oy + view.y * scale, cssH / view.z * scale, h);
+    miniCtx.strokeRect(left, top, width, height);
   }
-  let miniImage = null;
+  /** One axis of the viewport outline on the minimap, in its pixels. A view
+   * of a sliver of a long graph is grown around its centre to a size one can
+   * find, and a view past an edge, or larger than the whole graph, stays on
+   * the minimap. */
+  function minimapSpan(start, size, limit) {
+    const grow = Math.max(0, BLOCK_GRAPH_MINIMAP_MARK - size);
+    const lo = Math.max(1, start - grow / 2), hi = Math.min(limit - 1, start - grow / 2 + size + grow);
+    if (hi - lo >= BLOCK_GRAPH_MINIMAP_MARK) return [lo, hi - lo];
+    return [lo === 1 ? 1 : limit - 1 - BLOCK_GRAPH_MINIMAP_MARK, BLOCK_GRAPH_MINIMAP_MARK];
+  }
   function setState(kind, message = '', canRetry = false) {
-    if (!explicit) stopWait();
     stateBox.hidden = kind === 'ready';
     stateBox.dataset.kind = kind;
-    stateBox.dataset.overlay = kind === 'error' && layout ? 'banner' : 'center';
+    // Over a drawing, a state is a banner and the drawing stays readable.
+    stateBox.dataset.overlay = layout ? 'banner' : 'center';
     stateText.textContent = message; retry.hidden = !canRetry; onError = canRetry ? options.retry : null;
-    skip.hidden = true;
-    miniWrap.hidden = !layout;
-    renderTriskel();
+    // Zoom and the overview cue describe a drawing; with none they are hidden.
+    miniWrap.hidden = zoomBar.hidden = !layout;
+    if (!layout) lodCue.hidden = true;
+    renderTriskel(); requestDraw();
   }
   retry.addEventListener('click', () => onError?.());
-  skip.addEventListener('click', () => { options.runner?.skip(); canvas.focus({preventScroll: true}); });
 
-  // Triskel has no deadline: while it runs, elapsed seconds and a way to stop it.
-  let waiting = null, explicit = null;
+  // Triskel has no deadline: while it runs, elapsed seconds and Cancel.
+  let waiting = null, triskelJob = null;
   function stopWait() { waiting?.(); waiting = null; }
-  function waitFor(write) { stopWait(); waiting = graphTriskelElapsed(write); }
-  /** A layout job's progress: once Triskel is asked for a graph not drawn
-   * yet, Use the region layout stops it and draws that layout instead. */
-  function progress(stage) {
-    if (stage?.stage !== 'triskel' || explicit) return;
-    setState('loading', '');
-    skip.hidden = !options.runner;
-    waitFor(text => { stateText.textContent = text; });
-  }
+  const triskelServed = () => Boolean(options.runner) && blockGraphEngine() === 'triskel';
   function renderTriskel() {
-    const code = layout?.engine?.reason?.code;
-    // Only over a drawn graph: a state or a load in progress hides it.
-    const offered = Boolean(options.runner) && blockGraphEngine() === 'triskel' && stateBox.hidden && (code === 'large' || code === 'cancelled');
+    const offered = triskelServed() && Boolean(current) && graph.count >= 2 && stateBox.hidden && current.triskelReason?.code !== 'not_served';
     const focused = document.activeElement === triskelButton;
-    triskelButton.hidden = !offered && !explicit;
-    triskelButton.textContent = explicit ? 'Cancel' : 'Lay out with Triskel';
-    triskelButton.setAttribute('aria-label', explicit ? 'Stop Triskel and keep the region layout' : 'Lay out this graph with Triskel');
-    triskelButton.title = explicit ? 'Stop Triskel and keep the region layout.'
-      : `Triskel runs unasked on graphs of up to ${blockGraphAutomatic()}. Larger graphs take it longer, a minute at about 16,000 blocks, and it has no size limit.`;
+    triskelButton.hidden = !offered && !triskelJob;
+    const showing = current?.shown === 'triskel';
+    triskelButton.textContent = triskelJob ? 'Cancel' : current?.triskel ? (showing ? 'Show region layout' : 'Show Triskel layout') : 'Lay out with Triskel';
+    triskelButton.setAttribute('aria-label', triskelJob ? 'Stop Triskel and keep the region layout' : current?.triskel ? (showing ? 'Show the region layout' : 'Show the Triskel layout') : 'Lay out this graph with Triskel');
+    triskelButton.title = triskelJob ? 'Stop Triskel and keep the region layout.'
+      : current?.triskel ? 'Both layouts are kept; this switches between them.'
+        : 'Triskel, a CFG layout engine built on single-entry single-exit regions, lays out this graph beside the region layout. It has no size limit and no deadline: about a minute at 16,000 blocks.';
     if (focused && triskelButton.hidden) canvas.focus({preventScroll: true});
   }
-  /** Lays out the drawn graph with Triskel, past the size it runs on unasked.
-   * The region layout stays drawn until Triskel answers or is stopped. */
+  function triskelAction() {
+    if (triskelJob) options.runner?.skip();
+    else if (current?.triskel) showLayout(current.shown === 'triskel' ? 'region' : 'triskel');
+    else layOutWithTriskel();
+  }
+  /** Lays out the drawn graph with Triskel. The region layout stays drawn
+   * while it runs; its answer is drawn whatever its size, with how it
+   * compares, and both stay to switch between. */
   async function layOutWithTriskel() {
-    if (!graph || explicit || !options.runner) return;
-    const shown = graph, run = explicit = {};
-    renderTriskel();
+    if (!current || triskelJob || !options.runner) return;
+    const target = current, job = triskelJob = {}, region = target.layout;
+    renderTriskel(); renderHeader();
     engineRun.hidden = false;
-    waitFor(text => { engineRun.textContent = text; });
+    stopWait(); waiting = graphTriskelElapsed(text => { engineRun.textContent = text; });
     const finish = () => {
-      if (explicit !== run) return false;
-      explicit = null; stopWait(); engineRun.textContent = ''; engineRun.hidden = true; renderTriskel();
+      if (triskelJob !== job) return false;
+      triskelJob = null; stopWait(); engineRun.textContent = ''; engineRun.hidden = true;
       return true;
     };
     try {
-      const result = await options.runner.run({type: 'graph', graph: shown, metrics: {...m}, engine: 'triskel', all: true});
-      if (!finish() || graph !== shown) return;
-      result.graph = shown;
-      setResult(result, {keep: true});
-      options.onLayout?.(result);
+      const answer = await options.runner.run({type: 'triskel', graph: {count: target.graph.count, from: target.graph.from, to: target.graph.to},
+        layout: {w: region.w, h: region.h, width: region.width, height: region.height, stub: region.stub}, metrics: {...m}});
+      if (!finish() || current !== target) return;
+      if (answer.layout.engine?.name === 'triskel') { target.triskel = answer.layout; target.triskelReason = null; showLayout('triskel'); }
+      else { target.triskelReason = answer.layout.engine?.reason ?? null; renderHeader(); renderTriskel(); }
+      options.onLayout?.(target);
     } catch (error) {
-      if (finish() && graph === shown && error.name !== 'AbortError') setState('error', error.message);
+      if (!finish() || current !== target || error.name === 'AbortError') return;
+      target.triskelReason = {code: 'error', detail: blockGraphFailure(error).message};
+      renderHeader(); renderTriskel();
     }
   }
-  /** Draws `result`. `keep` redraws the same graph in a new layout: the
-   * selection stays, and so does the view when the engine did not change. */
-  function setResult(result, {keep = false} = {}) {
-    const before = keep ? {block: selectedBlock, row: selectedRow, view: {...view}, engine: layout?.engine?.name} : null;
-    if (!keep) { explicit = null; engineRun.textContent = ''; engineRun.hidden = true; }
-    graph = result.graph; starts = result.starts; layout = result.layout;
-    selectedBlock = -1; selectedRow = -1; view.z = 1; miniDirty = true;
+  /** Draws the region or the Triskel layout of the current graph, each at
+   * the view it was last left at; the selection stays. */
+  function showLayout(which) {
+    if (!current || (which === 'triskel' && !current.triskel)) return;
+    current.views ??= {};
+    if (layout) current.views[current.shown ?? 'region'] = {...view, fitted};
+    current.shown = which; layout = which === 'triskel' ? current.triskel : current.layout; miniDirty = true;
+    renderHeader(); renderTriskel();
+    const saved = current.views[which];
+    if (saved) { view = {x: saved.x, y: saved.y, z: saved.z}; fitted = saved.fitted; if (fitted) view = fitView(); requestDraw(); }
+    else if (selectedBlock >= 0) centerOn(selectedBlock);
+    else start();
+  }
+  /** What the header says about the layout drawn. */
+  function engineNote() {
+    if (!current || triskelJob) return '';
+    if (current.shown === 'triskel') {
+      const {width, height} = current.triskel.engine.ratio;
+      return `Triskel layout · ${blockGraphRatio(width)}× as wide, ${blockGraphRatio(height)}× as tall`;
+    }
+    if (current.triskel) return 'region layout';
+    const code = current.triskelReason?.code;
+    if (code === 'cancelled') return 'region layout · Triskel stopped';
+    if (code && code !== 'one_block' && code !== 'not_served') return 'region layout · Triskel failed';
+    return '';
+  }
+  function renderHeader() {
+    if (!graph) return;
     title.textContent = options.titleOf?.(graph) ?? graph.title;
-    const parts = [`${graph.count.toLocaleString()} ${graph.count === 1 ? 'block' : 'blocks'}`, `${graph.instructions.toLocaleString()} ${graph.evidence === 'observed' ? 'retained steps' : 'instructions'}`];
-    // Which engine laid it out is said in the header, not only on hover.
-    parts.push(blockGraphEngineNote(layout.engine));
-    stats.textContent = [options.statsPrefix?.(graph), ...parts].filter(Boolean).join(' · ');
-    const revision = layout.engine?.revision ? ` ${layout.engine.revision.slice(0, 7)}` : '';
-    const reason = blockGraphLayoutReason(layout.engine?.reason);
-    stats.title = layout.engine?.name === 'triskel' ? `Laid out by Triskel${revision}, a CFG layout engine built on single-entry single-exit regions.` : reason ? `Region layout: ${reason}.` : '';
+    const blocks = `${blockGraphCount(graph.count, 'block')}${graph.foldedBlocks ? ` (${graph.foldedBlocks.toLocaleString()} folded)` : ''}`;
+    const parts = [options.statsPrefix?.(graph), blocks, blockGraphCount(graph.instructions, graph.evidence === 'observed' ? 'retained step' : 'instruction'), engineNote()];
+    stats.textContent = parts.filter(Boolean).join(' · ');
+    const notes = [];
+    if (graph.foldedBlocks) notes.push(`${blockGraphCount(graph.foldedBlocks, 'block')} of only end, block, loop, try or nop ${graph.foldedBlocks === 1 ? 'is' : 'are'} drawn as the first row of the block ${graph.foldedBlocks === 1 ? 'it falls' : 'they fall'} into.`);
+    if (current?.shown === 'triskel') {
+      const {revision, ratio} = current.triskel.engine;
+      notes.push(`Laid out by Triskel${revision ? ` ${revision.slice(0, 7)}` : ''}, a CFG layout engine built on single-entry single-exit regions: ${blockGraphRatio(ratio.width)} times as wide and ${blockGraphRatio(ratio.height)} times as tall as the region layout.`);
+    } else if (current?.triskelReason) notes.push(`Region layout: ${blockGraphLayoutReason(current.triskelReason)}.`);
+    stats.title = notes.join(' ');
+  }
+  /** Draws `result`, a new graph or the same one laid out anew, in its
+   * region layout unless it says it showed Triskel's. */
+  function setResult(result) {
+    if (triskelJob) { triskelJob = null; stopWait(); engineRun.textContent = ''; engineRun.hidden = true; }
+    current = result; graph = result.graph; starts = result.starts;
+    if (current.shown === 'triskel' && !current.triskel) current.shown = 'region';
+    current.shown ??= 'region';
+    layout = current.shown === 'triskel' ? current.triskel : current.layout;
+    selectedBlock = -1; selectedRow = -1; focusEdge = -1; view.z = 1; miniDirty = true;
+    indexGraph();
+    renderHeader(); renderLegend();
     evidence.textContent = graph.status === 'partial' ? `${graph.evidence} · partial` : graph.evidence;
     limits.textContent = graph.evidence === 'observed' ? graph.notice : BLOCK_GRAPH_LIMITS;
     limits.title = graph.evidence === 'observed' ? graph.notice : 'Declared static flow. Reachable here is not observed execution, and a complete drawing is not a proof.';
     if (graph.omissions?.length) limits.title += ` ${graph.omissions.join(' ')}`;
     selection.textContent = graph.omissions?.length ? graph.omissions[0] : '';
+    if (find) { runFind(find.query); renderFind(); options.onFind?.(findStatus()); }
     setState('ready');
-    if (before) {
-      if (before.engine === layout.engine?.name) view = before.view;
-      if (before.block >= 0) { select(before.block, before.row, {silent: true}); if (before.engine !== layout.engine?.name) centerOn(before.block); return; }
-      if (before.engine === layout.engine?.name) { requestDraw(); return; }
-    }
+    current.views = {};
     needsFit = cssW <= 1;
     start();
   }
-  /** First view: actual size, centered on the selected block or the entry.
-   * A graph that fits at actual size is centered whole. Fit is one key away. */
+  function indexGraph() {
+    const n = graph.count, edges = graph.from.length;
+    outs = blockGraphGroups(n, edges, e => graph.from[e]);
+    ins = blockGraphGroups(n, edges, e => graph.to[e]);
+    order = Int32Array.from({length: n}, (_, i) => i).sort((a, b) => graph.offsets[a] - graph.offsets[b] || a - b);
+    rank = new Int32Array(n); order.forEach((block, i) => { rank[block] = i; });
+    byFirstRow = Int32Array.from({length: n}, (_, i) => i).sort((a, b) => graph.firstRow[a] - graph.firstRow[b] || a - b);
+    // A block's exits are rows under its instructions, in edge order, as the
+    // layout sized and placed them.
+    exits = blockGraphGroups(n, edges, e => (graph.to[e] < 0 || current.layout.stub?.[e] ? graph.from[e] : -1));
+    lowerRows = null;
+  }
+  /** The key lists the edge kinds this graph has, in this graph's words. */
+  function renderLegend() {
+    const wasm = graph.functionIndex !== undefined;
+    const words = [[K.fallthrough, 'fallthrough', 'fall'], [K.branch, 'branch', 'br'], [K.taken, 'taken', wasm ? 'true' : 'taken'], [K.not_taken, 'not-taken', wasm ? 'false' : 'not taken'],
+      [K.table, 'table', 'table'], [K.exception, 'exception', 'exception'], [K.call, 'call', 'call'], [K.assumed, 'assumed', 'assumed'], [K.sequence, 'sequence', 'step'], [K.unresolved, 'unresolved', 'unresolved']];
+    const present = new Set(graph.kind);
+    if (present.has(K.table_default)) present.add(K.table);
+    legend.replaceChildren();
+    for (const [kind, key, label] of words) {
+      if (!present.has(kind)) continue;
+      const item = node('span', 'block-graph-key');
+      const sample = document.createElementNS?.('http://www.w3.org/2000/svg', 'svg');
+      if (sample?.setAttribute) { sample.setAttribute('width', '22'); sample.setAttribute('height', '6'); sample.setAttribute('aria-hidden', 'true'); sample.classList.add(`block-graph-key-${key}`); const line = document.createElementNS('http://www.w3.org/2000/svg', 'line'); line.setAttribute('x1', '0'); line.setAttribute('y1', '3'); line.setAttribute('x2', '22'); line.setAttribute('y2', '3'); sample.append(line); item.append(sample); }
+      item.append(node('span', '', label)); legend.append(item);
+    }
+    keyToggle.hidden = !legend.childElementCount;
+  }
+  /** First view: actual size, from the selected block or the entry, in the
+   * part of the stage the minimap leaves clear. The block and the successors
+   * that start on that first screen are centered together when they fit, so
+   * none opens under the minimap; otherwise the block is. A graph that fits
+   * at actual size is centered whole. Fit is one key away. */
   function start() {
     if (!layout || !cssW) return;
     view.z = 1;
-    if (layout.width <= cssW && layout.height <= cssH) { view.x = (layout.width - cssW) / 2; view.y = (layout.height - cssH) / 2; requestDraw(); return; }
-    const block = selectedBlock >= 0 ? selectedBlock : Math.max(0, graph.roots?.[0] ?? 0);
-    view.x = layout.x[block] + layout.w[block] / 2 - cssW / 2;
+    const whole = fitView();
+    if (whole.z >= 1) { view = whole; fitted = true; requestDraw(); return; }
+    fitted = false;
+    const block = selectedBlock >= 0 ? selectedBlock : Math.max(0, graph.roots?.[0] ?? 0), clear = clearArea(false);
+    let left = layout.x[block], right = left + layout.w[block];
+    for (let i = outs.start[block]; i < outs.start[block + 1]; i += 1) {
+      const edge = outs.list[i], next = graph.to[edge];
+      if (isStub(edge) || layout.y[next] >= layout.y[block] - 24 + clear.h) continue;
+      left = Math.min(left, layout.x[next]); right = Math.max(right, layout.x[next] + layout.w[next]);
+    }
+    if (right - left > clear.w) { left = layout.x[block]; right = left + layout.w[block]; }
+    view.x = (left + right) / 2 - clear.w / 2;
     view.y = layout.y[block] - 24;
     requestDraw();
   }
   function fit() {
     if (!layout || !cssW) return;
-    view = fitView(cssW, cssH);
+    view = fitView(); fitted = true;
     requestDraw();
   }
   function zoomAt(factor, cx = cssW / 2, cy = cssH / 2) {
-    view = graphZoomAt(view, factor, cx, cy);
+    if (!layout) return;
+    view = graphZoomAt(view, factor, cx, cy, zoomFloor()); fitted = false;
     requestDraw();
   }
-  function centerOn(block, zoom = null) {
-    if (zoom) view.z = zoom;
+  function centerOn(block, row = -1) {
     view.x = layout.x[block] + layout.w[block] / 2 - cssW / view.z / 2;
-    view.y = layout.y[block] + layout.h[block] / 2 - cssH / view.z / 2;
+    const tall = layout.h[block] > cssH / view.z;
+    // A block taller than the view is centered on its row, or its header.
+    view.y = row >= 0 && tall ? layout.y[block] + m.headerH + m.padY + (shownOfRow(block, row) + 0.5) * m.rowH - cssH / view.z / 2
+      : tall ? layout.y[block] - 24 : layout.y[block] + layout.h[block] / 2 - cssH / view.z / 2;
+    fitted = false;
     requestDraw();
   }
-  /** Selects a block (and a row of it) and keeps it in view. A pick tells
-   * onSelect, or onReveal when `reveal`; a `silent` selection is the host's
-   * own and tells neither. */
-  function select(block, row = -1, {reveal = false, silent = false} = {}) {
+  /** One edge in words, from the selected block's side. */
+  function edgeText(edge) {
+    const out = graph.from[edge] === selectedBlock, label = graph.labels[edge];
+    const far = out ? (graph.to[edge] >= 0 ? `→ ${blockLabel(graph.to[edge])}` : '→ unresolved') : `← ${blockLabel(graph.from[edge])}`;
+    const follow = out ? (graph.to[edge] >= 0 ? ', Alt+Down follows' : '') : ', Alt+Up follows';
+    return `edge ${far}${label ? ` (${label})` : ''}${follow}`;
+  }
+  function describe() {
+    const block = selectedBlock, flags = graph.flags[block];
+    if (flags & 16) { selection.textContent = `Gap: ${rowText(graph.firstRow[block]).split(' ')[0]} steps not retained. No edge crosses it.`; return; }
+    const successors = outs.start[block + 1] - outs.start[block];
+    let unresolved = false; for (let i = outs.start[block]; i < outs.start[block + 1]; i += 1) if (graph.to[outs.list[i]] < 0) unresolved = true;
+    const count = graph.instructionCount[block];
+    const parts = [blockLabel(block), blockGraphCount(count, graph.evidence === 'observed' ? 'step' : 'instruction'), blockGraphCount(successors, 'successor')];
+    if (graph.folded?.[block]) parts.push(`opens with ${graph.foldNote[block]}`);
+    if (!(flags & 2)) parts.push('not reached by declared edges');
+    if (unresolved) parts.push('unresolved target');
+    if (focusEdge >= 0) parts.push(edgeText(focusEdge));
+    selection.textContent = parts.join(' · ');
+  }
+  /** Selects a block (and a row of it, and an edge of it) and keeps it in
+   * view. A pick tells onSelect, or onReveal when `reveal`; a `silent`
+   * selection is the host's own and tells neither. */
+  function select(block, row = -1, {reveal = false, silent = false, edge = -1} = {}) {
     if (!layout || block < 0 || block >= graph.count) return;
-    selectedBlock = block; selectedRow = row;
-    const flags = graph.flags[block];
-    if (flags & 16) selection.textContent = `Gap: ${graph.rows.slice(starts[graph.firstRow[block]], starts[graph.firstRow[block] + 1] - 1).split(' ')[0]} steps not retained. No edge crosses it.`;
-    else {
-      const succ = []; for (let e = 0; e < graph.from.length; e += 1) if (graph.from[e] === block) succ.push(graph.to[e]);
-      selection.textContent = `${blockLabel(block)} · ${graph.instructionCount[block]} ${graph.evidence === 'observed' ? 'steps' : 'instructions'} · ${succ.length} ${succ.length === 1 ? 'successor' : 'successors'}${flags & 2 ? '' : ' · not reached by declared edges'}${succ.includes(-1) ? ' · unresolved target' : ''}`;
-    }
+    selectedBlock = block; selectedRow = row; focusEdge = edge;
+    describe();
     const x = layout.x[block], y = layout.y[block], w = layout.w[block], h = layout.h[block];
-    if (!visible(x, y, w, h) || x < view.x || y < view.y || x + w > view.x + cssW / view.z || y + h > view.y + cssH / view.z) centerOn(block);
+    const rowY = row >= 0 ? y + m.headerH + m.padY + shownOfRow(block, row) * m.rowH : y;
+    if (!visible(x, y, w, h) || x < view.x || x + w > view.x + cssW / view.z || rowY < view.y || Math.min(y + h, rowY + m.rowH * 2) > view.y + cssH / view.z) centerOn(block, row);
     requestDraw();
     if (silent) return;
     if (reveal) options.onReveal?.(graph.offsets[block], block, graph);
     else options.onSelect?.(graph.offsets[block], block, graph);
   }
-  const blockAt = (px, py) => {
-    const gx = view.x + px / view.z, gy = view.y + py / view.z;
+  const blockAt = (gx, gy) => {
     for (let block = 0; block < graph.count; block += 1) if (gx >= layout.x[block] && gx <= layout.x[block] + layout.w[block] && gy >= layout.y[block] && gy <= layout.y[block] + layout.h[block]) return block;
     return -1;
   };
+  /** The edge drawn nearest (gx, gy), within `reach` graph units. */
+  function edgeAt(gx, gy, reach) {
+    let best = -1, nearest = reach;
+    const box = layout.box, pts = layout.points;
+    for (let edge = 0; edge < graph.from.length; edge += 1) {
+      if (gx < box[edge * 4] - reach || gx > box[edge * 4 + 2] + reach || gy < box[edge * 4 + 1] - reach || gy > box[edge * 4 + 3] + reach) continue;
+      for (let i = layout.pointStart[edge]; i + 1 < layout.pointStart[edge + 1]; i += 1) {
+        const distance = blockGraphSegmentDistance(gx, gy, pts[i * 2], pts[i * 2 + 1], pts[i * 2 + 2], pts[i * 2 + 3]);
+        if (distance < nearest) { nearest = distance; best = edge; }
+      }
+    }
+    return best;
+  }
+  /** A click on an edge goes to its far end: the target when the click was
+   * nearer the source, else the source. A stub's exit row goes to the block
+   * the stub reaches; an unresolved edge has only its source. */
+  function followClick(edge, gx, gy, chip = false) {
+    const from = graph.from[edge], to = graph.to[edge];
+    if (to < 0) { select(from, -1, {reveal: true, edge}); return; }
+    const start = layout.pointStart[edge], end = layout.pointStart[edge + 1] - 1, pts = layout.points;
+    const nearSource = Math.hypot(gx - pts[start * 2], gy - pts[start * 2 + 1]) <= Math.hypot(gx - pts[end * 2], gy - pts[end * 2 + 1]);
+    select(chip && isStub(edge) ? to : nearSource ? to : from, -1, {reveal: true, edge});
+  }
   const pointer = {down: false, x: 0, y: 0, moved: false};
   canvas.addEventListener('pointerdown', event => { pointer.down = true; pointer.x = event.clientX; pointer.y = event.clientY; pointer.moved = false; canvas.setPointerCapture?.(event.pointerId); canvas.focus({preventScroll: true}); });
   canvas.addEventListener('pointermove', event => {
     if (!pointer.down || !layout) return;
     if (Math.abs(event.clientX - pointer.x) + Math.abs(event.clientY - pointer.y) > 2) pointer.moved = true;
-    view.x -= (event.clientX - pointer.x) / view.z; view.y -= (event.clientY - pointer.y) / view.z; pointer.x = event.clientX; pointer.y = event.clientY; requestDraw();
+    view.x -= (event.clientX - pointer.x) / view.z; view.y -= (event.clientY - pointer.y) / view.z; pointer.x = event.clientX; pointer.y = event.clientY; fitted = false; requestDraw();
   });
   canvas.addEventListener('pointerup', event => {
     if (!pointer.down) return;
     pointer.down = false;
     if (pointer.moved || !layout) return;
-    const rect = canvas.getBoundingClientRect(), block = blockAt(event.clientX - rect.left, event.clientY - rect.top);
-    if (block < 0) { selectedBlock = -1; selectedRow = -1; requestDraw(); return; }
-    const gy = view.y + (event.clientY - rect.top) / view.z - layout.y[block] - m.headerH - m.padY;
-    const row = gy >= 0 && graph.rowCount[block] ? Math.min(graph.rowCount[block] - 1, Math.floor(gy / m.rowH)) : -1;
-    select(block, row >= 0 ? graph.firstRow[block] + row : -1, {reveal: true});
+    const rect = canvas.getBoundingClientRect(), gx = view.x + (event.clientX - rect.left) / view.z, gy = view.y + (event.clientY - rect.top) / view.z;
+    const chip = chips.find(item => gx >= item.x && gx <= item.x + item.w && gy >= item.y && gy <= item.y + item.h);
+    if (chip) { followClick(chip.edge, gx, gy, true); return; }
+    const block = blockAt(gx, gy);
+    if (block >= 0) {
+      const local = gy - layout.y[block] - m.headerH - m.padY;
+      const shown = local >= 0 && shownRows(block) ? Math.min(shownRows(block) - 1, Math.floor(local / m.rowH)) : -1;
+      select(block, shown >= 0 && graph.rowCount[block] ? rowOfShown(block, shown) : -1, {reveal: true});
+      return;
+    }
+    const edge = edgeAt(gx, gy, 5 / view.z);
+    if (edge >= 0) { followClick(edge, gx, gy); return; }
+    selectedBlock = -1; selectedRow = -1; focusEdge = -1; selection.textContent = ''; requestDraw();
   });
   canvas.addEventListener('wheel', event => {
     if (!layout) return;
     event.preventDefault();
     if (event.ctrlKey || event.metaKey) { const rect = canvas.getBoundingClientRect(); zoomAt(Math.exp(-event.deltaY * 0.01), event.clientX - rect.left, event.clientY - rect.top); }
-    else { view.x += event.deltaX / view.z; view.y += event.deltaY / view.z; requestDraw(); }
+    else { view.x += event.deltaX / view.z; view.y += event.deltaY / view.z; fitted = false; requestDraw(); }
   }, {passive: false});
   function move(dx, dy) {
-    if (selectedBlock < 0) return select(0);
+    if (selectedBlock < 0) return select(Math.max(0, graph.roots?.[0] ?? 0));
     const cx = layout.x[selectedBlock] + layout.w[selectedBlock] / 2, cy = layout.y[selectedBlock] + layout.h[selectedBlock] / 2;
     let best = -1, bestScore = Infinity;
     for (let block = 0; block < graph.count; block += 1) {
@@ -650,28 +955,128 @@ function createBlockGraphView(root, options = {}) {
     }
     if (best >= 0) select(best);
   }
+  /** The selected block's edges in the order Alt+Left and Alt+Right step:
+   * out by where they leave, then in by where they arrive. */
+  function edgesOfSelected() {
+    const block = selectedBlock, list = [], pts = layout.points;
+    const x = (edge, at) => pts[(at === 'start' ? layout.pointStart[edge] : layout.pointStart[edge + 1] - 1) * 2];
+    const out = Array.from(outs.list.subarray(outs.start[block], outs.start[block + 1])).sort((a, b) => x(a, 'start') - x(b, 'start') || a - b);
+    const into = Array.from(ins.list.subarray(ins.start[block], ins.start[block + 1])).filter(edge => graph.from[edge] !== block).sort((a, b) => x(a, 'end') - x(b, 'end') || a - b);
+    list.push(...out, ...into);
+    return list;
+  }
+  /** Alt+Arrow: Left and Right pick an edge of the selected block, Down
+   * follows an edge out of it to its target and Up one into it to its
+   * source. The edge followed stays picked, so the opposite key returns. */
+  function edgeKey(key) {
+    if (selectedBlock < 0) { select(Math.max(0, graph.roots?.[0] ?? 0)); return; }
+    const edges = edgesOfSelected();
+    if (!edges.length) return;
+    if (key === 'ArrowLeft' || key === 'ArrowRight') {
+      const at = edges.indexOf(focusEdge), next = at < 0 ? (key === 'ArrowRight' ? 0 : edges.length - 1) : (at + (key === 'ArrowRight' ? 1 : -1) + edges.length) % edges.length;
+      focusEdge = edges[next]; describe(); requestDraw();
+      return;
+    }
+    const out = key === 'ArrowDown';
+    const fits = edge => (out ? graph.from[edge] === selectedBlock && graph.to[edge] >= 0 : graph.to[edge] === selectedBlock);
+    const edge = focusEdge >= 0 && fits(focusEdge) ? focusEdge : edges.find(fits);
+    if (edge === undefined) return;
+    select(out ? graph.to[edge] : graph.from[edge], -1, {edge});
+  }
   canvas.addEventListener('keydown', event => {
-    if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey || !layout) return;
+    if (event.isComposing || event.ctrlKey || event.metaKey || !layout) return;
+    const key = event.key;
+    if (event.altKey) {
+      if (!key.startsWith('Arrow')) return;
+      event.preventDefault(); edgeKey(key);
+      return;
+    }
     const panStep = 96 / view.z;
-    const key = event.key; let handled = true;
-    if (event.shiftKey && key.startsWith('Arrow')) { view.x += key === 'ArrowLeft' ? -panStep : key === 'ArrowRight' ? panStep : 0; view.y += key === 'ArrowUp' ? -panStep : key === 'ArrowDown' ? panStep : 0; requestDraw(); }
+    let handled = true;
+    if (event.shiftKey && key.startsWith('Arrow')) { view.x += key === 'ArrowLeft' ? -panStep : key === 'ArrowRight' ? panStep : 0; view.y += key === 'ArrowUp' ? -panStep : key === 'ArrowDown' ? panStep : 0; fitted = false; requestDraw(); }
     else if (key === 'ArrowDown') move(0, 1); else if (key === 'ArrowUp') move(0, -1); else if (key === 'ArrowLeft') move(-1, 0); else if (key === 'ArrowRight') move(1, 0);
     else if (key === '+' || key === '=') zoomAt(1.25); else if (key === '-' || key === '_') zoomAt(0.8); else if (key === '0') fit();
-    else if (key === 'Home') { select(0); centerOn(0); }
-    else if (key === ']' || key === '[') { const order = [...Array(graph.count).keys()].sort((a, b) => graph.offsets[a] - graph.offsets[b]), index = order.indexOf(selectedBlock), next = order[key === ']' ? index + 1 : Math.max(0, index - 1)] ?? order.at(-1); if (next !== undefined) select(next); }
-    else if (key === 'Enter' && selectedBlock >= 0) select(selectedBlock, selectedRow, {reveal: true});
+    else if (key === 'Home') { const entry = Math.max(0, graph.roots?.[0] ?? 0); select(entry); centerOn(entry); }
+    else if (key === ']' || key === '[') { const at = selectedBlock < 0 ? -1 : rank[selectedBlock]; select(order[Math.max(0, Math.min(graph.count - 1, at + (key === ']' ? 1 : -1)))]); }
+    else if (key === 'Enter' && selectedBlock >= 0) select(selectedBlock, selectedRow, {reveal: true, edge: focusEdge});
     else handled = false;
     if (handled) event.preventDefault();
   });
-  canvas.addEventListener('focus', () => { if (layout && selectedBlock < 0 && canvas.matches?.(':focus-visible')) select(0); });
+  canvas.addEventListener('focus', () => { if (layout && selectedBlock < 0 && canvas.matches?.(':focus-visible')) select(Math.max(0, graph.roots?.[0] ?? 0)); });
   minimap.addEventListener('pointerdown', event => {
     if (!layout) return;
     const rect = minimap.getBoundingClientRect(), scale = Math.min(minimap.width / layout.width, minimap.height / layout.height);
     const ox = (minimap.width - layout.width * scale) / 2, oy = (minimap.height - layout.height * scale) / 2;
     view.x = ((event.clientX - rect.left) * (minimap.width / rect.width) - ox) / scale - cssW / view.z / 2;
     view.y = ((event.clientY - rect.top) * (minimap.height / rect.height) - oy) / scale - cssH / view.z / 2;
-    requestDraw();
+    fitted = false; requestDraw();
   });
+
+  /** The row holding character `at` of the rows text. */
+  function rowOfChar(at) {
+    let low = 0, high = starts.length - 2;
+    while (low < high) { const mid = (low + high + 1) >> 1; if (starts[mid] <= at) low = mid; else high = mid - 1; }
+    return low;
+  }
+  /** Marks every row holding `query`, a case-insensitive literal, as Find
+   * in the text view does, and every block holding such a row. */
+  function runFind(query) {
+    find = null; miniDirty = true;
+    if (!query || !graph) { if (query) find = {query, needle: query.toLowerCase(), rowHit: new Uint8Array(0), hit: new Uint8Array(0), blocks: new Int32Array(0), rows: 0, current: -1, pending: true}; return; }
+    const needle = query.toLowerCase(), total = starts.length - 1, rowHit = new Uint8Array(total), rows = graph.rows;
+    let matched = 0;
+    lowerRows ??= rows.toLowerCase();
+    if (lowerRows.length === rows.length) {
+      for (let at = lowerRows.indexOf(needle); at >= 0;) {
+        const row = rowOfChar(at);
+        if (at + needle.length <= starts[row + 1] - 1 && !rowHit[row]) { rowHit[row] = 1; matched += 1; }
+        at = lowerRows.indexOf(needle, starts[row + 1]);
+      }
+    } else {
+      // Lowercasing changed the text's length: match row by row instead.
+      for (let row = 0; row < total; row += 1) if (rowText(row).toLowerCase().includes(needle)) { rowHit[row] = 1; matched += 1; }
+    }
+    const hit = new Uint8Array(graph.count), blocks = [];
+    for (const block of order) {
+      for (let row = graph.firstRow[block], end = row + graph.rowCount[block]; row < end; row += 1) if (rowHit[row]) { hit[block] = 1; break; }
+      if (hit[block]) blocks.push(block);
+    }
+    find = {query, needle, rowHit, hit, blocks: Int32Array.from(blocks), rows: matched, current: -1};
+  }
+  function findStatus() {
+    if (!find) return '';
+    if (find.pending) return 'Find runs once the graph is drawn.';
+    if (!find.blocks.length) return `No row matches in ${blockGraphCount(graph.count, 'block')}.`;
+    const at = find.current >= 0 ? `${(find.current + 1).toLocaleString()} of ` : '';
+    return `${at}${blockGraphCount(find.blocks.length, 'block')} · ${blockGraphCount(find.rows, 'row')} match`;
+  }
+  function renderFind() { findCue.textContent = find ? `Find: ${findStatus()}` : ''; findCue.hidden = !find; }
+  /** Shows match `index`: its block selected, centered on its first matched row. */
+  function showMatch(index) {
+    find.current = index;
+    const block = find.blocks[index];
+    let row = graph.firstRow[block];
+    for (let end = row + graph.rowCount[block]; row < end && !find.rowHit[row]; row += 1);
+    select(block, row, {silent: true});
+  }
+  /** Find from the host: a new `query` shows the first matched block at or
+   * after the selection; the same one moves `direction` blocks, wrapping.
+   * Returns the status line. */
+  function search(query, direction = 0) {
+    if (query !== (find?.query ?? '')) {
+      runFind(query);
+      if (find?.blocks.length) {
+        const from = selectedBlock >= 0 ? rank[selectedBlock] : 0;
+        let index = find.blocks.findIndex(block => rank[block] >= from);
+        if (index < 0) index = 0;
+        showMatch(index);
+      }
+    } else if (find?.blocks.length && direction) showMatch((Math.max(0, find.current) + (find.current < 0 && direction > 0 ? 0 : direction) + find.blocks.length) % find.blocks.length);
+    renderFind(); miniDirty = true; requestDraw();
+    const status = findStatus();
+    return status;
+  }
+
   let observer = null;
   const themeObserver = typeof MutationObserver !== 'undefined' ? new MutationObserver(() => { if (active) { readTokens(); requestDraw(); } }) : null;
   return {
@@ -686,15 +1091,23 @@ function createBlockGraphView(root, options = {}) {
       active = false; root.hidden = true;
       if (frame) { cancelAnimationFrame(frame); frame = 0; }
       observer?.disconnect(); observer = null; themeObserver?.disconnect();
-      graph = starts = layout = null; miniImage = null; selectedBlock = -1; explicit = null; stopWait(); engineRun.textContent = ''; engineRun.hidden = true;
+      current = graph = starts = layout = null; outs = ins = order = rank = byFirstRow = exits = lowerRows = find = null; miniImage = null; selectedBlock = -1; focusEdge = -1;
+      triskelJob = null; stopWait(); engineRun.textContent = ''; engineRun.hidden = true; renderFind();
       canvas.width = 0; canvas.height = 0; minimap.width = 300; minimap.height = 220;
       setState('empty', '');
     },
-    measurements: () => ({...m}), setResult, setState, progress,
+    measurements: () => ({...m}), setResult, setState, search,
     /** The host's selection: it never reports back through onSelect. */
     select: (block, row = -1) => select(block, row, {silent: true}),
-    // A new title is another graph: a Triskel run for the drawn one stops.
-    focus: () => canvas.focus(), hasGraph: () => Boolean(layout), tools, setTitle(text) { if (explicit) options.runner?.cancel(); title.textContent = text; stats.textContent = ''; },
+    focus: () => canvas.focus(), hasGraph: () => Boolean(layout), tools,
+    /** A new title is another graph: the drawn one, and any Triskel run for it, are dropped. */
+    setTitle(text) {
+      if (triskelJob) { options.runner?.cancel(); triskelJob = null; stopWait(); engineRun.textContent = ''; engineRun.hidden = true; }
+      current = graph = starts = layout = null; selectedBlock = selectedRow = focusEdge = -1;
+      if (find) { find = {...find, pending: true, blocks: new Int32Array(0), current: -1}; renderFind(); }
+      title.textContent = text; stats.textContent = ''; stats.title = ''; evidence.textContent = ''; selection.textContent = '';
+      requestDraw();
+    },
     setAnalystName(name) { analyst.textContent = name ?? ''; analyst.hidden = !name; analyst.title = name ? `${name} (researcher name)` : ''; }
   };
 }
@@ -704,13 +1117,14 @@ const blockGraphEngine = () => /^https?:$/.test(globalThis.location?.protocol ??
 
 /**
  * Runs layout jobs one at a time in a worker that answers {id, ok, result}
- * or {id, ok: false, error}, and may first send {id, progress}. A new job
- * cancels the one running; the worker stays between jobs and is terminated
- * only to cancel one. `skip` stops Triskel for the running job, which then
- * answers with its own layout. `script` is the worker; `local`, when given,
- * runs a job on this thread where no worker starts, as local(message,
+ * or {id, ok: false, error, name}, and may first send {id, progress}. A new
+ * job cancels the one running; the worker stays between jobs and is
+ * terminated only to cancel one. `skip` stops Triskel for the running job,
+ * which then answers without it. `script` is the worker; `local`, when
+ * given, runs a job on this thread where no worker starts, as local(message,
  * {signal, progress}). The flow graph uses it with its own worker and
- * fallback.
+ * fallback. A worker that stops before it answers rejects with a
+ * `transient` error: trying again can succeed.
  */
 function createBlockGraphRunner({script = 'block_graph_layout.js', local = null} = {}) {
   let worker = null, serial = 0, job = null;
@@ -731,7 +1145,7 @@ function createBlockGraphRunner({script = 'block_graph_layout.js', local = null}
     worker.onmessage = event => {
       const {id, progress} = event.data;
       if (progress) { if (job?.id === id) job.onProgress?.(progress); return; }
-      finish(id, event.data.ok, event.data.ok ? event.data.result : Error(event.data.error));
+      finish(id, event.data.ok, event.data.ok ? event.data.result : Object.assign(Error(event.data.error), {name: event.data.name || 'Error'}));
     };
     worker.onerror = event => {
       event.preventDefault?.();
@@ -739,7 +1153,7 @@ function createBlockGraphRunner({script = 'block_graph_layout.js', local = null}
       worker = null;
       // A worker that cannot run leaves its job to this thread when it can.
       if (job && local) runLocal(job.id, job.message);
-      else if (job) finish(job.id, false, Error(event.message || 'Layout failed.'));
+      else if (job) finish(job.id, false, Object.assign(Error(event.message || 'The layout worker stopped before it answered.'), {transient: true}));
     };
     return true;
   }
@@ -771,11 +1185,11 @@ function createBlockGraphRunner({script = 'block_graph_layout.js', local = null}
 }
 
 /* Sources view mode for one captured WASM artifact. */
-function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
+function createSourceGraphPanel({host, editor, button, closeOn, revealOffset, findQuery = null, onFind = null}) {
   const runner = createBlockGraphRunner();
   const view = createBlockGraphView(host, {
-    runner,
-    // A Triskel layout asked for replaces the cached region layout.
+    runner, onFind,
+    // A Triskel layout asked for is cached beside the region layout.
     onLayout: result => { if (functionIndex !== null) remember(`${key()}:${functionIndex}`, result); },
     // Showing a block's offset in the linear listing focuses that row; a
     // reveal started from the Graph (a click or Enter on a block) keeps focus
@@ -796,9 +1210,10 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
   let requested = null;
   const key = () => `${source?.artifact_id}:${source?.sha256}`;
   const cache = new Map(); let cacheBytes = 0;
+  const layoutBytes = layout => (layout ? layout.x.byteLength * 4 + layout.points.byteLength + layout.pointStart.byteLength + layout.box.byteLength : 0);
   const entryBytes = result => {
-    const {graph, starts, layout} = result;
-    return graph.offsets.byteLength * 6 + graph.from.byteLength * 3 + graph.rows.length + starts.byteLength + layout.x.byteLength * 4 + layout.points.byteLength + layout.pointStart.byteLength + layout.box.byteLength;
+    const {graph, starts, layout, triskel} = result;
+    return graph.offsets.byteLength * 7 + graph.from.byteLength * 3 + graph.rows.length + starts.byteLength + layoutBytes(layout) + layoutBytes(triskel);
   };
   const remember = (cacheKey, result) => {
     const old = cache.get(cacheKey);
@@ -921,7 +1336,7 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
       }
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'PageDown' || event.key === 'PageUp') {
         event.preventDefault(); const step = event.key.startsWith('Page') ? 10 : 1; cursor = Math.max(0, Math.min(filtered.length - 1, cursor + (event.key.endsWith('Down') ? step : -step)));
-        list.scrollTop = scroll = Math.max(0, Math.min(cursor * rowH, Math.max(scroll, (cursor - 12) * rowH))); paint();
+        list.scrollTop = scroll = blockGraphRowInView(cursor, scroll, list.clientHeight, rowH); paint();
       } else if (event.key === 'Enter' && filtered[cursor] !== undefined) { event.preventDefault(); choose(filtered[cursor]); }
     };
     input.addEventListener('keydown', keys); list.addEventListener('keydown', keys);
@@ -957,7 +1372,8 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
     } catch (error) {
       if (current() && error.name !== 'AbortError') {
         indexStatus = 'error';
-        view.setState('error', graphReadMessage(error), true);
+        const failure = blockGraphFailure(error);
+        view.setState('error', failure.message, failure.retry);
       }
     }
   }
@@ -977,11 +1393,17 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
       if (!current()) return;
       remember(cacheKey, result); applyResult(result);
     } catch (error) {
-      if (current() && error.name !== 'AbortError') view.setState('error', graphReadMessage(error), true);
+      if (current() && error.name !== 'AbortError') { const failure = blockGraphFailure(error); view.setState('error', failure.message, failure.retry); }
     }
   }
   function applyResult(result) { view.setResult(result); renderTools(); showAnalystName(); }
-  function open() { isOpen = true; host.hidden = false; editor.setAttribute('data-graph', 'true'); button.setAttribute('aria-pressed', 'true'); if (!linearChoice && innerHeight < 600) { editor.setAttribute('data-graph-linear-hidden', ''); } view.activate(); if (functions) { if (functionIndex !== null) loadFunction(functionIndex); else view.setState('empty', 'Select a function.'); } else loadIndex(); }
+  function open() {
+    isOpen = true; host.hidden = false; editor.setAttribute('data-graph', 'true'); button.setAttribute('aria-pressed', 'true'); if (!linearChoice && innerHeight < 600) { editor.setAttribute('data-graph-linear-hidden', ''); }
+    view.activate();
+    const query = findQuery?.();
+    if (query) view.search(query);
+    if (functions) { if (functionIndex !== null) loadFunction(functionIndex); else view.setState('empty', 'Select a function.'); } else loadIndex();
+  }
   function close() { isOpen = false; showAnalystName(); host.hidden = true; editor.removeAttribute('data-graph'); button.setAttribute('aria-pressed', 'false'); closeMenu(); view.release(); release(); }
   const toggle = () => { if (isOpen) close(); else if (isWasmSource(source)) open(); };
   button.addEventListener('click', toggle);
@@ -1005,6 +1427,8 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
       return true;
     },
     isOpen: () => isOpen,
+    /** Find in the drawn function's rows (see the view's search); its status line. */
+    find: (query, direction = 0) => (isOpen ? view.search(query, direction) : ''),
     /** The function the graph last showed, for a view that follows it. */
     functionIndex: () => functionIndex
   };
@@ -1014,8 +1438,7 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
  * share a renderer and never a node set, so they cannot merge into one CFG. */
 function createVmBlockGraph({host, button, getReport, getObservedPath, onReveal}) {
   const runner = createBlockGraphRunner();
-  const view = createBlockGraphView(host, {runner, onReveal: offset => onReveal?.(offset), onSelect: offset => onReveal?.(offset), retry: () => render(), titleOf: graph => graph.title,
-    blockLabel: (graph, block) => graph.evidence === 'observed' ? `step ${graph.offsets[block]}` : `loc_${graph.offsets[block].toString(16)}`});
+  const view = createBlockGraphView(host, {runner, onReveal: offset => onReveal?.(offset), onSelect: offset => onReveal?.(offset), retry: () => render(), titleOf: graph => graph.title});
   host.hidden = true;
   let isOpen = false, layer = 'declared', generation = 0;
   const switcher = document.createElement('div'); switcher.className = 'block-graph-layers'; switcher.setAttribute('role', 'group'); switcher.setAttribute('aria-label', 'Graph layer');
@@ -1032,24 +1455,25 @@ function createVmBlockGraph({host, button, getReport, getObservedPath, onReveal}
     if (layer === 'observed') {
       const path = getObservedPath?.();
       if (!path) { runner.cancel(); view.setTitle('Observed path'); view.setState('empty', 'Import a retained trace in Execution to draw its observed path. It stays a separate layer from declared flow.'); return; }
-      await lay(vmObservedBlockGraph(path), owner);
+      await lay({type: 'observed', path}, owner);
     } else {
       const report = getReport();
       if (!report?.instructions.length) { runner.cancel(); view.setTitle('Static bytecode'); view.setState('empty', report ? 'No instructions decoded. See Inputs and limits.' : 'Analyze a bytecode image to draw its declared blocks.'); return; }
-      await lay(vmStaticBlockGraph(report), owner);
+      await lay({type: 'vm', report}, owner);
     }
   }
-  async function lay(graph, owner) {
+  /** Builds and lays out the graph `message` names in the layout worker. */
+  async function lay(message, owner) {
     view.setState('loading', 'Laying out the graph…');
     try {
-      const result = await runner.run({type: 'graph', graph, metrics: view.measurements(), engine: blockGraphEngine()}, [], {onProgress: view.progress});
+      const result = await runner.run({...message, metrics: view.measurements()});
       if (owner === generation) view.setResult(result);
-    } catch (error) { if (owner === generation && error.name !== 'AbortError') view.setState('error', error.message, true); }
+    } catch (error) { if (owner === generation && error.name !== 'AbortError') { const failure = blockGraphFailure(error); view.setState('error', failure.message, failure.retry); } }
   }
   function open() { isOpen = true; host.hidden = false; button.setAttribute('aria-pressed', 'true'); view.activate(); render(); }
   function close() { isOpen = false; generation += 1; host.hidden = true; button.setAttribute('aria-pressed', 'false'); runner.cancel(); view.release(); }
   return {toggle: () => (isOpen ? close() : open()), close, refresh: () => render()};
 }
 
-// The offline check reads the graph builders.
-if (typeof module === 'object' && module?.exports) module.exports = {vmStaticBlockGraph, vmObservedBlockGraph, BLOCK_GRAPH_KIND};
+// The offline check reads the edge kinds and how failures are worded.
+if (typeof module === 'object' && module?.exports) module.exports = {BLOCK_GRAPH_KIND, blockGraphFailure, blockGraphClipSegment, blockGraphRowInView, blockGraphBoundView};

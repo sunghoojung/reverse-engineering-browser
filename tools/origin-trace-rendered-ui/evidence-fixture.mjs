@@ -29,12 +29,17 @@ export const REQUEST_BODY_MARKER = '<img src=x onerror="window.__rebInjected=4">
 export const METADATA_BODY_HOST = 'api.metadata.test';
 // A content-session response body (native-network-v3.md) whose JSON carries markup.
 export const RESPONSE_BODY_HOST = 'api.response.test';
-// A content-session POST, recorded as real capture records it: its target's
-// first 116 bytes, the rest refused by the request content budget, and its
-// body and response refused by their budgets (native-network-v2.md target
-// retention 4 and body state 10, v3 response state 12).
+// A content-session POST from an older browser, recorded as it recorded it:
+// its target's first 116 bytes, the rest refused by that browser's request
+// content budget, and its body and response refused by their budgets
+// (native-network-v2.md target retention 4 and version 1 body state 10, v3
+// version 1 response state 12). Current capture emits none of these.
 export const BUDGET_HOST = 'api.budget.test';
 export const BUDGET_TARGET = `/collect/batch?session=fixture&events=${'e'.repeat(160)}`;
+// A current content-session POST whose body and response the artifact
+// receiver refused to keep its free-disk reserve (native-network-v3.md request
+// body version 2 and response body version 3, state 13).
+export const DISK_RESERVE_HOST = 'api.disk-reserve.test';
 // Rows only the renderer finishes (protocol/native-network-v3.md).
 export const MEMORY_CACHE_HOST = 'cdn.memory.test';
 export const MEMORY_CACHE_TARGET = '/sprite.png?v=3';
@@ -152,6 +157,53 @@ function dispatcherWasm(arms) {
   return Buffer.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, ...section(1, [1, 0x60, 1, 0x7f, 1, 0x7f]), ...section(3, [1, 0]),
     ...section(7, [1, 8, ...Buffer.from('dispatch'), 0, 0]), ...section(10, [1, ...leb(body.length), ...body])]);
 }
+
+// test25b: one function per shape the block graph must draw well, as compilers
+// emit them: a sparse switch ladder (a br_if chain into nested case blocks, as
+// LLVM lowers one), an interpreter loop around a 256-arm br_table, and nested
+// loops with a diamond in each. `emit` writes the body; locals 0 to 2 are i32.
+function shapedWasm(name, emit) {
+  const leb = n => { const out = []; do { let b = n & 127; n >>>= 7; out.push(n ? b | 128 : b); } while (n); return out; };
+  const sleb = n => { const out = []; for (;;) { const b = n & 127; n >>= 7; if ((n === 0 && !(b & 64)) || (n === -1 && b & 64)) { out.push(b); return out; } out.push(b | 128); } };
+  const section = (id, data) => [id, ...leb(data.length), ...data];
+  const body = [];
+  const op = (...bytes) => { for (const byte of bytes) body.push(byte); };
+  const shape = {op, leb, constant: value => op(0x41, ...sleb(value)),
+    work: count => { for (let i = 0; i < count; i += 1) { op(0x20, 1); shape.constant(i + 3); op(0x6a, 0x21, 1); } },
+    test: mask => { op(0x20, 0); shape.constant(mask); op(0x71); }};
+  emit(shape);
+  op(0x20, 1);
+  const code = [1, 3, 0x7f, ...body, 0x0b];
+  return Buffer.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, ...section(1, [1, 0x60, 1, 0x7f, 1, 0x7f]), ...section(3, [1, 0]),
+    ...section(7, [1, name.length, ...Buffer.from(name), 0, 0]), ...section(10, [1, ...leb(code.length), ...code])]);
+}
+const ladderWasm = cases => shapedWasm('ladder', ({op, leb, constant, work}) => {
+  op(0x02, 0x40);
+  for (let i = 0; i < cases; i += 1) op(0x02, 0x40);
+  for (let i = 0; i < cases; i += 1) { op(0x20, 0); constant(i * 7 + 3); op(0x46, 0x0d, ...leb(i)); }
+  op(0x0c, ...leb(cases));
+  for (let i = 0; i < cases; i += 1) { op(0x0b); work(2); op(0x0c, ...leb(cases - 1 - i)); }
+  op(0x0b);
+});
+const dispatchLoopWasm = (arms, armWork) => shapedWasm('dispatch', ({op, leb, constant, work, test}) => {
+  op(0x03, 0x40, 0x02, 0x40);
+  for (let i = 0; i < arms; i += 1) op(0x02, 0x40);
+  op(0x20, 0, 0x20, 1, 0x6a); constant(255); op(0x71, 0x0e, ...leb(arms));
+  for (let i = 0; i < arms; i += 1) op(...leb(i));
+  op(...leb(arms));
+  for (let i = 0; i < arms; i += 1) {
+    op(0x0b);
+    for (let w = 0; w < armWork; w += 1) { test(1 << (w % 8)); op(0x04, 0x40); work(1); op(0x05); work(1); op(0x0b); }
+    op(0x20, 1); constant(1); op(0x6a, 0x21, 1, 0x0c, ...leb(arms - i));
+  }
+  op(0x0b, 0x20, 1, 0x0f, 0x0b);
+});
+const loopNestWasm = (depth, repeat) => shapedWasm('loops', ({op, constant, work, test}) => {
+  for (let r = 0; r < repeat; r += 1) {
+    for (let d = 0; d < depth; d += 1) { op(0x02, 0x40, 0x03, 0x40); test(1 << (d % 8)); op(0x04, 0x40); work(1); op(0x05); work(1); op(0x0b); }
+    for (let d = 0; d < depth; d += 1) { op(0x20, 2); constant(1); op(0x6a, 0x22, 2); constant(d + 10); op(0x49, 0x0d, 0); test(2); op(0x0d, 1, 0x0b, 0x0b); }
+  }
+});
 
 // test39: an import (func 0), an unexported helper (func 1) and an export
 // (func 2) that calls it, so a name shows on a header and on a call row.
@@ -373,13 +425,41 @@ function responseBodyPayload(bytes, contentType = 'application/json') {
   return payload.toString('hex');
 }
 
-// A response_body record refused by the session's response body budget:
-// no artifact, no captured bytes and no digest.
+// A version 1 response_body record an older browser's response body budget
+// refused: no artifact, no captured bytes and no digest.
 function budgetResponsePayload(length, contentType = 'application/json') {
   const payload = Buffer.alloc(128);
   payload.writeUInt16LE(1, 0);
   payload.writeUInt16LE(128, 2);
   payload[4] = 12;
+  payload[5] = 0x40;
+  payload[6] = contentType.length;
+  payload.writeBigUInt64LE(BigInt(length), 8);
+  payload.write(contentType, 64, 'ascii');
+  return payload.toString('hex');
+}
+
+// Refused to keep the receiver's free-disk reserve: a version 2 request body
+// read whole (bit 6) with no digest, and a version 3 response body with no
+// artifact, captured bytes or digest.
+function diskReserveRequestBodyPayload(length, contentType = 'application/json') {
+  const payload = Buffer.alloc(128);
+  payload.writeUInt16LE(2, 0);
+  payload.writeUInt16LE(128, 2);
+  payload[4] = 1;
+  payload[5] = 13;
+  payload[6] = 1 | 16 | 64;
+  payload[7] = contentType.length;
+  payload.writeBigUInt64LE(BigInt(length), 8);
+  payload.writeUInt32LE(1, 24);
+  payload.write(contentType, 64, 'ascii');
+  return payload.toString('hex');
+}
+function diskReserveResponsePayload(length, contentType = 'application/json') {
+  const payload = Buffer.alloc(128);
+  payload.writeUInt16LE(3, 0);
+  payload.writeUInt16LE(128, 2);
+  payload[4] = 13;
   payload[5] = 0x40;
   payload[6] = contentType.length;
   payload.writeBigUInt64LE(BigInt(length), 8);
@@ -503,6 +583,12 @@ async function requestBodyRequests(template, firstSequence, firstTime, artifacts
   const refusedResponse = row(refused, 'response_started', hex('application/json'), {status_code: 200});
   row(refused, 'response_body', budgetResponsePayload(2048), {parent_event_id: refusedResponse.sequence_number});
   row(refused, 'request_completed', hex('completed'), {status_code: 200});
+  const reserved = {request_id: '3005'};
+  const reservedStart = row(reserved, 'request_started', hex(`POST ${DISK_RESERVE_HOST}`), {resource_type: 13});
+  row(reserved, 'request_body', diskReserveRequestBodyPayload(18), {parent_event_id: reservedStart.sequence_number});
+  const reservedResponse = row(reserved, 'response_started', hex('application/json'), {status_code: 200});
+  row(reserved, 'response_body', diskReserveResponsePayload(4096), {parent_event_id: reservedResponse.sequence_number});
+  row(reserved, 'request_completed', hex('completed'), {status_code: 200});
   const responseArtifact = await artifact(artifactsRoot, {artifact_id: '325', session_id: template.session_id, navigation_id: '0',
     frame_id: template.frame_id, creator_event_id: responded.sequence_number, execution_context_id: '0',
     capture_origin: 'network_response', kind: 'response_body', mime_type: 'application/json', sensitive: true,
@@ -976,6 +1062,15 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const graphWasm = await artifact(artifacts, {artifact_id: '340', session_id: '1', navigation_id: '100', frame_id: '200',
     capture_origin: 'webassembly_compile', kind: 'wasm', mime_type: 'application/wasm', url: 'fixture://graph-dispatcher.wasm'},
   dispatcherWasm(32));
+  // Block graph shapes (test25b): the exception function is the checked-in
+  // tools/fixtures/wasm-block-graph build; the large one has 19,459 blocks.
+  const graphShapes = [];
+  for (const [id, name, bytes] of [['341', 'ladder', () => ladderWasm(1000)], ['342', 'dispatch256', () => dispatchLoopWasm(256, 2)],
+    ['343', 'loops', () => loopNestWasm(8, 2)], ['344', 'exceptions', () => readFile(new URL('../fixtures/wasm-block-graph/exceptions.wasm', import.meta.url))],
+    ['345', 'large', () => dispatchLoopWasm(256, 25)]]) {
+    graphShapes.push(await artifact(artifacts, {artifact_id: id, session_id: '1', navigation_id: '100', frame_id: '200',
+      capture_origin: 'webassembly_compile', kind: 'wasm', mime_type: 'application/wasm', url: `fixture://graph-${name}.wasm`}, await bytes()));
+  }
   const namedWasm = await artifact(artifacts, {artifact_id: NAMED_WASM_ARTIFACT_ID, session_id: '1', navigation_id: '100', frame_id: '200',
     capture_origin: 'webassembly_compile', kind: 'wasm', mime_type: 'application/wasm', url: 'fixture://named-functions.wasm'},
   namedFunctionsWasm());
@@ -1024,7 +1119,7 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
       capture_origin: 'webassembly_compile', kind: 'wasm', execution_context_id: '1', mime_type: 'application/wasm', url: 'https://large.test/module.wasm'},
     await readFile(join(largeDirectory, 'module.wasm'))),
   ] : [];
-  const manifest = [...demoArtifacts, ...large, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, namedWasm, offlineRunner, identified, readable, ...diffBuilds, valueFlowWasm, ...withBodies.artifacts, ...bodyCases.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts, ...debuggerRecords.artifacts];
+  const manifest = [...demoArtifacts, ...large, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, ...graphShapes, namedWasm, offlineRunner, identified, readable, ...diffBuilds, valueFlowWasm, ...withBodies.artifacts, ...bodyCases.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts, ...debuggerRecords.artifacts];
   const retained = [...demoEvents, ...requests, ...guest.events, ...physical.events, ...observed.events];
   for (const process of WORKER_STACK_PROCESSES) {
     assert.equal(retained.filter(event => event.process_id === process).length,

@@ -518,8 +518,13 @@ def check_receiver_stop(receiver: str) -> None:
                         ) from None
                     stopped = time.monotonic() - started
                     answered = 1
-                    while read_ack(connection) is not None:
-                        answered += 1
+                    try:
+                        while read_ack(connection) is not None:
+                            answered += 1
+                    except ConnectionResetError:
+                        # Linux resets a connection whose peer closed with
+                        # frames it never read, after the answers it sent.
+                        pass
             finally:
                 if child.poll() is None:
                     child.kill()

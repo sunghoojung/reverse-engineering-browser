@@ -21,6 +21,7 @@
 #include <utility>
 
 #include "../local_resources.hpp"
+#include "../stop_signal.hpp"
 #include "reb/artifact.hpp"
 #include "reb/local_ipc.hpp"
 
@@ -28,23 +29,14 @@ namespace {
 
 using reb::services::ScopedDescriptor;
 using reb::services::ScopedSocketPath;
+using reb::services::StopSignal;
 
 constexpr std::uint64_t kDefaultMaxArtifactBytes = 16ULL * 1024ULL * 1024ULL;
 constexpr std::uint64_t kDefaultMaxStoreBytes = 256ULL * 1024ULL * 1024ULL;
 constexpr int kSocketTimeoutSeconds = 30;
 
-volatile std::sig_atomic_t g_stop_requested = 0;
-
-void RequestStop(const int) noexcept {
-  g_stop_requested = 1;
-}
-
 bool InstallSignalHandlers() noexcept {
-  struct sigaction stop_action {};
-  stop_action.sa_handler = RequestStop;
-  sigemptyset(&stop_action.sa_mask);
-  if (sigaction(SIGINT, &stop_action, nullptr) != 0 ||
-      sigaction(SIGTERM, &stop_action, nullptr) != 0) {
+  if (!StopSignal::Install({SIGINT, SIGTERM})) {
     return false;
   }
   struct sigaction pipe_action {};
@@ -72,14 +64,23 @@ class DescriptorStreamBuffer final : public std::streambuf {
   }
 
  protected:
+  // An authenticated connection has no receive timeout, so a stop must end
+  // the wait for the next frame even while the browser sends nothing.
   int_type underflow() override {
     for (;;) {
+      const StopSignal::Wait wait = StopSignal::Readable(descriptor_, -1);
+      if (wait == StopSignal::Wait::kInterrupted) {
+        continue;
+      }
+      if (wait != StopSignal::Wait::kReady) {
+        return traits_type::eof();
+      }
       const ssize_t count = read(descriptor_, buffer_.data(), buffer_.size());
       if (count > 0) {
         setg(buffer_.data(), buffer_.data(), buffer_.data() + static_cast<std::ptrdiff_t>(count));
         return traits_type::to_int_type(*gptr());
       }
-      if (count < 0 && errno == EINTR && g_stop_requested == 0) {
+      if (count < 0 && errno == EINTR) {
         continue;
       }
       return traits_type::eof();
@@ -242,13 +243,18 @@ bool ReceiveSocketConnections(const int listener,
                               const Options& options,
                               const reb::LocalIpcToken& token,
                               reb::ArtifactReceiver& receiver) {
-  while (g_stop_requested == 0) {
-    int raw_connection = -1;
-    do {
-      raw_connection = accept(listener, nullptr, nullptr);
-    } while (raw_connection < 0 && errno == EINTR && g_stop_requested == 0);
-    if (g_stop_requested != 0) {
+  while (!StopSignal::Requested()) {
+    const StopSignal::Wait wait = StopSignal::Readable(listener, -1);
+    if (wait == StopSignal::Wait::kStopped) {
       return true;
+    }
+    if (wait == StopSignal::Wait::kInterrupted) {
+      continue;
+    }
+    const int raw_connection =
+        wait == StopSignal::Wait::kReady ? accept(listener, nullptr, nullptr) : -1;
+    if (raw_connection < 0 && errno == EINTR) {
+      continue;
     }
     if (raw_connection < 0) {
       std::cerr << "Unable to accept artifact connection: " << std::strerror(errno) << '\n';

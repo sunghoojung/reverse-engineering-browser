@@ -64,6 +64,9 @@ acknowledges and closes that connection. Socket mode then keeps the listener and
 accepts a later authenticated connection; the browser reconnects within a
 bounded budget and records an `artifact_channel_lost` gap if it cannot. The live
 launcher stops the listener explicitly when the browser session ends.
+`SIGTERM` or `SIGINT` stops it at once, even while the browser's authenticated
+connection stays open and idle, which has no receive timeout; an artifact still
+arriving is not stored.
 
 Response bodies, request bodies, full request targets and Canvas data URLs are
 rejected by default.

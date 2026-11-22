@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import signal
 import socket
 import struct
@@ -413,6 +414,139 @@ def check_receiver_socket(receiver: str) -> None:
     )
 
 
+def check_receiver_stop(receiver: str) -> None:
+    """SIGTERM stops the receiver while the browser's connection stays open and idle.
+
+    The browser holds one authenticated connection for the whole session, and
+    the receiver waits on it with no timeout. A stop that lands while the
+    receiver is consuming an artifact, rather than blocked in a read, must
+    still end that wait: a handler that only set a flag lost it, and the
+    receiver waited for a next frame that an idle browser never sends.
+    """
+    with tempfile.TemporaryDirectory(prefix="reb-stop-", dir="/tmp") as temporary:
+        root = Path(temporary)
+        token = root / "token"
+        token.write_text("a" * 64)
+        token.chmod(0o600)
+        socket_path = root / "artifact.sock"
+        content = b"stop();" * (5 * 1024 * 1024)
+        child = subprocess.Popen(
+            [
+                receiver,
+                "--store",
+                str(root / "artifacts"),
+                "--socket",
+                str(socket_path),
+                "--token-file",
+                str(token),
+                "--session-id",
+                "7",
+                "--max-artifact-bytes",
+                str(len(content)),
+                "--max-store-bytes",
+                str(2 * len(content)),
+            ],
+            stderr=subprocess.PIPE,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                connection.settimeout(30)
+                # The socket file exists from bind(), before the receiver listens.
+                while connection.connect_ex(str(socket_path)) != 0:
+                    assert child.poll() is None and time.monotonic() < deadline, "receiver socket"
+                    time.sleep(0.01)
+                connection.sendall(
+                    struct.pack("<IHHQ32s16s", HELLO_MAGIC, 1, 64, 7, TEST_TOKEN, bytes(16))
+                )
+                # Once the whole frame is written the receiver never blocks
+                # in a read until it has answered, so the signal lands while
+                # it works. The browser then sends nothing more.
+                connection.sendall(artifact_frame(1, content))
+                unanswered = not select.select([connection], [], [], 0)[0]
+                started = time.monotonic()
+                child.send_signal(signal.SIGTERM)
+                try:
+                    _, errors = child.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    raise AssertionError(
+                        "SIGTERM while the receiver consumed an artifact did not stop it; it "
+                        "waits for a frame the idle browser never sends"
+                    ) from None
+                stopped = time.monotonic() - started
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.communicate()
+        assert unanswered, "the artifact was answered before the stop, so nothing raced"
+        assert child.returncode == 0, errors.decode()
+        assert "Artifact receiver stopped:" in errors.decode(), errors.decode()
+    print(
+        "PASS artifact receiver stop: SIGTERM while it consumes an artifact ends it in "
+        f"{stopped * 1000:.0f} ms with the browser's connection open and idle"
+    )
+
+
+def check_broker_stop(broker: str) -> None:
+    """SIGUSR1 stops the socket broker at each wait, with the browser connected or not."""
+    for phase in ("connection", "authentication", "events"):
+        with tempfile.TemporaryDirectory(prefix="reb-bstop-", dir="/tmp") as temporary:
+            root = Path(temporary)
+            token = root / "token"
+            token.write_text("a" * 64)
+            token.chmod(0o600)
+            socket_path = root / "broker.sock"
+            child = subprocess.Popen(
+                [
+                    broker,
+                    "--store",
+                    str(root / "events.jsonl"),
+                    "--socket",
+                    str(socket_path),
+                    "--token-file",
+                    str(token),
+                    "--session-id",
+                    "7",
+                    "--category-mask",
+                    "1",
+                    "--duration-seconds",
+                    "3600",
+                ],
+                stderr=subprocess.PIPE,
+            )
+            connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                deadline = time.monotonic() + 10
+                while not socket_path.is_socket():
+                    assert child.poll() is None and time.monotonic() < deadline, "broker socket"
+                    time.sleep(0.01)
+                if phase != "connection":
+                    while connection.connect_ex(str(socket_path)) != 0:
+                        assert child.poll() is None and time.monotonic() < deadline, "listen"
+                        time.sleep(0.01)
+                if phase == "events":
+                    connection.sendall(
+                        struct.pack("<IHHQ32s16s", HELLO_MAGIC, 1, 64, 7, TEST_TOKEN, bytes(16))
+                    )
+                time.sleep(0.1)
+                child.send_signal(signal.SIGUSR1)
+                try:
+                    _, errors = child.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    raise AssertionError(f"SIGUSR1 awaiting {phase} did not stop the broker") from None
+            finally:
+                connection.close()
+                if child.poll() is None:
+                    child.kill()
+                    child.communicate()
+            assert child.returncode == 0, errors.decode()
+            assert "Broker stopped:" in errors.decode(), errors.decode()
+    print(
+        "PASS event broker stop: SIGUSR1 ends the socket broker awaiting a connection, its "
+        "authentication or the next event"
+    )
+
+
 def check_receiver_recovery(receiver: str) -> None:
     """Interrupted-append recovery in the production executable.
 
@@ -787,11 +921,13 @@ def main() -> None:
                 )
             check_stores(output, cases)
             check_receiver_socket(args.receiver)
+            check_receiver_stop(args.receiver)
+            check_broker_stop(args.broker)
             check_receiver_recovery(args.receiver)
             check_transport(args.receiver)
         else:
             print(
-                "SKIPPED production service stdio replay, receiver socket/recovery and socket "
+                "SKIPPED production service stdio replay, receiver socket/stop/recovery and socket "
                 "writer transport: --receiver/--broker not supplied"
             )
         if args.analyzer:

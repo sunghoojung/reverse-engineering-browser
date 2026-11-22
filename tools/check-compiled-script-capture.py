@@ -4,7 +4,7 @@
 Needs a Brave built from this tree. Serves an owned loopback fixture, starts a
 visibly labeled content-capture session for that fixture only, and compares the
 stored records and artifacts with the exact source of each case. See
-protocol/native-compiled-scripts-v1.md.
+protocol/native-compiled-scripts-v2.md.
 """
 
 from __future__ import annotations
@@ -25,6 +25,9 @@ import urllib.request
 
 KIND_SCRIPT, KIND_FUNCTION_CONSTRUCTOR, KIND_EVAL = 1, 5, 4
 QUEUED, DUPLICATE, NETWORK_FETCHED = 1, 2, 3
+PAYLOAD_VERSION = 2
+# Over version 1's 16 MiB source limit: version 2 hashes and keeps it whole.
+LARGE_EVAL_PAD = 17 * 1024 * 1024
 REPORT_ONLY = ("Content-Security-Policy-Report-Only", "script-src 'self' 'unsafe-inline'")
 UNSAFE_EVAL = ("Content-Security-Policy", "script-src 'self' 'unsafe-inline' 'unsafe-eval'")
 
@@ -83,6 +86,7 @@ def build_fixture() -> tuple[dict[str, tuple[str, tuple[str, str] | None]], list
     report_only_eval = text("report_only_eval")
     report_only_body = text("report_only_new_function", "return 8;")
     unsafe_eval = text("unsafe_eval")
+    large_eval = text("large_eval") + " " * LARGE_EVAL_PAD
 
     index = f"""<!doctype html><meta charset=utf-8><title>compiled scripts</title>
 <script>{inline}</script>
@@ -94,6 +98,7 @@ async function run() {{
   eval({json.dumps(direct)});
   (0, eval)({json.dumps(indirect)});
   eval({json.dumps(outer)});
+  eval({json.dumps(text("large_eval"))} + ' '.repeat({LARGE_EVAL_PAD}));
   new Function('a', {json.dumps(body)})(1);
   setTimeout({json.dumps(timer)}, 0);
   const s = document.createElement('script');
@@ -151,6 +156,7 @@ fetch('/beacon?m=unsafe_eval');
         Case("report_only_eval", report_only_eval, KIND_EVAL),
         Case("report_only_new_function", function_source("", report_only_body), KIND_FUNCTION_CONSTRUCTOR),
         Case("unsafe_eval", unsafe_eval, KIND_EVAL),
+        Case("large_eval", large_eval, KIND_EVAL),
         Case("external_script", external, KIND_SCRIPT, fetched=True),
         Case("worker_entry", worker, KIND_SCRIPT, fetched=True, worker=True),
         Case("worker_import", worker_import, KIND_SCRIPT, fetched=True, worker=True),
@@ -202,6 +208,7 @@ def api(endpoint: str, instance: str, path: str, body: dict | None = None) -> di
 def decode(event: dict) -> dict:
     payload = bytes.fromhex(event["payload"])
     return {
+        "version": int.from_bytes(payload[0:2], "little"),
         "kind": payload[4],
         "retention": payload[5],
         "script_id": int.from_bytes(payload[8:12], "little"),
@@ -225,6 +232,8 @@ def verify(cases: list[Case], records: list[dict], artifacts: list[dict]) -> lis
             failures.append(f"{case.name}: no script_compiled record")
             continue
         record = matches[0]
+        if record["version"] != PAYLOAD_VERSION:
+            failures.append(f"{case.name}: payload version {record['version']}")
         allowed = (NETWORK_FETCHED,) if case.fetched else (QUEUED, DUPLICATE)
         if record["kind"] != case.kind or record["retention"] not in allowed:
             failures.append(f"{case.name}: kind {record['kind']} retention {record['retention']}")

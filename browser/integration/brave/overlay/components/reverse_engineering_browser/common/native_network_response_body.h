@@ -24,39 +24,40 @@ namespace reb {
 
 // Producer half of the response_body record in protocol/native-network-v3.md.
 // include/reb/network_response_body.hpp decodes and validates the same bytes.
-// Version 2 adds flag bit 7, kNativeResponseBodySnapshotsWithheld.
-inline constexpr std::uint16_t kNativeResponseBodyPayloadVersion = 2;
+// Version 2 adds flag bit 7, kNativeResponseBodySnapshotsWithheld. Version 3
+// keeps every body whole and every media type: it never emits
+// captured_truncated, not_captured_type or not_captured_session_budget, and
+// snapshots have their own bound below.
+inline constexpr std::uint16_t kNativeResponseBodyPayloadVersion = 3;
 inline constexpr std::size_t kNativeResponseBodyCodingSlots = 4;
-inline constexpr std::uint64_t kNativeResponseBodyCaptureBytes = kNativeArtifactMaxContentBytes;
 // Partial snapshots of an open body ("Partial bodies" in native-network-v3.md).
-// Each copies every byte kept so far, so they are spaced by the body's age and
-// paid from a byte allowance rather than counted: the first after a second,
-// each later one at least a 32nd of the body's age after the one before.
+// Each copies every byte kept so far, so they are spaced by the body's age:
+// the first after a second, each later one at least a 32nd of the body's age
+// after the one before.
 inline constexpr std::uint64_t kNativeResponseBodySnapshotFirstNs = 1'000'000'000;
 inline constexpr std::uint64_t kNativeResponseBodySnapshotAgeDivisor = 32;
-// One body's snapshots copy at most an eighth of the session budget, and all of a
-// session's snapshots at most a quarter, so whole bodies keep three quarters.
-inline constexpr std::uint64_t kNativeResponseBodySnapshotBodyDivisor = 8;
-inline constexpr std::uint64_t kNativeResponseBodySnapshotSessionDivisor = 4;
-// Unique response bytes per session (--reb-response-body-budget-bytes).
-inline constexpr std::uint64_t kNativeResponseBodyDefaultBudgetBytes = 512ULL * 1024ULL * 1024ULL;
-inline constexpr std::uint64_t kNativeResponseBodyMinBudgetBytes = 1ULL * 1024ULL * 1024ULL;
-inline constexpr std::uint64_t kNativeResponseBodyMaxBudgetBytes =
-    16ULL * 1024ULL * 1024ULL * 1024ULL;
+// The age spacing alone lets a steadily growing body copy about 32 times its
+// size in snapshots. A body's snapshots together copy at most four times the
+// bytes it kept so far, plus 64 MiB, so their disk cost stays proportional to
+// the body however long it stays open, without any session-wide budget.
+inline constexpr std::uint64_t kNativeResponseBodySnapshotCopyFactor = 4;
+inline constexpr std::uint64_t kNativeResponseBodySnapshotSlackBytes = 64ULL * 1024ULL * 1024ULL;
 
 enum class NativeResponseBodyState : std::uint8_t {
   kCaptured = 1,
-  kCapturedTruncated = 2,
+  // 2, 9 and 12 are retired: versions 1 and 2's 16 MiB capture limit, media
+  // and fonts left out by choice, and response body budget.
+  // include/reb/network_response_body.hpp still decodes them.
   kPartial = 3,
   kAborted = 4,
   kCancelled = 5,
   kEmpty = 6,
   kNotModified = 7,
   kRedirected = 8,
-  kNotCapturedType = 9,
   kNotCapturedArtifactUnavailable = 10,
   kNotCapturedTransferRefused = 11,
-  kNotCapturedSessionBudget = 12,
+  // The receiver's disk reserve refused the body while it arrived.
+  kNotCapturedDiskReserve = 13,
 };
 
 enum class NativeResponseCoding : std::uint8_t {
@@ -78,16 +79,14 @@ inline constexpr std::uint8_t kNativeResponseBodyStillEncoded = 1U << 3U;
 inline constexpr std::uint8_t kNativeResponseBodyCodingsOmitted = 1U << 4U;
 inline constexpr std::uint8_t kNativeResponseBodyCompletionUnobserved = 1U << 5U;
 inline constexpr std::uint8_t kNativeResponseBodyContentTypePresent = 1U << 6U;
-// A snapshot the spacing allowed was withheld by a byte bound; every later
-// record of the body carries it ("Partial bodies" in native-network-v3.md).
+// A snapshot the spacing allowed was withheld by the body's snapshot bound;
+// every later record of the body carries it ("Partial bodies" in
+// native-network-v3.md).
 inline constexpr std::uint8_t kNativeResponseBodySnapshotsWithheld = 1U << 7U;
 
 struct NativeResponseBodyPolicy final {
   // Content sessions only (--reb-capture-request-content).
   bool enabled = false;
-  // Element-loaded images, audio, video and fonts (--reb-capture-response-media).
-  bool media = false;
-  std::uint64_t budget = kNativeResponseBodyDefaultBudgetBytes;
 };
 
 struct NativeResponseBodySummary final {
@@ -161,26 +160,6 @@ constexpr void SetNativeResponseContentType(const std::string_view mime_type,
   if (NormalizeNativeContentType(mime_type, summary.content_type, summary.content_type_length)) {
     summary.flags |= kNativeResponseBodyContentTypePresent;
   }
-}
-
-// Images, audio, video and fonts that page elements load are kept only when
-// the session asks for media; every other response body is kept. A fetch or
-// XHR image is a deliberate script read, so it is kept by default.
-[[nodiscard]] constexpr bool IsNativeResponseMedia(const int resource_type,
-                                                   const std::string_view mime_type) noexcept {
-  using native_response_detail::Is;
-  // blink.mojom.ResourceType at the pin.
-  constexpr int kImage = 4, kFont = 5, kMedia = 8, kFavicon = 12, kXhr = 13;
-  const auto major = mime_type.substr(0, mime_type.find('/'));
-  if (resource_type == kFont || resource_type == kMedia || Is(major, "audio") ||
-      Is(major, "video") || Is(major, "font") || Is(mime_type, "application/font-woff") ||
-      Is(mime_type, "application/font-woff2") || Is(mime_type, "application/font-sfnt") ||
-      Is(mime_type, "application/x-font-ttf") || Is(mime_type, "application/x-font-otf") ||
-      Is(mime_type, "application/x-font-woff") || Is(mime_type, "application/vnd.ms-fontobject")) {
-    return true;
-  }
-  const bool image = resource_type == kImage || resource_type == kFavicon || Is(major, "image");
-  return image && resource_type != kXhr && !Is(mime_type, "image/svg+xml");
 }
 
 // Fixed little-endian layout; see the field table in native-network-v3.md.

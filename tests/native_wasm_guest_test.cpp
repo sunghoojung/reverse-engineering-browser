@@ -1,7 +1,6 @@
 #include "components/reverse_engineering_browser/common/native_wasm_guest.h"
 #include <cassert>
 #include <cstdio>
-#include "components/reverse_engineering_browser/common/native_artifact_queue_limits.h"
 #include "components/reverse_engineering_browser/common/native_wasm_guest_wire.h"
 #include "reb/wasm_guest.hpp"
 
@@ -160,11 +159,6 @@ void Put(Runtime& s, std::size_t offset, std::uint32_t value) {
     s.memory[offset + i] = static_cast<std::uint8_t>(value >> (8 * i));
 }
 int main() {
-  static_assert(reb::CanQueueNativeArtifact(287, 0, 32U * 1024U * 1024U));
-  static_assert(!reb::CanQueueNativeArtifact(288, 0, 1));
-  static_assert(!reb::CanQueueNativeArtifact(0, 32U * 1024U * 1024U, 1));
-  static_assert(!reb::CanQueueNativeArtifact(0, SIZE_MAX, 1));
-  static_assert(!reb::CanQueueNativeArtifact(0, 1, SIZE_MAX));
   Runtime runtime;
   runtime.locals[10] = 8;
   Put(runtime, 12, 32);

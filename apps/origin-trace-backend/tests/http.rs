@@ -7838,8 +7838,15 @@ async fn guarded_export_round_trips_canonical_private_cli_bytes_without_secrets_
             & 0o777,
         0o600
     );
+    // An existing output is refused before the export is asked for, so the
+    // answer does not depend on how the server fares.
     let second = call();
-    assert_eq!(second.status.code(), Some(2));
+    let refusal = String::from_utf8_lossy(&second.stderr);
+    assert_eq!(second.status.code(), Some(2), "{refusal}");
+    assert!(
+        refusal.contains("already exists. No request was sent"),
+        "{refusal}"
+    );
     assert_eq!(std::fs::read(&output_path).unwrap(), bytes);
     let result = Command::new(env!("CARGO_BIN_EXE_reb-api"))
         .args([

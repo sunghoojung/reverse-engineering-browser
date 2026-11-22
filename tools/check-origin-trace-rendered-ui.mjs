@@ -78,7 +78,11 @@ function run(command, args, {timeout, label}) {
     for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => { output = (output + chunk).slice(-1024 * 1024); });
     const timer = setTimeout(() => {
       try { process.kill(-child.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') output += `\n${error}`; }
-      reject(new Error(`${label} timed out\n${summary(output)}`));
+      // The whole output goes into xcodebuild.log, as for a failed pass: the
+      // summary keeps only the last lines, after the test that went wrong.
+      const error = new Error(`${label} timed out\n${summary(output)}`);
+      Object.defineProperty(error, 'output', {value: output, enumerable: false});
+      reject(error);
     }, timeout);
     child.once('error', error => { clearTimeout(timer); reject(error); });
     child.once('close', code => {

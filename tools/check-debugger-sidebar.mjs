@@ -79,9 +79,12 @@ function mount({protocol = 'http:', store = createStore(), hold = null, failing 
     const url = String(input), parameters = new URL(url, 'http://local').searchParams;
     const entry = {url, signal: init.signal ?? null, timeout: timeouts.at(-1) ?? null};
     requests.push(entry);
+    // Held or not is decided as the request is made: a case may stop holding
+    // as soon as it sees the request listed, before the answer's turn comes.
+    const held = hold?.(url);
     // Answered on a later turn, as a network answers, so a read loop cannot starve timers.
     await new Promise(next => setImmediate(next));
-    if (hold?.(url)) {
+    if (held) {
       await new Promise((release, reject) => {
         entry.release = release;
         init.signal?.addEventListener('abort', () => reject(init.signal.reason ?? new DOMException('aborted', 'AbortError')), {once: true});

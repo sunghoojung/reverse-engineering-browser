@@ -1251,8 +1251,8 @@ impl origin_trace::Evidence for StoredEvidence<'_> {
 mod tests {
     use super::*;
     use crate::origin_trace::{RequestBodies, Retained, RetainedBody, check_selectors, trace};
-    use std::sync::atomic::AtomicBool;
     use serde_json::json;
+    use std::sync::atomic::AtomicBool;
 
     fn write(path: &Path, rows: &[Value], terminated: bool) {
         let mut text = rows
@@ -1392,17 +1392,16 @@ mod tests {
 
     fn steps(indexes: &mut Indexes, root: &Path, request: u64) -> Vec<String> {
         let mut evidence = indexes.trace(root, far()).unwrap();
-        let document =
-            origin_trace::build(
-                &mut evidence,
-                &request.to_string(),
-                None,
-                None,
-                None,
-                root,
-                &AtomicBool::new(false),
-            )
-            .unwrap();
+        let document = origin_trace::build(
+            &mut evidence,
+            &request.to_string(),
+            None,
+            None,
+            None,
+            root,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
         document["steps"]
             .as_array()
             .unwrap()

@@ -367,16 +367,24 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   const ROUTE = flowGraphLayout.ROUTE;
 
   const requestDraw = () => { if (visible && !frame) frame = requestAnimationFrame(() => { frame = 0; draw(); }); };
-  /** The heading and the tools share the top of the stage. When the
-   * heading's whole text and the tools do not fit side by side, as when Find
-   * widens, the tools move under the heading rather than cut it. */
+  /** How much of the stage's right Details covers: in a narrow panel it is
+   * a drawer over the canvas, beside it otherwise. */
+  const drawerWidth = () => detailsOpen && globalThis.getComputedStyle?.(inspector)?.position === 'absolute' ? inspector.offsetWidth ?? 0 : 0;
+  /** The heading and the tools share the top of the stage left of any
+   * drawer. When the heading's whole text and the tools do not fit side by
+   * side, as when Find widens or Details opens, the tools move under the
+   * heading rather than cut it, and wrap there rather than run under the
+   * drawer; the backdrop ends below whichever reaches lower. */
   function syncToolsWidth() {
+    const drawer = drawerWidth();
+    host.style.setProperty('--flow-drawer-w', `${drawer}px`);
     const toolsW = Math.ceil(tools.offsetWidth || 0);
     host.style.setProperty('--flow-tools-w', `${toolsW}px`);
     let want = 0;
     for (const part of heading.children) if (part.textContent) want += part.scrollWidth + (want ? 12 : 0);
     // The heading's left inset, the tools' right one and the gap between.
-    host.toggleAttribute('data-tools-below', 18 + want + 48 + toolsW + 12 > stage.clientWidth);
+    host.toggleAttribute('data-tools-below', 18 + want + 48 + toolsW + 12 > stage.clientWidth - drawer);
+    host.style.setProperty('--flow-band-h', `${Math.max(heading.offsetTop + heading.offsetHeight, tools.offsetTop + tools.offsetHeight) + 18}px`);
   }
   function resize() {
     if (!visible) return;
@@ -450,6 +458,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     if (isOpen) setKey(false);
     detailsOpen = isOpen;
     inspector.hidden = !isOpen; host.toggleAttribute('data-details', isOpen);
+    syncToolsWidth();
     detailsToggle.setAttribute('aria-pressed', String(isOpen));
     detailsToggle.setAttribute('aria-label', isOpen ? 'Hide details' : 'Show details');
     if (isOpen) renderInspector();
@@ -656,7 +665,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     for (const node of doc.nodes) if (!FLOW_GRAPH_SINKS.has(node.kind)) functions += 1;
     const sinks = doc.nodes.length - functions, distinct = doc.stacks.distinct;
     const parts = [`${distinct.toLocaleString()} distinct ${distinct === 1 ? 'stack' : 'stacks'}`, `${functions.toLocaleString()} ${functions === 1 ? 'function' : 'functions'}`,
-      `${sinks.toLocaleString()} ${sinks === 1 ? 'sink' : 'sinks'}`, `${model.contexts.length} ${model.contexts.length === 1 ? 'realm' : 'realms'}`];
+      `${sinks.toLocaleString()} ${sinks === 1 ? 'sink' : 'sinks'}`, `${model.contexts.length.toLocaleString()} ${model.contexts.length === 1 ? 'realm' : 'realms'}`];
     if (display?.groups) parts.push(`${display.groups.toLocaleString()} ${display.groups === 1 ? 'chain' : 'chains'} folded`);
     // The heading names the count that matters; the rest is in its tooltip
     // and the key.
@@ -694,7 +703,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     const waiting = sized.filter(item => item.reason?.code === 'pending').length, failure = sessionLayout.engine.failure;
     // Triskel's elapsed seconds beside the label say it is still running;
     // the hover counts the realms it has left, so the selection keeps its room.
-    engineLabel.textContent = triskel ? `Triskel layout${triskel < sized.length ? ` · ${triskel} of ${sized.length} realms` : ''}` : failure ? 'Layered layout · Triskel unavailable' : 'Layered layout';
+    engineLabel.textContent = triskel ? `Triskel layout${triskel < sized.length ? ` · ${triskel.toLocaleString()} of ${sized.length.toLocaleString()} realms` : ''}` : failure ? 'Layered layout · Triskel unavailable' : 'Layered layout';
     engineLabel.dataset.engine = triskel ? 'triskel' : 'layered';
     engineLabel.title = [waiting ? `${waiting.toLocaleString()} ${waiting === 1 ? 'realm' : 'realms'} waiting for Triskel.` : '', triskel || waiting ? `Triskel ${sessionLayout.engine.revision ? sessionLayout.engine.revision.slice(0, 7) : ''} lays out each realm of up to ${graphLayoutClient.AUTOMATIC.graphNodes.toLocaleString()} cards in the background, and larger ones when asked; a realm it would draw far wider than the stacked layered layout keeps that one.`.replace('  ', ' ') : 'Laid out in the app with the layered layout.',
       // Realms of one origin are told apart by their realm, the detail's first part.
@@ -1512,9 +1521,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   /** The part of the stage a card can be shown in: under the heading, above
    * a Details sheet, and clear of the minimap. */
   function freeArea() {
-    // In a narrow panel Details is a drawer over the right of the canvas.
-    const drawer = detailsOpen && globalThis.getComputedStyle?.(inspector)?.position === 'absolute' ? inspector.offsetWidth ?? 0 : 0;
-    const box = miniRect(), mini = box ? {w: box.w + 14, h: box.h + 14} : null;
+    const drawer = drawerWidth(), box = miniRect(), mini = box ? {w: box.w + 14, h: box.h + 14} : null;
     return {top: topInset(), bottom: cssH - 8, left: 8, right: cssW - drawer - 8, mini: drawer ? null : mini};
   }
   /** First view: the whole graph when its rows stay legible; else reading

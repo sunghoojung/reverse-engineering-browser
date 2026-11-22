@@ -2484,7 +2484,42 @@ final class OriginTraceRenderedUITests: XCTestCase {
     } else {
       print("RENDERED_UI_FLOW large: Triskel laid out every realm unasked")
     }
+    // The narrow window shows one pane at a time; the heading keeps its
+    // whole text with the large session's counts there too.
+    try await ui.resize(width: windowSizes[1].width, height: windowSizes[1].height)
+    if try await ui.value("document.querySelector('#flow-pane-graph').dataset.shown !== 'true'") as? Bool == true {
+      try await ui.click("#flow-tab-graph")
+    }
+    try await ui.waitUntil("document.querySelector('#flow-graph-host').dataset.state === 'ready'", timeout: 60, "large narrow: the Graph pane did not draw")
+    try await assertFlowHeading(ui, "large narrow")
+    try await assertLayout(ui, "#flow-graph-host .flow-graph-tools", "large narrow Graph tools")
+    try await assertLayout(ui, "#flow-graph-host .flow-graph-status", "large narrow Graph status")
+    try await ui.screenshot("flow-graph-narrow-large")
     try await ui.load(harnessPage)
+  }
+
+  // Every part of the Flow graph heading shows its whole text, whatever the
+  // tools and an open Details drawer take, and its counts are grouped; the
+  // tools wrap left of the drawer rather than run under it.
+  @MainActor
+  private func assertFlowHeading(_ ui: Harness, _ name: String, file: StaticString = #filePath, line: UInt = #line) async throws {
+    try await ui.settle()
+    let heading = try await ui.json("""
+      (() => { const graph = document.querySelector('#flow-graph-host'), parts = [...graph.querySelectorAll('.flow-graph-heading > *')];
+        const tools = graph.querySelector('.flow-graph-tools').getBoundingClientRect(), box = graph.querySelector('.flow-graph-heading').getBoundingClientRect();
+        const drawer = graph.querySelector('.flow-graph-inspector'), edge = drawer && !drawer.hidden ? drawer.getBoundingClientRect().left : Infinity;
+        return {cut: parts.filter(part => part.textContent && part.scrollWidth > part.clientWidth + 0.5).map(part => part.textContent),
+          text: parts.map(part => part.textContent).join(' '), overlap: !(tools.top >= box.bottom || tools.left >= box.right),
+          underDrawer: box.right > edge + 0.5, toolsUnderDrawer: tools.right > edge + 0.5}; })()
+      """)
+    print("RENDERED_UI_FLOW \(name) heading: \(heading["text"] ?? "?")")
+    XCTAssertEqual(heading["cut"] as? [String], [], "\(name): the heading is cut: \(heading)", file: file, line: line)
+    XCTAssertEqual(heading["overlap"] as? Bool, false, "\(name): the tools cover the heading: \(heading)", file: file, line: line)
+    XCTAssertEqual(heading["underDrawer"] as? Bool, false, "\(name): Details covers the heading: \(heading)", file: file, line: line)
+    XCTAssertEqual(heading["toolsUnderDrawer"] as? Bool, false, "\(name): Details covers the tools: \(heading)", file: file, line: line)
+    let text = heading["text"] as? String ?? ""
+    XCTAssertTrue(text.contains("stack"), "\(name): the heading names the stacks: \(heading)", file: file, line: line)
+    XCTAssertNil(text.range(of: #"\d{4}"#, options: .regularExpression), "\(name): a heading count is not grouped: \(heading)", file: file, line: line)
   }
 
   @MainActor
@@ -2500,16 +2535,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     XCTAssertEqual(state["state"] as? String, "ready", "\(name): the Graph pane did not draw: \(state)")
     guard state["state"] as? String == "ready" else { return }
     print(String(format: "RENDERED_UI_FLOW %@: drawn in %.1f s", name, Date().timeIntervalSince(started)))
-    // Every part of the heading shows its whole text, whatever the tools take.
-    let heading = try await ui.json("""
-      (() => { const graph = document.querySelector('#flow-graph-host'), parts = [...graph.querySelectorAll('.flow-graph-heading > *')];
-        const tools = graph.querySelector('.flow-graph-tools').getBoundingClientRect(), box = graph.querySelector('.flow-graph-heading').getBoundingClientRect();
-        return {cut: parts.filter(part => part.textContent && part.scrollWidth > part.clientWidth + 0.5).map(part => part.textContent),
-          text: parts.map(part => part.textContent).join(' '), overlap: !(tools.top >= box.bottom || tools.left >= box.right)}; })()
-      """)
-    XCTAssertEqual(heading["cut"] as? [String], [], "\(name): the heading is cut: \(heading)")
-    XCTAssertEqual(heading["overlap"] as? Bool, false, "\(name): the tools cover the heading: \(heading)")
-    XCTAssertTrue((heading["text"] as? String ?? "").contains("stack"), "\(name): the heading names the stacks: \(heading)")
+    try await assertFlowHeading(ui, name)
     // An empty timeline is a strip, never a dock of empty space.
     let dock = try await ui.json("""
       ({state: document.querySelector('#flow-timeline').dataset.state ?? '', height: document.querySelector('#flow-pane-timeline').getBoundingClientRect().height,
@@ -2555,6 +2581,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     let details = try await ui.value("document.querySelector('#flow-graph-host .flow-graph-inspector').innerText") as? String ?? ""
     XCTAssertNil(details.range(of: #"\b\d[\d,]* more\b"#, options: .regularExpression), "\(name): Details counts entries it does not list: \(details)")
     try await assertLayout(ui, "#flow-graph-host .flow-graph-inspector", "\(name) Graph details")
+    try await assertFlowHeading(ui, "\(name) with Details")
     try await ui.screenshot("flow-graph-details-\(name)")
     _ = try await ui.value("document.querySelector('#flow-graph-host .flow-graph-canvas').focus({focusVisible: true})")
     try await ui.key(53, "\u{1B}")

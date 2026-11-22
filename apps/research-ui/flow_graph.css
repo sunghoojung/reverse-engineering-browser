@@ -109,8 +109,10 @@
 .flow-graph[data-details] .flow-graph-body { grid-template-columns: minmax(0, 1fr) minmax(240px, 300px); }
 .flow-graph-stage { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: var(--graph-canvas); container: flow-stage / size; }
 .flow-graph-canvas { display: block; cursor: grab; touch-action: none; }
-/* The floating heading gets a backdrop that fades into the canvas. */
-.flow-graph-stage::before { content: ""; position: absolute; z-index: 1; inset: 0 0 auto; height: 58px; background: linear-gradient(var(--graph-canvas) 62%, transparent); pointer-events: none; }
+/* The floating heading gets a backdrop that fades into the canvas, ending
+ * under whichever of the heading and the tools reaches lower (--flow-band-h,
+ * measured by syncToolsWidth in flow_graph.js). */
+.flow-graph-stage::before { content: ""; position: absolute; z-index: 1; inset: 0 0 auto; height: var(--flow-band-h, 58px); background: linear-gradient(var(--graph-canvas) 62%, transparent); pointer-events: none; }
 .flow-graph-canvas:active { cursor: grabbing; }
 .flow-graph-canvas:focus { outline: none; }
 .flow-graph-canvas:focus-visible { outline: none; }
@@ -119,7 +121,7 @@
 .flow-graph:not([data-state="ready"]) :is(.flow-graph-tools, .flow-graph-heading) { visibility: hidden; }
 
 /* Heading and tools float over the canvas, like a document title. */
-.flow-graph-heading { position: absolute; z-index: 2; top: 12px; left: 18px; max-width: calc(100% - var(--flow-tools-w, 640px) - 48px); display: flex; align-items: baseline; gap: 12px; white-space: nowrap; pointer-events: none; }
+.flow-graph-heading { position: absolute; z-index: 2; top: 12px; left: 18px; max-width: calc(100% - var(--flow-tools-w, 640px) - 48px - var(--flow-drawer-w, 0px)); display: flex; align-items: baseline; gap: 12px; white-space: nowrap; pointer-events: none; }
 /* When Find widens the tools, the stats give way first, then the state
  * label, then the title; each keeps its whole text in its tooltip. */
 .flow-graph-title { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--text); font: 600 19px var(--sans); letter-spacing: -0.01em; text-overflow: ellipsis; }
@@ -127,7 +129,9 @@
 .flow-graph-evidence { flex: 0 10 auto; min-width: 0; overflow: hidden; color: var(--faint); font: 13px var(--sans); text-overflow: ellipsis; }
 .flow-graph-stats, .flow-graph-evidence { pointer-events: auto; cursor: default; }
 .flow-graph-evidence[data-partial="true"] { color: var(--amber); }
-.flow-graph-tools { position: absolute; z-index: 3; top: 10px; right: 12px; max-width: calc(100% - 24px); display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px; }
+/* A Details drawer over the right of the canvas (--flow-drawer-w) narrows
+ * the room the heading and tools share, so the tools wrap beside it. */
+.flow-graph-tools { position: absolute; z-index: 3; top: 10px; right: calc(12px + var(--flow-drawer-w, 0px)); max-width: calc(100% - 24px - var(--flow-drawer-w, 0px)); display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px; }
 .flow-graph-filter input { width: 200px; height: 30px; padding: 0 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--text); font: 11.5px var(--sans); }
 .flow-graph-find { display: inline-flex; align-items: center; gap: 2px; padding: 3px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); }
 .flow-graph-find[hidden] { display: none; }
@@ -150,7 +154,7 @@
 .flow-graph-state strong { color: var(--text); font: 600 14px var(--sans); }
 .flow-graph-state p { max-width: 460px; margin: 0; line-height: 1.5; overflow-wrap: anywhere; }
 .flow-graph-state[data-kind="error"] strong { color: var(--red); }
-.flow-graph-banner { position: absolute; z-index: 5; top: 52px; left: 50%; max-width: calc(100% - 32px); transform: translateX(-50%); padding: 6px 14px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--muted); font: 11.5px var(--sans); box-shadow: 0 6px 18px var(--shadow); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.flow-graph-banner { position: absolute; z-index: 5; top: calc(var(--flow-band-h, 58px) - 6px); left: 50%; max-width: calc(100% - 32px); transform: translateX(-50%); padding: 6px 14px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--muted); font: 11.5px var(--sans); box-shadow: 0 6px 18px var(--shadow); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .flow-graph-banner[data-kind="error"] { display: flex; align-items: center; gap: 10px; max-width: min(560px, calc(100% - 32px)); border-radius: 10px; color: var(--red); white-space: normal; text-overflow: clip; }
 .flow-graph-banner .secondary-button { flex: 0 0 auto; min-height: 24px; }
 .flow-graph-toast { position: absolute; z-index: 6; left: 50%; bottom: 16px; transform: translateX(-50%); padding: 6px 14px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel-3); color: var(--text); font: 11.5px var(--sans); box-shadow: 0 6px 18px var(--shadow); pointer-events: none; }
@@ -290,20 +294,16 @@ ol.flow-inspector-list { padding-left: 18px; list-style: decimal; color: var(--t
 /* When the heading's whole text and the tools do not fit side by side
  * (data-tools-below, measured from both), the tools drop under the heading;
  * a narrow canvas then tightens everything. */
-.flow-graph[data-tools-below] .flow-graph-heading { max-width: calc(100% - 36px); }
-.flow-graph[data-tools-below] .flow-graph-stage::before { height: 96px; }
+.flow-graph[data-tools-below] .flow-graph-heading { max-width: calc(100% - 36px - var(--flow-drawer-w, 0px)); }
 .flow-graph[data-tools-below] .flow-graph-tools { top: 44px; left: 12px; right: auto; justify-content: flex-start; }
-.flow-graph[data-tools-below] .flow-graph-banner { top: 84px; }
 @container flow-stage (max-width: 760px) {
   .flow-graph-heading { top: 10px; left: 12px; gap: 8px; }
   .flow-graph-title { font-size: 16px; }
   .flow-graph-stats { font-size: 11.5px; }
-  .flow-graph[data-tools-below] .flow-graph-stage::before { height: 84px; }
   .flow-graph[data-tools-below] .flow-graph-tools { top: 38px; }
   .flow-graph-tools { gap: 4px; }
   .flow-graph-filter input { width: 160px; }
   .flow-graph-tools > .flow-graph-tool { min-height: 28px; padding: 0 10px; }
-  .flow-graph[data-tools-below] .flow-graph-banner { top: 76px; }
 }
 @container flow-stage (max-width: 520px) {
   .flow-graph-evidence { display: none; }

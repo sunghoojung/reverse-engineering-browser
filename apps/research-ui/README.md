@@ -3133,8 +3133,11 @@ The canvas announces this list through `aria-describedby`.
   view, in a short canvas, and in a canvas narrower than 820 px unless M shows
   it.
 - Centring a card keeps it clear of the minimap and of a Details sheet.
-- In a canvas narrower than 860 px the tools drop under the heading. In a
-  narrow window Details is a sheet over the bottom 40% of the canvas.
+- The tools drop under the heading when the heading's whole text and the
+  tools do not fit side by side. In a pane narrower than 760 px Details is a
+  drawer over the right of the canvas, at most 300 px wide, and the heading
+  and tools keep left of it, the tools wrapping there rather than running
+  under it. Counts carry the locale's digit grouping.
 
 ### Workspace API
 

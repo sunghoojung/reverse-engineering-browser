@@ -84,7 +84,7 @@ function flowGraphNodeFile(node, short = false) {
 
 function flowGraphNodeDetail(node) {
   if (!node) return '';
-  if (node.kind === 'chain') return `${node.members.length} functions · Space expands`;
+  if (node.kind === 'chain') return `${node.members.length.toLocaleString()} functions · Space expands`;
   if (FLOW_GRAPH_SINKS.has(node.kind)) return `${node.hits.toLocaleString()} ${node.hits === 1 ? 'time' : 'times'}`;
   if (node.status !== 'resolved') return FLOW_GRAPH_REASONS[node.reason] ?? node.reason ?? 'unresolved';
   if (node.kind === 'wasm') return `func ${node.function_index} · ${requestStackFile(node.url)}`;
@@ -294,7 +294,7 @@ function flowGraphCard(model, display, v, measure = FLOW_GRAPH_MEASURE) {
     ...display.outs[v].map(index => flowGraphCardRow(model, display, display.edges[index], index)),
     ...display.sinkRows[v].map(edge => flowGraphCardRow(model, display, edge, -1))
   ].sort(flowGraphRowOrder);
-  const location = sink ? `${node.hits.toLocaleString()} ${FLOW_GRAPH_SINK_NOUNS[node.kind][node.hits === 1 ? 0 : 1]}` : chain ? `${node.members.length} pass-through frames, folded` : flowGraphNodeDetail(node);
+  const location = sink ? `${node.hits.toLocaleString()} ${FLOW_GRAPH_SINK_NOUNS[node.kind][node.hits === 1 ? 0 : 1]}` : chain ? `${node.members.length.toLocaleString()} pass-through frames, folded` : flowGraphNodeDetail(node);
   const stacks = flowGraphStacks(model, node);
   const title = flowGraphNodeName(node), tag = FLOW_GRAPH_KIND_TAGS[node.kind] ?? node.kind, badge = stacks.toLocaleString();
   const siteW = rows.reduce((max, row) => Math.max(max, row.site.length), 0), opW = rows.reduce((max, row) => Math.max(max, row.op.length), 0);

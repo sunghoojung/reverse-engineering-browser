@@ -393,16 +393,11 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     )
   }
 
+  /// The collection holds the researcher's own request templates, as many,
+  /// as deep and as large as they make, so it records no limits, as in the
+  /// Rust backend's workspace::Kind::Collection.
   private func apiCollectionLimits() -> [String: Int] {
-    [
-      "folders": 32,
-      "requests": 128,
-      "folder_depth": 4,
-      "variables_per_scope": 32,
-      "variable_bytes_per_scope": 32 * 1_024,
-      "request_body_bytes": 64 * 1_024,
-      "document_bytes": 2 * 1_024 * 1_024,
-    ]
+    [:]
   }
 
   private func emptyApiCollection() -> [String: Any] {
@@ -466,11 +461,10 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 
   private func normalizeApiCollectionVariables(_ value: Any?) throws -> [[String: Any]] {
-    guard let values = value as? [[String: Any]], values.count <= 32 else {
+    guard let values = value as? [[String: Any]] else {
       throw LocalHTTPError(status: 400, message: "API Collection variables are invalid")
     }
     var names = Set<String>()
-    var totalBytes = 0
     var normalized: [[String: Any]] = []
     normalized.reserveCapacity(values.count)
     for variable in values {
@@ -480,12 +474,12 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       let name = try apiCollectionText(
         variable["name"],
         label: "API Collection variable name",
-        maximumBytes: 64
+        maximumBytes: Int.max
       )
       let variableValue = try apiCollectionText(
         variable["value"],
         label: "API Collection variable value",
-        maximumBytes: 4 * 1_024,
+        maximumBytes: Int.max,
         allowEmpty: true
       )
       guard name.range(of: #"^[A-Za-z_][A-Za-z0-9_.-]*$"#, options: .regularExpression) != nil,
@@ -496,17 +490,13 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           message: "API Collection variable name is invalid or duplicated"
         )
       }
-      totalBytes += name.utf8.count + variableValue.utf8.count
-      guard totalBytes <= 32 * 1_024 else {
-        throw LocalHTTPError(status: 400, message: "API Collection variable scope exceeds 32 KiB")
-      }
       normalized.append(["name": name, "value": variableValue])
     }
     return normalized.sorted { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }
   }
 
   private func normalizeApiCollectionHeaders(_ value: Any?) throws -> [[String: Any]] {
-    guard let values = value as? [[String: Any]], values.count <= 64 else {
+    guard let values = value as? [[String: Any]] else {
       throw LocalHTTPError(status: 400, message: "API Collection request headers are invalid")
     }
     // The HTTP client computes framing and connection headers; credentials and
@@ -530,7 +520,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       let headerValue = try apiCollectionText(
         header["value"],
         label: "API Collection request header value",
-        maximumBytes: 64 * 1_024,
+        maximumBytes: Int.max,
         allowEmpty: true
       )
       let lowerName = name.lowercased()
@@ -603,8 +593,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     guard !name.contains("/") else {
       throw LocalHTTPError(status: 400, message: "API Collection request names cannot contain slashes")
     }
-    guard let body = request["body"] as? String, body.utf8.count <= 64 * 1_024 else {
-      throw LocalHTTPError(status: 400, message: "API Collection request body exceeds 64 KiB")
+    guard let body = request["body"] as? String else {
+      throw LocalHTTPError(status: 400, message: "API Collection request body must be text")
     }
     let timeout = try apiCollectionInteger(
       request["timeout_ms"],
@@ -625,7 +615,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       "url": try apiCollectionText(
         request["url"],
         label: "API Collection request URL template",
-        maximumBytes: 8 * 1_024,
+        maximumBytes: Int.max,
         trim: true
       ),
       "method": try apiCollectionText(
@@ -665,15 +655,16 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       ),
       try apiCollectionInteger(collection["contract_version"], label: "API Collection contract") == 1,
       collection["document_kind"] as? String == "api-collection",
-      let limits = collection["limits"] as? [String: Any],
-      NSDictionary(dictionary: limits).isEqual(to: apiCollectionLimits())
+      // A document written under other limits still reads; the next save
+      // records these.
+      collection["limits"] is [String: Any]
     else {
       throw LocalHTTPError(status: 400, message: "API Collection document contract is unsupported")
     }
     let generation = try apiCollectionInteger(collection["generation"], label: "API Collection generation")
     let updatedAt = try apiCollectionInteger(collection["updated_at_ms"], label: "API Collection update time")
-    guard let rawFolders = collection["folders"] as? [Any], 1...32 ~= rawFolders.count,
-      let rawRequests = collection["requests"] as? [Any], rawRequests.count <= 128
+    guard let rawFolders = collection["folders"] as? [Any], !rawFolders.isEmpty,
+      let rawRequests = collection["requests"] as? [Any]
     else {
       throw LocalHTTPError(status: 400, message: "API Collection counts are invalid")
     }
@@ -692,27 +683,28 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     else {
       throw LocalHTTPError(status: 400, message: "API Collection root folder is invalid")
     }
+    // A walk toward the root stops at a folder already known to reach it, so
+    // a hierarchy of any depth is checked in linear time and a cycle is found
+    // on the walk that enters it.
+    var reached: Set<Int> = [1]
     var siblingNames = Set<String>()
     for folder in folders {
-      let identifier = folder["id"] as! Int
       let parent = folder["parent_id"] as? Int
       let siblingKey = "\(parent.map(String.init) ?? "root")\u{0}\((folder["name"] as! String).lowercased())"
       guard siblingNames.insert(siblingKey).inserted else {
         throw LocalHTTPError(status: 400, message: "API Collection folder name is duplicated")
       }
-      var seen = Set([identifier])
+      var walked: Set<Int> = []
       var current = folder
-      var depth = 0
-      while let parentID = current["parent_id"] as? Int {
-        guard let parentFolder = foldersByID[parentID], seen.insert(parentID).inserted else {
+      while !reached.contains(current["id"] as! Int) {
+        guard walked.insert(current["id"] as! Int).inserted,
+          let parentID = current["parent_id"] as? Int, let parentFolder = foldersByID[parentID]
+        else {
           throw LocalHTTPError(status: 400, message: "API Collection folder hierarchy is invalid")
         }
         current = parentFolder
-        depth += 1
-        guard depth <= 4 else {
-          throw LocalHTTPError(status: 400, message: "API Collection folder depth exceeds four levels")
-        }
       }
+      reached.formUnion(walked)
     }
     var requestIDs = Set<Int>()
     var requestNames = Set<String>()
@@ -735,10 +727,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       "requests": requests.sorted { ($0["id"] as! Int) < ($1["id"] as! Int) },
       "limits": apiCollectionLimits(),
     ]
-    let encoded = try JSONSerialization.data(withJSONObject: normalized, options: [])
-    guard encoded.count <= 2 * 1_024 * 1_024 else {
-      throw LocalHTTPError(status: 400, message: "API Collection document exceeds 2 MiB")
-    }
     if generation == 0 {
       guard updatedAt == 0, folders.count == 1,
         (root["variables"] as? [Any])?.isEmpty == true, requests.isEmpty
@@ -767,27 +755,22 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     defer { Darwin.close(descriptor) }
     var metadata = stat()
     guard fstat(descriptor, &metadata) == 0,
-      (metadata.st_mode & S_IFMT) == S_IFREG,
-      metadata.st_size <= 2 * 1_024 * 1_024
+      (metadata.st_mode & S_IFMT) == S_IFREG
     else {
-      throw LocalHTTPError(status: 500, message: "API Collection store must be a bounded regular file")
+      throw LocalHTTPError(status: 500, message: "API Collection store must be a regular file")
     }
     do {
-      let maximumBytes = 2 * 1_024 * 1_024
       var data = Data()
-      data.reserveCapacity(min(Int(metadata.st_size), maximumBytes))
-      var buffer = [UInt8](repeating: 0, count: 16 * 1_024)
-      while data.count <= maximumBytes {
-        let requested = min(buffer.count, maximumBytes + 1 - data.count)
-        let count = Darwin.read(descriptor, &buffer, requested)
+      data.reserveCapacity(Int(metadata.st_size))
+      var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
+      while true {
+        let count = Darwin.read(descriptor, &buffer, buffer.count)
         if count < 0 {
+          if errno == EINTR { continue }
           throw LocalHTTPError(status: 500, message: "API Collection store could not be read")
         }
         if count == 0 { break }
         data.append(buffer, count: count)
-      }
-      guard data.count <= maximumBytes else {
-        throw LocalHTTPError(status: 500, message: "API Collection store exceeds 2 MiB")
       }
       return try decodeApiCollection(data)
     } catch let error as LocalHTTPError where error.status == 500 {
@@ -812,9 +795,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 
   private func apiCollectionRequestBody(_ request: URLRequest) throws -> Data {
-    try requestBody(
-      request, label: "API Collection action", maximumBytes: 2 * 1_024 * 1_024 + 64 * 1_024
-    )
+    try requestBody(request, label: "API Collection action", maximumBytes: nil)
   }
 
   /// A request body read whole; nil `maximumBytes` reads one of any size.
@@ -857,9 +838,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private func writeApiCollection(_ collection: [String: Any], lease: NativeWorkspaceLease) throws {
     var data = try apiCollectionData(collection)
     data.append(0x0a)
-    guard data.count <= 2 * 1_024 * 1_024 else {
-      throw LocalHTTPError(status: 400, message: "API Collection store exceeds 2 MiB")
-    }
     try lease.write(data)
   }
 
@@ -885,7 +863,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       label: "Expected API Collection generation"
     )
     let lease = try NativeWorkspaceLease(
-      at: apiCollectionStoreURL, label: "API Collection", maximumBytes: 2 * 1_024 * 1_024
+      at: apiCollectionStoreURL, label: "API Collection", maximumBytes: nil
     )
     defer { lease.close() }
     let current = try decodeApiCollection(lease.read())

@@ -378,7 +378,7 @@ fn normalize(mut value: Value, workspace: &Value) -> Result<(Value, Option<(Stri
     if source.trim().is_empty() || source.chars().any(|c| c < ' ' && !"\t\n\r".contains(c)) {
         return Err(Error::bad("Analyst source is empty or contains controls"));
     }
-    let variables = workspace::variables(&value["variables"], &workspace::ANALYST_SCOPE, true)?;
+    let variables = workspace::variables(&value["variables"], true)?;
     let evidence = &value["evidence"];
     validation::fields(
         evidence,

@@ -4815,7 +4815,7 @@
             }
           }
         },
-        "x-max-body-bytes": 2162688,
+        "x-max-body-bytes": 9007199254740991,
         "x-reb-execution": {
           "kind": "operation",
           "effects": [
@@ -23113,8 +23113,7 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/NameValue"
-            },
-            "maxItems": 32
+            }
           }
         },
         "required": [
@@ -23139,8 +23138,7 @@
             "x-max-utf8-bytes": 128
           },
           "url": {
-            "type": "string",
-            "x-max-utf8-bytes": 8192
+            "type": "string"
           },
           "method": {
             "type": "string",
@@ -23150,12 +23148,10 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/NameValue"
-            },
-            "maxItems": 64
+            }
           },
           "body": {
-            "type": "string",
-            "x-max-utf8-bytes": 65536
+            "type": "string"
           },
           "timeout_ms": {
             "type": "integer",
@@ -23166,8 +23162,7 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/NameValue"
-            },
-            "maxItems": 32
+            }
           }
         },
         "required": [
@@ -23197,8 +23192,7 @@
             "x-max-utf8-bytes": 128
           },
           "url": {
-            "type": "string",
-            "x-max-utf8-bytes": 8192
+            "type": "string"
           },
           "method": {
             "type": "string",
@@ -23208,12 +23202,10 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/NameValue"
-            },
-            "maxItems": 64
+            }
           },
           "body": {
-            "type": "string",
-            "x-max-utf8-bytes": 65536
+            "type": "string"
           },
           "timeout_ms": {
             "type": "integer",
@@ -23224,8 +23216,7 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/NameValue"
-            },
-            "maxItems": 32
+            }
           },
           "created_at_ms": {
             "$ref": "#/components/schemas/SafeInteger"
@@ -23271,15 +23262,13 @@
             "items": {
               "$ref": "#/components/schemas/CollectionFolder"
             },
-            "minItems": 1,
-            "maxItems": 32
+            "minItems": 1
           },
           "requests": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/CollectionRequest"
-            },
-            "maxItems": 128
+            }
           },
           "limits": {
             "type": "object",
@@ -23311,15 +23300,13 @@
             "items": {
               "$ref": "#/components/schemas/CollectionFolder"
             },
-            "minItems": 1,
-            "maxItems": 32
+            "minItems": 1
           },
           "requests": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/CollectionRequestInput"
-            },
-            "maxItems": 128
+            }
           }
         },
         "required": [
@@ -23329,7 +23316,7 @@
           "requests"
         ],
         "additionalProperties": false,
-        "description": "Full replacement, not patch. IDs are positive; root folder id=1/name=API Collection/parent_id=null must remain. Parent references, uniqueness, depth <=4, header restrictions and cumulative UTF-8 budgets are enforced by src/workspace.rs. Stale expected_generation returns 409. This stores templates; it does not execute requests.",
+        "description": "Full replacement, not patch. IDs are positive; root folder id=1/name=API Collection/parent_id=null must remain. Parent references, cycles, uniqueness, name lengths and header restrictions are enforced by src/workspace.rs; counts, folder depth and text sizes have no limit, and the body is parsed as it arrives. Stale expected_generation returns 409. This stores templates; it does not execute requests.",
         "x-reb-execution": {
           "kind": "action",
           "effects": [

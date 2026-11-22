@@ -942,8 +942,9 @@ impl App {
                 {
                     return Ok(not_modified(tag));
                 }
-                // These documents are at most 1–2 MiB. Do not wait behind VM
-                // analysis or Wasm inspection, which hold the shared reader permits.
+                // These are the researcher's own documents, read whole. Do not
+                // wait behind VM analysis or Wasm inspection, which hold the
+                // shared reader permits.
                 let (value, digest) = tokio::task::spawn_blocking(move || {
                     store.load().map(|value| {
                         // A store replaced outside this backend can repeat a
@@ -2526,11 +2527,6 @@ impl App {
     }
     async fn post(&self, path: &str, value: &Value) -> Result<Value> {
         match path {
-            "/api/api-collection/actions" => {
-                let store = self.collection.clone();
-                let value = value.clone();
-                self.blocking(move || store.replace(&value)).await
-            }
             "/api/live-wasm/actions" => self.live_wasm.action(value),
             "/api/native-debugger/actions" => {
                 // The command blocks on the peer socket, so it does not run
@@ -2908,8 +2904,8 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                 None
             };
             // A pack request, an analyst run's evidence snapshot, a decoder's
-            // input and a Binary32 request parse as they arrive, so the body
-            // is held once, as its parsed value.
+            // input, a Binary32 request and a Collection replacement parse as
+            // they arrive, so the body is held once, as its parsed value.
             if matches!(
                 path,
                 "/api/analysis/vm/packs/apply" | "/api/analysis/vm/packs/compare"
@@ -2930,7 +2926,10 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                     .await
                     .map(|bytes| ([("content-type", "application/json")], bytes).into_response());
             }
-            if matches!(path, "/api/local-analyst/actions" | "/api/decoder/actions") {
+            if matches!(
+                path,
+                "/api/local-analyst/actions" | "/api/decoder/actions" | "/api/api-collection/actions"
+            ) {
                 let value = streamed(body, length, |reader| {
                     let value: Value = serde_json::from_reader(reader)
                         .map_err(|_| Error::bad("The request body is malformed JSON"))?;
@@ -2940,10 +2939,13 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                     Ok(value)
                 })
                 .await?;
-                return if path == "/api/decoder/actions" {
-                    app.decoder.action(&value).await
-                } else {
-                    app.analyst_action(value).await
+                return match path {
+                    "/api/decoder/actions" => app.decoder.action(&value).await,
+                    "/api/local-analyst/actions" => app.analyst_action(value).await,
+                    _ => {
+                        let store = app.collection.clone();
+                        app.blocking(move || store.replace(&value)).await
+                    }
                 }
                 .map(|value| axum::Json(value).into_response());
             }

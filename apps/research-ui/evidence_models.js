@@ -1323,65 +1323,54 @@
           body.artifacts.every(isArtifact);
       }
 
-      function isRepeaterRequest(request, resolved = false) {
-        if (!isPlainObject(request) || !isBoundedText(request.url, 8 * 1024) ||
-            !isBoundedText(request.method, resolved ? 32 : 256) ||
-            !Array.isArray(request.headers) || request.headers.length > 64 ||
-            !isBoundedText(request.body, 64 * 1024) ||
-            !isSafeIntegerInRange(request.timeout_ms, 100, 30000)) return false;
-        let headerBytes = 0;
-        const token = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
-        const forbidden = new Set(['authorization', 'cookie', 'proxy-authorization', 'set-cookie',
-          'connection', 'content-length', 'host', 'transfer-encoding']);
-        if (!request.headers.every(header => {
-          if (!isPlainObject(header) || !isBoundedText(header.name, 128) ||
-              !isBoundedText(header.value, 2 * 1024) || !token.test(header.name) ||
-              forbidden.has(header.name.toLowerCase())) return false;
-          headerBytes += utf8ByteLength(header.name) + utf8ByteLength(header.value);
-          return headerBytes <= 16 * 1024;
-        })) return false;
-        if (!resolved) return request.url.length > 0 && request.method.length > 0;
-        if (!/^[A-Z][!#$%&'*+.^_`|~0-9A-Z-]{0,31}$/.test(request.method)) return false;
-        try {
-          const url = new URL(request.url);
-          return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !url.hash &&
-            (!['GET', 'HEAD'].includes(request.method) || request.body === '');
-        } catch { return false; }
-      }
-
+      // Mirrors the backend's workspace::normalize for an API Collection. Names,
+      // header names and method templates keep their bounds; contents, counts
+      // and folder depth have none, and `limits` records what an older host
+      // wrote, so a document written under other limits still reads.
       function isApiCollection(collection) {
         const exactKeys = (value, keys) => isPlainObject(value) &&
           Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+        const controls = /[\x00-\x1f\x7f]/u;
         const validName = value => isBoundedText(value, 128) && value.trim() === value &&
-          value.length > 0 && !value.includes('/') && !/[\x00-\x1f\x7f]/u.test(value);
+          value.length > 0 && !value.includes('/') && !controls.test(value);
         const validVariables = value => {
-          if (!Array.isArray(value) || value.length > 32) return false;
-          let bytes = 0;
+          if (!Array.isArray(value)) return false;
           const names = new Set();
           return value.every(variable => {
-            if (!exactKeys(variable, ['name', 'value']) || !isBoundedText(variable.name, 64) ||
+            if (!exactKeys(variable, ['name', 'value']) || typeof variable.name !== 'string' ||
                 !/^[A-Za-z_][A-Za-z0-9_.-]*$/u.test(variable.name) || names.has(variable.name) ||
-                !isBoundedText(variable.value, 4 * 1024) || /[\x00-\x1f\x7f]/u.test(variable.value)) return false;
+                typeof variable.value !== 'string' || controls.test(variable.value)) return false;
             names.add(variable.name);
-            bytes += utf8ByteLength(variable.name) + utf8ByteLength(variable.value);
-            return bytes <= 32 * 1024;
+            return true;
           });
         };
-        const limits = {
-          folders: 32, requests: 128, folder_depth: 4, variables_per_scope: 32,
-          variable_bytes_per_scope: 32 * 1024, request_body_bytes: 64 * 1024,
-          document_bytes: 2 * 1024 * 1024
+        // The HTTP client computes framing and connection headers; credentials
+        // and cookies are kept as the researcher wrote them.
+        const framing = new Set(['connection', 'content-length', 'host', 'keep-alive', 'proxy-connection',
+          'te', 'trailer', 'transfer-encoding', 'upgrade']);
+        const validHeaders = value => {
+          if (!Array.isArray(value)) return false;
+          const names = new Set();
+          return value.every(header => {
+            if (!exactKeys(header, ['name', 'value']) || !isBoundedText(header.name, 128) ||
+                !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(header.name) || typeof header.value !== 'string' ||
+                controls.test(header.value)) return false;
+            const lower = header.name.toLowerCase();
+            if (framing.has(lower) || names.has(lower)) return false;
+            names.add(lower);
+            return true;
+          });
         };
+        const validTemplate = (value, maximumBytes) => typeof value === 'string' &&
+          utf8ByteLength(value) <= maximumBytes && value.trim() === value && value.length > 0 && !controls.test(value);
         if (!exactKeys(collection, ['contract_version', 'document_kind', 'generation', 'updated_at_ms',
           'folders', 'requests', 'limits']) || collection.contract_version !== 1 ||
           collection.document_kind !== 'api-collection' ||
           !isSafeIntegerInRange(collection.generation, 0, Number.MAX_SAFE_INTEGER) ||
           !isSafeIntegerInRange(collection.updated_at_ms, 0, Number.MAX_SAFE_INTEGER) ||
-          !isPlainObject(collection.limits) || Object.keys(collection.limits).length !== Object.keys(limits).length ||
-          Object.entries(limits).some(([name, limit]) => collection.limits[name] !== limit) ||
-          !Array.isArray(collection.folders) || collection.folders.length < 1 || collection.folders.length > 32 ||
-          !Array.isArray(collection.requests) || collection.requests.length > 128 ||
-          utf8ByteLength(JSON.stringify(collection)) > 2 * 1024 * 1024) return false;
+          !isPlainObject(collection.limits) ||
+          !Array.isArray(collection.folders) || collection.folders.length < 1 ||
+          !Array.isArray(collection.requests)) return false;
         const folderIds = new Set();
         const folderNames = new Set();
         const folders = new Map();
@@ -1396,17 +1385,22 @@
         const root = folders.get(1);
         if (!root || root.name !== 'API Collection' || root.parent_id !== null ||
             collection.folders.some(folder => folder.id !== 1 && folder.parent_id === null)) return false;
+        // A walk toward the root stops at a folder already known to reach it,
+        // so a hierarchy of any depth is checked in linear time and a cycle is
+        // found on the walk that enters it.
+        const reachesRoot = new Set([1]);
         for (const folder of collection.folders) {
           const siblingKey = `${folder.parent_id ?? 'root'}\u0000${folder.name.toLocaleLowerCase()}`;
           if (folderNames.has(siblingKey)) return false;
           folderNames.add(siblingKey);
+          const walked = new Set();
           let current = folder;
-          const seen = new Set([current.id]);
-          let depth = 0;
-          while (current.parent_id !== null) {
-            if (seen.has(current.parent_id) || !folders.has(current.parent_id) || ++depth > 4) return false;
-            seen.add(current.parent_id); current = folders.get(current.parent_id);
+          while (!reachesRoot.has(current.id)) {
+            if (walked.has(current.id) || !folders.has(current.parent_id)) return false;
+            walked.add(current.id);
+            current = folders.get(current.parent_id);
           }
+          for (const id of walked) reachesRoot.add(id);
         }
         const requestIds = new Set();
         const requestNames = new Set();
@@ -1414,9 +1408,10 @@
           if (!exactKeys(request, ['id', 'folder_id', 'name', 'url', 'method', 'headers', 'body',
             'timeout_ms', 'variables', 'created_at_ms', 'updated_at_ms']) ||
               !isSafeIntegerInRange(request.id, 1, Number.MAX_SAFE_INTEGER) || requestIds.has(request.id) ||
-              !folderIds.has(request.folder_id) || !validName(request.name) || !isRepeaterRequest(request) ||
-              /[\x00-\x1f\x7f]/u.test(request.url) || /[\x00-\x1f\x7f]/u.test(request.method) ||
-              !validVariables(request.variables) ||
+              !folderIds.has(request.folder_id) || !validName(request.name) ||
+              !validTemplate(request.url, Infinity) || !validTemplate(request.method, 256) ||
+              !validHeaders(request.headers) || typeof request.body !== 'string' ||
+              !isSafeIntegerInRange(request.timeout_ms, 100, 30000) || !validVariables(request.variables) ||
               !isSafeIntegerInRange(request.created_at_ms, 0, Number.MAX_SAFE_INTEGER) ||
               !isSafeIntegerInRange(request.updated_at_ms, request.created_at_ms, Number.MAX_SAFE_INTEGER)) return false;
           const nameKey = `${request.folder_id}\u0000${request.name.toLocaleLowerCase()}`;

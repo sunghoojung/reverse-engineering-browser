@@ -5100,12 +5100,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           throw new TypeError(`${label} must map variable names to text values.`);
         }
         const entries = Object.entries(variables).sort(([left], [right]) => left.localeCompare(right));
-        let bytes = 0;
-        if (entries.length > 32 || entries.some(([name, value]) => {
-          bytes += utf8ByteLength(name) + utf8ByteLength(value);
-          return !/^[A-Za-z_][A-Za-z0-9_.-]*$/u.test(name) || utf8ByteLength(name) > 64 ||
-            utf8ByteLength(value) > 4 * 1024 || /[\x00-\x1f\x7f]/u.test(value) || bytes > 32 * 1024;
-        })) throw new TypeError(`${label} exceeds the 32-variable or 32 KiB scope limit.`);
+        if (entries.some(([name, value]) => !/^[A-Za-z_][A-Za-z0-9_.-]*$/u.test(name) ||
+          /[\x00-\x1f\x7f]/u.test(value))) {
+          throw new TypeError(`${label} need names that start with a letter or underscore, and values without control characters.`);
+        }
         return entries.map(([name, value]) => ({name, value}));
       }
 
@@ -5128,11 +5126,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const framing = new Set(['connection', 'content-length', 'host', 'keep-alive', 'proxy-connection',
           'te', 'trailer', 'transfer-encoding', 'upgrade']);
         const entries = Object.entries(headers);
-        if (entries.length > 64 || entries.some(([name, headerValue]) =>
+        if (entries.some(([name, headerValue]) =>
           !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(name) || framing.has(name.toLowerCase()) ||
-            utf8ByteLength(name) > 128 || utf8ByteLength(headerValue) > 64 * 1024 ||
-            /[\x00-\x1f\x7f]/u.test(headerValue)
-        )) throw new TypeError('Request headers must be at most 64 valid names with values of at most 64 KiB; Host, Content-Length, Connection, Transfer-Encoding and hop-by-hop headers belong to the HTTP client.');
+            utf8ByteLength(name) > 128 || /[\x00-\x1f\x7f]/u.test(headerValue)
+        )) throw new TypeError('Request headers need valid names of at most 128 bytes and values without control characters; Host, Content-Length, Connection, Transfer-Encoding and hop-by-hop headers belong to the HTTP client.');
         return entries.map(([name, headerValue]) => ({name, value: headerValue}));
       }
 
@@ -5191,12 +5188,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (state.apiCollectionRefreshing || (state.apiCollectionSaving && !conflictReload) || location.protocol === 'file:') return false;
         state.apiCollectionRefreshing = true;
         const version = state.apiCollectionVersion;
-        const controller = new AbortController();
-        const deadline = setTimeout(() => controller.abort(), 15000);
         if (!state.apiCollectionLoaded) setCollectionNotice('loading', 'Loading your local collection…');
         try {
           const headers = !force && state.apiCollectionEtag ? {'If-None-Match': state.apiCollectionEtag} : {};
-          const response = await fetch('/api/api-collection', {cache: 'no-store', headers, signal: controller.signal});
+          const response = await fetch('/api/api-collection', {cache: 'no-store', headers});
           if (version !== state.apiCollectionVersion) return false;
           if (response.status === 304) return true;
           if (!response.ok) throw new Error(`Collection store returned ${response.status}`);
@@ -5227,10 +5222,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         } catch (error) {
           if (version !== state.apiCollectionVersion) return false;
           state.apiCollectionEtag = null;
-          setCollectionNotice('error', `Collection load failed: ${controller.signal.aborted ? 'timed out' : error.message}. The last valid collection and your edits remain visible.`);
+          setCollectionNotice('error', `Collection load failed: ${error.message}. The last valid collection and your edits remain visible.`);
           return false;
         } finally {
-          clearTimeout(deadline);
           state.apiCollectionRefreshing = false;
           renderApiCollection();
         }
@@ -5243,14 +5237,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         state.apiCollectionSaving = true;
         state.apiCollectionVersion += 1;
-        const controller = new AbortController();
-        const deadline = setTimeout(() => controller.abort(), 15000);
         setCollectionNotice('saving', 'Saving collection changes locally…');
         renderApiCollection();
         try {
           const response = await fetch('/api/api-collection/actions', {
             method: 'POST', cache: 'no-store', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(collectionReplacement(folders, requests)), signal: controller.signal
+            body: JSON.stringify(collectionReplacement(folders, requests))
           });
           const body = await response.json();
           if (response.status === 409) {
@@ -5271,10 +5263,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           return true;
         } catch (error) {
           state.apiCollectionEtag = null;
-          setCollectionNotice('error', `Save could not be confirmed: ${controller.signal.aborted ? 'timed out' : error.message}. Your edits are retained. Retry load before saving again.`);
+          setCollectionNotice('error', `Save could not be confirmed: ${error.message}. Your edits are retained. Retry load before saving again.`);
           return false;
         } finally {
-          clearTimeout(deadline);
           state.apiCollectionSaving = false;
           renderApiCollection();
         }

@@ -6594,6 +6594,114 @@ async fn analyst_libraries_variables_and_errors_have_no_shape_limits() {
     assert_eq!(result["error"], "e".repeat(4000), "the error is kept whole");
 }
 
+#[tokio::test]
+async fn api_collections_have_no_count_size_or_depth_limits() {
+    let server = Server::start().await;
+    // A document written under the old limits, which recorded them, reads.
+    let legacy = json!({"contract_version":1,"document_kind":"api-collection","generation":1,"updated_at_ms":5,
+        "folders":[{"id":1,"name":"API Collection","parent_id":null,"variables":[]}],"requests":[],
+        "limits":{"folders":32,"requests":128,"folder_depth":4,"variables_per_scope":32,
+            "variable_bytes_per_scope":32768,"request_body_bytes":65536,"document_bytes":2097152}});
+    std::fs::write(
+        server.root.path().join("collection.json"),
+        serde_json::to_vec(&legacy).unwrap(),
+    )
+    .unwrap();
+    let read: Value = server
+        .get("/api/api-collection")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(read["generation"], 1);
+    assert_eq!(read["limits"], json!({}));
+
+    // Past every old limit: 40 folders 39 levels deep, 200 requests, 100
+    // headers with a 100 KiB credential, 100 variables of 1 KiB, a 20 KiB
+    // URL and a 3 MiB body, so the document is past 2 MiB as well.
+    let mut folders = vec![json!({"id":1,"name":"API Collection","parent_id":null,"variables":[]})];
+    folders.extend((2..=40).map(|id| {
+        json!({"id":id,"name":format!("Level {id}"),"parent_id":id - 1,"variables":if id == 40 {
+            json!((0..100).map(|i| json!({"name":format!("v{i:03}"),"value":"x".repeat(1024)})).collect::<Vec<_>>())
+        } else { json!([]) }})
+    }));
+    let mut headers = vec![
+        json!({"name":"Authorization","value":format!("Bearer {}", "t".repeat(100 * 1024))}),
+        json!({"name":"Cookie","value":"session=1"}),
+    ];
+    headers.extend((0..98).map(|i| json!({"name":format!("x-h{i}"),"value":"v"})));
+    let requests = (1..=200)
+        .map(|id| {
+            json!({"id":id,"folder_id":1 + id % 40,"name":format!("Request {id}"),
+                "url":format!("https://{{{{host}}}}/{}", "q".repeat(20 * 1024)),"method":"POST",
+                "headers":headers,"body":if id == 1 { "b".repeat(3 * 1024 * 1024) } else { "{}".into() },
+                "timeout_ms":15000,"variables":[]})
+        })
+        .collect::<Vec<_>>();
+    let replace = json!({"action":"replace_api_collection","expected_generation":1,"folders":folders,"requests":requests});
+    let route = "/api/api-collection/actions";
+    let response = server.action(route, replace.clone()).await;
+    let bytes = assert_contract_response(response, "post", route, 200).await;
+    assert!(bytes.len() > 2 * 1024 * 1024 + 20 * 1024 * 200);
+    let saved: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(saved["generation"], 2);
+    assert_eq!(saved["limits"], json!({}));
+    assert_eq!(saved["folders"].as_array().unwrap().len(), 40);
+    assert_eq!(saved["requests"].as_array().unwrap().len(), 200);
+    assert_eq!(
+        saved["requests"][0]["body"].as_str().unwrap().len(),
+        3 * 1024 * 1024
+    );
+    assert_eq!(
+        saved["requests"][0]["headers"].as_array().unwrap().len(),
+        100
+    );
+    assert_eq!(saved["requests"][0]["headers"][0]["name"], "Authorization");
+    let loaded: Value = server
+        .get(route.trim_end_matches("/actions"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(loaded, saved, "the collection reads back whole");
+
+    // The same replacement through reb-api: one more generation, unchanged contents.
+    let mut again = replace.clone();
+    again["expected_generation"] = json!(2);
+    let path = server.root.path().join("collection-large.json");
+    std::fs::write(&path, again.to_string()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "replace_api_collection",
+            "--base-url",
+            &server.url,
+            "--body-file",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cli: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(cli, saved, "an unchanged replacement keeps its generation");
+
+    // Structure is still checked: a cycle, a missing parent and a framing header.
+    let mut cyclic = again.clone();
+    cyclic["folders"][1]["parent_id"] = json!(40);
+    let mut orphan = again.clone();
+    orphan["folders"][1]["parent_id"] = json!(99);
+    let mut framing = again.clone();
+    framing["requests"][3]["headers"][5] = json!({"name":"Content-Length","value":"1"});
+    for refused in [cyclic, orphan, framing] {
+        let response = server.action(route, refused).await;
+        assert_contract_response(response, "post", route, 400).await;
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn decoder_requests_wait_their_turn_and_a_signal_is_named() {

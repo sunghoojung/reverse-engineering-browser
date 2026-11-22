@@ -17,15 +17,7 @@
         updated_at_ms: 0,
         folders: [{id: 1, name: 'API Collection', parent_id: null, variables: []}],
         requests: [],
-        limits: {
-          folders: 32,
-          requests: 128,
-          folder_depth: 4,
-          variables_per_scope: 32,
-          variable_bytes_per_scope: 32 * 1024,
-          request_body_bytes: 64 * 1024,
-          document_bytes: 2 * 1024 * 1024
-        }
+        limits: {}
       });
 
       const emptyLocalAnalystWorkspace = () => ({

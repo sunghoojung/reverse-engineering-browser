@@ -405,6 +405,13 @@ wait for it to settle before measuring it. Fixed chrome, the analysis pane at
 rest, and controls revealed by product navigation are checked without
 test-driven scrolling.
 
+Program Trees lists VM findings before the opcode workspace and its host links
+arrive, and each arrival rebuilds the finding's detail. A VM test that selects
+a finding and reads its Symbol Tree, handler listing or analysis panels first
+waits for `#vm-detail` and `#vm-symbol-list` to report `aria-busy="false"`, not
+only for the finding rows; reading after the rows alone raced that load and
+failed `test4VmNativeGuestRows` with a missing symbol row on a slow runner.
+
 To reproduce smaller CI displays locally, cap all requested heights without
 changing the display resolution. The `macos-latest` runner currently clamps
 every 790-high request to 677:

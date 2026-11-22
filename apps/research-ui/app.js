@@ -259,9 +259,14 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const headers = sameSelection && state.vmOpcodeWorkspaceEtag
           ? { 'If-None-Match': state.vmOpcodeWorkspaceEtag }
           : {};
-        if (!sameSelection) state.vmOpcodeWorkspaceEtag = null;
+        // A poll of the same selection revalidates in the background: what is
+        // shown stays as it is until the answer changes it, so a render during
+        // the request neither flashes a notice nor rebuilds the workspace.
+        if (!sameSelection) {
+          state.vmOpcodeWorkspaceEtag = null;
+          state.vmOpcodeWorkspaceStatus = 'loading';
+        }
         state.vmOpcodeWorkspaceEmbedded = false;
-        state.vmOpcodeWorkspaceStatus = 'loading';
         try {
           const response = await fetch('/api/analysis/vm/opcodes', { cache: 'no-store', headers });
           if (!current()) return;
@@ -1731,6 +1736,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         return field;
       }
 
+      // Host links are read after a fetched workspace, never for an embedded one.
+      function vmHostLinksPending() {
+        return state.vmHostLinksStatus === 'loading' && Boolean(state.vmOpcodeWorkspace) && !state.vmOpcodeWorkspaceEmbedded;
+      }
+
       function vmSessionPresentation(targetState) {
         const analysis = targetState.vmAnalysisDocument;
         const finding = targetState.vmFindings?.find(item => item.findingId === targetState.selectedVmFindingId);
@@ -1780,8 +1790,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         } else if (kind === 'unavailable') {
           message = `Opcode workspace unavailable. Detection findings remain visible.${workspace ? ' The last valid workspace is retained.' : ''}`;
         } else if (kind === 'loading') {
-          message = workspace ? 'Refreshing opcode workspace. The last valid workspace remains visible.'
-            : 'Loading opcode workspace.';
+          message = 'Loading opcode workspace.';
         } else if (!workspace) {
           kind = 'empty';
           message = 'Workspace unavailable for this finding. Detection evidence remains visible without synthesized VM semantics.';
@@ -2383,6 +2392,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (state.vmHostLinksStatus === 'unavailable') {
           section.append(textElement('p', 'vm-workspace-empty', 'Host links unavailable. Any matching last valid links are retained.'));
         }
+        // An unread report proves nothing either way about the guest position.
+        if (!bound && vmHostLinksPending()) {
+          section.append(textElement('p', 'vm-workspace-empty', 'Loading host event positions.'));
+          return section;
+        }
         const view = vmHostLinksView(row || null);
         const banner = document.createElement('p');
         banner.className = view.staticOnly ? 'vm-workspace-notice' : 'vm-workspace-empty';
@@ -2830,14 +2844,24 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             });
             symbols.append(button);
           }
-          if (!rows.length) symbols.append(textElement('p', '', 'No retained handler symbols for this finding.'));
+          // Without a workspace the tree says what the workspace notice says, so
+          // it never reports a finding as handler-free while loading or failed.
+          const status = state.vmOpcodeWorkspaceStatus;
+          symbols.setAttribute('aria-busy', String(!workspace && status === 'loading'));
+          if (!rows.length) symbols.append(textElement('p', '', workspace || status === 'ready'
+            ? 'No retained handler symbols for this finding.'
+            : status === 'loading' ? 'Loading retained handlers.'
+            : status === 'malformed' ? 'Handler symbols are unavailable: the opcode workspace was rejected.'
+            : 'Handler symbols are unavailable: the opcode workspace is unavailable.'));
         }
       }
 
       function renderVmDetail() {
         const selected = state.vmFindings.find(finding => finding.findingId === state.selectedVmFindingId);
         if (!selected) {
-          document.querySelector('#vm-symbol-list')?.replaceChildren(textElement('p', '', 'Select a finding to browse its retained handlers.'));
+          const symbols = document.querySelector('#vm-symbol-list');
+          symbols?.replaceChildren(textElement('p', '', 'Select a finding to browse its retained handlers.'));
+          symbols?.setAttribute('aria-busy', 'false');
           elements.vmDetail.replaceChildren(textElement('div', 'vm-empty', 'No valid VM findings have been captured. Capture stays separate from interpretation, so the lab does not synthesize sample conclusions.'));
           return;
         }
@@ -3024,6 +3048,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           state.vmHostLinksStatus, state.vmHostLinks?.document_digest ?? null,
           vmSessionSourceRefreshKey()
         ]);
+        // Findings list before the workspace and its host links arrive; until
+        // both settle the detail is busy, and arriving rebuilds it.
+        elements.vmDetail.setAttribute('aria-busy', String(state.vmOpcodeWorkspaceStatus === 'loading' && !state.vmOpcodeWorkspace ||
+          vmHostLinksPending()));
         if (renderKey === renderedVmFindings && workspaceKey === renderedVmWorkspace) return;
         if (renderKey !== renderedVmFindings) {
         const selectedExists = state.vmFindings.some(finding => finding.findingId === state.selectedVmFindingId);

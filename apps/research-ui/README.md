@@ -64,6 +64,11 @@ The Findings view uses compact CodeBrowser-style docks: Program Trees holds
 captured findings, Symbol Tree lists the selected finding's retained handlers,
 the central Handler listing drives the linked evidence inspector, and analysis
 tools use a bottom tab strip. The layout keeps the Rosé Pine Moon palette.
+Findings list before the opcode workspace and its host links are read. Until
+then Symbol Tree and the Host event positions card say they are loading, and
+the tree and the finding's detail are `aria-busy`, rather than reporting no
+handlers or no proven link; a failed read names the failure. A poll that
+revalidates an unchanged workspace changes nothing on screen.
 Symbols and the up/down toolbar navigate the same selection. The literal handler
 filter matches retained source offsets, opcodes and labels; selecting a symbol
 clears an excluding filter. Arrow keys, Home and End navigate visible listing

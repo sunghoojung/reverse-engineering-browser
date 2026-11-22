@@ -642,6 +642,20 @@ final class OriginTraceRenderedUITests: XCTestCase {
     try await assertFullyVisible(ui, ".vm-workbench-tabs", "\(context) analysis tabs")
   }
 
+  // Program Trees lists findings before the opcode workspace behind the Symbol
+  // Tree and handler listing, and its host links, arrive; each arrival
+  // rebuilds the detail. A test that selects a finding and reads its analysis
+  // waits until the detail and the tree are no longer busy, not only for the
+  // findings.
+  @MainActor
+  private func openVmFindings(_ ui: Harness) async throws {
+    try await show(ui, "vm")
+    try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+    try await ui.waitUntil("document.querySelector('#vm-detail[aria-busy=\"false\"]') !== null && " +
+      "document.querySelector('#vm-symbol-list[aria-busy=\"false\"]') !== null",
+      "the opcode workspace and host links behind the selected finding did not load")
+  }
+
   @MainActor
   private func setVmAnalysisExpanded(_ ui: Harness, _ expanded: Bool) async throws {
     let toggle = try await ui.json("""
@@ -661,8 +675,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     ]
     for size in sizes {
       let ui = try await prepare(size)
-      try await show(ui, "vm")
-      try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await openVmFindings(ui)
       try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 107")
       try await setVmAnalysisExpanded(ui, false)
@@ -748,8 +761,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     ]
     for size in sizes {
       let ui = try await prepare(size)
-      try await show(ui, "vm")
-      try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await openVmFindings(ui)
       try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 107")
       try await setVmAnalysisExpanded(ui, false)
@@ -773,8 +785,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     ]
     for size in sizes {
       let ui = try await prepare(size)
-      try await show(ui, "vm")
-      try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await openVmFindings(ui)
       try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 18446744073709551615")
       try await assertCompleteCompactFindings(ui, size.name)
@@ -1045,8 +1056,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     ]
     for size in sizes {
       let ui = try await prepare(size)
-      try await show(ui, "vm")
-      try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await openVmFindings(ui)
       try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 107")
       try await assertFullyVisible(ui, "#vm-symbol-list .vm-symbol-row", "\(size.name) symbol tree")
@@ -1166,8 +1176,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
   func test8VmHostLinksSpacing() async throws {
     for size in windowSizes {
       let ui = try await prepare(size)
-      try await show(ui, "vm")
-      try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await openVmFindings(ui)
       try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 107")
       try await setVmAnalysisExpanded(ui, false)
@@ -1203,8 +1212,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     ]
     for size in sizes {
       let ui = try await prepare(size)
-      try await show(ui, "vm")
-      try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await openVmFindings(ui)
       try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 107")
       try await assertFullyVisible(ui, "#vm-symbol-list .vm-symbol-row", "\(size.name) symbol tree")

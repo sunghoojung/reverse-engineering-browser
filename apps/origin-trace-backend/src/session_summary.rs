@@ -500,10 +500,10 @@ fn content_meaning(category: &str, reason: &str, count: u64) -> String {
     );
     let why = match reason {
         "not_captured_block_limit" if category == "cookie_list" => {
-            "were longer than the 2 MiB list limit, so only their counts and size are recorded"
+            "were longer than a cookie list record can describe (4 GiB), or than the 2 MiB list limit of the browser that recorded this session, so only their counts and size are recorded"
         }
         "not_captured_block_limit" => {
-            "were longer than the 320 KiB block limit, so only their header count and size are recorded"
+            "were longer than a header record can describe (4 GiB), or than the 320 KiB block limit of the browser that recorded this session, so only their header count and size are recorded"
         }
         "not_captured_session_budget" if headers => {
             "arrived after their configuration retained 64 MiB of header blocks and cookie lists, a limit of the browser that recorded this session. Current capture has none"

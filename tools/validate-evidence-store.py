@@ -682,12 +682,20 @@ def valid_response_body(event: dict, payload: bytes) -> bool:
     }[state]
 
 
-HEADER_BLOCK_LIMIT = 320 * 1024
+# Version 2 retains a block or cookie list of any length, so its
+# not_captured_block_limit is only a length past the 32-bit field; version 1
+# had a 320 KiB block and 2 MiB list limit.
+HEADER_BLOCK_LIMIT_V1 = 320 * 1024
+LENGTH_UNREPRESENTABLE = 0xFFFFFFFF
+
+
+def too_long(version: int, length: int, v1_limit: int) -> bool:
+    return length > v1_limit if version == 1 else length == LENGTH_UNREPRESENTABLE
 
 
 def valid_header_block(event: dict, payload: bytes) -> bool:
     """Every rule of the native-network-v3.md header record, mirrored from the C++ core."""
-    if not valid_request_child(event, payload):
+    if not valid_request_child(event, payload, (1, 2)):
         return False
 
     def at(offset: int, size: int) -> int:
@@ -716,17 +724,18 @@ def valid_header_block(event: dict, payload: bytes) -> bool:
         return False
     empty, limited = state == 3, state == 4
     if ((count == 0) != empty or (length == 0) != empty or length < 5 * count
-            or limited != (length > HEADER_BLOCK_LIMIT) or (not any(digest)) != limited):
+            or limited != too_long(payload[0], length, HEADER_BLOCK_LIMIT_V1)
+            or (not any(digest)) != limited):
         return False
     return (event["artifact_id"] != "0") == (state in (1, 2))
 
 
-COOKIE_LIST_LIMIT = 2 * 1024 * 1024
+COOKIE_LIST_LIMIT_V1 = 2 * 1024 * 1024
 
 
 def valid_cookie_list(event: dict, payload: bytes) -> bool:
     """The native-network-v3.md cookie_list record, mirrored from the C++ core."""
-    if not valid_request_child(event, payload):
+    if not valid_request_child(event, payload, (1, 2)):
         return False
 
     def at(offset: int, size: int) -> int:
@@ -741,7 +750,8 @@ def valid_cookie_list(event: dict, payload: bytes) -> bool:
     empty, limited = state == 3, state == 4
     if ((count == 0) != empty or (length == 0) != empty
             or (not empty and length < 16 + 64 * count)
-            or limited != (length > COOKIE_LIST_LIMIT) or (not any(digest)) != limited):
+            or limited != too_long(payload[0], length, COOKIE_LIST_LIMIT_V1)
+            or (not any(digest)) != limited):
         return False
     return (event["artifact_id"] != "0") == (state in (1, 2))
 

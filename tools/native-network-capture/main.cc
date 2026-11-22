@@ -292,15 +292,18 @@ void HeaderBlocks() {
          Headers(events[0]).status_code == 0 &&
          Headers(events[0]).source == static_cast<std::uint8_t>(reb::HeaderSource::kNetwork));
 
-  // Beyond 320 KiB: count and length only, no digest, no artifact.
-  head.headers->lines = {{"X-Huge", std::string(reb::kNativeHeaderBlockLimitBytes, 'h')}};
+  // A block past version 1's 320 KiB limit is retained whole.
+  const std::string huge_value(1024U * 1024U, 'h');
+  head.headers->lines = {{"X-Huge", huge_value}};
   events.clear();
   static_cast<void>(sink.RecordResponseStarted(502, 0, 0, 4, 5, 11, 12, head));
   value = Headers(events.back());
-  assert(AllValid() &&
-         value.state == static_cast<std::uint8_t>(HeaderState::kNotCapturedBlockLimit) &&
-         value.block_length == reb::kNativeHeaderBlockLimitBytes + 10 && value.header_count == 1 &&
-         events.back().header.artifact_id == 0);
+  const std::string huge_text = "X-Huge: " + huge_value + "\r\n";
+  assert(AllValid() && value.state == static_cast<std::uint8_t>(HeaderState::kCaptured) &&
+         value.block_length == huge_text.size() && value.header_count == 1 &&
+         value.sha256 == crypto::hash::Sha256(huge_text) &&
+         events.back().header.artifact_id == artifacts.next_artifact_id - 1 &&
+         Text(artifacts.header_calls.back().content) == huge_text);
 
   // Synthetic Shields responses and empty blocks.
   events.clear();
@@ -390,7 +393,8 @@ void HeaderBlocks() {
          "two redirect hops, raw response with Set-Cookie and its status, out-of-order raw "
          "request, early hints, pseudo-headers, "
          "200 KiB retained whole, network headers before rewrite, sharing, unattributed "
-         "count, DevTools-owned ID, block limit, unavailable/refused/URL, 70 MiB with no "
+         "count, DevTools-owned ID, a block past 320 KiB kept whole, unavailable/refused/URL, 70 "
+         "MiB with no "
          "session budget, refused blocks resent, "
          "early-hints factory gate only in a current, unexpired content session with Network\n";
 }
@@ -1113,7 +1117,7 @@ void CookieLists() {
   assert(Cookies(Last(reb::NativeProbeType::kCookieList)).unattributed_lists == 2 &&
          Headers(Last(reb::NativeProbeType::kRequestHeaders)).unattributed_blocks == 2);
 
-  // Beyond 2 MiB: counts and length only.
+  // A list past version 1's 2 MiB limit is retained whole.
   std::vector<net::CookieWithAccessResult> huge(520, session);
   for (auto& item : huge) {
     item.cookie.value.assign(4000, 'v');
@@ -1122,15 +1126,20 @@ void CookieLists() {
   events.clear();
   reb::NotifyNativeNetworkHeaders(kRaw, "reb-00000000000002bf", Raw({{"a", "b"}}), {.sent = &huge});
   value = Cookies(Last(reb::NativeProbeType::kCookieList));
-  assert(AllValid() &&
-         value.state == static_cast<std::uint8_t>(reb::HeaderState::kNotCapturedBlockLimit) &&
-         value.cookie_count == 520 && value.list_length > reb::kCookieListLimitBytes &&
-         Last(reb::NativeProbeType::kCookieList).header.artifact_id == 0);
+  const auto& huge_call = artifacts.header_calls.back();
+  assert(AllValid() && value.state == static_cast<std::uint8_t>(reb::HeaderState::kCaptured) &&
+         value.cookie_count == 520 && value.list_length > reb::kCookieListLimitV1Bytes &&
+         huge_call.kind == reb::NativeArtifactKind::kCookieList &&
+         huge_call.content.size() == value.list_length &&
+         value.sha256 == crypto::hash::Sha256(Text(huge_call.content)) &&
+         Last(reb::NativeProbeType::kCookieList).header.artifact_id ==
+             artifacts.next_artifact_id - 1);
+  assert(ParseList(huge_call.content, 1).size() == 520);
   sink.SetEmitter(nullptr, 0, 0, 0, true);
   std::cout << "PASS native cookie lists: metadata-only none, sent list with excluded cookie and "
                "reasons, every attribute, received list joined to its raw request's hop, "
                "unparsed line, empty redirect list, sharing, early and late lists counted "
-               "with their response blocks, 2 MiB limit\n";
+               "with their response blocks, a list past 2 MiB kept whole\n";
 }
 // A navigation's request start names the renderer stack its loader noted.
 void NavigationLinks() {

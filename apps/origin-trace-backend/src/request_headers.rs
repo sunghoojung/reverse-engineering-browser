@@ -13,7 +13,22 @@ use sha2::{Digest, Sha256};
 use crate::event_window;
 use crate::evidence;
 
-const BLOCK_LIMIT: usize = 320 * 1024;
+/// Version 1's block limit. Version 2 retains a block of any length, so its
+/// not_captured_block_limit is only a length past the 32-bit field.
+const BLOCK_LIMIT_V1: u32 = 320 * 1024;
+/// Version 2's not_captured_block_limit length, for header blocks and cookie
+/// lists alike.
+pub(crate) const LENGTH_UNREPRESENTABLE: u32 = u32::MAX;
+
+/// Whether a header block or cookie list record of `version` is too long to
+/// have been retained.
+pub(crate) fn too_long(version: u64, length: u32, v1_limit: u32) -> bool {
+    if version == 1 {
+        length > v1_limit
+    } else {
+        length == LENGTH_UNREPRESENTABLE
+    }
+}
 /// Substrings that mark a header name as a credential even inside a compound
 /// such as `X-AuthToken`, `AccessToken` or `X-Amzn-Remapped-Set-Cookie`. Each is
 /// long or distinctive enough that an ordinary name does not contain it.
@@ -324,7 +339,9 @@ pub(crate) fn child_payload(event: &Value, kind: &str) -> Option<Vec<u8>> {
         return None;
     }
     let bytes = hex::decode(event["payload"].as_str()?).ok()?;
-    (bytes.len() == 128 && le(&bytes[0..2]) == 1 && le(&bytes[2..4]) == 128).then_some(bytes)
+    // Header blocks and cookie lists: version 2 retains one of any length.
+    (bytes.len() == 128 && matches!(le(&bytes[0..2]), 1 | 2) && le(&bytes[2..4]) == 128)
+        .then_some(bytes)
 }
 
 /// The C++ core's rules for the record, envelope included.
@@ -384,7 +401,7 @@ fn decode(event: &Value) -> Option<Block> {
         && (block.count == 0) == empty
         && (block.length == 0) == empty
         && u64::from(block.length) >= 5 * u64::from(block.count)
-        && limited == (block.length as usize > BLOCK_LIMIT)
+        && limited == too_long(le(&bytes[0..2]), block.length, BLOCK_LIMIT_V1)
         && zero(&block.digest) == limited
         && (event["artifact_id"] != "0") == matches!(block.state, 1 | 2);
     valid.then_some(block)
@@ -513,7 +530,7 @@ fn describe(event: &Value, block: &Block, artifacts: &[Value], root: &Path) -> V
             return value;
         }
     };
-    match evidence::content(root, artifact, BLOCK_LIMIT) {
+    match evidence::content(root, artifact, block.length as usize) {
         Ok(bytes)
             if bytes.len() == block.length as usize
                 && Sha256::digest(&bytes).as_slice() == block.digest =>
@@ -725,6 +742,30 @@ mod tests {
         out[20..22].copy_from_slice(&status.to_le_bytes());
         out[48..80].copy_from_slice(&Sha256::digest(block));
         out
+    }
+
+    // Version 2 retains a block of any length; version 1 limited it to 320 KiB.
+    #[test]
+    fn a_version_two_block_past_320_kib_is_captured() {
+        let line = format!("X-Long: {}\r\n", "v".repeat(400 * 1024));
+        let mut long = payload(1, 1, 4, line.as_bytes(), 1, 0);
+        long[0] = 2;
+        assert!(decode(&record("request_headers", 12, 11, long, "5")).is_some());
+        long[0] = 1;
+        assert!(decode(&record("request_headers", 12, 11, long, "5")).is_none());
+        long[0] = 3;
+        assert!(decode(&record("request_headers", 12, 11, long, "5")).is_none());
+        // Only a length the field cannot hold is not_captured_block_limit.
+        let mut limited = [0u8; 128];
+        limited[..48].copy_from_slice(&long[..48]);
+        limited[0] = 2;
+        limited[5] = 4;
+        limited[12..16].copy_from_slice(&LENGTH_UNREPRESENTABLE.to_le_bytes());
+        assert!(decode(&record("request_headers", 12, 11, limited, "0")).is_some());
+        limited[12..16].copy_from_slice(&(400u32 * 1024).to_le_bytes());
+        assert!(decode(&record("request_headers", 12, 11, limited, "0")).is_none());
+        limited[0] = 1;
+        assert!(decode(&record("request_headers", 12, 11, limited, "0")).is_some());
     }
 
     #[test]

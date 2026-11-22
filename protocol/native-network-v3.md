@@ -1621,7 +1621,7 @@ transfer sizes and resource type zero, the parent's identity, and
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
-| 0 | 2 | payload version, `1` |
+| 0 | 2 | payload version: `2`, or `1` from earlier browsers |
 | 2 | 2 | payload size, `128` |
 | 4 | 1 | source |
 | 5 | 1 | state |
@@ -1643,7 +1643,7 @@ transfer sizes and resource type zero, the parent's identity, and
 | 1 `captured` | Retained as the named artifact, created by this record |
 | 2 `captured_shared` | The receiver already accepted an identical block (kind, length and SHA-256) in this configuration; `artifact_id` names it. A block recorded before that acceptance gets its own artifact |
 | 3 `empty` | No headers |
-| 4 `not_captured_block_limit` | Longer than 320 KiB; count and length only |
+| 4 `not_captured_block_limit` | Version 2: longer than the 32-bit length field holds, recorded with length 4,294,967,295. Version 1: longer than its 320 KiB block limit. Count and length only |
 | 5 `not_captured_artifact_unavailable` | Artifact category off, receiver disconnected or session inactive |
 | 6 `not_captured_transfer_refused` | The bounded artifact queue refused it |
 | 7 `not_captured_session_budget` | Older browsers only: the configuration already held 64 MiB of header blocks. Current capture has no header budget and never emits it |
@@ -1660,8 +1660,10 @@ decoder and the backend:
 - Family 0 has port and address zero; family 4 has address bytes 4 to 15 zero.
 - Count, length and state 3 are all zero or none is. Otherwise the length is at
   least 5 bytes per header.
-- State 4 if and only if the length exceeds 327,680; its digest is zero. Every
-  other state has a nonzero digest.
+- State 4 if and only if, in version 2, the length is 4,294,967,295, or, in
+  version 1, it exceeds 327,680; its digest is zero. Every other state has a
+  nonzero digest, so a version 2 block of any length below the field's
+  ceiling is retained.
 - `artifact_id` is nonzero exactly for states 1 and 2.
 - Reserved bytes are zero.
 
@@ -1707,10 +1709,10 @@ headers; those stay in the header blocks.
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
-| 0 | 2 | payload version, `1` |
+| 0 | 2 | payload version: `2`, or `1` from earlier browsers |
 | 2 | 2 | payload size, `128` |
 | 4 | 1 | direction: 1 sent with the request, 2 received in the response |
-| 5 | 1 | state, as for header blocks; 4 means longer than 2 MiB |
+| 5 | 1 | state, as for header blocks; 4 means longer than the length field holds, or, in version 1, longer than 2 MiB |
 | 6 | 2 | reserved, zero |
 | 8 | 4 | cookie count |
 | 12 | 4 | blocked count: cookies with at least one exclusion reason |
@@ -1723,8 +1725,9 @@ headers; those stay in the header blocks.
 
 Rules: direction 1 or 2; blocked at most count; count, length and state 3 are
 all zero or none is, and otherwise the length is at least 16 + 64 per cookie;
-state 4 if and only if the length exceeds 2,097,152, with a zero digest; every
-other state has a nonzero digest; `artifact_id` is nonzero exactly for states 1
+state 4 if and only if, in version 2, the length is 4,294,967,295, or, in
+version 1, it exceeds 2,097,152, with a zero digest; every other state has a
+nonzero digest; `artifact_id` is nonzero exactly for states 1
 and 2; reserved bytes are zero.
 
 #### Cookie list artifact
@@ -1738,7 +1741,7 @@ or rewritten:
 | Offset | Size | Field |
 | ---: | ---: | --- |
 | 0 | 4 | magic `RBCK` |
-| 4 | 2 | version, `1` |
+| 4 | 2 | version, `1`, in records of either version |
 | 6 | 1 | direction, as in the record |
 | 7 | 1 | reserved, zero |
 | 8 | 4 | cookie count |
@@ -1953,13 +1956,13 @@ provenance. Values are inserted as text after a size and SHA-256 check.
 - Disabled or metadata-only: unchanged. The proxy adds no ID, the hook
   costs one atomic load per DevTools raw notification, and an early-hints
   factory costs one atomic load and is built as stock.
-- 320 KiB per block: Chromium's 256 KiB response header bound
-  (`HttpStreamParser::kMaxHeaderBufSize`, `kSpdyMaxHeaderListSize`) plus the
-  byte `: ` normalization can add to a line of at least 4 bytes. Request blocks
-  use the same bound.
-- No byte budget: every block within the 320 KiB bound is retained. Older
-  browsers kept at most 64 MiB of blocks per configuration and named the rest
-  state 7.
+- No block limit: a block of any length goes whole through the artifact
+  channel. Chromium bounds the response headers it parses at 256 KiB
+  (`HttpStreamParser::kMaxHeaderBufSize`, `kSpdyMaxHeaderListSize`), but
+  request headers a page, an extension or the browser sets have no such
+  bound. Version 1 records named a block past 320 KiB state 4.
+- No byte budget: every block is retained. Older browsers kept at most 64 MiB
+  of blocks per configuration and named the rest state 7.
 - Identical blocks are retained once by kind, length and SHA-256, through a
   4,096-entry table per configuration. When it is full, later blocks are
   retained individually.

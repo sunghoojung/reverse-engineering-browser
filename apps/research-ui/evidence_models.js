@@ -805,7 +805,11 @@
       // net::ReferrerPolicy + 1, as the Fetch policy names DevTools shows.
       const referrerPolicies = [null, 'no-referrer-when-downgrade', 'strict-origin-when-cross-origin',
         'origin-when-cross-origin', 'unsafe-url', 'origin', 'same-origin', 'strict-origin', 'no-referrer'];
-      const HEADER_BLOCK_LIMIT = 320 * 1024;
+      // Version 2 retains a block or cookie list of any length, so its
+      // not_captured_block_limit is only a length past the 32-bit field;
+      // version 1 had a 320 KiB block and 2 MiB list limit.
+      const HEADER_BLOCK_LIMIT_V1 = 320 * 1024;
+      const LENGTH_UNREPRESENTABLE = 0xffffffff;
 
       // Every rule of the request_headers and response_headers payload
       // (protocol/native-network-v3.md), shared with the C++ core and the
@@ -822,7 +826,8 @@
         const address = bytes.slice(24, 40), digest = bytes.slice(48, 80);
         const zero = list => list.every(byte => byte === 0);
         const addressed = family !== 0;
-        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || state < 1 || state > 8 ||
+        const version = view.getUint16(0, true);
+        if ((version !== 1 && version !== 2) || view.getUint16(2, true) !== 128 || state < 1 || state > 8 ||
             !zero(bytes.slice(44, 48)) || !zero(bytes.slice(80))) return null;
         const httpStatus = status === 0 || (status >= 100 && status <= 999);
         if (response ? policy !== 0 || (source === 1 ? !httpStatus : source === 2 ? !httpStatus || addressed
@@ -832,7 +837,8 @@
             (family === 4 && !zero(address.slice(4)))) return null;
         const empty = state === 3, limited = state === 4;
         if ((count === 0) !== empty || (length === 0) !== empty || length < 5 * count ||
-            limited !== (length > HEADER_BLOCK_LIMIT) || zero(digest) !== limited) return null;
+            limited !== (version === 1 ? length > HEADER_BLOCK_LIMIT_V1 : length === LENGTH_UNREPRESENTABLE) ||
+            zero(digest) !== limited) return null;
         if ((event.artifact_id !== '0') !== (state === 1 || state === 2)) return null;
         const hex = list => Array.from(list, byte => byte.toString(16).padStart(2, '0')).join('');
         let remoteAddress = null;
@@ -851,7 +857,7 @@
         };
       }
 
-      const COOKIE_LIST_LIMIT = 2 * 1024 * 1024;
+      const COOKIE_LIST_LIMIT_V1 = 2 * 1024 * 1024;
 
       // The cookie_list record ("Cookies" in protocol/native-network-v3.md),
       // shared with the C++ core and the Python validator through
@@ -864,12 +870,14 @@
         const count = view.getUint32(8, true), blocked = view.getUint32(12, true), length = view.getUint32(16, true);
         const digest = bytes.slice(32, 64);
         const zero = list => list.every(byte => byte === 0);
-        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || ![1, 2].includes(direction) ||
+        const version = view.getUint16(0, true);
+        if ((version !== 1 && version !== 2) || view.getUint16(2, true) !== 128 || ![1, 2].includes(direction) ||
             state < 1 || state > 8 || !zero(bytes.slice(6, 8)) || !zero(bytes.slice(28, 32)) || !zero(bytes.slice(64)) ||
             blocked > count) return null;
         const empty = state === 3, limited = state === 4;
         if ((count === 0) !== empty || (length === 0) !== empty || (!empty && length < 16 + 64 * count) ||
-            limited !== (length > COOKIE_LIST_LIMIT) || zero(digest) !== limited) return null;
+            limited !== (version === 1 ? length > COOKIE_LIST_LIMIT_V1 : length === LENGTH_UNREPRESENTABLE) ||
+            zero(digest) !== limited) return null;
         if ((event.artifact_id !== '0') !== (state === 1 || state === 2)) return null;
         return {
           direction: direction === 1 ? 'sent' : 'received', state: headerStates[state], cookieCount: count,

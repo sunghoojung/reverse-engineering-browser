@@ -76,7 +76,8 @@ static_assert(static_cast<std::uint16_t>(reb::ArtifactKind::kRequestHeaders) ==
               static_cast<std::uint16_t>(reb::NativeArtifactKind::kRequestHeaders));
 static_assert(static_cast<std::uint16_t>(reb::ArtifactKind::kResponseHeaders) ==
               static_cast<std::uint16_t>(reb::NativeArtifactKind::kResponseHeaders));
-static_assert(reb::kHeaderBlockLimitBytes == reb::kNativeHeaderBlockLimitBytes);
+static_assert(reb::kHeaderPayloadVersion == reb::kNativeHeaderPayloadVersion);
+static_assert(reb::kHeaderLengthUnrepresentable == reb::kNativeHeaderLengthUnrepresentable);
 static_assert(static_cast<std::uint8_t>(reb::HeaderState::kNotCapturedUrl) ==
               static_cast<std::uint8_t>(reb::NativeHeaderState::kNotCapturedUrl));
 static_assert(static_cast<std::uint8_t>(reb::HeaderSource::kEarlyHints) ==
@@ -87,7 +88,7 @@ static_assert(static_cast<std::uint16_t>(reb::EventType::kScriptCookie) ==
               static_cast<std::uint16_t>(reb::NativeProbeType::kScriptCookie));
 static_assert(static_cast<std::uint16_t>(reb::ArtifactKind::kCookieList) ==
               static_cast<std::uint16_t>(reb::NativeArtifactKind::kCookieList));
-static_assert(reb::kCookieListLimitBytes == reb::kNativeCookieListLimitBytes);
+static_assert(reb::kCookiePayloadVersion == reb::kNativeCookiePayloadVersion);
 static_assert(reb::kCookieEntryBytes == reb::kNativeCookieEntryBytes);
 static_assert(reb::kScriptCookieNamePrefixBytes == reb::kNativeScriptCookieNamePrefixBytes);
 static_assert(static_cast<std::uint8_t>(reb::ScriptCookieApi::kCookieStoreDelete) ==
@@ -672,9 +673,10 @@ void CheckHeaderBlocks() {
     value.state = state;
     value.referrer_policy = source == Source::kBrowser ? 4 : 0;
     value.header_count = state == State::kEmpty ? 0 : 2;
-    value.block_length = state == State::kEmpty                   ? 0
-                         : state == State::kNotCapturedBlockLimit ? 400 * 1024
-                                                                  : 40;
+    value.block_length = state == State::kEmpty ? 0
+                         : state == State::kNotCapturedBlockLimit
+                             ? static_cast<std::uint32_t>(reb::kNativeHeaderLengthUnrepresentable)
+                             : 40;
     if (state != State::kNotCapturedBlockLimit) {
       value.sha256.fill(0xcd);
     }
@@ -745,7 +747,14 @@ void CheckHeaderBlocks() {
          v.state = State::kNotCapturedBlockLimit;
          v.sha256 = {};
        }},
-      {"over the limit captured", false, [](auto& v) { v.block_length = 400 * 1024; }},
+      {"limit state below the length ceiling", false,
+       [](auto& v) {
+         v.state = State::kNotCapturedBlockLimit;
+         v.block_length = 400 * 1024;
+         v.sha256 = {};
+       }},
+      {"captured at the length ceiling", false,
+       [](auto& v) { v.block_length = reb::kHeaderLengthUnrepresentable; }},
       {"missing digest", false, [](auto& v) { v.sha256 = {}; }},
       {"response policy", true, [](auto& v) { v.referrer_policy = 1; }},
       {"network response address", true, [](auto& v) { v.source = Source::kNetwork; }},
@@ -785,6 +794,23 @@ void CheckHeaderBlocks() {
     item.mutate(value);
     add(std::string("header ") + item.name, HeaderEvent(item.response, value, 77), false);
   }
+  // Version 2 retains a block of any length; version 1 had a 320 KiB limit.
+  auto long_block = captured;
+  long_block.block_length = 400 * 1024;
+  add("header captured past 320 KiB", HeaderEvent(false, long_block, 77), true);
+  const auto version = [](reb::EventRecord event, const std::uint16_t number) {
+    event.inline_payload[0] = static_cast<std::byte>(number & 0xffU);
+    event.inline_payload[1] = static_cast<std::byte>(number >> 8U);
+    return event;
+  };
+  add("header version 1 captured past 320 KiB", version(HeaderEvent(false, long_block, 77), 1),
+      false);
+  add("header version 1 captured", version(HeaderEvent(false, captured, 77), 1), true);
+  auto v1_limited = block(Source::kBrowser, State::kNotCapturedBlockLimit);
+  v1_limited.block_length = 400 * 1024;
+  add("header version 1 past its 320 KiB limit", version(HeaderEvent(false, v1_limited, 0), 1),
+      true);
+  add("header version 3", version(HeaderEvent(false, captured, 77), 3), false);
   auto unparsed = answered;
   unparsed.status_code = 0;
   add("response status unparsed", HeaderEvent(true, unparsed, 77), true);
@@ -811,7 +837,7 @@ void CheckHeaderBlocks() {
   event.header.parent_event_id = event.header.sequence_number;
   add("header parent not earlier", event, false);
   event = HeaderEvent(false, captured, 77);
-  event.inline_payload[0] = std::byte{2};
+  event.inline_payload[0] = std::byte{0};
   add("header payload version", event, false);
 }
 
@@ -829,9 +855,10 @@ void CheckCookies() {
     value.state = state;
     value.cookie_count = state == State::kEmpty ? 0 : 2;
     value.blocked_count = state == State::kEmpty ? 0 : 1;
-    value.list_length = state == State::kEmpty                   ? 0
-                        : state == State::kNotCapturedBlockLimit ? 3U * 1024U * 1024U
-                                                                 : 200;
+    value.list_length = state == State::kEmpty ? 0
+                        : state == State::kNotCapturedBlockLimit
+                            ? static_cast<std::uint32_t>(reb::kNativeHeaderLengthUnrepresentable)
+                            : 200;
     if (state != State::kNotCapturedBlockLimit) {
       value.sha256.fill(0xab);
     }
@@ -871,7 +898,14 @@ void CheckCookies() {
       {"blocked above count", [](auto& v) { v.blocked_count = 3; }},
       {"count without length", [](auto& v) { v.list_length = 0; }},
       {"length below one entry each", [](auto& v) { v.list_length = 143; }},
-      {"over the limit captured", [](auto& v) { v.list_length = 3U * 1024U * 1024U; }},
+      {"captured at the length ceiling",
+       [](auto& v) { v.list_length = reb::kHeaderLengthUnrepresentable; }},
+      {"limit state below the length ceiling",
+       [](auto& v) {
+         v.state = State::kNotCapturedBlockLimit;
+         v.list_length = 3U * 1024U * 1024U;
+         v.sha256 = {};
+       }},
       {"missing digest", [](auto& v) { v.sha256 = {}; }},
       {"empty with cookies", [](auto& v) { v.state = State::kEmpty; }},
   };
@@ -883,6 +917,21 @@ void CheckCookies() {
   auto minimal = captured;
   minimal.list_length = 144;
   add("cookie list minimal length", list_event(minimal, 78), true);
+  // Version 2 retains a list of any length; version 1 had a 2 MiB limit.
+  auto long_list = captured;
+  long_list.list_length = 3U * 1024U * 1024U;
+  add("cookie list captured past 2 MiB", list_event(long_list, 78), true);
+  const auto version = [](reb::EventRecord record, const std::uint16_t number) {
+    record.inline_payload[0] = static_cast<std::byte>(number & 0xffU);
+    record.inline_payload[1] = static_cast<std::byte>(number >> 8U);
+    return record;
+  };
+  add("cookie list version 1 captured past 2 MiB", version(list_event(long_list, 78), 1), false);
+  add("cookie list version 1 captured", version(list_event(captured, 78), 1), true);
+  auto v1_limited = list(reb::NativeCookieDirection::kSent, State::kNotCapturedBlockLimit);
+  v1_limited.list_length = 3U * 1024U * 1024U;
+  add("cookie list version 1 past its 2 MiB limit", version(list_event(v1_limited, 0), 1), true);
+  add("cookie list version 3", version(list_event(captured, 78), 3), false);
   auto event = list_event(captured, 78);
   event.inline_payload[6] = std::byte{1};
   add("cookie list reserved word", event, false);

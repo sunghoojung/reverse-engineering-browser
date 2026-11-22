@@ -110,6 +110,8 @@ struct NativeWasmDispatchObservation final {
 // Views are valid only during this call; transport must bound/copy before returning.
 using NativeWasmDispatchEmitter = bool (*)(const NativeWasmDispatchObservation&,
                                            std::uint64_t) noexcept;
+// V8's kV8MaxWasmModuleSize: no module, so no byte offset in one, is larger.
+inline constexpr std::uint32_t kNativeWasmModuleByteOffsetLimit = 1U << 30U;
 [[nodiscard]] inline bool IsValidNativeWasmDispatchInput(
     const NativeWasmDispatchObservation& value) noexcept {
   constexpr std::array<std::uint8_t, 8> magic{0, 97, 115, 109, 1, 0, 0, 0};
@@ -117,7 +119,6 @@ using NativeWasmDispatchEmitter = bool (*)(const NativeWasmDispatchObservation&,
   if (!value.execution_context_id || !value.header.frame_id ||
       !(value.document_token_high || value.document_token_low) || value.source_url.empty() ||
       value.source_url.size() > kNativeArtifactMaxUrlBytes || bytes.size() < magic.size() ||
-      bytes.size() > kNativeArtifactMaxContentBytes ||
       !std::equal(magic.begin(), magic.end(), bytes.begin()) || value.module_byte_offset < 8 ||
       value.module_byte_offset >= bytes.size() || bytes[value.module_byte_offset] != 0x0e ||
       value.sample_index >= kNativeWasmDispatchSampleBudget ||
@@ -270,7 +271,6 @@ using NativeWasmIndirectEmitter = bool (*)(const NativeWasmIndirectObservation&,
   if (!value.execution_context_id || !value.header.frame_id ||
       !(value.document_token_high || value.document_token_low) || value.source_url.empty() ||
       value.source_url.size() > kNativeArtifactMaxUrlBytes || bytes.size() < magic.size() ||
-      bytes.size() > kNativeArtifactMaxContentBytes ||
       !std::equal(magic.begin(), magic.end(), bytes.begin()) || value.module_byte_offset < 8 ||
       value.module_byte_offset >= bytes.size() ||
       (bytes[value.module_byte_offset] != 0x11 && bytes[value.module_byte_offset] != 0x13) ||
@@ -559,14 +559,14 @@ using NativeWasmExecutionNudge = void (*)() noexcept;
     return false;
   }
   if (offset_known) {
-    if (value.module_byte_offset < 8 || value.module_byte_offset >= kLimit)
+    if (value.module_byte_offset < 8 ||
+        value.module_byte_offset >= kNativeWasmModuleByteOffsetLimit)
       return false;
   } else if (value.module_byte_offset != 0) {
     return false;
   }
   if (!bytes.empty()) {
-    if (bytes.size() < magic.size() || bytes.size() > kNativeArtifactMaxContentBytes ||
-        !std::equal(magic.begin(), magic.end(), bytes.begin()) ||
+    if (bytes.size() < magic.size() || !std::equal(magic.begin(), magic.end(), bytes.begin()) ||
         (offset_known && value.module_byte_offset >= bytes.size()))
       return false;
   }

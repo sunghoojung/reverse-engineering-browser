@@ -1369,9 +1369,14 @@ void Corpus(reb::ArtifactReceiver& receiver, const std::filesystem::path& output
   std::vector<std::uint8_t> initialized(32, 0);
   initialized[0] = 1;
   initialized[1] = 7;
+  int runtime_released = 0;
   NativeArtifactCaptureSink::Get().CaptureRuntimeTypedArray(
       42, kSession, 22, false, runtime.response, 71, kFrame, "https://fixture.test/stack.js",
-      mojo_base::BigBuffer(source), mojo_base::BigBuffer(initialized));
+      mojo_base::BigBuffer(source),
+      base::ScopedClosureRunner(base::OnceClosure([&] { ++runtime_released; })),
+      mojo_base::BigBuffer(initialized),
+      base::ScopedClosureRunner(base::OnceClosure([&] { ++runtime_released; })));
+  Check(runtime_released == 2, "A typed array and its script return their credit once copied");
   while (!NativeArtifactSocketClient::Get().transfers.empty()) {
     const auto id = NativeArtifactSocketClient::Get().transfers.begin()->first;
     Receive(receiver, id);

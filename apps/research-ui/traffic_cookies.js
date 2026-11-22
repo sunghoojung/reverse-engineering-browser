@@ -45,7 +45,7 @@ const trafficCookieStateNotes = {
   not_captured_artifact_unavailable: 'Not retained: the artifact channel was unavailable.',
   not_captured_transfer_refused: 'Not retained: the bounded artifact queue refused it.',
   not_captured_session_budget: 'Not retained: it arrived after 64 MiB of header blocks and cookie lists were retained, a limit of the browser that recorded this session.',
-  not_captured_url: 'Not retained: not an HTTP(S) URL, longer than 8 KiB, or its hop was not tracked.'
+  not_captured_url: 'Not retained: not an HTTP(S) URL, or its hop was not tracked. Older captures also used this for URLs longer than 8 KiB.'
 };
 
 function trafficCookieReasons(bits, names) {

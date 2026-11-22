@@ -91,7 +91,10 @@ interface NativeProbeHost {
                       uint8 js_invocation_state,
                       uint32 js_invocation_id,
                       string source_url,
-                      mojo_base.mojom.BigBuffer content);
+                      mojo_base.mojom.BigBuffer content,
+                      // Bytes of content the renderer charged; released by
+                      // NativeProbeClient.ReleaseArtifactCredit.
+                      uint64 credit_bytes);
   // Physical call_indirect observation; same admission and module transfer as
   // CaptureWasmDispatch, with its own 16-record budget.
   CaptureWasmIndirect(uint64 capture_epoch,
@@ -114,7 +117,10 @@ interface NativeProbeHost {
                       uint8 js_invocation_state,
                       uint32 js_invocation_id,
                       string source_url,
-                      mojo_base.mojom.BigBuffer content);
+                      mojo_base.mojom.BigBuffer content,
+                      // Bytes of content the renderer charged; released by
+                      // NativeProbeClient.ReleaseArtifactCredit.
+                      uint64 credit_bytes);
   // Trap or still-executing follow-up for one host-visible Wasm call.
   // content may be empty: the browser then binds the one module already
   // captured for this document, or records an explicit gap.
@@ -140,7 +146,9 @@ interface NativeProbeHost {
                        uint8 js_invocation_state,
                        uint32 js_invocation_id,
                        string source_url,
-                       mojo_base.mojom.BigBuffer content);
+                       mojo_base.mojom.BigBuffer content,
+                       // As CaptureWasmDispatch.
+                       uint64 credit_bytes);
   CaptureNativeGuest(uint64 capture_epoch,
                      array<uint8> invocation_record,
                      array<uint8> dispatch_record,
@@ -150,7 +158,10 @@ interface NativeProbeHost {
                      string source_url,
                      string adapter_json,
                      mojo_base.mojom.BigBuffer wasm_module,
-                     mojo_base.mojom.BigBuffer bytecode);
+                     mojo_base.mojom.BigBuffer bytecode,
+                     // wasm_module bytes the renderer charged, as
+                     // CaptureWasmDispatch.
+                     uint64 credit_bytes);
   CaptureNativeGuestHost(uint64 capture_epoch, array<uint8> event_record);
   CaptureGeneratedArtifact(uint16 kind,
                            uint16 capture_origin,

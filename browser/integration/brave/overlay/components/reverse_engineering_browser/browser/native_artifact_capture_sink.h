@@ -144,7 +144,9 @@ class NativeArtifactCaptureSink final {
                                 std::uint64_t frame_id,
                                 std::string_view source_url,
                                 mojo_base::BigBuffer script_source,
-                                mojo_base::BigBuffer content);
+                                base::ScopedClosureRunner source_released,
+                                mojo_base::BigBuffer content,
+                                base::ScopedClosureRunner content_released);
   // `on_refused`, if set, runs once when the artifact is refused or lost, so a
   // renderer that claimed it captured can stop claiming it for later repeats.
   // `content_released` runs once `content` is dropped, on every path.

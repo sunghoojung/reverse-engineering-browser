@@ -115,7 +115,7 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
   reb::NativeGuestPut(dispatch.inline_payload, 32, 30, 8);
   reb::NativeGuestPut(dispatch.inline_payload, 72, code.size(), 4);
   reb::NativeGuestPut(dispatch.inline_payload, 92, 7, 4);
-  reb::NativeGuestPut(invocation.inline_payload, 0, 3, 2);
+  reb::NativeGuestPut(invocation.inline_payload, 0, reb::kNativeWasmGuestInvocationVersion, 2);
   reb::NativeGuestPut(invocation.inline_payload, 2, 128, 2);
   reb::NativeGuestPut(invocation.inline_payload, 4, 1, 4);
   reb::NativeGuestPut(invocation.inline_payload, 8, 20, 8);
@@ -132,8 +132,9 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
   const auto send = [&](std::span<const std::uint8_t> module_bytes, const std::string& json) {
     host.CaptureNativeGuest(epoch, record(invocation), record(dispatch), 10, 11, 12,
                             "fixture://host-guest", json, mojo_base::BigBuffer(module_bytes),
-                            mojo_base::BigBuffer(code));
+                            mojo_base::BigBuffer(code), module_bytes.size());
   };
+  const auto released = [&] { return std::exchange(client.released_credit, {}); };
   const auto gap_for = [&](std::uint64_t sequence, std::string_view reason) {
     return std::any_of(events.begin(), events.end(), [&](const auto& e) {
       return e.header.type == NativeProbeType::kGap && e.header.process_id == 123 &&
@@ -146,6 +147,8 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
             client.verdicts.size() == 1 && !client.verdicts.back().accepted &&
             client.verdicts.back().token == 501,
         "Adapter mismatch is an explicit gap and a module rejection");
+  Check(released() == std::vector<std::uint64_t>{module.size()},
+        "A refused guest module returns its credit");
   frame.document = {11, 99};
   d.sequence_number = 502;
   send(module, recipe);
@@ -164,9 +167,13 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
   Check(transfers.empty() && gap_for(504, "native_guest_module_unbound") &&
             client.verdicts.size() == 3,
         "An empty module never produces a verdict");
+  Check(released() == std::vector<std::uint64_t>{module.size(), corrupt.size()},
+        "Every refused guest module returns its credit; an empty one was charged none");
   d.sequence_number = 505;
   send(module, recipe);
   Check(transfers.size() == 3, "A valid capture reaches the production sink");
+  Check(released() == std::vector<std::uint64_t>{module.size()},
+        "A captured guest module returns its credit once the browser copied it");
   while (!transfers.empty())
     Receive(receiver, transfers.begin()->first);
   Check(client.verdicts.size() == 4 && client.verdicts.back().accepted &&
@@ -224,9 +231,11 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
   d.sequence_number = 509;
   host.CaptureNativeGuest(epoch + 1, record(invocation), record(dispatch), 10, 11, 12,
                           "fixture://host-guest", recipe, mojo_base::BigBuffer(module),
-                          mojo_base::BigBuffer(code));
+                          mojo_base::BigBuffer(code), module.size());
   Check(events.size() == stale && transfers.empty(),
         "A retired configuration's capture is discarded like its queue records");
+  released();
+  Check(released().empty(), "Nothing else returned credit");
 
   // Physical call_indirect through the production host: stale epochs and
   // invalid resolutions are discarded, a missing document is one bounded gap.
@@ -235,7 +244,7 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
                             std::uint32_t resolution, std::uint32_t callee) {
     host.CaptureWasmIndirect(capture_epoch, kSession, sequence, 100, 123, 7, frame_id, 10, 11, 12,
                              1, 8, 0, 4, callee, resolution, 0, 0, 0, "fixture://host-indirect",
-                             mojo_base::BigBuffer(indirect_module));
+                             mojo_base::BigBuffer(indirect_module), indirect_module.size());
   };
   const auto before_indirect = events.size();
   indirect(epoch + 1, 600, 0, 2);
@@ -243,6 +252,8 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
   Check(events.size() == before_indirect + 1 &&
             gap_for(601, "native_wasm_indirect_limit_or_invalid") && transfers.empty(),
         "A retired epoch is discarded; an unknown resolution fills its own slot");
+  Check(released() == std::vector<std::uint64_t>(2, indirect_module.size()),
+        "A discarded or refused call_indirect module returns its credit");
   frame.document = {11, 99};
   indirect(epoch, 602, 0, 2);
   indirect(epoch, 603, 0, 2);
@@ -253,6 +264,8 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
   frame.document = {11, 12};
   indirect(epoch, 604, 0, 2);
   Check(transfers.size() == 1, "A valid call_indirect observation reaches the production sink");
+  Check(released() == std::vector<std::uint64_t>(3, indirect_module.size()),
+        "A captured call_indirect module returns its credit like the refused ones");
   Receive(receiver, transfers.begin()->first);
   Check(std::any_of(events.begin(), events.end(),
                     [](const auto& e) {
@@ -268,7 +281,7 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
                                     const std::vector<std::uint8_t>& bytes) {
     host.CaptureWasmIndirect(epoch, kSession, sequence, 100, 123, 7, frame_id, 10, 11, 12, 9, 8, 0,
                              4, 2, 0, 0, 0, 0, "fixture://host-indirect",
-                             mojo_base::BigBuffer(bytes));
+                             mojo_base::BigBuffer(bytes), bytes.size());
   };
   frame.document = {11, 99};
   capture_indirect(605, indirect_module);
@@ -289,7 +302,7 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
   session.wasm_budget = {};
   host.CaptureWasmExecution(epoch, kSession, 610, 100, 123, 7, frame_id, 10, 11, 12, 4, 9, 8, 0, 0,
                             1, 0, 3, 2, 0, 0, "fixture://host-indirect",
-                            mojo_base::BigBuffer(indirect_module));
+                            mojo_base::BigBuffer(indirect_module), indirect_module.size());
   const auto trap = std::find_if(events.begin(), events.end(), [](const auto& event) {
     return event.header.type == reb::NativeProbeType::kWasmExecutionOutcome &&
            event.header.sequence_number == 610;
@@ -303,7 +316,7 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
         "The host publishes a signature-mismatch trap for a resolved entry");
   host.CaptureWasmExecution(epoch, kSession, 611, 100, 123, 7, frame_id, 10, 11, 12, 5, 1, 8, 0, 1,
                             0, 0, 3, 2, 0, 0, "fixture://host-indirect",
-                            mojo_base::BigBuffer(std::span<const std::uint8_t>{}));
+                            mojo_base::BigBuffer(std::span<const std::uint8_t>{}), 0);
   const auto still = std::find_if(events.begin(), events.end(), [](const auto& event) {
     return event.header.sequence_number == 611;
   });
@@ -314,6 +327,7 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
                 static_cast<std::uint8_t>(reb::WasmExecutionKind::kStillExecuting) &&
             still_payload.reason == 0,
         "An empty still-executing record binds the document's one module");
+  released();
 
   // caller_observed crosses the host. An unwalked record stays version 2.
   // Zero caller bytes are not an observed host, and a named index on an
@@ -323,7 +337,7 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
                                  std::uint32_t caller_index) {
     host.CaptureWasmDispatch(epoch, kSession, sequence, 100, 123, 7, frame_id, 10, 11, 12, 1, 8, 0,
                              1, observed, kind, caller_index, 0, 0, 0, "fixture://host-dispatch",
-                             mojo_base::BigBuffer(dispatch_module));
+                             mojo_base::BigBuffer(dispatch_module), dispatch_module.size());
   };
   const auto published = [&](std::uint64_t sequence) {
     return std::find_if(events.begin(), events.end(), [&](const auto& event) {
@@ -358,6 +372,8 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
   Check(transfers.empty() && gap_for(702, "native_wasm_dispatch_limit_or_invalid") &&
             events.size() == before_unwalked_index + 1,
         "A function index on an unwalked record is a gap, not a dropped caller");
+  Check(released() == std::vector<std::uint64_t>(3, dispatch_module.size()),
+        "Every br_table module, captured, bound or refused, returns its credit");
   host.Disable();
   session.active = false;
   session.emitted = {};

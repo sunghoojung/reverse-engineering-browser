@@ -188,8 +188,8 @@ std::string OriginOf(const GURL& url, const NativeRequestTarget& target) {
   return spec;
 }
 
-// The whole URL when it fits the manifest's 8 KiB, else the origin; empty
-// unless HTTP(S).
+// The whole URL, which fits an artifact URL as every URL Chromium carries
+// does, else the origin; empty unless HTTP(S).
 std::string ArtifactUrlOf(const GURL& url, const NativeRequestTarget& target) {
   if (target.scheme != NativeRequestScheme::kHttp && target.scheme != NativeRequestScheme::kHttps) {
     return {};

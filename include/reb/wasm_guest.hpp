@@ -10,6 +10,7 @@
 #include <type_traits>
 #include "reb/event.hpp"
 #include "reb/js_invocation.hpp"
+#include "reb/wasm_dispatch.hpp"
 namespace reb {
 // Dispatch sites one adapter recipe may configure.
 inline constexpr std::uint32_t kWasmGuestSiteLimit = 8;
@@ -278,7 +279,7 @@ static_assert(offsetof(WasmGuestInvocationPayload, recipe_sha256) == 32);
          DecodeWasmGuestDispatchPayload(event.inline_payload, value) &&
          value.protocol_version == 1 && value.payload_size == 128 &&
          value.function_index < 16U * 1024U * 1024U && value.module_byte_offset >= 8 &&
-         value.module_byte_offset < 16U * 1024U * 1024U &&
+         value.module_byte_offset < kWasmModuleByteOffsetLimit &&
          value.table_count < 16U * 1024U * 1024U && value.sample_index < 256 && value.instance_id &&
          value.invocation_id && value.bytecode_artifact_id &&
          value.bytecode_artifact_id != event.header.artifact_id && value.memory_length &&

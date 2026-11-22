@@ -71,10 +71,11 @@ detects that disconnect promptly and disables every renderer host and browser
 capture sink. No page script controls probe activation.
 
 Canvas output is a separate, explicit sensitive-capture mode. When enabled for
-the session, a successful `HTMLCanvasElement.toDataURL()` result of at most 2
-MiB becomes a `canvas_data_url` artifact linked by `creator_event_id` to the
-exact readback operation. Larger or invalid results still produce metadata but
-no artifact. Renderer code passes the output one way to the browser process;
+the session, a successful `HTMLCanvasElement.toDataURL()` result of any size
+becomes a `canvas_data_url` artifact linked by `creator_event_id` to the
+exact readback operation. An invalid result, or one the renderer's artifact
+credit cannot take (`canvas_data_url_backlog`), still produces metadata but no
+artifact. Renderer code passes the output one way to the browser process;
 the browser remains the only owner of the authenticated artifact connection.
 
 Web Audio call sites observe selected graph construction, connection, source
@@ -263,10 +264,11 @@ most 64 KiB with an incremental SHA-256. Tees, request content and renderer
 content share the 32 MiB in-flight pool in
 `common/native_artifact_memory_pool.h`, charged with each queued data frame and
 returned when the writer drops it; a stream that finds the pool full waits for
-it to drain. Compiled script source that no response body carries and WASM
-byte-buffer API inputs use a separate one-way Mojo submission, charged to a
-256 MiB renderer credit that the browser returns once it no longer holds the
-buffer; see
+it to drain. Compiled script source that no response body carries, WASM
+byte-buffer API inputs, the modules Wasm observations and guest captures
+carry, runtime buffers, Canvas images and stack script sources use a separate
+one-way Mojo submission of any size, charged to a 256 MiB renderer credit that
+the browser returns once it no longer holds the buffer; see
 [native compiled scripts](../../../../../../protocol/native-compiled-scripts-v2.md).
 The browser copies renderer-owned shared memory before validation and records
 the stable execution context plus exact capture origin. A dedicated writer

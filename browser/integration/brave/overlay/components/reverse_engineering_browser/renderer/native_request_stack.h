@@ -65,9 +65,6 @@ struct NativeStackScriptSource final {
   std::uint32_t script_id = 0;
   NativeScriptIdentityKind kind = NativeScriptIdentityKind::kJavaScript;
   bool is_eval = false;
-  // Longer than kNativeScriptIdentityMaxSourceBytes, so not converted.
-  bool too_large = false;
-  std::uint64_t too_large_length = 0;
   std::uint32_t start_line = 0;
   std::uint32_t start_column = 0;
   std::uint64_t execution_context_id = 0;

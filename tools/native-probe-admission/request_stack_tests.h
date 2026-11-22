@@ -286,7 +286,7 @@ std::pair<NativeProbeEvent, NativeProbeEvent> Start(NativeProbeQueue& queue,
     const auto identity_event = Pop(queue);
     assert(identity_event.header.parent_event_id == stack.header.sequence_number);
     const auto identity = IdentityPayload(identity_event);
-    assert(identity.protocol_version == reb::kNativeScriptIdentityScopeVersion &&
+    assert(identity.protocol_version == reb::kNativeScriptIdentityBacklogVersion &&
            reb::NativeStackScopeOf(identity.reserved2).thread == 1 && identity.script_id == id &&
            identity.execution_context_id == 77 && identity.source_length == kStackSource.size() &&
            identity.sha256 == crypto::hash::Sha256(kStackSource) &&
@@ -472,6 +472,57 @@ std::vector<reb::NativeTaskSegment> GeneratedChain() {
 
 std::uint8_t Kind(const reb::NativeAsyncTaskKind kind) {
   return static_cast<std::uint8_t>(kind);
+}
+
+// A stack script whose source the renderer's artifact credit cannot take
+// says so in its identity, which keeps its length and digest. The
+// configuration gets one named gap, and sources are sent again once the
+// browser has copied out what it holds.
+[[gnu::noinline]] void NativeStackScriptSourceBacklog() {
+  // A compiled script the browser has not copied out holds the whole credit.
+  ConfigureCompiledScripts(true);
+  std::vector<std::uint8_t> held(kCredit, 'c');
+  sink.RecordCompiledScript(CompiledScript(NativeCompiledScriptKind::kEval, 95, held));
+  assert(RetentionOf(LastCompiledScript()) == Value(Retention::kQueued));
+  NativeProbeQueue queue;
+  Configure(queue, 48);
+  scenario = {};
+  scenario.depth = 2;
+  scenario.scripts = 2;
+  scenario.seed = 9100;
+  const auto artifacts = reb::mojom::NativeProbeHost::artifacts.load();
+  const auto stack = Start(queue, 4200).second;
+  for (std::uint32_t id = 10; id < 12; ++id) {
+    const auto identity_event = Pop(queue);
+    const auto identity = IdentityPayload(identity_event);
+    // Script 11 is an eval.
+    assert(identity_event.header.parent_event_id == stack.header.sequence_number &&
+           identity.protocol_version == reb::kNativeScriptIdentityBacklogVersion &&
+           identity.script_id == id &&
+           (identity.flags & ~reb::kNativeScriptIdentityEval) ==
+               reb::kNativeScriptIdentitySourceBacklog &&
+           identity.source_length == kStackSource.size() &&
+           identity.sha256 == crypto::hash::Sha256(kStackSource));
+    if (id == 10) {
+      const auto gap = Pop(queue);
+      assert(gap.header.type == reb::NativeProbeType::kArtifactCaptureFailed &&
+             gap.header.category == reb::NativeProbeCategory::kArtifact &&
+             PayloadText(gap) == "stack_script_source_backlog");
+    }
+  }
+  // Only the stack artifact, which is not charged, was sent.
+  assert(Drain(queue) == 0 && reb::mojom::NativeProbeHost::artifacts == artifacts + 1);
+  sink.ReleaseArtifactCredit(held.size());
+  Configure(queue, 49);
+  Start(queue, 4201);
+  for (std::uint32_t id = 10; id < 12; ++id) {
+    assert((IdentityPayload(Pop(queue)).flags & ~reb::kNativeScriptIdentityEval) ==
+           reb::kNativeScriptIdentitySourceQueued);
+  }
+  assert(Drain(queue) == 0 && reb::mojom::NativeProbeHost::artifacts == artifacts + 4);
+  scenario = {};
+  transport.Disable();
+  std::cout << "PASS a stack script past the artifact credit names its backlog\n";
 }
 
 // A queue that refused the async record means no artifact left this renderer

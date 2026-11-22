@@ -115,8 +115,12 @@ The browser captures the module through the artifact receiver and emits the
 observation only after accepted ACK. Stale navigation/configuration callbacks
 are rejected. Observations of the same module in the same document share one
 module artifact; each is emitted once that artifact is accepted (or at once if
-it already was). Capture is capped at 16 observations per configuration and
-16 MiB per module. Raising that global cap does not keep a hot function from
+it already was). Capture is capped at 16 observations per configuration. A
+module of any size is sent, charged to the renderer's 256 MiB artifact credit
+until the browser has copied it out; an observation whose module the credit
+cannot take fills its sequence slot with `native_wasm_module_backlog`, in the
+`call_indirect` and execution outcome streams too. Module byte offsets are
+bounded by V8's largest module, 1 GiB. Raising that global cap does not keep a hot function from
 filling it. A session can instead restrict admission before a sample index is
 taken: a module-digest allowlist, a function-index allowlist and denylist
 (deny wins), and a maximum number of retained samples per function. Empty

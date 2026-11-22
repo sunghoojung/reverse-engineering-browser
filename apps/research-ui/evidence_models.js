@@ -9,6 +9,9 @@
       // A named gap limits only the surface that shows its own category.
       const networkGapCategories = new Set(['network']);
       const vmGapCategories = new Set(['vm', 'wasm']);
+      // V8's largest Wasm module (kV8MaxWasmModuleSize) bounds a byte offset in
+      // one; include/reb/wasm_dispatch.hpp kWasmModuleByteOffsetLimit.
+      const WASM_MODULE_OFFSET_LIMIT = 2 ** 30;
 
       function fingerprintEventsFromEvents(events) {
         return events.filter(event => fingerprintSignalCategories.has(event.category));
@@ -493,7 +496,7 @@
         const row = {function_index:view.getUint32(4,true),module_byte_offset:view.getUint32(8,true),
           selector:view.getUint32(12,true),table_count:view.getUint32(16,true),sample_index:view.getUint32(20,true),
           ...nativeInvocationRow(context), ...(directCaller ? {direct_caller: directCaller} : {})};
-        return row.function_index < 16777216 && row.module_byte_offset >= 8 && row.module_byte_offset < 16777216 &&
+        return row.function_index < 16777216 && row.module_byte_offset >= 8 && row.module_byte_offset < WASM_MODULE_OFFSET_LIMIT &&
           row.table_count < 16777216 && row.sample_index < 16 ? row : null;
       }
 
@@ -514,7 +517,7 @@
         const row = {function_index:view.getUint32(4,true),module_byte_offset:view.getUint32(8,true),
           table_index:view.getUint32(12,true),slot:view.getUint32(16,true),callee_function_index:view.getUint32(20,true),
           resolution:view.getUint32(24,true),sample_index:view.getUint32(28,true),...nativeInvocationRow(context)};
-        return row.function_index < 16777216 && row.module_byte_offset >= 8 && row.module_byte_offset < 16777216 &&
+        return row.function_index < 16777216 && row.module_byte_offset >= 8 && row.module_byte_offset < WASM_MODULE_OFFSET_LIMIT &&
           row.table_index < 16777216 && row.callee_function_index < 16777216 && row.resolution < 5 &&
           (row.resolution === 0 || row.callee_function_index === 0) && row.sample_index < 16 ? row : null;
       }
@@ -542,7 +545,7 @@
         const offsetKnown = (row.known & 2) !== 0;
         if ((row.known & ~3) !== 0 || row.kind > 1 || row.related_stream > 2 || row.invocation_id === 0) return null;
         if (functionKnown ? row.function_index >= 16777216 : row.function_index !== 0) return null;
-        if (offsetKnown ? row.module_byte_offset < 8 || row.module_byte_offset >= 16777216 : row.module_byte_offset !== 0) return null;
+        if (offsetKnown ? row.module_byte_offset < 8 || row.module_byte_offset >= WASM_MODULE_OFFSET_LIMIT : row.module_byte_offset !== 0) return null;
         if (row.kind === 1 ? row.reason !== 0 || row.bounds !== 0 : row.reason >= 6) return null;
         if (row.reason === 3 ? row.bounds >= 7 : row.bounds !== 0) return null;
         if (row.related_stream === 0 ? row.related_sample_index !== 0xffffffff : row.related_sample_index >= 16) return null;
@@ -1153,7 +1156,7 @@
         }
         const length = view.getUint32(72,true);
         return isCanonicalInteger(event.parent_event_id,1n,uint64Max) && BigInt(event.parent_event_id) < BigInt(event.sequence_number) &&
-          view.getUint32(8,true) >= 8 && view.getUint32(8,true) < 16777216 && view.getUint32(16,true) < 16777216 &&
+          view.getUint32(8,true) >= 8 && view.getUint32(8,true) < WASM_MODULE_OFFSET_LIMIT && view.getUint32(16,true) < 16777216 &&
           view.getUint32(20,true) < 256 && u64(24) > 0n && u64(32) > 0n &&
           u64(56) > 0n && u64(56) !== BigInt(event.artifact_id) && length > 0 && length <= 65536 &&
           u64(40) < BigInt(length) && u64(64) + BigInt(length) <= uint64Max && bytes.slice(96).some(b => b !== 0) ? {} : null;
@@ -2710,7 +2713,7 @@
         if (!vmWorkspaceExact(row, vmNativeRowKeys(row, keys)) ||
           !vmSampleEvent(row.event) || !vmNativeRowTimeValid(row) || !vmNativeInvocationValid(row) ||
           !vmNativeDirectCallerValid(row) || !isSafeIntegerInRange(row.function_index,0,16777215) ||
-          !isSafeIntegerInRange(row.module_byte_offset,8,16777215) || !isSafeIntegerInRange(row.selector,0,0xffffffff) ||
+          !isSafeIntegerInRange(row.module_byte_offset,8,WASM_MODULE_OFFSET_LIMIT - 1) || !isSafeIntegerInRange(row.selector,0,0xffffffff) ||
           !isSafeIntegerInRange(row.table_count,0,16777215) || !isSafeIntegerInRange(row.sample_index,0,15) ||
           row.selected_arm !== Math.min(row.selector,row.table_count) || row.is_default !== (row.selector >= row.table_count)) return false;
         const site = workspace.dispatch_inventory?.candidates.find(site => site.byte_offset === row.module_byte_offset);
@@ -2724,7 +2727,7 @@
         if (!vmWorkspaceExact(row, vmNativeRowKeys(row, ['event','function_index','module_byte_offset','instruction','table_index',
           'slot','resolution','callee_function_index','sample_index'])) ||
           !vmSampleEvent(row.event) || !vmNativeRowTimeValid(row) || !isSafeIntegerInRange(row.function_index,0,16777215) ||
-          !isSafeIntegerInRange(row.module_byte_offset,8,16777215) || !['call_indirect','return_call_indirect'].includes(row.instruction) ||
+          !isSafeIntegerInRange(row.module_byte_offset,8,WASM_MODULE_OFFSET_LIMIT - 1) || !['call_indirect','return_call_indirect'].includes(row.instruction) ||
           !isSafeIntegerInRange(row.table_index,0,16777215) || !isSafeIntegerInRange(row.slot,0,0xffffffff) ||
           !vmIndirectResolutions.includes(row.resolution) || !isSafeIntegerInRange(row.sample_index,0,15) ||
           (row.resolution === 'resolved' ? !isSafeIntegerInRange(row.callee_function_index,0,16777215) : row.callee_function_index !== null)) return false;
@@ -2827,7 +2830,7 @@
           !isCanonicalInteger(row.pc_adjustment,int64Min,int64Max,true) ||
           !['i32','i64'].includes(row.pc_value_type) || typeof row.pc_subtract_memory_base !== 'boolean' ||
           !['pc_local_index','memory_index','selector','opcode'].every(k => isSafeIntegerInRange(row[k],0,0xffffffff)) ||
-          !isSafeIntegerInRange(row.function_index,0,16777215) || !isSafeIntegerInRange(row.module_byte_offset,8,16777215) ||
+          !isSafeIntegerInRange(row.function_index,0,16777215) || !isSafeIntegerInRange(row.module_byte_offset,8,WASM_MODULE_OFFSET_LIMIT - 1) ||
           !isSafeIntegerInRange(row.table_count,0,16777215) || !isSafeIntegerInRange(row.sample_index,0,255) ||
           row.selected_arm !== Math.min(row.selector,row.table_count) || row.is_default !== (row.selector >= row.table_count) ||
           !isSafeIntegerInRange(row.memory_length,1,65536) || !isSafeIntegerInRange(row.instruction_pointer,0,65535) ||
@@ -2837,7 +2840,7 @@
           !['explicit-adapter','verified-dataflow'].includes(row.interpretation) ||
           new Set([row.adapter_artifact_id,row.bytecode_artifact_id,workspace.interpreter_artifact_id]).size !== 3 ||
           !Array.isArray(row.host_import_call_offsets) || row.host_import_call_offsets.length > 64 ||
-          !row.host_import_call_offsets.every(n => isSafeIntegerInRange(n,8,16777215)) ||
+          !row.host_import_call_offsets.every(n => isSafeIntegerInRange(n,8,WASM_MODULE_OFFSET_LIMIT - 1)) ||
           new Set(row.host_import_call_offsets).size !== row.host_import_call_offsets.length) return false;
         const raw = BigInt(row.raw_pc_bits), base = BigInt(row.memory_base), adjusted = raw + BigInt(row.pc_adjustment);
         if ((row.pc_value_type === 'i32' && raw > 0xffffffffn) || adjusted < 0n || adjusted > uint64Max ||
@@ -3017,7 +3020,7 @@
             if (workspace.runtime !== 'webassembly' || claim.site_attribution !== 'exact' ||
               !vmWorkspaceExact(claim.site, ['function_index', 'byte_offset', 'line', 'column']) || claim.site.line !== null ||
               claim.site.column !== null || !isSafeIntegerInRange(claim.site.function_index, 0, 16777215) ||
-              !isSafeIntegerInRange(claim.site.byte_offset, 8, 16777215) || !vmObservedInterpreterSite(workspace, claim.site.byte_offset) ||
+              !isSafeIntegerInRange(claim.site.byte_offset, 8, WASM_MODULE_OFFSET_LIMIT - 1) || !vmObservedInterpreterSite(workspace, claim.site.byte_offset) ||
               !vmWorkspaceExact(claim.handler, ['kind', 'table_index', 'callee_function_index']) || claim.handler.kind !== 'table-entry' ||
               !isSafeIntegerInRange(claim.handler.table_index, 0, 16777215) ||
               !isSafeIntegerInRange(claim.handler.callee_function_index, 0, 16777215) ||
@@ -3040,7 +3043,7 @@
             if (workspace.runtime !== 'webassembly' || claim.site_attribution !== 'exact' ||
               !vmWorkspaceExact(claim.site, ['function_index', 'byte_offset', 'line', 'column']) || claim.site.line !== null ||
               claim.site.column !== null || !isSafeIntegerInRange(claim.site.function_index, 0, 16777215) ||
-              !isSafeIntegerInRange(claim.site.byte_offset, 8, 16777215) || !vmObservedInterpreterSite(workspace, claim.site.byte_offset) ||
+              !isSafeIntegerInRange(claim.site.byte_offset, 8, WASM_MODULE_OFFSET_LIMIT - 1) || !vmObservedInterpreterSite(workspace, claim.site.byte_offset) ||
               !vmWorkspaceExact(claim.handler, ['kind', 'arm', 'is_default']) || claim.handler.kind !== 'br-table-arm' ||
               typeof claim.handler.is_default !== 'boolean' || !isSafeIntegerInRange(claim.handler.arm, 0, 16777215) ||
               !isSafeIntegerInRange(claim.selector, 0, 0xffffffff) ||

@@ -795,8 +795,10 @@ void RequestContent() {
              static_cast<std::uint8_t>(State::kNotCapturedUrl) &&
          Target(Last(reb::NativeProbeType::kRequestTarget)).scheme ==
              static_cast<std::uint8_t>(reb::RequestScheme::kWss));
-  // A body to a URL past the manifest's 8 KiB keeps its origin; its target is whole.
-  const std::string long_path = "/" + std::string(reb::kNativeArtifactMaxUrlBytes, 'p');
+  // A body to a URL longer than any artifact URL keeps its origin; its target,
+  // at the request target bound, is whole.
+  static_assert(reb::kNativeRequestTargetMaxBytes == reb::kNativeArtifactMaxUrlBytes);
+  const std::string long_path = "/" + std::string(reb::kNativeArtifactMaxUrlBytes - 1, 'p');
   request.url = GURL("https", "api.test", long_path);
   events.clear();
   artifacts.read_calls.clear();

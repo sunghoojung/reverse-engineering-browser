@@ -143,6 +143,8 @@ struct NativeRequestStackTables final {
   std::uint64_t budget_generation = 0;
   std::uint32_t stacks_sent = 0;
   std::uint64_t source_bytes = 0;
+  // A source refused for the artifact credit has been named once by a gap.
+  bool source_backlog_reported = false;
   std::uint32_t async_sent = 0;
   std::uint32_t promise_sent = 0;
   std::array<Segment, kNativeAsyncTaskRing> segments{};
@@ -315,6 +317,7 @@ void ResetBudgets(NativeRequestStackTables& state, const std::uint64_t generatio
     state.budget_generation = generation;
     state.stacks_sent = 0;
     state.source_bytes = 0;
+    state.source_backlog_reported = false;
     state.async_sent = 0;
     state.promise_sent = 0;
     // Once per configuration: an older generation's refusals no longer apply.
@@ -1711,7 +1714,7 @@ void NativeRequestStackWalk::DescribeScript(const NativeStackScriptSource& scrip
   NativeRequestStackTables& state = *state_;
   const bool javascript = script.kind == NativeScriptIdentityKind::kJavaScript;
   NativeScriptIdentityPayload payload;
-  payload.protocol_version = kNativeScriptIdentityScopeVersion;
+  payload.protocol_version = kNativeScriptIdentityBacklogVersion;
   payload.kind = static_cast<std::uint8_t>(script.kind);
   payload.flags = javascript && script.is_eval ? kNativeScriptIdentityEval : 0;
   payload.script_id = script.script_id;
@@ -1721,23 +1724,32 @@ void NativeRequestStackWalk::DescribeScript(const NativeStackScriptSource& scrip
   SetNativeStackScope(payload.reserved2, state.scope);
   NativeProbeSink& sink = NativeProbeSink::Get();
   bool queue = false;
-  if (script.too_large) {
-    payload.flags |= kNativeScriptIdentitySourceTooLarge;
-    payload.source_length = script.too_large_length;
-  } else if (script.bytes.empty() || script.bytes.size() > kNativeScriptIdentityMaxSourceBytes) {
+  if (script.bytes.empty()) {
     payload.flags |= kNativeScriptIdentitySourceUnavailable;
   } else {
     payload.source_length = script.bytes.size();
     payload.sha256 = crypto::hash::Sha256(script.bytes);
     if (javascript) {
       // Inline source can embed per-user data; only content capture retains it.
-      queue = sink.IsArtifactCaptureEnabled() && sink.IsContentCaptureEnabled() &&
-              !script.url.empty() && script.url.size() <= kNativeArtifactMaxUrlBytes &&
-              state.source_bytes + script.bytes.size() <= kNativeRequestStackSourceBytes;
-      payload.flags |= queue ? kNativeScriptIdentitySourceQueued : kNativeScriptIdentityNotRetained;
+      const bool retain =
+          sink.IsArtifactCaptureEnabled() && sink.IsContentCaptureEnabled() &&
+          !script.url.empty() && script.url.size() <= kNativeArtifactMaxUrlBytes &&
+          state.source_bytes + script.bytes.size() <= kNativeRequestStackSourceBytes;
+      // Charged before the identity is sent, so the identity says whether its
+      // source follows.
+      queue = retain && sink.TryChargeArtifactCredit(script.bytes.size());
+      payload.flags |= queue    ? kNativeScriptIdentitySourceQueued
+                       : retain ? kNativeScriptIdentitySourceBacklog
+                                : kNativeScriptIdentityNotRetained;
     }
   }
+  const auto refuse = [&] {
+    if (queue) {
+      sink.ReleaseArtifactCredit(script.bytes.size());
+    }
+  };
   if (!IsValidNativeScriptIdentityPayload(payload)) {
+    refuse();
     return;
   }
   NativeProbeEvent event =
@@ -1746,19 +1758,28 @@ void NativeRequestStackWalk::DescribeScript(const NativeStackScriptSource& scrip
   event.header.sequence_number = sink.next_sequence_.fetch_add(1, std::memory_order_relaxed);
   event.inline_payload = EncodeNativeRequestStackRecord(payload);
   if (sink.EmitStatus(event, generation_) != NativeProbeEmitStatus::kAdmitted) {
+    refuse();
     return;
   }
   const std::size_t hash = Mix(script.script_id);
   NativeRequestStackTables::Script& slot = Slot(state.scripts, hash, generation_, state.evict);
   slot.generation = generation_;
   slot.id = script.script_id;
+  // Each identity names its own backlog; the gap puts the reason in the
+  // session's failure counts.
+  if ((payload.flags & kNativeScriptIdentitySourceBacklog) != 0 && !state.source_backlog_reported) {
+    state.source_backlog_reported =
+        sink.RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, frame_id_,
+                                      "stack_script_source_backlog", generation_,
+                                      NativeProbeCategory::kArtifact) != 0;
+  }
   if (!queue) {
     return;
   }
-  sink.CaptureGeneratedArtifact(NativeArtifactKind::kJavaScript,
-                                NativeArtifactCaptureOrigin::kStackScript,
-                                event.header.sequence_number, script.execution_context_id,
-                                frame_id_, script.url, script.bytes);
+  sink.CaptureChargedArtifact(NativeArtifactKind::kJavaScript,
+                              NativeArtifactCaptureOrigin::kStackScript,
+                              event.header.sequence_number, script.execution_context_id, frame_id_,
+                              script.url, script.bytes);
   state.source_bytes += script.bytes.size();
 }
 

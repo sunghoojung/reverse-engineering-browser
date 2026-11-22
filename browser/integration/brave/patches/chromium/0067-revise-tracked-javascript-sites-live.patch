@@ -1,0 +1,25 @@
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+index 9f001c98f9102ad9039f2cb84d53c7bebb34d108..c7ac44d31088c8f90b11572a6850d2cc11b6a4a9 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+@@ -708,6 +708,12 @@ std::size_t NativeJsInvocationSites(const std::uint64_t epoch,
+   return count;
+ }
+ 
++// The revision of the epoch's sites. A changed revision makes V8 copy the
++// sites again without renumbering slots or ending calls in flight.
++std::uint64_t NativeJsInvocationRevision(const std::uint64_t epoch) {
++  return reb::NativeProbeSink::Get().NativeJsInvocationRevision(epoch);
++}
++
+ bool NativeJsInvocationEnabled(const std::uint64_t epoch,
+                                const std::uint32_t slot) {
+   // V8 calls this before allocating anything for the call.
+@@ -2235,6 +2241,7 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+     js_invocation.start = CaptureJsInvocationStart;
+     js_invocation.settle = CaptureJsInvocationSettle;
+     js_invocation.status = NoteJsInvocationStatus;
++    js_invocation.revision = NativeJsInvocationRevision;
+     isolate->SetJsInvocationCallbacks(js_invocation);
+     reb::NativeProbeSink::Get().SetNativeJsInvocationContextProvider(
+         CurrentJsInvocation);

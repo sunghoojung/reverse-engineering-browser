@@ -287,10 +287,15 @@ Each section is a collapsible pane:
   retried. Without a live connection the section says how to get one and
   shows no form. The form and the armed set say what a rule cannot observe,
   because a wait for it would then find nothing with nothing missing: only
-  the armed document's main thread records, never its workers, other frames
-  or same-process iframes; its navigation clears the rules; and they cannot
-  be armed ahead of a page load, so what a page does while it loads is not
-  observed.
+  the main thread of the documents a rule is armed on records, never their
+  workers or other documents; and this document's navigation clears its
+  rules. **Keep for every later** *origin frame kind* **document**, which
+  names this document's origin and frame kind, also keeps the rules other
+  than DOM ones for every later such document, in any tab: each one is armed
+  from its first script, so a reload is observed
+  while it loads, but documents that are already open are not armed. The
+  armed set names the kept origin and frame kind and lists the kept rules,
+  and Clear rules forgets them, even after this document navigated.
 - **Observations**: the newest records, 128 at a time and up to 4,096 with
   **Show older records**, filtered by kind. A note says how much of the store
   the rows were read from: the whole store, or its newest bytes and why the
@@ -316,7 +321,7 @@ Each section is a collapsible pane:
   **Show newest** returns to the newest page. Past 4,096 rows the oldest are
   dropped, and the list says how many. A failed read changes neither the rows
   nor their note. Malformed
-  records, a renderer's `debugger_observation_budget` gap and store sequence
+  records, an earlier build's `debugger_observation_budget` gap and store sequence
   gaps are stated above the list, which is as tall as its rows up to a cap.
   Traffic's **Show in debugger** on a watched request calls
   `RebDebuggerSidebar.showObservation`: the sidebar opens on the Requests
@@ -898,7 +903,13 @@ Each submitted command has a numbered running/completed/error state. A transport
 failure marks its outcome unavailable, preserves the next draft and delivered
 output, and never automatically retries the command. Use Session settings to
 refresh documents explicitly, or disconnect and start a fresh disposable session.
-The Run button and Enter both submit; the composer also shows its UTF-8 byte count.
+The Run button and Enter both submit; the composer also shows its UTF-8 size.
+A command runs until it returns: while it runs, Run becomes **Stop**, which ends
+it in the page and marks it Stopped, keeping the changes it already made. Input
+of any size up to the 64 MiB command record is accepted. The transcript shows a
+long command's first 4096 characters with its full size, and history keeps the
+newest command whole however large; inputs over 64 KiB are shown uncolored so
+typing stays fast.
 An empty prompt has no placeholder text. Fully typed built-in names do not open
 automatic suggestions, so Enter runs them unchanged; Ctrl+Space can still request
 their completions explicitly.
@@ -936,11 +947,13 @@ unchanged; Ctrl+Space explicitly requests completion.
 
 Results expand into property pages, DOM element previews, function source and
 source locations. Getters remain labeled, proxies are opaque, and retained values
-expire after 60 seconds. Explicit actions copy bounded property previews, store a
+stay until they are released, the output is cleared or the page navigates.
+Explicit actions copy bounded property previews, store a
 value as `window.tempN`, or release it. `$_` reads the previous result. `copy(value)`,
 `inspect(value)`, `getEventListeners(element)`, `monitorEvents(element)` and
 `unmonitorEvents(element)` are standalone console utilities. They evaluate their
-argument once. Event monitoring is explicit and lasts at most 60 seconds.
+argument once. Event monitoring is explicit and lasts until
+`unmonitorEvents(element)` or the page navigates.
 `getEventListeners` also takes `window` and `document`, and an element, `window`
 or `document` result offers **Event listeners** among its value actions. The
 runtime describes `window` and `document` as a plain `Object`, so a plain
@@ -1541,9 +1554,21 @@ categories in Fingerprinting. The configured sampling budgets
 sampled. That includes the per-function and per-call-site Wasm budgets. A
 function, module, call-site, or stream refusal also keeps a compact overflow
 identity up to a ring of 32, and identities past the ring are a count; those
-records are not full observations. `reset_wasm_sample_budgets` publishes that
-count and starts both rings again. See
+records are not full observations. Each one-second window has its own ring
+and count, and starts the Wasm budgets again; `reset_wasm_sample_budgets`
+closes the window at once. See
 [overflow identities](../../protocol/native-wasm-dispatch-v1.md#overflow-identities).
+For a live session that records a Wasm stream, VM Lab shows the session
+context's `capture_options.wasm_sampling` under its notice: the streams, the
+records each window keeps, the per-function and per-call-site allowances (an
+unnamed per-function allowance is the browser's 64), and the function and
+module filters. Its Reset sample budgets button posts
+`reset_wasm_sample_budgets` and shows the new reset generation or the
+backend's refusal, for example while capture is stopped, under the policy;
+the button keeps its place at the end of the first line, and a narrow strip
+wraps only between the policy's parts. It is disabled when the session has no
+reset file, and a malformed label is named rather than shown. The strip is
+hidden for every other session.
 Filter reasons (`native_wasm_dispatch_filtered`, `native_wasm_indirect_filtered`,
 and their `_browser_` counterparts) are sample-policy exclusions: the
 execution was not sampled and did not consume a sample slot. The notice and
@@ -2392,8 +2417,8 @@ worker makes AST operations unavailable with an explicit error. Deob stays insid
 
 ## Track calls to a function
 
-To follow calls of a page function such as `window.hsw` in the next capture,
-open its captured script in **Sources** and either type the name in the
+To follow calls of a page function such as `window.hsw`, open its captured
+script in **Sources** and either type the name in the
 **Track function calls** pane of **Details** and press Return, or put the
 cursor in the function (click it, or use **Go to line**) and
 choose **Track calls** in **More**. The position must be in the original
@@ -2405,18 +2430,24 @@ bare-parameter or `async` arrow, a generator, a class constructor or a class
 initializer is refused with its reason, as is top-level code. Context lines
 and labels are captured text, inserted as text.
 
-Saving changes nothing in the open page or the running capture. The pane says
-tracking starts with the next capture: the start panel that **New Live
-Session…** opens shows "Tracking N functions" with each label and
-script URL, a Remove for each and Clear All (which asks once more), and the
-capture it starts arms a private copy of the set. The native app reads and
+Saving changes nothing in the open page. A capture the app started follows the
+saved set: the pane says it tracks a saved function at once, and a removed one
+stops recording new calls while a call already running still settles. A
+function the page compiled before it was saved is tracked after the page
+reloads. A function saved once the capture has used all 256 site slots waits
+for the next capture, and the pane says so. With a Brave built before site
+revisions the pane says tracking starts with the next capture. The start panel
+that **New Live Session…** opens shows "Tracking N functions" with each label
+and script URL, a Remove for each and Clear All (which asks once more), and
+the capture it starts arms a private copy of the set, which its backend
+rewrites as a slot table when the set changes. The native app reads and
 rewrites the saved file for the panel; a Remove names the list the panel
 showed, so a list that changed since is refused rather than edited. Content mode also records
 the calls' settled-value digests; Metadata mode does not. The titlebar names
 what the running capture tracks, says when its Brave predates invocation
 capture and started without the sites, and warns when this session retained
 another version of a saved script, which the saved site will not match. At
-most 8 functions are saved, in
+most 256 functions are saved, the most one capture can arm, in
 `~/Library/Application Support/Origin Trace/js-invocation-sites-v1.json` with a
 label sidecar; `REB_JS_INVOCATION_SITE_STORE` names another file. Stored-evidence
 native mode has no backend for these routes and says so. The routes and

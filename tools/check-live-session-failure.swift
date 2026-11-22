@@ -227,31 +227,33 @@ enum LiveSessionFailureChecks {
     precondition(content["REB_CAPTURE_REQUEST_CONTENT"] == "1", "choosing Content there is a Content start")
     print("PASS native start panel: a start names only its mode, removed budget and media keys refused, the panel's mode deciding request content, and an inherited opt-out preselecting Metadata")
 
-    // Saved invocation sites arm app-started captures. Digests follow the
-    // mode and the session option, the launcher drops sites a Brave cannot
-    // arm, and explicit sites win.
+    // Saved invocation sites arm app-started captures, which follow the saved
+    // set. Digests follow the mode and the session option, the launcher drops
+    // sites a Brave cannot arm, and explicit sites win.
     let saved = URL(fileURLWithPath: "/private/tmp/origin-trace-live-x-js-invocation-sites.json")
-    let invocationNames = ["REB_NATIVE_JS_INVOCATION_SITES", "REB_NATIVE_JS_INVOCATION_DIGESTS", "REB_NATIVE_JS_INVOCATION_IF_SUPPORTED"]
+    let invocationNames = ["REB_NATIVE_JS_INVOCATION_SITES", "REB_NATIVE_JS_INVOCATION_DIGESTS",
+      "REB_NATIVE_JS_INVOCATION_IF_SUPPORTED", "REB_NATIVE_JS_INVOCATION_LIVE"]
     let invocationCases: [(String, [String: String], Bool, URL?, [String?])] = [
-      ("content", [:], true, saved, [saved.path, "1", "1"]),
-      ("metadata", [:], false, saved, [saved.path, "0", "1"]),
-      ("nothing saved", [:], true, nil, [nil, "0", nil]),
-      ("explicit digests off", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "0"], true, saved, [saved.path, "0", "1"]),
-      ("explicit digests on", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "1"], true, saved, [saved.path, "1", "1"]),
-      ("explicit digests never reach Metadata", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "1"], false, saved, [saved.path, "0", "1"]),
+      ("content", [:], true, saved, [saved.path, "1", "1", "1"]),
+      ("metadata", [:], false, saved, [saved.path, "0", "1", "1"]),
+      ("nothing saved", [:], true, nil, [nil, "0", nil, nil]),
+      ("explicit digests off", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "0"], true, saved, [saved.path, "0", "1", "1"]),
+      ("explicit digests on", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "1"], true, saved, [saved.path, "1", "1", "1"]),
+      ("explicit digests never reach Metadata", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "1"], false, saved, [saved.path, "0", "1", "1"]),
       ("nor with explicit sites", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "1", "REB_NATIVE_JS_INVOCATION_SITES": "/explicit.json"], false, saved,
-        ["/explicit.json", "0", nil]),
-      ("explicit sites", ["REB_NATIVE_JS_INVOCATION_SITES": "/explicit.json"], true, saved, ["/explicit.json", "1", nil]),
-      ("explicit sites off", ["REB_NATIVE_JS_INVOCATION_SITES": ""], true, saved, ["", "0", nil]),
-      ("strict check kept", ["REB_NATIVE_JS_INVOCATION_IF_SUPPORTED": "0"], true, saved, [saved.path, "1", "0"]),
-      ("no VM category", ["REB_CAPTURE_CATEGORY_MASK": "1280"], true, saved, [nil, "0", nil]),
-      ("unreadable mask", ["REB_CAPTURE_CATEGORY_MASK": "0xzz"], true, saved, [nil, "0", nil]),
+        ["/explicit.json", "0", nil, nil]),
+      ("explicit sites", ["REB_NATIVE_JS_INVOCATION_SITES": "/explicit.json"], true, saved, ["/explicit.json", "1", nil, nil]),
+      ("explicit sites off", ["REB_NATIVE_JS_INVOCATION_SITES": ""], true, saved, ["", "0", nil, nil]),
+      ("strict check kept", ["REB_NATIVE_JS_INVOCATION_IF_SUPPORTED": "0"], true, saved, [saved.path, "1", "0", "1"]),
+      ("following opted out", ["REB_NATIVE_JS_INVOCATION_LIVE": "0"], true, saved, [saved.path, "1", "1", "0"]),
+      ("no VM category", ["REB_CAPTURE_CATEGORY_MASK": "1280"], true, saved, [nil, "0", nil, nil]),
+      ("unreadable mask", ["REB_CAPTURE_CATEGORY_MASK": "0xzz"], true, saved, [nil, "0", nil, nil]),
     ]
     for (name, given, content, url, expected) in invocationCases {
       let environment = launch(given, content: content, sites: url)
       precondition(invocationNames.map { environment[$0] } == expected, "invocation defaults: \(name) \(invocationNames.map { environment[$0] })")
     }
-    print("PASS native live invocation sites: saved sites armed with digests in Content and without in Metadata, explicit sites win, digests only with armed sites, no VM category arms nothing")
+    print("PASS native live invocation sites: saved sites armed and followed, with digests in Content and without in Metadata, explicit sites win, digests only with armed sites, no VM category arms nothing")
 
     // A Metadata start decides every content-derived switch, whatever the
     // environment holds: chosen in the panel or by REB_AUTOMATIC_CAPTURE_MODE,

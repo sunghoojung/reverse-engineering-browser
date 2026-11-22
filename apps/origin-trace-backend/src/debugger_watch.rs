@@ -5,9 +5,10 @@ use serde_json::Value;
 use crate::error::{Error, Result};
 use crate::validation;
 
-const REQUEST_RULES: usize = 8;
-const EVENT_RULES: usize = 16;
-const DOM_NODES: usize = 4;
+// The renderer's rule tables (renderer/native_debugger_observation.h).
+const REQUEST_RULES: usize = 32;
+const EVENT_RULES: usize = 64;
+const DOM_NODES: usize = 32;
 const URL_BYTES: usize = 256;
 const EVENT_BYTES: usize = 27;
 
@@ -120,17 +121,24 @@ mod tests {
         )
         .unwrap();
         validate(&json!({})).unwrap();
+        validate(&json!({
+            "requests": vec![json!({"url_contains":"x"}); 32],
+            "events": (0..64).map(|i| format!("e{i}")).collect::<Vec<_>>(),
+            "dom": (1..=32).map(|i| json!({"handle": i.to_string(), "removal": true})).collect::<Vec<_>>(),
+        }))
+        .unwrap();
         for rules in [
             json!({"requests":[{"url_contains":""}]}),
             json!({"requests":[{"url_contains":"x","method":"post"}]}),
             json!({"requests":[{"url_contains":"x","regex":".*"}]}),
-            json!({"requests": vec![json!({"url_contains":"x"}); 9]}),
+            json!({"requests": vec![json!({"url_contains":"x"}); 33]}),
+            json!({"events": (0..65).map(|i| format!("e{i}")).collect::<Vec<_>>()}),
             json!({"events":["click","click"]}),
             json!({"events":["cl ick"]}),
             json!({"events":["x".repeat(28)]}),
             json!({"exceptions":"caught"}),
             json!({"dom":[{"handle":"0"}]}),
-            json!({"dom": vec![json!({"handle":"1"}); 5]}),
+            json!({"dom": vec![json!({"handle":"1"}); 33]}),
             json!({"selector":"#login"}),
         ] {
             assert!(validate(&rules).is_err(), "{rules}");

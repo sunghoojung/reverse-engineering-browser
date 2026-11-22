@@ -15,8 +15,8 @@ use crate::validation;
 
 pub const LEASE_LIMIT_MS: u64 = 60_000;
 
-/// `console` is the Console listing; `watch` is None while a Console action
-/// holds the session. `query` selects which observation records are listed,
+/// `console` is the Console listing; `watch` is the Console's `armed` and
+/// `kept` rules, or None while a Console action holds the session. `query` selects which observation records are listed,
 /// and `pause` owns every pausing field.
 pub fn state(
     store: &Path,
@@ -38,10 +38,15 @@ pub fn state(
                 "out_of_process": target.get("out_of_process").cloned().unwrap_or(json!(false))})
         })
         .collect();
+    // `state` is the Console's own arm; `kept` is the scope the browser arms
+    // later documents with, which outlives that arm's document.
     let watch = match watch {
-        None => json!({"state": "busy", "armed": null}),
-        Some(Value::Null) => json!({"state": "none", "armed": null}),
-        Some(armed) => json!({"state": "armed", "armed": armed}),
+        None => json!({"state": "busy", "armed": null, "kept": null}),
+        Some(watch) => json!({
+            "state": if watch["armed"].is_null() { "none" } else { "armed" },
+            "armed": watch["armed"],
+            "kept": watch["kept"],
+        }),
     };
     let mut value = json!({
         "contract_version": 1,
@@ -248,8 +253,23 @@ mod tests {
             "the next older record is refused"
         );
         assert_eq!(page["observations_malformed"], 1);
+        // A kept scope outlives the document it was armed from.
+        let kept = json!({"session_id":"4","target_id":"22","origin":"https://a.test",
+            "frame":"top","rules":{"events":["click"]}});
+        let keeping = state(
+            &path,
+            &indexes,
+            &console,
+            Some(json!({"armed":null,"kept":kept})),
+            &every,
+            &pause,
+        )
+        .unwrap();
+        assert_eq!(keeping["watch"]["state"], "none");
+        assert_eq!(keeping["watch"]["kept"], kept);
         let busy = state(&path, &indexes, &json!({}), None, &every, &pause).unwrap();
         assert_eq!(busy["watch"]["state"], "busy");
+        assert_eq!(busy["watch"]["kept"], Value::Null);
         assert_eq!(busy["threads"]["console"], "idle");
         let error = action(
             &json!({"action":"resume","target_id":"22","lease_id":"1"}),

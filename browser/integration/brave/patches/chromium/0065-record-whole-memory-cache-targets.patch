@@ -1,0 +1,44 @@
+diff --git a/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc b/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
+index 1ddec4e..c96dc8e 100644
+--- a/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
++++ b/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
+@@ -413,8 +413,8 @@ void RecordDeferUnusedPreloadHistograms(const Resource* resource) {
+ 
+ // A load Blink answers from a resource it holds makes no request; see
+ // protocol/native-network-v3.md. The sink admits the reuse before anything is
+-// converted, and only bounded prefixes are copied, since a data: URL can be
+-// megabytes long.
++// converted, and a data: URL, which can be megabytes long, is copied only as a
++// bounded prefix.
+ void RecordNativeMemoryCacheReuse(const FetchContext& context,
+                                   const Resource& resource,
+                                   const ResourceRequest& request,
+@@ -434,21 +434,21 @@ void RecordNativeMemoryCacheReuse(const FetchContext& context,
+   const reb::NativeTargetRange range = reb::NativeRequestTargetRange(
+       spec.length(), parsed.path.begin, parsed.path.len, parsed.query.begin,
+       parsed.query.len, parsed.ref.begin, parsed.ref.len);
++  // A content capture converts the whole of an http(s) target, which the
++  // browser keeps as its request_target artifact, and the whole host for its
++  // origin; everything else stays bounded.
+   std::string target;
+   if (admission.capture_request_content) {
+     target = StringView(spec, static_cast<wtf_size_t>(range.begin),
+-                        static_cast<wtf_size_t>(std::min(
+-                            range.length, reb::kNativeRequestTargetPrefixBytes)))
++                        static_cast<wtf_size_t>(reb::NativeMemoryCacheTargetBytes(
++                            url.ProtocolIsInHttpFamily(), range.length)))
+                  .Utf8();
+   }
+-  // One byte past the 120 the record keeps tells the sink the host is longer.
+   const StringView host_view = url.Host();
+   const std::string host =
+       StringView(host_view, 0,
+-                 std::min<wtf_size_t>(
+-                     host_view.length(),
+-                     static_cast<wtf_size_t>(
+-                         reb::kNativeMemoryCacheReuseHostSize + 1)))
++                 static_cast<wtf_size_t>(reb::NativeMemoryCacheHostBytes(
++                     admission.capture_request_content, host_view.length())))
+           .Utf8();
+   const std::string scheme = url.Protocol().Utf8();
+   reb::NativeMemoryCacheReuse reuse;

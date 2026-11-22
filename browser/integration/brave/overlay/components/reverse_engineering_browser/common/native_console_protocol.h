@@ -14,13 +14,31 @@
 namespace reb {
 
 inline constexpr std::uint32_t kNativeConsoleMagic = 0x43424552;
-inline constexpr std::uint16_t kNativeConsoleVersion = 2;
-inline constexpr std::uint32_t kNativeConsoleSourceLimit = 8192;
+// Version 3 adds operation 5 (Stop) and status 7 (Stopped), and lifts the
+// source and payload bounds to the transport bound below.
+inline constexpr std::uint16_t kNativeConsoleVersion = 3;
+// One command is one Mojo string and one socket record. 64 MiB stays well
+// inside Mojo's message limit and leaves room for JSON escaping of a pasted
+// script; it is the transport's bound, not a source budget.
+inline constexpr std::uint32_t kNativeConsolePayloadLimit = 64 * 1024 * 1024;
+inline constexpr std::uint32_t kNativeConsoleSourceLimit = kNativeConsolePayloadLimit;
+// A runtime reply is one JSON page. Larger values are paged by offset, and a
+// poll drains at most this much, so a reply never grows with the page.
+inline constexpr std::uint32_t kNativeConsoleReplyLimit = 64 * 1024;
+// A document-start reply lists the armed set and every retained record after
+// the reader's cursor that fits, so it takes the transport's bound.
+inline constexpr std::uint32_t kNativeConsoleDocumentStartReplyLimit = kNativeConsolePayloadLimit;
+// The legacy operation 2 reply copies a primitive preview only.
 inline constexpr std::uint32_t kNativeConsoleTextLimit = 8192;
 inline constexpr std::uint32_t kNativeConsoleTargetLimit = 64;
-inline constexpr std::uint32_t kNativeConsolePayloadLimit = 65536;
-inline constexpr int kNativeConsoleExecutionMillis = 200;
-inline constexpr int kNativeConsoleReplyMillis = 2000;
+// A command runs until it returns or the owner sends Stop; there is no
+// execution budget. These bound only the hand-offs around it: the renderer
+// must start a command this soon after the browser posts it, a header's
+// payload must follow it this soon, and a Stop must end the command this
+// soon, or the exchange is ambiguous and the session retires.
+inline constexpr int kNativeConsoleDispatchMillis = 500;
+inline constexpr int kNativeConsoleTransferMillis = 2000;
+inline constexpr int kNativeConsoleStopMillis = 5000;
 inline constexpr char kNativeConsoleSwitch[] = "reb-native-console";
 // Binds this protocol to the browser a live capture is already using.
 // Remote debugging may stay enabled. Losing the socket must not exit that browser.
@@ -30,15 +48,15 @@ inline constexpr char kNativeConsoleLiveBindingSwitch[] = "reb-native-console-li
 // scripts later, and its absence makes an arm request fail closed.
 inline constexpr char kNativeConsoleDocumentStartSwitch[] = "reb-native-console-document-start";
 
-inline constexpr std::uint32_t kNativeConsoleDocumentStartScriptLimit = 4;
-inline constexpr std::uint32_t kNativeConsoleDocumentStartSourceLimit = 4096;
-inline constexpr std::uint32_t kNativeConsoleDocumentStartTotalSourceLimit = 8192;
-
 enum class NativeConsoleOperation : std::uint16_t {
   kTargets = 1,
   kEvaluate = 2,
   kRuntime = 3,
   kDocumentStart = 4,
+  // Sent only while a request is in flight, naming that request. It has no
+  // reply of its own: the running request answers kStopped, or its own result
+  // when it finished first.
+  kStop = 5,
 };
 enum class NativeConsoleStatus : std::uint16_t {
   kOk,
@@ -48,6 +66,7 @@ enum class NativeConsoleStatus : std::uint16_t {
   kException,
   kTimeout,
   kDisconnected,
+  kStopped,
 };
 enum class NativeConsoleType : std::uint16_t {
   kUndefined,
@@ -114,7 +133,8 @@ struct NativeConsoleTarget final {
       request.request_id == 0 || request.reserved != 0) {
     return false;
   }
-  if (request.operation == NativeConsoleOperation::kTargets) {
+  if (request.operation == NativeConsoleOperation::kTargets ||
+      request.operation == NativeConsoleOperation::kStop) {
     return request.target_id == 0 && request.source_bytes == 0;
   }
   // Document-start scripts belong to the session, not to one selected document,
@@ -135,7 +155,7 @@ struct NativeConsoleTarget final {
                                                   std::uint64_t request_id) noexcept {
   if (response.magic != kNativeConsoleMagic || response.version != kNativeConsoleVersion ||
       response.request_id != request_id || response.reserved != 0 ||
-      response.status > NativeConsoleStatus::kDisconnected ||
+      response.status > NativeConsoleStatus::kStopped ||
       response.type > NativeConsoleType::kDocumentStart ||
       (response.flags & ~kNativeConsoleResponseFlags) != 0) {
     return false;
@@ -150,9 +170,10 @@ struct NativeConsoleTarget final {
            response.payload_bytes == response.item_count * sizeof(NativeConsoleTarget);
   }
   return response.item_count == 0 &&
-         response.payload_bytes <= (response.type == NativeConsoleType::kRuntime ||
-                                            response.type == NativeConsoleType::kDocumentStart
-                                        ? kNativeConsolePayloadLimit
+         response.payload_bytes <= (response.type == NativeConsoleType::kDocumentStart
+                                        ? kNativeConsoleDocumentStartReplyLimit
+                                    : response.type == NativeConsoleType::kRuntime
+                                        ? kNativeConsoleReplyLimit
                                         : kNativeConsoleTextLimit);
 }
 

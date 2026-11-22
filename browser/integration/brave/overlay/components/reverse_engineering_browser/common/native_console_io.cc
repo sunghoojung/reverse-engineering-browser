@@ -36,12 +36,16 @@ bool Ready(int socket, short events, NativeConsoleDeadline deadline) noexcept {
   }
 }
 
-}  // namespace
-
-bool NativeConsoleRead(int socket,
-                       std::span<std::byte> bytes,
-                       NativeConsoleDeadline deadline) noexcept {
+// `deadline` is fixed when `stall` is zero, and otherwise moves to `stall`
+// after every transfer that makes progress.
+bool Read(int socket,
+          std::span<std::byte> bytes,
+          NativeConsoleDeadline deadline,
+          std::chrono::milliseconds stall) noexcept {
   while (!bytes.empty()) {
+    if (stall.count() > 0) {
+      deadline = std::chrono::steady_clock::now() + stall;
+    }
     if (!Ready(socket, POLLIN, deadline)) {
       return false;
     }
@@ -55,10 +59,14 @@ bool NativeConsoleRead(int socket,
   return true;
 }
 
-bool NativeConsoleWrite(int socket,
-                        std::span<const std::byte> bytes,
-                        NativeConsoleDeadline deadline) noexcept {
+bool Write(int socket,
+           std::span<const std::byte> bytes,
+           NativeConsoleDeadline deadline,
+           std::chrono::milliseconds stall) noexcept {
   while (!bytes.empty()) {
+    if (stall.count() > 0) {
+      deadline = std::chrono::steady_clock::now() + stall;
+    }
     if (!Ready(socket, POLLOUT, deadline)) {
       return false;
     }
@@ -74,6 +82,32 @@ bool NativeConsoleWrite(int socket,
     }
   }
   return true;
+}
+
+}  // namespace
+
+bool NativeConsoleRead(int socket,
+                       std::span<std::byte> bytes,
+                       NativeConsoleDeadline deadline) noexcept {
+  return Read(socket, bytes, deadline, std::chrono::milliseconds::zero());
+}
+
+bool NativeConsoleWrite(int socket,
+                        std::span<const std::byte> bytes,
+                        NativeConsoleDeadline deadline) noexcept {
+  return Write(socket, bytes, deadline, std::chrono::milliseconds::zero());
+}
+
+bool NativeConsoleRead(int socket,
+                       std::span<std::byte> bytes,
+                       std::chrono::milliseconds stall) noexcept {
+  return Read(socket, bytes, {}, stall);
+}
+
+bool NativeConsoleWrite(int socket,
+                        std::span<const std::byte> bytes,
+                        std::chrono::milliseconds stall) noexcept {
+  return Write(socket, bytes, {}, stall);
 }
 
 }  // namespace reb

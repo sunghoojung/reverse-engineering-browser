@@ -3308,6 +3308,7 @@ pub(crate) mod tests {
             &manifest,
             &source_artifact(&artifacts, "900", "https://app.test/bundle0.js?v=2", &b),
         );
+        caught_up(&index);
         // A page whose only site is kept, then one with a kept and a new site.
         for mut page in [
             vec![listener_record(2, 7, start)],
@@ -3453,6 +3454,7 @@ pub(crate) mod tests {
                 &two.b,
             ),
         );
+        caught_up(&index);
         assert_eq!(
             named(&two.site(&sites, &index)),
             (

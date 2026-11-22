@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 
 from live_acceptance import (baseline, bodies, cookies, debugger, headers, limits, metadata, nostacks, reserve,
-                             stacks, tabs, volume)
+                             stacks, tabs, volume, wasm)
 from live_acceptance.evidence import Session, StartError, start_session
 from live_acceptance.fixture import Fixture
 from live_acceptance.pages import document
@@ -28,9 +28,11 @@ from live_acceptance.run import Options, Run, brotli_encoder
 # The step 7 start command of docs/development/paired-release.md. Agent sessions
 # otherwise share one research profile, so each kind takes a fresh one: no
 # cookie, cache or service worker carries from one fixture session to the next,
-# and the volume check finds its browser by the session's own profile.
-CONTENT_FLAGS = ["--localhost-only", "--request-content", "--confirm-sensitive-capture", "--canvas-images",
-                 "--request-stacks", "--document-start", "--wasm-dispatch", "--wasm-call-indirect", "--fresh-profile"]
+# no run waits on a Brave that holds the shared profile, and the volume check
+# finds its browser by the session's own profile.
+CONTENT_FLAGS = ["--localhost-only", "--fresh-profile", "--request-content", "--confirm-sensitive-capture",
+                 "--canvas-images", "--request-stacks", "--promise-stacks", "--document-start", "--wasm-dispatch",
+                 "--wasm-call-indirect"]
 METADATA_DROPS = {"--request-content", "--confirm-sensitive-capture", "--canvas-images"}
 SETTLE_SECONDS = 3
 # A session always turns the probes on, so the inactive path is measured outside one.
@@ -44,7 +46,6 @@ INACTIVE_STEPS = ("launch the same Brave without a session (every probe disabled
 @dataclass(frozen=True)
 class Kind:
     flags: list[str]
-    environment: dict[str, str]
     areas: list[ModuleType]
     duration: int
     # More environment, from the directory that will hold the session.
@@ -52,15 +53,13 @@ class Kind:
 
 
 KINDS = {
-    "content": Kind(CONTENT_FLAGS, {"REB_NATIVE_PROMISE_STACKS": "1"},
-                    [baseline, stacks, headers, cookies, bodies, limits, debugger, tabs], 3600),
-    "volume": Kind(CONTENT_FLAGS, {"REB_NATIVE_PROMISE_STACKS": "1"}, [volume], 1800),
-    "reserve": Kind(CONTENT_FLAGS, {"REB_NATIVE_PROMISE_STACKS": "1"}, [reserve], 900, reserve.environment),
-    "metadata": Kind([flag for flag in CONTENT_FLAGS if flag not in METADATA_DROPS],
-                     {"REB_NATIVE_PROMISE_STACKS": "1"}, [metadata], 900),
-    # Request stacks are on unless a start turns them off.
-    "no-stacks": Kind([flag for flag in CONTENT_FLAGS if flag != "--request-stacks"] + ["--request-stacks=false"],
-                      {"REB_NATIVE_PROMISE_STACKS": "0"}, [nostacks], 900),
+    "content": Kind(CONTENT_FLAGS, [baseline, stacks, headers, cookies, bodies, limits, debugger, tabs, wasm], 3600),
+    "volume": Kind(CONTENT_FLAGS, [volume], 1800),
+    "reserve": Kind(CONTENT_FLAGS, [reserve], 900, reserve.environment),
+    "metadata": Kind([flag for flag in CONTENT_FLAGS if flag not in METADATA_DROPS], [metadata], 900),
+    # Request stacks are on unless a start turns them off, and Promise stacks ride on them.
+    "no-stacks": Kind([*(flag for flag in CONTENT_FLAGS if flag not in ("--request-stacks", "--promise-stacks")),
+                       "--request-stacks=false"], [nostacks], 900),
 }
 AREAS = {area.NAME: area for kind in KINDS.values() for area in kind.areas}
 
@@ -137,7 +136,7 @@ def run_kind(name: str, args: argparse.Namespace, options: Options) -> Report:
         Path(root).mkdir(parents=True, exist_ok=True)
         arguments = ["--url", fixture.origin + "/", *kind.flags, "--brave-binary", str(args.brave),
                      "--sessions-root", str(Path(root).absolute()), "--duration-seconds", str(kind.duration)]
-        environment = {**kind.environment, **(kind.prepare(Path(root)) if kind.prepare else {})}
+        environment = kind.prepare(Path(root)) if kind.prepare else {}
         try:
             session = start_session(args.reb_api, arguments, environment)
         except (StartError, subprocess.TimeoutExpired, ValueError, KeyError) as error:

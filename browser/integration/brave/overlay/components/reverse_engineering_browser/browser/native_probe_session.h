@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -17,6 +18,7 @@
 #include "base/memory/raw_ptr.h"
 #include "base/no_destructor.h"
 #include "base/scoped_multi_source_observation.h"
+#include "brave/components/reverse_engineering_browser/common/native_js_invocation.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_transport.mojom.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_sample_budget.h"
@@ -65,21 +67,37 @@ class NativeProbeSession final : public content::RenderProcessHostObserver {
   [[nodiscard]] const std::vector<std::uint8_t>& js_dispatch_sites() const noexcept {
     return js_dispatch_sites_;
   }
-  // Fixed 44-byte function-entry site records; empty unless a valid
-  // --reb-js-invocation-sites file was supplied.
-  [[nodiscard]] const std::vector<std::uint8_t>& js_invocation_sites() const noexcept {
+  // Fixed 44-byte function-entry site records, one per slot; null unless a
+  // valid --reb-js-invocation-sites file was supplied, and empty when that
+  // file arms no function yet.
+  [[nodiscard]] const std::optional<std::vector<std::uint8_t>>& js_invocation_sites()
+      const noexcept {
     return js_invocation_sites_;
   }
   // --reb-js-invocation-digests: the session's sensitive opt-in for
   // settled-value digests. Only meaningful with invocation sites.
   [[nodiscard]] bool js_invocation_digests() const noexcept { return js_invocation_digests_; }
-  // Empty lists and zero caps are the historical 16-record stream budgets.
+  // A revision of the session's --reb-js-invocation-sites file, sent to every
+  // renderer. Every slot keeps its site for the browser lifetime; a revision
+  // that renumbers one, or that cannot be read, changes nothing and is the
+  // `native_js_invocation_sites_revision_refused` gap.
+  void UpdateJsInvocationSites(const std::string& json) noexcept;
+  // samples_per_function is kNativeWasmDefaultSamplesPerFunction unless the
+  // session sets it. Empty lists do not filter.
   [[nodiscard]] const NativeWasmSampleBudgetPolicy& wasm_sample_budget() const noexcept {
     return wasm_sample_budget_;
   }
-  // Restarts both sample indexes in this browser session. The profile, the
-  // session id, and the capture configuration stay.
+  // Starts a new sample window in every renderer now, as each one does every
+  // kNativeWasmSampleWindowNs. The profile, the session id, the capture
+  // configuration and sample indexes stay.
   void ResetWasmSampleBudgets() noexcept;
+  // The Console's kept debugger watch scope, sent to every renderer now and to
+  // each one configured later; null clears it. The Console session owns it, so
+  // a capture session ending leaves it for the next configuration.
+  void SetDebuggerWatchScope(mojom::NativeWatchScopePtr scope);
+  [[nodiscard]] const mojom::NativeWatchScopePtr& debugger_watch_scope() const noexcept {
+    return debugger_watch_scope_;
+  }
   [[nodiscard]] bool IsActive() const noexcept;
   [[nodiscard]] std::uint64_t session_id() const noexcept;
   [[nodiscard]] std::uint64_t category_mask() const noexcept;
@@ -121,14 +139,21 @@ class NativeProbeSession final : public content::RenderProcessHostObserver {
   void RenderProcessHostDestroyed(content::RenderProcessHost* process) override;
 
   static void EmitBrowserEvent(const NativeProbeEvent& event) noexcept;
+  // Whether sites keeps the site of every slot this browser has sent.
+  [[nodiscard]] bool KeepsJsInvocationSlots(
+      const std::vector<NativeJsInvocationSite>& sites) const noexcept;
+  void AdoptJsInvocationSlots(const std::vector<NativeJsInvocationSite>& sites) noexcept;
 
   std::string guest_adapter_json_, guest_startup_adapter_json_;
   std::string js_dispatch_startup_sites_json_;
   std::vector<std::uint8_t> js_dispatch_sites_;
-  std::string js_invocation_startup_sites_json_;
-  std::vector<std::uint8_t> js_invocation_sites_;
+  // Every slot's site that this browser has sent a renderer. Renderers keep
+  // their slots across sessions, so no later file may renumber one.
+  std::vector<NativeJsInvocationSite> js_invocation_slots_;
+  std::optional<std::vector<std::uint8_t>> js_invocation_sites_;
   bool js_invocation_digests_ = false;
   NativeWasmSampleBudgetPolicy wasm_sample_budget_{};
+  mojom::NativeWatchScopePtr debugger_watch_scope_;
   std::vector<raw_ptr<NativeProbeHost>> hosts_;
   std::atomic<NativeProbeEmitter> downstream_{nullptr};
   std::atomic<std::uint64_t> session_id_{0};

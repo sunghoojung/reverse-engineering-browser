@@ -28,9 +28,11 @@ command and waits on a filtered `wait_for_events` cursor, whose records carry
 line and column, and the `get_request_stack` arguments for its stack
 ([recipe 25](../development/agent-cookbook.md#25-break-on-a-request-a-click-handler-or-a-csp-violation-without-pausing)).
 Nothing pauses, no value is read, and records carry identities, kinds and
-positions only. Rules see only the armed document's main thread, its
-navigation clears them, and they cannot be armed ahead of a page load; every
-place that arms a rule or waits on one says so.
+positions only. Rules see only the main thread of the documents they are
+armed on. Navigation clears them unless the watch sets `keep`, which arms
+every later document of the same origin and frame kind before its own scripts
+run, though not documents already open; every place that arms a rule or waits
+on one says so.
 
 | DevTools feature | Phase 1 equivalent |
 | --- | --- |

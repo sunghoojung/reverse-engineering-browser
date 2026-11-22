@@ -1,0 +1,841 @@
+diff --git a/src/codegen/compiler.cc b/src/codegen/compiler.cc
+index 712545f..ecb3e99 100644
+--- a/src/codegen/compiler.cc
++++ b/src/codegen/compiler.cc
+@@ -44,6 +44,7 @@
+ #include "src/heap/parked-scope-inl.h"
+ #include "src/heap/visit-object.h"
+ #include "src/interpreter/interpreter.h"
++#include "src/interpreter/reb-js-dispatch.h"
+ #include "src/logging/counters-scopes.h"
+ #include "src/logging/log-inl.h"
+ #include "src/logging/runtime-call-stats-scope.h"
+@@ -3093,7 +3094,10 @@ bool Compiler::Compile(Isolate* isolate, Handle<SharedFunctionInfo> shared_info,
+   // Set up parse info.
+   UnoptimizedCompileFlags flags =
+       UnoptimizedCompileFlags::ForFunctionCompile(isolate, *shared_info);
+-  if (create_source_positions_flag) {
++  // REB capture: armed bytecode carries its source positions, so collecting
++  // them never reruns the generator on it.
++  if (create_source_positions_flag ||
++      interpreter::RebArmedScript(isolate, *script)) {
+     flags.set_collect_source_positions(true);
+   }
+ 
+@@ -3447,8 +3451,14 @@ MaybeDirectHandle<JSFunction> Compiler::GetFunctionFromEval(
+                               : v8::CompiledScriptKind::kEval);
+   };
+   CompilationCache* compilation_cache = isolate->compilation_cache();
+-  InfoCellPair eval_result = compilation_cache->LookupEval(
+-      source, outer_info, context, language_mode, eval_cache_position);
++  // REB capture: an armed source never reuses or enters the eval cache, so
++  // each evaluation runs the generator with the current arming.
++  const bool reb_armed = interpreter::RebArmsSource(isolate, source);
++  InfoCellPair eval_result =
++      reb_armed ? InfoCellPair()
++                : compilation_cache->LookupEval(source, outer_info, context,
++                                                language_mode,
++                                                eval_cache_position);
+   if (eval_result.has_js_function()) {
+     DirectHandle<JSFunction> result =
+         direct_handle(eval_result.js_function(), isolate);
+@@ -3485,6 +3495,7 @@ MaybeDirectHandle<JSFunction> Compiler::GetFunctionFromEval(
+         isolate, true, language_mode, REPLMode::kNo, ScriptType::kClassic,
+         v8_flags.lazy_eval);
+     flags.set_is_eval(true);
++    if (reb_armed) flags.set_collect_source_positions(true);
+     flags.set_parsing_while_debugging(parsing_while_debugging);
+     flags.set_private_name_lookup_skips_outer_class(
+         private_name_lookup_skips_outer_class);
+@@ -3541,7 +3552,7 @@ MaybeDirectHandle<JSFunction> Compiler::GetFunctionFromEval(
+              .ToHandle(&shared_info)) {
+       return MaybeDirectHandle<JSFunction>();
+     }
+-    allow_eval_cache = parse_info.allow_eval_cache();
++    allow_eval_cache = parse_info.allow_eval_cache() && !reb_armed;
+   }
+   observe(shared_info);
+ 
+@@ -4148,6 +4159,10 @@ MaybeDirectHandle<SharedFunctionInfo> GetSharedFunctionInfoForScriptImpl(
+   // nor put the compilation result back into the cache.
+   const bool use_compilation_cache =
+       extension == nullptr && script_details.repl_mode == REPLMode::kNo;
++  // REB capture: a source an armed site names skips the in-memory cache, so
++  // a reload runs the generator with the current arming, and the code cache
++  // rejects it (CodeSerializer). Every other source is cached as usual.
++  const bool reb_armed = interpreter::RebArmsSource(isolate, source);
+   MaybeDirectHandle<SharedFunctionInfo> maybe_result;
+   MaybeHandle<Script> maybe_script;
+   IsCompiledScope is_compiled_scope;
+@@ -4160,7 +4175,9 @@ MaybeDirectHandle<SharedFunctionInfo> GetSharedFunctionInfoForScriptImpl(
+ 
+     // First check per-isolate compilation cache.
+     CompilationCacheScript::LookupResult lookup_result =
+-        compilation_cache->LookupScript(source, script_details, language_mode);
++        reb_armed ? CompilationCacheScript::LookupResult()
++                  : compilation_cache->LookupScript(source, script_details,
++                                                    language_mode);
+     compilation_details->in_memory_cache_result =
+         CategorizeLookupResult(lookup_result);
+     maybe_script = lookup_result.script();
+@@ -4254,6 +4271,7 @@ MaybeDirectHandle<SharedFunctionInfo> GetSharedFunctionInfoForScriptImpl(
+           v8_flags.compile_hints_magic ||
+           (compile_options &
+            ScriptCompiler::kFollowCompileHintsPerFunctionMagicComment));
++      if (reb_armed) flags.set_collect_source_positions(true);
+ 
+       if (DirectHandle<Script> script; maybe_script.ToHandle(&script)) {
+         flags.set_script_id(script->id());
+@@ -4267,7 +4285,7 @@ MaybeDirectHandle<SharedFunctionInfo> GetSharedFunctionInfoForScriptImpl(
+ 
+     // Add the result to the isolate cache.
+     DirectHandle<SharedFunctionInfo> result;
+-    if (use_compilation_cache && maybe_result.ToHandle(&result)) {
++    if (use_compilation_cache && !reb_armed && maybe_result.ToHandle(&result)) {
+       DCHECK(is_compiled_scope.is_compiled());
+       compilation_cache->PutScript(source, language_mode, result);
+     } else if (maybe_result.is_null() && natives != EXTENSION_CODE) {
+@@ -4375,9 +4393,14 @@ MaybeDirectHandle<JSFunction> Compiler::GetWrappedFunction(
+   bool can_consume_code_cache =
+       compile_options & ScriptCompiler::kConsumeCodeCache;
+   CompilationCache* compilation_cache = isolate->compilation_cache();
++  // REB capture: as for scripts, an armed source skips the in-memory cache.
++  // Wrapped functions already record source positions eagerly.
++  const bool reb_armed = interpreter::RebArmsSource(isolate, source);
+   // First check per-isolate compilation cache.
+   CompilationCacheScript::LookupResult lookup_result =
+-      compilation_cache->LookupScript(source, script_details, language_mode);
++      reb_armed ? CompilationCacheScript::LookupResult()
++                : compilation_cache->LookupScript(source, script_details,
++                                                  language_mode);
+   maybe_result = lookup_result.toplevel_sfi();
+   if (maybe_result.ToHandle(&result)) {
+     is_compiled_scope = result->is_compiled_scope(isolate);
+@@ -4459,7 +4482,7 @@ MaybeDirectHandle<JSFunction> Compiler::GetWrappedFunction(
+     is_compiled_scope = result->is_compiled_scope(isolate);
+     script = Handle<Script>(Cast<Script>(result->script()), isolate);
+     // Add the result to the isolate cache if there's no context extension.
+-    if (maybe_outer_scope_info.is_null()) {
++    if (maybe_outer_scope_info.is_null() && !reb_armed) {
+       compilation_cache->PutScript(source, language_mode, result);
+     }
+   }
+@@ -4489,6 +4512,34 @@ Compiler::GetSharedFunctionInfoForStreamedScript(
+ 
+   BackgroundCompileTask* task = streaming_data->task.get();
+ 
++  if (interpreter::RebArmsSource(isolate, source)) {
++    // REB capture: the background thread never arms a site, so a source an
++    // armed site names discards the streamed result and compiles here, like
++    // an uncached script.
++    UnoptimizedCompileFlags flags = UnoptimizedCompileFlags::ForToplevelCompile(
++        isolate, true, task->flags().outer_language_mode(), REPLMode::kNo,
++        task->flags().is_module() ? ScriptType::kModule : ScriptType::kClassic,
++        task->flags().allow_lazy_parsing());
++    flags.set_compile_hints_magic_enabled(
++        task->flags().compile_hints_magic_enabled());
++    flags.set_compile_hints_per_function_magic_enabled(
++        task->flags().compile_hints_per_function_magic_enabled());
++    flags.set_collect_source_positions(true);
++    const bool produce_compile_hints = task->flags().produce_compile_hints();
++    streaming_data->Release();
++    MaybeDirectHandle<SharedFunctionInfo> maybe_result =
++        CompileScriptOnMainThread(flags, source, script_details,
++                                  NOT_NATIVES_CODE, nullptr, isolate,
++                                  MaybeHandle<Script>(), is_compiled_scope);
++    DirectHandle<SharedFunctionInfo> result;
++    if (!maybe_result.ToHandle(&result)) {
++      isolate->ReportPendingMessages();
++    } else if (produce_compile_hints) {
++      Cast<Script>(result->script())->set_produce_compile_hints(true);
++    }
++    return maybe_result;
++  }
++
+   MaybeDirectHandle<SharedFunctionInfo> maybe_result;
+   MaybeDirectHandle<Script> maybe_cached_script;
+   // Check if compile cache already holds the SFI, if so no need to finalize
+diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
+index 2ab8a58..63d2f5d 100644
+--- a/src/flags/flag-definitions.h
++++ b/src/flags/flag-definitions.h
+@@ -3215,22 +3215,22 @@ DEFINE_NEG_IMPLICATION(generate_dump_positions, load_dump_positions)
+ DEFINE_BOOL(compilation_cache, true, "enable compilation cache")
+ 
+ // REB native JavaScript dispatch capture, a research mode that is off by
+-// default. Every JavaScript compile must run the bytecode generator on the
+-// main thread, where armed dispatch sites are emitted, so this disables the
+-// caches, streaming and off-thread compiles that install bytecode without it.
+-// Lazy source positions rerun the generator on existing bytecode, so they are
+-// recorded eagerly instead.
++// default. An armed site is emitted only by the bytecode generator on the main
++// thread, so a script whose source an armed site names is compiled there: it
++// neither consumes nor produces a code cache, skips the in-memory compilation
++// cache, discards a streamed compile and records source positions eagerly,
++// since lazy positions rerun the generator on existing bytecode. Every other
++// script compiles as usual. The experimental off-thread compile tasks stay
++// off, and so do the stress modes that would move or rerun compiles.
+ DEFINE_BOOL(reb_js_dispatch_capture, false,
+             "emit native REB observations at armed JavaScript dispatch sites "
+-            "(disables code caching, streaming and lazy source positions)")
+-DEFINE_NEG_IMPLICATION(reb_js_dispatch_capture, compilation_cache)
+-DEFINE_NEG_IMPLICATION(reb_js_dispatch_capture, script_streaming)
++            "(scripts with an armed site compile on the main thread without "
++            "caches and with eager source positions)")
+ DEFINE_NEG_IMPLICATION(reb_js_dispatch_capture, stress_background_compile)
+ DEFINE_NEG_IMPLICATION(reb_js_dispatch_capture, lazy_compile_dispatcher)
+ DEFINE_NEG_IMPLICATION(reb_js_dispatch_capture,
+                        parallel_compile_tasks_for_eager_toplevel)
+ DEFINE_NEG_IMPLICATION(reb_js_dispatch_capture, parallel_compile_tasks_for_lazy)
+-DEFINE_NEG_IMPLICATION(reb_js_dispatch_capture, enable_lazy_source_positions)
+ DEFINE_NEG_IMPLICATION(reb_js_dispatch_capture, stress_lazy_source_positions)
+ 
+ // REB native JavaScript invocation identity, a research mode that is off by
+diff --git a/src/interpreter/bytecode-generator.cc b/src/interpreter/bytecode-generator.cc
+index 5783f5f..b6cc2ed 100644
+--- a/src/interpreter/bytecode-generator.cc
++++ b/src/interpreter/bytecode-generator.cc
+@@ -1791,7 +1791,23 @@ void BytecodeGenerator::FindRebArmedSites(uintptr_t stack_limit) {
+     reb_armed_ = {};
+     return;
+   }
+-  if (!finder.found()) reb_armed_ = {};
++  if (!finder.found()) {
++    reb_armed_ = {};
++    return;
++  }
++  if (!RebRecordsSourcePositions()) {
++    // Lazy positions would rerun the generator unarmed on this bytecode, so
++    // it stays unarmed and the embedder hears that it was compiled before
++    // arming. Every armed source compiles with eager positions; this guards
++    // a compile path that does not ask.
++    isolate->reb_js_dispatch().ReportUnarmed(*script_, reb_armed_);
++    reb_armed_ = {};
++  }
++}
++
++bool BytecodeGenerator::RebRecordsSourcePositions() const {
++  return info()->SourcePositionRecordingMode() ==
++         SourcePositionTableBuilder::RECORD_SOURCE_POSITIONS;
+ }
+ 
+ void BytecodeGenerator::FindRebInvocationEntry() {
+@@ -1805,6 +1821,11 @@ void BytecodeGenerator::FindRebInvocationEntry() {
+   uint32_t slot = 0;
+   reb_invocation_armed_ = isolate->reb_js_invocation().ArmedSlot(
+       isolate, *script_, literal->start_position(), literal->kind(), &slot);
++  if (reb_invocation_armed_ && !RebRecordsSourcePositions()) {
++    // As for dispatch sites: never armed bytecode with lazy positions.
++    isolate->reb_js_invocation().ReportUnarmed(slot, script_->id());
++    reb_invocation_armed_ = false;
++  }
+ }
+ 
+ void BytecodeGenerator::BuildRebInvocationEnter() {
+diff --git a/src/interpreter/bytecode-generator.h b/src/interpreter/bytecode-generator.h
+index 964b886..17670af 100644
+--- a/src/interpreter/bytecode-generator.h
++++ b/src/interpreter/bytecode-generator.h
+@@ -419,6 +419,9 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
+   void AllocateTopLevelRegisters();
+   void FindRebArmedSites(uintptr_t stack_limit);
+   void FindRebInvocationEntry();
++  // Armed bytecode needs eager source positions: collecting them later reruns
++  // the generator, unarmed, for this bytecode.
++  bool RebRecordsSourcePositions() const;
+   void BuildRebInvocationEnter();
+   void BuildRebInvocationExit(RebJsInvocationExitKind kind);
+   void BuildRebIndexedCallee(Property* property, Property* keyed, Register key,
+diff --git a/src/interpreter/reb-js-dispatch.cc b/src/interpreter/reb-js-dispatch.cc
+index ad1c0d7..c82206d 100644
+--- a/src/interpreter/reb-js-dispatch.cc
++++ b/src/interpreter/reb-js-dispatch.cc
+@@ -12,6 +12,7 @@
+ #include "src/execution/isolate-inl.h"
+ #include "src/flags/flags.h"
+ #include "src/handles/handles-inl.h"
++#include "src/interpreter/reb-js-invocation.h"
+ #include "src/objects/fixed-array-inl.h"
+ #include "src/objects/js-function-inl.h"
+ #include "src/objects/objects-inl.h"
+@@ -103,6 +104,31 @@ bool RebJsDispatchAnchors::Contains(JsDispatchShape shape, int position) const {
+   return false;
+ }
+ 
++bool RebArmsSource(Isolate* isolate, DirectHandle<String> source) {
++  if (V8_LIKELY(!v8_flags.reb_js_dispatch_capture)) return false;
++  RebJsDispatch& dispatch = isolate->reb_js_dispatch();
++  RebJsInvocation& invocation = isolate->reb_js_invocation();
++  const uint32_t length = source->length();
++  const bool dispatch_length =
++      dispatch.Sync(isolate) && dispatch.NamesLength(length);
++  const bool invocation_length =
++      invocation.Sync(isolate) && invocation.NamesLength(length);
++  if (!dispatch_length && !invocation_length) return false;
++  // The digest needs flat text. Only a source of an armed length is
++  // flattened, as the parser would flatten it next.
++  DirectHandle<String> flat = String::Flatten(isolate, source);
++  uint8_t digest[kSizeOfSha256Digest];
++  if (!RebSourceDigest(*flat, digest)) return false;
++  return (dispatch_length && dispatch.NamesDigest(length, digest)) ||
++         (invocation_length && invocation.NamesDigest(length, digest));
++}
++
++bool RebArmedScript(Isolate* isolate, Tagged<Script> script) {
++  if (V8_LIKELY(!v8_flags.reb_js_dispatch_capture)) return false;
++  return isolate->reb_js_dispatch().HoldsArmed(isolate, script) ||
++         isolate->reb_js_invocation().HoldsArmed(isolate, script);
++}
++
+ std::unordered_set<int> RebLiveScriptIds(Isolate* isolate) {
+   DisallowGarbageCollection no_gc;
+   std::unordered_set<int> ids;
+@@ -180,6 +206,46 @@ bool RebJsDispatch::Sync(Isolate* isolate) {
+   return any_armed_;
+ }
+ 
++bool RebJsDispatch::NamesLength(uint32_t length) const {
++  for (size_t slot = 0; slot < site_count_; ++slot) {
++    if (sites_[slot].usable && sites_[slot].source_length == length) {
++      return true;
++    }
++  }
++  return false;
++}
++
++bool RebJsDispatch::NamesDigest(uint32_t length,
++                                const uint8_t digest[32]) const {
++  for (size_t slot = 0; slot < site_count_; ++slot) {
++    const Site& site = sites_[slot];
++    if (site.usable && site.source_length == length &&
++        std::memcmp(site.source_sha256, digest, kSizeOfSha256Digest) == 0) {
++      return true;
++    }
++  }
++  return false;
++}
++
++bool RebJsDispatch::HoldsArmed(Isolate* isolate, Tagged<Script> script) {
++  return (Sync(isolate) && BindingMask(script).Any()) ||
++         armed_functions_.AnyIn(script->id());
++}
++
++void RebJsDispatch::ReportUnarmed(Tagged<Script> script,
++                                  const RebJsDispatchAnchors& anchors) {
++  const RebSiteSet mask = BindingMask(script);
++  for (size_t slot = 0; slot < site_count_; ++slot) {
++    if (mask.Test(slot) &&
++        anchors.Contains(sites_[slot].shape,
++                         static_cast<int>(sites_[slot].anchor_offset))) {
++      callbacks_.status(epoch_, static_cast<uint32_t>(slot),
++                        JsDispatchSiteStatus::kCompiledBeforeArming,
++                        script->id());
++    }
++  }
++}
++
+ RebSiteSet RebJsDispatch::BindingMask(Tagged<Script> script) {
+   if (script->type() != Script::Type::kNormal || script->id() <= 0 ||
+       !IsString(script->source())) {
+@@ -191,13 +257,8 @@ RebSiteSet RebJsDispatch::BindingMask(Tagged<Script> script) {
+   }
+   Tagged<String> source = Cast<String>(script->source());
+   const uint32_t length = source->length();
+-  bool length_matches = false;
+-  for (size_t slot = 0; slot < site_count_; ++slot) {
+-    length_matches = length_matches || (sites_[slot].usable &&
+-                                        sites_[slot].source_length == length);
+-  }
+   // Most scripts are rejected here without hashing or a cache entry.
+-  if (!length_matches) return {};
++  if (!NamesLength(length)) return {};
+   uint8_t digest[kSizeOfSha256Digest];
+   if (!RebSourceDigest(source, digest)) return {};
+   RebSiteSet mask;
+diff --git a/src/interpreter/reb-js-dispatch.h b/src/interpreter/reb-js-dispatch.h
+index 36f6e49..3ddf5eb 100644
+--- a/src/interpreter/reb-js-dispatch.h
++++ b/src/interpreter/reb-js-dispatch.h
+@@ -15,6 +15,7 @@
+ 
+ #include "include/v8-callbacks.h"
+ #include "src/common/globals.h"
++#include "src/handles/handles.h"
+ #include "src/objects/tagged.h"
+ 
+ namespace v8::internal::interpreter {
+@@ -42,6 +43,16 @@ class RebSiteSet final {
+ // The IDs of the isolate's live scripts.
+ std::unordered_set<int> RebLiveScriptIds(Isolate* isolate);
+ 
++// Whether an armed dispatch or invocation site names |source|, the text of a
++// script about to be compiled. Only such a script takes the capture compile
++// path: no code cache or in-memory compilation cache, no streamed result and
++// eager source positions. Most sources are rejected by their length alone.
++bool RebArmsSource(Isolate* isolate, DirectHandle<String> source);
++
++// Whether a code cache of |script| could carry an armed site: an armed site
++// names its source, or some of its bytecode was generated with one.
++bool RebArmedScript(Isolate* isolate, Tagged<Script> script);
++
+ // Facts about armed bytecode by script ID and a per-script function key, kept
+ // across configurations. Entries of collected scripts are dropped whenever
+ // the table doubles, so it stays proportional to the live armed functions;
+@@ -53,6 +64,12 @@ class RebArmedFunctions final {
+     const auto entry = functions_.find(Key(script_id, function));
+     return entry == functions_.end() ? nullptr : &entry->second;
+   }
++  bool AnyIn(int script_id) const {
++    for (const auto& entry : functions_) {
++      if (static_cast<int>(entry.first >> 32) == script_id) return true;
++    }
++    return false;
++  }
+   void Record(Isolate* isolate, int script_id, int function, Value value) {
+     functions_.insert_or_assign(Key(script_id, function), std::move(value));
+     if (functions_.size() < prune_at_) return;
+@@ -112,6 +129,17 @@ class RebJsDispatch final {
+   void AnchorsIn(Isolate* isolate, Tagged<Script> script, int start, int end,
+                  RebJsDispatchAnchors* anchors);
+ 
++  // Whether an armed site's source has |length| code units, and whether one
++  // has that length and |digest|. Call after Sync.
++  bool NamesLength(uint32_t length) const;
++  bool NamesDigest(uint32_t length, const uint8_t digest[32]) const;
++  // Whether |script| is armed now or holds armed bytecode.
++  bool HoldsArmed(Isolate* isolate, Tagged<Script> script);
++  // Reports |anchors| of |script| as compiled before arming: bytecode for
++  // them is being generated without source positions, so it stays unarmed.
++  void ReportUnarmed(Tagged<Script> script,
++                     const RebJsDispatchAnchors& anchors);
++
+   // Records bytecode generated with armed anchors. These are facts about
+   // bytecode, so an epoch change keeps them.
+   void RecordArmedFunction(Isolate* isolate, int script_id,
+diff --git a/src/interpreter/reb-js-invocation.cc b/src/interpreter/reb-js-invocation.cc
+index 2a685f8..8631697 100644
+--- a/src/interpreter/reb-js-invocation.cc
++++ b/src/interpreter/reb-js-invocation.cc
+@@ -299,6 +299,37 @@ bool RebJsInvocation::Sync(Isolate* isolate) {
+ #endif
+ }
+ 
++bool RebJsInvocation::NamesLength(uint32_t length) const {
++  for (size_t slot = 0; slot < site_count_; ++slot) {
++    if (sites_[slot].usable && sites_[slot].source_length == length) {
++      return true;
++    }
++  }
++  return false;
++}
++
++bool RebJsInvocation::NamesDigest(uint32_t length,
++                                  const uint8_t digest[32]) const {
++  for (size_t slot = 0; slot < site_count_; ++slot) {
++    const Site& site = sites_[slot];
++    if (site.usable && site.source_length == length &&
++        std::memcmp(site.source_sha256, digest, kSizeOfSha256Digest) == 0) {
++      return true;
++    }
++  }
++  return false;
++}
++
++bool RebJsInvocation::HoldsArmed(Isolate* isolate, Tagged<Script> script) {
++  return (Sync(isolate) && BindingMask(script).Any()) ||
++         armed_functions_.AnyIn(script->id());
++}
++
++void RebJsInvocation::ReportUnarmed(uint32_t slot, int script_id) {
++  ReportStatus(slot, v8::JsInvocationSiteStatus::kCompiledBeforeArming,
++               script_id);
++}
++
+ RebSiteSet RebJsInvocation::BindingMask(Tagged<Script> script) {
+   if (script->type() != Script::Type::kNormal || script->id() <= 0 ||
+       !IsString(script->source())) {
+@@ -310,13 +341,8 @@ RebSiteSet RebJsInvocation::BindingMask(Tagged<Script> script) {
+   }
+   Tagged<String> source = Cast<String>(script->source());
+   const uint32_t length = source->length();
+-  bool length_matches = false;
+-  for (size_t slot = 0; slot < site_count_; ++slot) {
+-    length_matches = length_matches || (sites_[slot].usable &&
+-                                        sites_[slot].source_length == length);
+-  }
+   // Most scripts are rejected here without hashing or a cache entry.
+-  if (!length_matches) return {};
++  if (!NamesLength(length)) return {};
+   uint8_t digest[kSizeOfSha256Digest];
+   if (!RebSourceDigest(source, digest)) return {};
+   RebSiteSet mask;
+diff --git a/src/interpreter/reb-js-invocation.h b/src/interpreter/reb-js-invocation.h
+index 94659c3..dca369c 100644
+--- a/src/interpreter/reb-js-invocation.h
++++ b/src/interpreter/reb-js-invocation.h
+@@ -73,6 +73,15 @@ class RebJsInvocation final {
+   void RecordArmedFunction(Isolate* isolate, int script_id,
+                            int start_position);
+ 
++  // As RebJsDispatch: armed source lengths and digests, after Sync.
++  bool NamesLength(uint32_t length) const;
++  bool NamesDigest(uint32_t length, const uint8_t digest[32]) const;
++  // Whether |script| is armed now or holds armed bytecode.
++  bool HoldsArmed(Isolate* isolate, Tagged<Script> script);
++  // Reports |slot| as compiled before arming: its function's bytecode is
++  // being generated without source positions, so it stays unarmed.
++  void ReportUnarmed(uint32_t slot, int script_id);
++
+   // Runtime_RebJsInvocationEnter: returns the frame record, or undefined
+   // when the call was not admitted.
+   Tagged<Object> Enter(Isolate* isolate, DirectHandle<JSFunction> closure);
+diff --git a/src/snapshot/code-serializer.cc b/src/snapshot/code-serializer.cc
+index ef1027c..83b0d15 100644
+--- a/src/snapshot/code-serializer.cc
++++ b/src/snapshot/code-serializer.cc
+@@ -19,6 +19,7 @@
+ #include "src/handles/persistent-handles.h"
+ #include "src/heap/heap-inl.h"
+ #include "src/heap/parked-scope.h"
++#include "src/interpreter/reb-js-dispatch.h"
+ #include "src/logging/counters-scopes.h"
+ #include "src/logging/log.h"
+ #include "src/logging/runtime-call-stats-scope.h"
+@@ -61,13 +62,13 @@ ScriptCompiler::CachedData* CodeSerializer::Serialize(
+   RCS_SCOPE(isolate, RuntimeCallCounterId::kCompileSerialize);
+   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"), "V8.CompileSerialize");
+ 
+-  // REB JavaScript dispatch capture writes no code cache: cached bytecode
+-  // could carry armed sites into a later session.
+-  if (v8_flags.reb_js_dispatch_capture) return nullptr;
+-
+   base::ElapsedTimer timer;
+   if (v8_flags.profile_deserialization) timer.Start();
+   DirectHandle<Script> script(Cast<Script>(info->script()), isolate);
++  // REB JavaScript dispatch capture writes no code cache of a script an
++  // armed site names or whose bytecode was armed: cached bytecode could carry
++  // armed sites into a later session. Other scripts are cached as usual.
++  if (interpreter::RebArmedScript(isolate, *script)) return nullptr;
+   if (v8_flags.trace_serializer) {
+     PrintF("[Serializing from");
+     ShortPrint(script->name());
+@@ -505,6 +506,16 @@ MaybeDirectHandle<SharedFunctionInfo> CodeSerializer::Deserialize(
+     wrapped_arguments = script_details.wrapped_arguments.ToHandleChecked();
+   }
+ 
++  // REB JavaScript dispatch capture consumes no code cache for a source an
++  // armed site names, so it compiles through the bytecode generator, where
++  // armed sites are emitted. Rejected like a source mismatch.
++  if (interpreter::RebArmsSource(isolate, source)) {
++    cached_data->Reject();
++    isolate->counters()->code_cache_reject_reason()->AddSample(
++        static_cast<int>(SerializedCodeSanityCheckResult::kSourceMismatch));
++    return MaybeDirectHandle<SharedFunctionInfo>();
++  }
++
+   SerializedCodeSanityCheckResult sanity_check_result =
+       SerializedCodeSanityCheckResult::kSuccess;
+   const SerializedCodeData scd = SerializedCodeData::FromCachedData(
+@@ -636,6 +647,15 @@ CodeSerializer::FinishOffThreadDeserialize(
+ 
+   HandleScope scope(isolate);
+ 
++  // REB JavaScript dispatch capture: as in Deserialize. The source is first
++  // known here, so the off-thread result is dropped.
++  if (interpreter::RebArmsSource(isolate, source)) {
++    cached_data->Reject();
++    isolate->counters()->code_cache_reject_reason()->AddSample(
++        static_cast<int>(SerializedCodeSanityCheckResult::kSourceMismatch));
++    return MaybeDirectHandle<SharedFunctionInfo>();
++  }
++
+   // Do a source sanity check now that we have the source. It's important for
+   // FromPartiallySanityCheckedCachedData call that the sanity_check_result
+   // holds the result of the off-thread sanity check.
+@@ -820,11 +840,6 @@ SerializedCodeSanityCheckResult SerializedCodeData::SanityCheckJustSource(
+ 
+ SerializedCodeSanityCheckResult SerializedCodeData::SanityCheckWithoutSource(
+     uint32_t expected_ro_snapshot_checksum) const {
+-  // REB JavaScript dispatch capture consumes no code cache, so every compile
+-  // runs the bytecode generator, where armed sites are emitted.
+-  if (v8_flags.reb_js_dispatch_capture) {
+-    return SerializedCodeSanityCheckResult::kFlagsMismatch;
+-  }
+   if (size_ < kHeaderSize) {
+     return SerializedCodeSanityCheckResult::kInvalidHeader;
+   }
+diff --git a/test/cctest/test-api.cc b/test/cctest/test-api.cc
+index a133725..063977c 100644
+--- a/test/cctest/test-api.cc
++++ b/test/cctest/test-api.cc
+@@ -32761,17 +32761,15 @@ size_t RebAnchor(const std::string& source, const std::string& text,
+   return found + offset_in_text;
+ }
+ 
+-// Turns capture mode on with the implications V8 applies at startup, and
+-// installs the fake embedder. Configuration changes are pulled by V8 at the
+-// next compile or trace, as from a real embedder.
++// Turns capture mode on and installs the fake embedder. Its implications only
++// keep experimental and stress compile modes off, so caches, streaming and
++// lazy source positions stay as V8 configures them. Configuration changes
++// are pulled by V8 at the next compile or trace, as from a real embedder.
+ class RebJsDispatchScope final {
+  public:
+   explicit RebJsDispatchScope(v8::Isolate* isolate, bool capture = true)
+       : isolate_(isolate),
+-        capture_(&i::v8_flags.reb_js_dispatch_capture, capture),
+-        compilation_cache_(&i::v8_flags.compilation_cache, !capture),
+-        lazy_positions_(&i::v8_flags.enable_lazy_source_positions,
+-                        i::v8_flags.enable_lazy_source_positions && !capture) {
++        capture_(&i::v8_flags.reb_js_dispatch_capture, capture) {
+     reb_js_dispatch_embedder = &embedder_;
+     v8::JsDispatchCallbacks callbacks;
+     callbacks.epoch = &RebJsDispatchEpoch;
+@@ -32797,8 +32795,6 @@ class RebJsDispatchScope final {
+  private:
+   v8::Isolate* const isolate_;
+   i::FlagScope<bool> capture_;
+-  i::FlagScope<bool> compilation_cache_;
+-  i::FlagScope<bool> lazy_positions_;
+   RebJsDispatchEmbedder embedder_;
+ };
+ 
+@@ -33213,47 +33209,169 @@ TEST(RebNativeJsDispatchFlushRegenerationAndRearm) {
+   CHECK_EQ(4u, capture.embedder().observations.size());
+ }
+ 
+-TEST(RebNativeJsDispatchRefusesCodeCache) {
++namespace {
++
++const char kRebCacheOrigin[] = "reb-js-dispatch-cache.js";
++
++// A code cache of |source| written by a capture load.
++v8::ScriptCompiler::CachedData* RebCodeCache(const std::string& source) {
++  LocalContext context;
++  v8::ScriptOrigin origin(v8_str(kRebCacheOrigin));
++  v8::ScriptCompiler::Source script_source(v8_str(source.c_str()), origin);
++  v8::Local<v8::Script> script =
++      v8::ScriptCompiler::Compile(context.local(), &script_source,
++                                  v8::ScriptCompiler::kEagerCompile)
++          .ToLocalChecked();
++  return v8::ScriptCompiler::CreateCodeCache(script->GetUnboundScript());
++}
++
++// Compiles |source| consuming |cache|, which the source takes over.
++v8::Local<v8::Script> RebConsume(LocalContext& context,
++                                 const std::string& source,
++                                 v8::ScriptCompiler::CachedData* cache,
++                                 bool* rejected) {
++  v8::ScriptOrigin origin(v8_str(kRebCacheOrigin));
++  v8::ScriptCompiler::Source script_source(v8_str(source.c_str()), origin,
++                                           cache);
++  v8::Local<v8::Script> script =
++      v8::ScriptCompiler::Compile(context.local(), &script_source,
++                                  v8::ScriptCompiler::kConsumeCodeCache)
++          .ToLocalChecked();
++  *rejected = script_source.GetCachedData()->rejected;
++  return script;
++}
++
++// The script ID a compile of |source| gets: equal IDs mean the in-memory
++// compilation cache answered the second compile.
++int RebUnboundId(const std::string& source) {
++  v8::ScriptOrigin origin(v8_str(kRebCacheOrigin));
++  v8::ScriptCompiler::Source script_source(v8_str(source.c_str()), origin);
++  return v8::ScriptCompiler::CompileUnboundScript(CcTest::isolate(),
++                                                  &script_source)
++      .ToLocalChecked()
++      ->ScriptId();
++}
++
++}  // namespace
++
++// Only a script an armed site names takes the capture compile path. Every
++// other script consumes and produces code caches, hits the in-memory cache
++// and keeps lazy source positions, in the same capture.
++TEST(RebNativeJsDispatchCompilePathOnlyForArmedScripts) {
+   LocalContext env;
+   v8::Isolate* isolate = env.isolate();
++  i::Isolate* i_isolate = CcTest::i_isolate();
+   v8::HandleScope scope(isolate);
+-  const std::string source =
++  const std::string armed =
+       "function rebCached(code) { var r = 0; for (var i = 0; i < code.length; "
+       "i++) { switch (code[i]) { case 0: r++; break; default: r--; } } "
+       "return r; }"
+       "rebCached([0]);";
+-  v8::ScriptCompiler::CachedData* cache = nullptr;
++  const std::string plain =
++      "function rebPlain(code) { var r = 0; for (var i = 0; i < code.length; "
++      "i++) { switch (code[i]) { case 0: r++; break; default: r--; } } "
++      "return r; }"
++      "rebPlain([0]);";
++  RebJsDispatchScope capture(isolate);
++  // Written by an earlier load of this capture, before the site was armed.
++  v8::ScriptCompiler::CachedData* armed_cache = RebCodeCache(armed);
++  v8::ScriptCompiler::CachedData* plain_cache = RebCodeCache(plain);
++  CHECK_NOT_NULL(armed_cache);
++  CHECK_NOT_NULL(plain_cache);
++  capture.Arm(1, {RebJsSite(armed, RebAnchor(armed, "switch"),
++                            v8::JsDispatchShape::kSwitch)});
++  i_isolate->compilation_cache()->Clear();
+   {
+-    // Produced without capture mode, like a cache written by an earlier
+-    // ordinary session.
+     LocalContext context;
+-    v8::ScriptOrigin origin(v8_str("reb-js-dispatch-cache.js"));
+-    v8::ScriptCompiler::Source script_source(v8_str(source.c_str()), origin);
++    bool rejected = true;
+     v8::Local<v8::Script> script =
+-        v8::ScriptCompiler::Compile(context.local(), &script_source,
+-                                    v8::ScriptCompiler::kEagerCompile)
+-            .ToLocalChecked();
+-    cache = v8::ScriptCompiler::CreateCodeCache(script->GetUnboundScript());
+-    CHECK_NOT_NULL(cache);
++        RebConsume(context, plain, plain_cache, &rejected);
++    CHECK(!rejected);
++    script->Run(context.local()).ToLocalChecked();
++    CHECK_EQ(0, RebBytecodeOf("rebPlain").traces);
++    CHECK_EQ(RebUnboundId(plain), RebUnboundId(plain));
++    std::unique_ptr<v8::ScriptCompiler::CachedData> written(
++        v8::ScriptCompiler::CreateCodeCache(script->GetUnboundScript()));
++    CHECK_NOT_NULL(written);
+   }
++  {
++    LocalContext context;
++    bool rejected = false;
++    v8::Local<v8::Script> script =
++        RebConsume(context, armed, armed_cache, &rejected);
++    CHECK(rejected);
++    script->Run(context.local()).ToLocalChecked();
++    CHECK_EQ(1u, capture.embedder().observations.size());
++    CHECK_EQ(1, RebBytecodeOf("rebCached").traces);
++    // Each compile runs the generator, and nothing armed is written.
++    CHECK_NE(RebUnboundId(armed), RebUnboundId(armed));
++    CHECK_NULL(v8::ScriptCompiler::CreateCodeCache(script->GetUnboundScript()));
++  }
++  {
++    // Armed bytecode has its position table from the start, so collecting
++    // positions never reruns the generator on it.
++    LocalContext context;
++    CompileRun(armed.c_str());
++    i::DirectHandle<i::JSFunction> function = RebFunction("rebCached");
++    CHECK(function->shared()
++              ->GetBytecodeArray(i_isolate)
++              ->HasSourcePositionTable());
++    if (i::v8_flags.enable_lazy_source_positions) {
++      const std::string lazy =
++          "function rebLazyPositions(a) { return a + 1; } "
++          "rebLazyPositions(1);";
++      CompileRun(lazy.c_str());
++      CHECK(!RebFunction("rebLazyPositions")
++                 ->shared()
++                 ->GetBytecodeArray(i_isolate)
++                 ->HasSourcePositionTable());
++    }
++  }
++}
++
++// The background thread never arms a site, so a streamed armed script is
++// compiled again on the main thread; an unarmed one keeps its streamed
++// result.
++TEST(RebNativeJsDispatchStreamedArmedScriptCompilesOnMainThread) {
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
+   RebJsDispatchScope capture(isolate);
+-  capture.Arm(1, {RebJsSite(source, RebAnchor(source, "switch"),
++  const std::string armed =
++      "function rebStreamed(code) { var r = 0; for (var i = 0; "
++      "i < code.length; i++) { switch (code[i]) { case 0: r++; break; "
++      "default: r--; } } return r; }"
++      "rebStreamed([0, 0]);";
++  const std::string plain =
++      "function rebStreamedPlain(code) { var r = 0; for (var i = 0; "
++      "i < code.length; i++) { switch (code[i]) { case 0: r++; break; "
++      "default: r--; } } return r; }"
++      "rebStreamedPlain([0, 0]);";
++  capture.Arm(1, {RebJsSite(armed, RebAnchor(armed, "switch"),
+                             v8::JsDispatchShape::kSwitch)});
+-  LocalContext context;
+-  v8::ScriptOrigin origin(v8_str("reb-js-dispatch-cache.js"));
+-  // The source takes ownership of the cache.
+-  v8::ScriptCompiler::Source script_source(v8_str(source.c_str()), origin,
+-                                           cache);
+-  v8::Local<v8::Script> script =
+-      v8::ScriptCompiler::Compile(context.local(), &script_source,
+-                                  v8::ScriptCompiler::kConsumeCodeCache)
+-          .ToLocalChecked();
+-  CHECK(script_source.GetCachedData()->rejected);
+-  script->Run(context.local()).ToLocalChecked();
+-  CHECK_EQ(1u, capture.embedder().observations.size());
+-  CHECK_EQ(1, RebBytecodeOf("rebCached").traces);
+-  // Capture mode writes no cache, armed or not.
+-  CHECK_NULL(v8::ScriptCompiler::CreateCodeCache(script->GetUnboundScript()));
++  for (const std::string* source : {&armed, &plain}) {
++    const char* chunks[] = {source->c_str(), nullptr};
++    v8::ScriptCompiler::StreamedSource streamed(
++        std::make_unique<i::TestSourceStream>(chunks),
++        v8::ScriptCompiler::StreamedSource::ONE_BYTE);
++    std::unique_ptr<v8::ScriptCompiler::ScriptStreamingTask> task(
++        v8::ScriptCompiler::StartStreaming(isolate, &streamed));
++    // Capture mode no longer turns streaming off.
++    CHECK_NOT_NULL(task);
++    StreamerThread::StartThreadForTaskAndJoin(task.get());
++    v8::ScriptOrigin origin(v8_str("reb-js-dispatch-streamed.js"));
++    v8::Local<v8::Script> script =
++        v8::ScriptCompiler::Compile(env.local(), &streamed,
++                                    v8_str(source->c_str()), origin)
++            .ToLocalChecked();
++    CHECK_EQ(2, script->Run(env.local())
++                    .ToLocalChecked()
++                    ->Int32Value(env.local())
++                    .FromJust());
++  }
++  CHECK_EQ(2u, capture.embedder().observations.size());
++  CHECK_EQ(1, RebBytecodeOf("rebStreamed").traces);
++  CHECK_EQ(0, RebBytecodeOf("rebStreamedPlain").traces);
+ }
+ 
+ TEST(RebNativeJsDispatchSparkplugAndNoOptimization) {
+@@ -33589,8 +33707,6 @@ class RebJsInvocationScope final {
+       : isolate_(env.isolate()),
+         invocation_(&i::v8_flags.reb_js_invocation_capture, true),
+         dispatch_(&i::v8_flags.reb_js_dispatch_capture, true),
+-        compilation_cache_(&i::v8_flags.compilation_cache, false),
+-        lazy_positions_(&i::v8_flags.enable_lazy_source_positions, false),
+         microtasks_(isolate_->GetMicrotasksPolicy()) {
+     // cctest's default policy runs queued jobs before CompileRun returns, which
+     // would settle a promise returned by the call before the test can see it
+@@ -33636,8 +33752,6 @@ class RebJsInvocationScope final {
+   v8::Isolate* const isolate_;
+   i::FlagScope<bool> invocation_;
+   i::FlagScope<bool> dispatch_;
+-  i::FlagScope<bool> compilation_cache_;
+-  i::FlagScope<bool> lazy_positions_;
+   v8::MicrotasksPolicy microtasks_;
+   RebJsInvocationEmbedder embedder_;
+ };
+@@ -33735,6 +33849,22 @@ TEST(RebNativeJsInvocationDisabledAndUnarmedBytecodeIdentity) {
+   }
+ }
+ 
++// Function-entry sites take the same per-script compile path as dispatch
++// sites: only the armed script skips the in-memory cache.
++TEST(RebNativeJsInvocationCompilePathOnlyForArmedScripts) {
++  LocalContext env;
++  v8::HandleScope scope(env.isolate());
++  RebJsInvocationScope capture(env);
++  const std::string armed =
++      "function rebEntryCached(a) { return a + 1; } rebEntryCached(1);";
++  const std::string plain =
++      "function rebEntryPlain(a) { return a + 1; } rebEntryPlain(1);";
++  capture.Arm(1, {RebInvocationSite(armed,
++                                    RebAnchor(armed, "rebEntryCached(", 14))});
++  CHECK_NE(RebUnboundId(armed), RebUnboundId(armed));
++  CHECK_EQ(RebUnboundId(plain), RebUnboundId(plain));
++}
++
+ TEST(RebNativeJsInvocationArgumentsAndSynchronousSettlement) {
+   LocalContext env;
+   v8::Isolate* isolate = env.isolate();

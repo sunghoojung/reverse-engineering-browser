@@ -990,6 +990,8 @@
   // live capture document selected and confirmed here, through the same
   // queue, never retried (debugger_sidebar.js).
   globalThis.RebNativeConsole = Object.freeze({
+    // Opens the Console on its connection settings, or focuses them when open.
+    open() { if (root.hidden) setOpen(true); else focusPrompt(); },
     liveDocument() {
       if (!session || disconnected || documentSource !== 'live_capture' || !selectedDocument()) return null;
       return {session_id: session, target_id: controls.target.value, label: controls.target.selectedOptions[0]?.textContent ?? ''};

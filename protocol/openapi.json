@@ -32385,7 +32385,8 @@
           "observations",
           "observations_malformed",
           "observations_query",
-          "observation_budget_gaps"
+          "observation_budget_gaps",
+          "time_origins"
         ],
         "properties": {
           "contract_version": {
@@ -32610,7 +32611,7 @@
               },
               "observed": {
                 "type": "array",
-                "description": "The native frame of every valid observation record of the store, from the event index, newest first: the exact identity a thread scope filters by. records counts that frame's records.",
+                "description": "The native frame of every valid observation record of the store, from the event index, newest first: the exact identity a thread scope filters by. records counts that frame's records, and kinds counts them per record type.",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -32619,7 +32620,8 @@
                     "process_id",
                     "frame_id",
                     "last_sequence",
-                    "records"
+                    "records",
+                    "kinds"
                   ],
                   "properties": {
                     "session_id": {
@@ -32642,6 +32644,37 @@
                     "records": {
                       "type": "integer",
                       "minimum": 1
+                    },
+                    "kinds": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "description": "That frame's records per record type; a type the frame never recorded is absent, and the counts add up to records.",
+                      "properties": {
+                        "request_watch_match": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "listener_dispatch": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "timer_observation": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "csp_violation": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "exception_observation": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "dom_mutation": {
+                          "type": "integer",
+                          "minimum": 1
+                        }
+                      }
                     }
                   }
                 }
@@ -32933,6 +32966,28 @@
                   "pattern": "^(0|[1-9][0-9]{0,19})$"
                 },
                 "sequence_number": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                }
+              }
+            }
+          },
+          "time_origins": {
+            "type": "array",
+            "description": "The first record time of each session an observed frame belongs to, from the event index; the sidebar shows observation times from their session's start. A store can hold sessions from different boots, whose monotonic clocks never compare.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "session_id",
+                "monotonic_time_ns"
+              ],
+              "properties": {
+                "session_id": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "monotonic_time_ns": {
                   "type": "string",
                   "pattern": "^(0|[1-9][0-9]{0,19})$"
                 }

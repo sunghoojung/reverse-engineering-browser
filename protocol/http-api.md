@@ -1156,7 +1156,7 @@ offsets (end exclusive) of the summaries' scope, `scan_limit`, separate
 cut-through record prefix is omitted, not parsed as a new record.
 
 The summaries cover the whole store. The event index
-(`events.jsonl.events-v1`, layout `reb-event-index-v1/2`) folds every appended
+(`events.jsonl.events-v1`, layout `reb-event-index-v1/5`) folds every appended
 record into per-stream sequence bounds, the drop total, every named gap pair
 and the unreadable-line count, so a poll reads them without scanning the
 store. Once the index has caught up, `scope` is `"store"`, `scan_start` is

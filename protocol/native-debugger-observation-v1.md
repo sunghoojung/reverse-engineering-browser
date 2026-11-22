@@ -90,14 +90,20 @@ operation: `type` (one of the six below), a thread scope of `session_id`,
 `observations_query.next_before`) and `limit` (1 to 256). The scope matches the
 record envelope exactly. Console documents carry no native frame ID, so the
 scope names a `threads.observed` frame: the session, renderer and frame of
-every valid observation record of the store, newest first. The event index
-(`events.jsonl.events-v1`, layout 4) keeps them as it folds the store, beside
-`threads.workers` (every worker that started a request) and
-`observation_budget_gaps` (every `debugger_observation_budget` gap, above,
-from earlier builds only), so a frame observed early in a long session is
-still listed. `threads.coverage` says what they cover: scope `store` once the
-index has caught up, else its indexed prefix, which the backend's indexer
-extends every second.
+every valid observation record of the store, newest first. Each frame's
+`records` counts its records and `kinds` counts them per record type (a type
+the frame never recorded is absent), so a reader can name each kind's count
+without reading the records. The event index (`events.jsonl.events-v1`,
+layout 5) keeps them as it folds the store, beside `threads.workers` (every
+worker that started a request) and `observation_budget_gaps` (every
+`debugger_observation_budget` gap, above, from earlier builds only), so a
+frame observed early in a long session is still listed. `threads.coverage`
+says what they cover: scope `store` once the index has caught up, else its
+indexed prefix, which the backend's indexer extends every second.
+`time_origins` gives the first record time (`monotonic_time_ns`) of each
+session an observed frame belongs to, so a record's time reads from its
+session's start; a store can hold sessions from different boots, whose
+monotonic clocks never compare, so no origin spans sessions.
 
 A filtered or cursor `get_events` read and every `wait_for_events` put
 `debugger_observation` beside the hex payload of each record of types 40 to

@@ -238,9 +238,12 @@ so opening one closes the other; below a 1,112 px window it overlays the editor
 as Details does. It is phase 1 of [native debugger v1](../../docs/product/native-debugger-v1.md):
 native observation records that never pause the page, read from
 `get_native_debugger` ([native debugger observation v1](../../protocol/native-debugger-observation-v1.md)).
-The header says "Observes, never pauses" and the status line says what the
-sidebar reads and when it last read; only a change of that state is
-announced, not the time of each read or the interval. In a live window, while it is open and
+The header says "Observes, never pauses". One status line below it gives a
+dot and a word for the state (**Live**, **Stored evidence**, **Reading…**,
+**Disconnected:**, **Not answered:** or **Malformed answer:** with the reason,
+or that no backend serves the window) and the time of the last read; its
+tooltip says how often it reads. Only a change of state is announced, never
+the time of each read or the interval. In a live window, while it is open and
 Sources is showing, it reads every 2 seconds, or four times as long as the
 last read took, up to 30 seconds. The stored-evidence window (`reb://`)
 answers the same reads from its fixed store, so it reads once when opened and
@@ -251,25 +254,39 @@ nothing and says it cannot read. Closed or behind another workspace, the
 sidebar runs no timer and sends nothing. One read is in flight at a time: a
 newer read, closing, leaving Sources or a cleared or replaced store aborts it.
 A failed or malformed read keeps the last state, marks each section "last
-read" and dims it, and says why.
+read" and dims it, and the status line says why.
 
-Each section is a collapsible pane:
+The sections scroll as one pane. An open section's title stays at the top of
+the pane while its content scrolls under it, so a list is never seen without
+its title, and a list fades the edge that more rows lie past. Each section is
+a collapsible pane:
 
-- **Threads**, the Threads view: Console documents (top, child and
-  out-of-process frames, as the Console listing derives them), observed frames
-  (the session, renderer and frame of the observation records among the
-  newest 2,048 records that are observations or gaps of any kind, within the
-  newest 64 MiB of the store, with the origin of a retained document of that exact frame when there is one)
-  and workers that started requests (from the newest 2,048 request records).
-  Each row gives the origin a line of its own; the selected thread's kind,
-  origin, frame, process and state are listed in full below the list. Arrow
-  keys, Home, End and the Page keys move through the list, and Enter, Space, a
-  click or a double-click selects or clears a thread once. An observed frame scopes
-  Observations and the Sources tree to that exact session and frame, and the
-  tree says so. A Console document scopes only Watch rules, because it carries
-  no native frame ID; a worker scopes nothing, because rules match only a
-  document's main thread and compiled worker scripts carry frame 0.
-- **Watch rules**: what the renderer confirmed armed, rule by rule. When the
+- **Threads**, the Threads view, one line per thread in three groups: Console
+  documents (top, child and out-of-process frames, as the Console listing
+  derives them, tagged `top`, `child` or `OOPIF`), observed frames (the
+  session, renderer and frame of every valid observation record in the event
+  store, from the event index, with the origin of a retained document of that
+  exact frame when there is one) and workers that started requests. A row
+  gives the thread's origin or name, its identifiers (`F` frame, `P` renderer
+  process, `ctx` execution context, `doc` Console document) and its activity:
+  its record count, its request count, or **armed** or **Console**. Its
+  tooltip, and the fields below the list for the selected thread, give its
+  kind, origin, frame, process and state in full. One line below says the
+  Console's state and, while the event index catches up, how much of the store
+  it has indexed. Arrow keys, Home, End and the Page keys move through the
+  list, and Enter, Space, a click or a double-click selects or clears a
+  thread once. An observed frame scopes Observations and the Sources tree to
+  that exact session and frame, and both say so. A Console document scopes
+  only Watch rules, because it carries no native frame ID; a worker scopes
+  nothing, because rules match only a document's main thread and compiled
+  worker scripts carry frame 0.
+- **Watch rules**: what the renderer confirmed armed, rule by rule, with the
+  rules that are off named on one line. With nothing armed it says **No rules
+  armed** and, without a live Console connection, offers **Open Console**,
+  which opens the Console on its connection settings; its tooltip says how
+  rules arm. An armed set's heading names its Console document and says in a
+  few words what it cannot observe (`main thread only`, and whether
+  navigation clears it or it is kept); its tooltip says it in full. When the
   Console is connected to a live capture document, selected and confirmed in
   the Console as before, one form, drawn for that document and naming it on
   its button, arms request rules (an optional method, then URL text), event
@@ -279,45 +296,53 @@ Each section is a collapsible pane:
   is sent, the section says so, and the form is drawn again for the new
   document. Arming replaces the set and keeps the DOM rules the Console armed
   on the same document. A refused set leaves nothing armed, and nothing is
-  retried. Without a live connection the section says how to get one and
-  shows no form. The form and the armed set say what a rule cannot observe,
-  because a wait for it would then find nothing with nothing missing: only
-  the main thread of the documents a rule is armed on records, never their
-  workers or other documents; and this document's navigation clears its
-  rules. **Keep for every later** *origin frame kind* **document**, which
-  names this document's origin and frame kind, also keeps the rules other
-  than DOM ones for every later such document, in any tab: each one is armed
-  from its first script, so a reload is observed
-  while it loads, but documents that are already open are not armed. The
-  armed set names the kept origin and frame kind and lists the kept rules,
-  and Clear rules forgets them, even after this document navigated.
-- **Observations**: the newest records, 128 at a time and up to 4,096 with
-  **Show older records**, filtered by kind. A note says how much of the store
-  the rows were read from: the whole store, or its newest bytes and why the
-  read stopped. An empty list says that no record exists only when the whole
-  store was read. Each row names the kind, what happened, its monotonic time,
-  category, renderer process, frame, sequence and request. Choosing a row
-  (a click, or the arrow keys) marks it at once, brings its details into view,
-  and again once its positions resolve, lists every identifier and resolves its own
-  frame (listener, timer callback or throw site) and its stack with
-  `get_request_stack`. Enter or **Open …** opens that position in Sources; a
-  watched request opens its Traffic row on the Initiator tab through Traffic's
-  own row selection, after locating it in the request index when it is
-  outside the block Traffic holds. Its link says it is working. A newer
-  click, choosing another record, the kind filter, **Show newest**, closing
-  the record's details or the sidebar, and leaving Sources (even when the
-  researcher comes back before the lookup answers) each cancel it, and a
-  cancelled lookup never switches to Traffic. Until the researcher has a place, the
-  list follows the newest page. Once a row is selected, the list is scrolled
-  from its top or older pages are loaded, the rows are kept: each read adds
-  the records written since, reading at most two more pages to reach them,
-  and keeps the scroll position and selection. When more was written than
-  that, the list stays as it is, names the byte span it does not hold, and
-  **Show newest** returns to the newest page. Past 4,096 rows the oldest are
-  dropped, and the list says how many. A failed read changes neither the rows
-  nor their note. Malformed
-  records, an earlier build's `debugger_observation_budget` gap and store sequence
-  gaps are stated above the list, which is as tall as its rows up to a cap.
+  retried. The form says what a rule cannot observe, because a wait for it
+  would then find nothing with nothing missing: only the main thread of armed
+  documents records, never their workers or other documents, and this
+  document's navigation clears its rules. **Keep for every later** *origin
+  frame kind* **document**, which names this document's origin and frame
+  kind, also keeps the rules other than DOM ones for every later such
+  document, in any tab: each one is armed from its first script, so a reload
+  is observed while it loads, but documents that are already open are not
+  armed. The armed set names the kept origin and frame kind and lists the
+  kept rules, and Clear rules forgets them, even after this document
+  navigated.
+- **Observations**: one line of controls, then the newest records, 128 at a
+  time and up to 4,096 with **Show older records**. The kind menu (All kinds,
+  Requests, Listeners, Timers, CSP, Exceptions, DOM) names each kind's record
+  count in scope from the event index, with `+` while the index catches up;
+  while an observed frame is selected, a **Frame** *N* **×** chip beside it
+  lists every frame again. Malformed records, an earlier build's
+  `debugger_observation_budget` gap, store sequence gaps, a read that stopped
+  at its budget, a failed older read and dropped rows are short flags above
+  the list, each with its detail in its tooltip and for assistive readers;
+  none is left out. An empty list says that no record exists only when the
+  whole store was read, and otherwise how much was read. Each row is two
+  lines: the kind and what happened, then its time from its session's first
+  record (`+M:SS.mmm`, from `time_origins`; the exact monotonic time is in the
+  row's tooltip and its details), its category, and its correlation
+  identifiers (`P` renderer process, `F` frame, `#` sequence, `R` request).
+  The row the pointer or the keyboard is on shows **↵ Open**, what Enter does.
+  Choosing a row (a click, or the arrow keys) marks it at once, brings its
+  details into view, and again once its positions resolve, lists every
+  identifier and resolves its own frame (listener, timer callback or throw
+  site) and its stack with `get_request_stack`. Enter or **Open …** opens that
+  position in Sources; a watched request opens its Traffic row on the
+  Initiator tab through Traffic's own row selection, after locating it in the
+  request index when it is outside the block Traffic holds. Its link says it
+  is working. A newer click, choosing another record, the kind menu, **Show
+  newest**, closing the record's details or the sidebar, and leaving Sources
+  (even when the researcher comes back before the lookup answers) each cancel
+  it, and a cancelled lookup never switches to Traffic. Until the researcher
+  has a place, the list follows the newest page. Once a row is selected, the
+  list is scrolled from its top or older pages are loaded, the rows are kept:
+  each read adds the records written since, reading at most two more pages to
+  reach them, and keeps the scroll position and selection. When more was
+  written than that, the list stays as it is, says how much newer data it
+  does not hold (the byte span is in the tooltip), and **Show newest**
+  returns to the newest page. Past 4,096 rows the oldest are dropped, and a
+  flag says how many. A failed read changes neither the rows nor their notes.
+  The list is as tall as its rows up to a cap.
   Traffic's **Show in debugger** on a watched request calls
   `RebDebuggerSidebar.showObservation`: the sidebar opens on the Requests
   kind, clears an observed-frame scope that would hide the record, and once a
@@ -330,11 +355,14 @@ Each section is a collapsible pane:
   leaving Sources or a replaced store. Focus moves to the list only if it is
   still where it was when asked; a file, Find or the Watch form picked
   meanwhile keeps it, and the record is still chosen.
-- **Pausing**: one statement of the availability `get_native_debugger` reports.
-  Today it is unsupported, so the sidebar offers no control to stop, step or
-  inspect a paused frame. When sections registered with `native: 'pausing'`
-  exist, the statement names them: available, their controls are there;
-  unsupported, those controls stay disabled.
+- **Pausing**: one short statement of the availability `get_native_debugger`
+  reports, with the reason, policy, experiment flag, pause lease and whether a
+  page can detect the debugger listed below it. Today it is unsupported, so
+  the sidebar offers no control to stop, step or inspect a paused frame. When
+  sections registered with `native: 'pausing'` exist, the statement names
+  them: available, their controls are there; unsupported, those controls stay
+  disabled, and each of those sections says in one line that no browser
+  serves the pausing debugger.
 
 Threads and Observations mount only the rows in view, and captured names such
 as event types and hosts are inserted as text.
@@ -355,6 +383,9 @@ const remove = globalThis.RebDebuggerSidebar.addSection({
   release(body) { /* optional: drop rows and timers when collapsed or closed */ }
 });
 ```
+
+A registered section's body is padded to the section titles' edge; the
+built-in sections run their lists edge to edge and pad their own lines.
 
 `view` holds `status` (`loading`, `ready`, `disconnected`, `malformed` or
 `unavailable`), `document` (the last valid `get_native_debugger` answer, or

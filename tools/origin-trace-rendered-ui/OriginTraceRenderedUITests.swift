@@ -543,6 +543,19 @@ final class OriginTraceRenderedUITests: XCTestCase {
     try await ui.waitUntil("!document.querySelector('#screen-\(screen)').hidden", "\(screen) screen did not open")
   }
 
+  // The debugger's Observations kind menu. Its popup is an AppKit menu outside
+  // the page, which the harness does not drive, so the choice is made the way
+  // the menu makes it: the select's value, then its change event.
+  @MainActor
+  private func chooseObservationKind(_ ui: Harness, _ kind: String) async throws {
+    let chosen = try await ui.value("""
+      (() => { const menu = document.querySelector('#debugger-sidebar .debugger-kind-select');
+        if (!menu || ![...menu.options].some(option => option.value === '\(kind)')) return false;
+        menu.focus({preventScroll: true}); menu.value = '\(kind)'; menu.dispatchEvent(new Event('change', {bubbles: true})); return true; })()
+      """) as? Bool
+    XCTAssertEqual(chosen, true, "the Observations kind menu offers \(kind)")
+  }
+
   // A Sources toolbar command that did not fit the row sits in More; open
   // More first, as a researcher would, then choose it.
   @MainActor
@@ -1588,7 +1601,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
           rows: document.querySelectorAll('#debugger-observations .debugger-list-row').length,
           size: Number(document.querySelector('#debugger-observations .debugger-list-row').getAttribute('aria-setsize')),
           view: Math.ceil(document.querySelector('#debugger-observations').clientHeight / 44),
-          threads: [...document.querySelectorAll('#debugger-threads .debugger-list-group')].map(node => node.innerText.replace(/\\s+/g, ' ')),
+          threads: [...document.querySelectorAll('#debugger-threads .debugger-list-group')].map(node => node.textContent),
           pausing: document.querySelector('#debugger-sidebar [data-debugger-native="availability"]')?.dataset.availability ?? null,
           buttons: [...document.querySelectorAll('#debugger-sidebar button')].filter(button => !button.closest('#debugger-sidebar [data-debugger-native="pausing"]'))
             .map(button => button.innerText).filter(text => /pause|resume|step|breakpoint/i.test(text)),
@@ -1607,6 +1620,47 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertInert(ui, "\(size.name) debugger sidebar")
       try await assertLayout(ui, "#debugger-sidebar", "\(size.name) debugger sidebar")
       try await ui.screenshot("debugger-sidebar-\(size.name)")
+
+      // Threads reads as whole one-line rows at either size: several show
+      // before the list scrolls, none is cut by its top, and each row's name,
+      // identifiers and count sit side by side inside it. Scrolling the pane
+      // keeps the section's title over the list, never a headless list.
+      let layout = try await ui.json("""
+        (() => { const parts = row => [...row.querySelectorAll(':scope > *, :scope > * > *')].filter(part => part.getBoundingClientRect().width > 0 && !part.children.length);
+          const fits = row => { const box = row.getBoundingClientRect(), all = parts(row);
+            return row.scrollHeight <= row.clientHeight + 0.5 && all.every(part => { const at = part.getBoundingClientRect();
+              return at.left >= box.left - 0.5 && at.right <= box.right + 0.5 && at.top >= box.top - 0.5 && at.bottom <= box.bottom + 0.5; }); };
+          const apart = row => [...row.children].filter(part => part.getBoundingClientRect().width > 0)
+            .every((part, index, all) => !index || all[index - 1].getBoundingClientRect().right <= part.getBoundingClientRect().left + 0.5);
+          const list = document.querySelector('#debugger-threads'), box = list.getBoundingClientRect();
+          const rows = [...list.querySelectorAll('.debugger-list-row')];
+          const whole = rows.filter(row => { const at = row.getBoundingClientRect(); return at.top >= box.top - 0.5 && at.bottom <= box.bottom + 0.5; });
+          const records = [...document.querySelectorAll('#debugger-observations .debugger-list-row')];
+          const meta = records.map(row => ({time: row.querySelector('.debugger-row-time')?.textContent ?? '', ids: row.querySelector('.debugger-row-ids')?.textContent.trim() ?? ''}));
+          const pane = document.querySelector('#debugger-sidebar .debugger-sidebar-sections'), summary = document.querySelector('#debugger-sidebar [data-debugger-section="threads"] > summary');
+          pane.scrollTop = 0;
+          pane.scrollTop = box.top - pane.getBoundingClientRect().top + 60;
+          const stuck = summary.getBoundingClientRect(), sides = pane.getBoundingClientRect();
+          const over = document.elementFromPoint(stuck.left + 40, stuck.top + stuck.height / 2)?.closest('summary') === summary;
+          const scrolled = pane.scrollTop;
+          pane.scrollTop = 0;
+          return {height: list.clientHeight, whole: whole.length, rows: rows.length, threadsFit: rows.every(fits), threadsApart: rows.every(apart),
+            recordsFit: records.every(fits), headsApart: records.every(row => apart(row.querySelector('.debugger-row-head'))),
+            metaApart: records.every(row => apart(row.querySelector('.debugger-row-meta'))),
+            times: meta.every(item => /^[+-]\\d+:\\d\\d\\.\\d{3}$/.test(item.time)), ids: meta.every(item => /^P\\d+ F\\d+ #\\d+( R\\d+)?$/.test(item.ids)),
+            menu: [...document.querySelectorAll('#debugger-sidebar .debugger-kind-select option')].map(option => option.textContent),
+            scrolled, stuck: Math.abs(stuck.top - sides.top) <= 0.5, over}; })()
+        """)
+      print("RENDERED_UI_DEBUGGER_LAYOUT \(size.name) \(layout)")
+      XCTAssertGreaterThanOrEqual(layout["whole"] as? Int ?? 0, 6, "\(size.name): the Threads list shows at least six whole rows: \(layout)")
+      for key in ["threadsFit", "threadsApart", "recordsFit", "headsApart", "metaApart", "times", "ids", "stuck", "over"] {
+        XCTAssertEqual(layout[key] as? Bool, true, "\(size.name): \(key): \(layout)")
+      }
+      XCTAssertGreaterThan(layout["scrolled"] as? Double ?? 0, 0, "\(size.name): the pane scrolled for the sticky-title check: \(layout)")
+      let menu = layout["menu"] as? [String] ?? []
+      XCTAssertEqual(menu.count, 7, "\(size.name): one menu holds every kind: \(layout)")
+      XCTAssertTrue(menu.allSatisfy { $0.range(of: #"^.+ · [0-9][0-9,]*\+?$"#, options: .regularExpression) != nil },
+        "\(size.name): each kind names its record count: \(menu)")
 
       // Keyboard: the next stop is the Threads list, with a visible indicator.
       try await ui.tab()
@@ -1642,7 +1696,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.screenshot("debugger-sidebar-scoped-\(size.name)")
 
       // A listener record opens its own resolved frame in Sources.
-      try await ui.click(".debugger-kind[data-kind='listener_dispatch']")
+      try await chooseObservationKind(ui, "listener_dispatch")
       try await ui.waitUntil("[...document.querySelectorAll('#debugger-observations .debugger-list-row')].every(row => row.dataset.kind === 'listener_dispatch')",
         "\(size.name): the Listeners filter did not apply")
       try await ui.click("#debugger-observations .debugger-list-row", containing: "click listener")
@@ -1679,7 +1733,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
 
       // Keyboard in Observations: an arrow moves the active row and brings
       // its details into view.
-      try await ui.click(".debugger-kind[data-kind='all']")
+      try await chooseObservationKind(ui, "all")
       try await ui.waitUntil("[...document.querySelectorAll('#debugger-observations .debugger-list-row')].some(row => row.dataset.kind !== 'listener_dispatch')",
         "\(size.name): the All filter did not apply")
       try await ui.click("#debugger-observations .debugger-list-row")
@@ -1701,7 +1755,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
           document.querySelector('#screen-traffic .inspector-tab[aria-selected="true"]')?.dataset.inspectorTab === 'initiator'
         """
       for how in ["link", "Enter"] {
-        try await ui.click(".debugger-kind[data-kind='request_watch_match']")
+        try await chooseObservationKind(ui, "request_watch_match")
         try await ui.waitUntil("(() => { const rows = [...document.querySelectorAll('#debugger-observations .debugger-list-row')]; return rows.length === 1 && rows[0].dataset.kind === 'request_watch_match'; })()",
           "\(size.name): the Requests filter did not apply")
         try await ui.click("#debugger-observations .debugger-list-row")
@@ -1722,12 +1776,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
         }
         try await ui.waitUntil("document.querySelectorAll('#debugger-observations .debugger-list-row').length > 0", "\(size.name): the sidebar did not list records again")
       }
-      try await ui.click(".debugger-kind[data-kind='all']")
+      try await chooseObservationKind(ui, "all")
 
       // A failed read and a malformed answer keep the last rows, marked stale;
       // the next good read clears it.
       for (body, status) in [("Promise.reject(new TypeError('Load failed'))", "Disconnected: Load failed"),
-                             ("Promise.resolve(new Response('{\"contract_version\":2}', {status: 200}))", "The last answer was malformed (an unknown contract version)")] {
+                             ("Promise.resolve(new Response('{\"contract_version\":2}', {status: 200}))", "Malformed answer: an unknown contract version")] {
         _ = try await ui.value("""
           (() => { window.__rebDebuggerFetch ??= window.fetch;
             window.fetch = (input, init) => String(input).startsWith('/api/native-debugger') ? \(body) : window.__rebDebuggerFetch(input, init); return true; })()
@@ -1744,7 +1798,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       }
       _ = try await ui.value("(() => { window.fetch = window.__rebDebuggerFetch; delete window.__rebDebuggerFetch; return true; })()")
       try await ui.waitUntil("""
-        (document.querySelector('#debugger-sidebar .debugger-status-state')?.textContent ?? '').startsWith('Live:') &&
+        document.querySelector('#debugger-sidebar .debugger-status-state')?.textContent === 'Live' &&
           document.querySelector('#debugger-sidebar [data-debugger-section="observations"]').dataset.stale === 'false'
         """, "\(size.name): a good read did not clear the stale state")
 
@@ -1759,11 +1813,21 @@ final class OriginTraceRenderedUITests: XCTestCase {
       if try await ui.value("document.querySelector('#debugger-sidebar').hidden") as? Bool == false {
         try await ui.click("#debugger-sidebar .debugger-sidebar-close")
       }
-      let reads = "performance.getEntriesByType('resource').filter(entry => entry.name.includes('/api/native-debugger')).length"
-      let before = try await ui.value(reads) as? Int ?? -1
+      // Closing aborts the read in flight and starts none. A resource entry
+      // is added when its fetch ends, so one begun before the close (the
+      // thread click's, say) can land after it under load: only reads that
+      // start after the sidebar closed break the contract, so only those count.
+      try await ui.waitUntil("document.querySelector('#debugger-sidebar').hidden", "\(size.name): the sidebar did not close")
+      _ = try await ui.value("(() => { window.__rebDebuggerClosedAt = performance.now(); return true; })()")
       try await Task.sleep(nanoseconds: 4_500_000_000)
-      let after = try await ui.value(reads) as? Int ?? -2
-      XCTAssertEqual(after, before, "\(size.name): a closed sidebar must not read")
+      let reads = try await ui.json("""
+        (() => { const reads = performance.getEntriesByType('resource').filter(entry => entry.name.includes('/api/native-debugger'));
+          const closed = window.__rebDebuggerClosedAt; delete window.__rebDebuggerClosedAt;
+          return {started: reads.filter(entry => entry.startTime >= closed).length,
+            endedAfter: reads.filter(entry => entry.startTime < closed && entry.responseEnd >= closed).length}; })()
+        """)
+      print("RENDERED_UI_DEBUGGER_CLOSED \(size.name) \(reads)")
+      XCTAssertEqual(reads["started"] as? Int, 0, "\(size.name): a closed sidebar must not read: \(reads)")
       let closed = try await ui.value("(document.querySelector('#source-tree')?.innerText ?? '').includes('selected in Debugger Threads')") as? Bool
       XCTAssertEqual(closed, false, "\(size.name): closing the sidebar lifts the tree scope")
     }
@@ -5296,7 +5360,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
           const pane = document.querySelector('#debugger-sidebar .debugger-sidebar-sections').getBoundingClientRect();
           const list = document.querySelector('#debugger-observations').getBoundingClientRect();
           const row = document.querySelector('#debugger-observations .debugger-list-row[aria-selected="true"]')?.getBoundingClientRect();
-          return {kind: document.querySelector('.debugger-kind[aria-pressed="true"]')?.dataset.kind ?? '',
+          return {kind: document.querySelector('#debugger-sidebar .debugger-kind-select')?.value ?? '',
             detail: detail.innerText.replace(/\\s+/g, ' '), inView: !detail.hidden && box.top < pane.bottom - 24 && box.bottom > pane.top,
             // The focused list and its chosen row are on screen, inside the pane.
             listInPane: list.top >= pane.top - 0.5 && list.top < pane.bottom - 20,
@@ -5331,8 +5395,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
         (() => { const note = document.querySelector('#debugger-sidebar .debugger-watch-limits');
           note.scrollIntoView({block: 'center'}); return note.innerText; })()
         """) as? String ?? ""
-      for said in ["main thread of the documents it is armed on", "never workers or other documents", "navigation clears its rules",
-                   "not documents that are already open"] {
+      for said in ["Main thread of armed documents only", "never workers or other documents", "Navigation clears these rules",
+                   "not ones already open"] {
         XCTAssertTrue(limits.contains(said), "\(size.name): the form says \(said): \(limits)")
       }
       try await assertLayout(ui, "#debugger-sidebar", "\(size.name) watch limits")

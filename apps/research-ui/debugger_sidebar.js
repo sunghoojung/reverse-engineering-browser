@@ -11,7 +11,7 @@
 // evidence window's first read may wait for its bundled backend to start
 // (up to 15 seconds) and then scan 64 MiB, so it gets `storedDeadline`.
 const DEBUGGER_SIDEBAR = Object.freeze({poll: 2000, slowest: 30000, deadline: 10000, storedDeadline: 45000, refreshGap: 1000, retry: 2000,
-  page: 128, rows: 4096, stacks: 32, bridge: 2, threadRow: 40, groupRow: 26, observationRow: 44, overscan: 6, listHeight: 240});
+  page: 128, rows: 4096, stacks: 32, bridge: 2, threadRow: 28, groupRow: 24, observationRow: 44, overscan: 6, listHeight: 240});
 
 const DEBUGGER_OBSERVATION_KINDS = Object.freeze({
   request_watch_match: {label: 'Request', filter: 'Requests'},
@@ -89,10 +89,35 @@ function debuggerButton(text, className, onClick) {
   return button;
 }
 
+// The recorded monotonic time, exact to the microsecond.
 function debuggerTime(ns) {
   try {
     const micros = BigInt(ns) / 1000n;
     return `${(micros / 1000000n).toString()}.${(micros % 1000000n).toString().padStart(6, '0')} s`;
+  } catch {
+    return 'time not recorded';
+  }
+}
+
+// The first record time of a record's session (get_native_debugger's
+// time_origins), or null while the event index has not folded that session.
+function debuggerOrigin(answer, record) {
+  const origins = Array.isArray(answer?.time_origins) ? answer.time_origins : [];
+  return origins.find(origin => origin?.session_id === record.session_id)?.monotonic_time_ns ?? null;
+}
+
+// A monotonic time as minutes and seconds since `origin`, its session's first
+// record; the exact value stays in the row's tooltip and details. Without an
+// origin the exact value is all there is.
+function debuggerRelativeTime(ns, origin) {
+  try {
+    if (origin === null || origin === undefined) return debuggerTime(ns);
+    const delta = BigInt(ns) - BigInt(origin), sign = delta < 0n ? '-' : '+';
+    const ms = (delta < 0n ? -delta : delta) / 1000000n;
+    const pad = (value, width) => value.toString().padStart(width, '0');
+    const [hours, minutes, seconds] = [ms / 3600000n, ms / 60000n % 60n, ms / 1000n % 60n];
+    const clock = hours ? `${hours}:${pad(minutes, 2)}` : `${minutes}`;
+    return `${sign}${clock}:${pad(seconds, 2)}.${pad(ms % 1000n, 3)}`;
   } catch {
     return 'time not recorded';
   }
@@ -158,9 +183,12 @@ function debuggerDocumentProblem(answer) {
 /* A fixed-row listbox that mounts only the rows in view. Items are
  * {key, height, header?, ...}; headers are not options. The list keeps focus
  * itself and names the active row with aria-activedescendant, so a row
- * scrolled away never takes focus with it. */
+ * scrolled away never takes focus with it. Its frame fades the edge that has
+ * more rows past it, so a row cut by that edge reads as more to scroll. */
 function createDebuggerList({id, label, onActive = null, onChoose, render}) {
+  const box = debuggerNode('div', 'debugger-list-frame');
   const element = debuggerNode('div', 'debugger-list');
+  box.append(element);
   element.id = id;
   element.tabIndex = 0;
   element.setAttribute('role', 'listbox');
@@ -205,6 +233,8 @@ function createDebuggerList({id, label, onActive = null, onChoose, render}) {
       return row;
     });
     space.replaceChildren(...rows);
+    const above = top > 0.5, below = tops.at(-1) - top - height > 0.5;
+    box.dataset.more = above && below ? 'both' : above ? 'above' : below ? 'below' : 'none';
     if (active !== null && activeIndex >= 0) element.setAttribute('aria-activedescendant', rowId(active));
     else element.removeAttribute('aria-activedescendant');
   }
@@ -258,6 +288,7 @@ function createDebuggerList({id, label, onActive = null, onChoose, render}) {
 
   return {
     element,
+    box,
     // Same keys in the same order repaint only the selection marks.
     set(next, {selectedKey = selected, anchor = true} = {}) {
       const nextSignature = next.map(item => `${item.key}/${item.version ?? ''}`).join('|');
@@ -298,33 +329,46 @@ function createDebuggerList({id, label, onActive = null, onChoose, render}) {
 
 /* Threads: Console documents, workers whose requests the renderer recorded,
  * and the native frames observation records came from. It needs only the
- * get_native_debugger document, so it stands on its own wherever it mounts. */
+ * get_native_debugger document, so it stands on its own wherever it mounts.
+ * A row reads as one line: what the thread is (`label`), its identifiers
+ * (`ids`) and its activity or state (`badge`); `tag` names a document's frame
+ * kind. Every field is in full in the row's tooltip and the selected details. */
 function debuggerThreads(answer, {frameOrigin = () => null, consoleTarget = null} = {}) {
   const threads = answer?.threads ?? {frames: [], workers: [], observed: []};
   const armed = answer?.watch?.state === 'armed' ? answer.watch.armed?.target_id ?? null : null;
-  const documents = threads.frames.map(target => ({
-    key: `D:${target.target_id}`, kind: 'document', target_id: String(target.target_id), group: 'Console documents',
-    title: target.frame === 'top' ? 'Top frame' : target.out_of_process === true ? 'Out-of-process frame' : 'Child frame',
-    origin: target.origin || '(no origin)',
-    frame: `${target.frame} · document ${target.target_id}`,
-    process: target.frame === 'top' ? 'process not listed'
-      : target.out_of_process === true ? 'own renderer (site isolation)' : target.out_of_process === false ? 'top renderer' : 'process undetermined',
-    state: String(target.target_id) === armed ? 'watch armed' : String(target.target_id) === consoleTarget ? 'Console connected' : 'listed'
-  }));
+  const count = (value, one, many) => `${Number(value).toLocaleString('en-US')} ${value === 1 ? one : many}`;
+  const documents = threads.frames.map(target => {
+    const id = String(target.target_id), oop = target.out_of_process === true;
+    const state = id === armed ? 'watch armed' : id === consoleTarget ? 'Console connected' : 'listed';
+    return {key: `D:${id}`, kind: 'document', target_id: id, group: 'Console documents',
+      title: target.frame === 'top' ? 'Top frame' : oop ? 'Out-of-process frame' : 'Child frame',
+      origin: target.origin || '(no origin)', label: target.origin || '(no origin)', missing: !target.origin,
+      tag: target.frame === 'top' ? 'top' : oop ? 'OOPIF' : 'child', ids: `doc ${id}`,
+      badge: id === armed ? 'armed' : id === consoleTarget ? 'Console' : '', tone: id === armed ? 'ok' : 'accent',
+      frame: `${target.frame} · document ${id}`,
+      process: target.frame === 'top' ? 'process not listed'
+        : oop ? 'own renderer (site isolation)' : target.out_of_process === false ? 'top renderer' : 'process undetermined',
+      state};
+  });
   const workers = threads.workers.map(worker => ({
     key: `W:${worker.session_id}:${worker.process_id}:${worker.context_id}`, kind: 'worker', group: 'Workers',
     session_id: worker.session_id, process_id: worker.process_id, context_id: worker.context_id,
-    title: DEBUGGER_WORKER_KINDS[worker.kind] ?? 'Worker', origin: 'origin not recorded', missing: true,
+    title: DEBUGGER_WORKER_KINDS[worker.kind] ?? 'Worker', origin: 'origin not recorded',
+    label: DEBUGGER_WORKER_KINDS[worker.kind] ?? 'Worker', ids: `ctx ${worker.context_id} P${worker.process_id}`,
+    badge: `${Number(worker.requests).toLocaleString('en-US')} req`,
     frame: `context ${worker.context_id}`, process: `process ${worker.process_id}`, last: worker.last_sequence,
-    state: `${worker.requests} ${worker.requests === 1 ? 'request' : 'requests'}`
+    state: count(worker.requests, 'request', 'requests')
   }));
-  const observed = threads.observed.map(frame => ({
-    key: `F:${frame.session_id}:${frame.process_id}:${frame.frame_id}`, kind: 'observed', group: 'Observed frames',
-    session_id: frame.session_id, process_id: frame.process_id, frame_id: frame.frame_id,
-    title: 'Observed frame', origin: frameOrigin(frame.session_id, frame.frame_id), last: frame.last_sequence,
-    frame: `frame ${frame.frame_id} · session ${frame.session_id}`, process: `process ${frame.process_id}`,
-    state: `${frame.records} ${frame.records === 1 ? 'record' : 'records'}`
-  })).map(frame => frame.origin ? frame : {...frame, origin: 'no retained document', missing: true});
+  const observed = threads.observed.map(frame => {
+    const origin = frameOrigin(frame.session_id, frame.frame_id);
+    return {key: `F:${frame.session_id}:${frame.process_id}:${frame.frame_id}`, kind: 'observed', group: 'Observed frames',
+      session_id: frame.session_id, process_id: frame.process_id, frame_id: frame.frame_id, kinds: frame.kinds ?? null,
+      title: 'Observed frame', origin: origin ?? 'no retained document', missing: !origin, last: frame.last_sequence,
+      label: origin ?? `frame ${frame.frame_id}`, ids: origin ? `F${frame.frame_id} P${frame.process_id}` : `P${frame.process_id}`,
+      badge: Number(frame.records).toLocaleString('en-US'),
+      frame: `frame ${frame.frame_id} · session ${frame.session_id}`, process: `process ${frame.process_id}`,
+      state: count(frame.records, 'record', 'records')};
+  });
   return [documents, observed, workers];
 }
 
@@ -338,35 +382,32 @@ function createDebuggerThreadsView({id = 'debugger-threads', onSelect}) {
   // A click or a key chooses a thread; a double-click is not a third toggle.
   const list = createDebuggerList({id, label: 'Threads', onChoose: (item, how) => { if (how !== 'dblclick') onSelect(item); }, render(row, item) {
     if (item.header) {
-      row.append(debuggerNode('span', 'debugger-list-group-name', item.title), debuggerNode('b', 'debugger-list-count', item.count));
+      row.append(debuggerNode('span', 'debugger-list-group-name', item.title), debuggerNode('span', 'debugger-list-count', item.count));
       return;
     }
     row.dataset.kind = item.kind;
-    // The origin has the first line to itself; the selected thread's
-    // details below the list repeat every field in full.
-    const head = debuggerNode('div', 'debugger-row-head');
-    const origin = debuggerNode('span', 'debugger-row-main', item.origin);
-    if (item.missing) origin.dataset.missing = 'true';
-    head.append(origin, debuggerNode('span', 'debugger-row-state', item.state));
-    const foot = debuggerNode('div', 'debugger-row-foot');
-    foot.append(debuggerNode('span', 'debugger-chip', item.title), debuggerNode('span', 'debugger-row-meta', `${item.frame} · ${item.process}`));
-    row.title = debuggerThreadFields(item).map(([label, value]) => `${label}: ${value}`).join(' · ');
-    row.append(head, foot);
+    if (item.tag) row.append(debuggerNode('span', 'debugger-thread-tag', item.tag));
+    const label = debuggerNode('span', 'debugger-row-main', item.label);
+    if (item.missing) label.dataset.missing = 'true';
+    const badge = debuggerNode('span', 'debugger-thread-badge', item.badge);
+    if (item.badge && item.kind === 'document') badge.dataset.tone = item.tone;
+    row.append(label, debuggerNode('span', 'debugger-thread-ids', item.ids), badge);
+    row.title = debuggerThreadFields(item).map(([label, value]) => `${label}: ${value}`).join('\n');
   }});
-  const empty = debuggerNode('p', 'debugger-note');
-  root.append(list.element, empty);
+  const empty = debuggerNode('p', 'debugger-note debugger-empty');
+  root.append(list.box, empty);
   return {
     element: root,
     render(groups, selectedKey) {
       const items = [];
       for (const group of groups) {
         if (!group.length) continue;
-        items.push({key: `group:${group[0].group}`, header: true, title: group[0].group, count: group.length, height: DEBUGGER_SIDEBAR.groupRow});
-        for (const thread of group) items.push({...thread, height: DEBUGGER_SIDEBAR.threadRow, version: `${thread.state}|${thread.origin}|${thread.last ?? ''}`});
+        items.push({key: `group:${group[0].group}`, header: true, title: group[0].group, count: group.length.toLocaleString('en-US'), height: DEBUGGER_SIDEBAR.groupRow});
+        for (const thread of group) items.push({...thread, height: DEBUGGER_SIDEBAR.threadRow, version: `${thread.state}|${thread.label}|${thread.badge}|${thread.last ?? ''}`});
       }
-      list.element.hidden = !items.length;
+      list.box.hidden = !items.length;
       empty.hidden = Boolean(items.length);
-      empty.textContent = 'No threads listed. Connect the Console to a live capture to list its documents; workers and frames appear once the renderer records their requests or observations.';
+      empty.textContent = 'No threads yet. Frames and workers appear as they record; documents once the Console connects.';
       list.set(items, {selectedKey});
     },
     release() { list.release(); }
@@ -391,14 +432,18 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
   close.setAttribute('aria-label', 'Close debugger');
   close.title = 'Close debugger (Esc)';
   head.append(title, mode, close);
-  // Only the state is announced; the time of the last read changes every poll.
-  const status = debuggerNode('p', 'debugger-sidebar-status');
+  // A dot and a word for the state, then the time of the last read. Only the
+  // state is announced; the time changes every poll, and the interval, which
+  // follows how long reads take, is in the tooltip.
+  const status = debuggerNode('div', 'debugger-sidebar-status');
+  const dot = debuggerNode('span', 'debugger-status-dot');
+  dot.setAttribute('aria-hidden', 'true');
   const announced = debuggerNode('span', 'debugger-status-state');
   announced.setAttribute('role', 'status');
   announced.setAttribute('aria-live', 'polite');
   const when = debuggerNode('span', 'debugger-status-time');
   const again = debuggerButton('Read again', 'debugger-link debugger-status-again', () => read());
-  status.append(announced, ' ', when, ' ', again);
+  status.append(dot, announced, when, again);
   const body = debuggerNode('div', 'debugger-sidebar-sections');
   root.append(head, status, body);
   root.setAttribute('aria-labelledby', title.id);
@@ -654,20 +699,28 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
   function renderStatus() {
     const kind = windowMode(), stored = kind === 'stored';
     const time = view.updatedAt ? view.updatedAt.toLocaleTimeString() : null;
+    const every = `every ${Math.round(interval / 1000)} seconds`;
     const text = {
-      loading: stored ? 'Reading the stored evidence…' : 'Reading the native debugger state…',
-      unavailable: 'No backend serves this window, so the debugger state cannot be read.',
-      ready: stored ? 'Stored evidence: read once, since nothing captures in this window.' : 'Live: read while open.',
-      disconnected: stored ? `The stored-evidence backend did not answer: ${view.error}.`
-        : time ? `Disconnected: ${view.error}. Showing what was read before; reading again.` : `Cannot read the native debugger state: ${view.error}. Reading again.`,
-      malformed: `The last answer was malformed (${view.error}) and was not used.${time ? ' Showing what was read before.' : ''}`
+      loading: stored ? 'Reading stored evidence…' : 'Reading…',
+      unavailable: 'No backend serves this window',
+      ready: stored ? 'Stored evidence' : 'Live',
+      disconnected: stored ? `Not answered: ${view.error}` : time ? `Disconnected: ${view.error}` : `Cannot read: ${view.error}`,
+      malformed: `Malformed answer: ${view.error}`
     }[view.status];
     if (announced.textContent !== text) announced.textContent = text;
-    // Outside the live region: the time, and the interval, which follows how long reads take.
-    when.textContent = time ? kind === 'live' ? `Read at ${time}, every ${Math.round(interval / 1000)} seconds.` : `Read at ${time}.` : '';
+    when.textContent = !time ? '' : view.status === 'ready' ? time : `last read ${time}`;
     when.hidden = !time;
+    status.title = {
+      loading: stored ? 'The bundled backend can take 15 seconds to start.' : '',
+      unavailable: 'This window has no backend, so the debugger state cannot be read.',
+      ready: stored ? `Read once at ${time}: nothing captures in this window.` : `Read at ${time}. Reads ${every} while open.`,
+      disconnected: stored ? 'Read again asks the stored-evidence backend again.'
+        : `${time ? `Showing what was read at ${time}. ` : ''}Reading again ${every}.`,
+      malformed: `The answer was not used.${time ? ` Showing what was read at ${time}.` : ''}`
+    }[view.status];
     again.hidden = !stored || view.status === 'loading';
     status.dataset.kind = view.status;
+    status.dataset.mode = kind;
     root.dataset.state = view.status;
   }
 
@@ -843,6 +896,19 @@ function debuggerNote(text, kind = '') {
   return note;
 }
 
+// A short flag for a state the researcher must see (malformed records, gaps,
+// a partial read): its words say what happened, `detail` says the rest in
+// the tooltip, and an assistive reader hears both.
+function debuggerFlag(text, detail = '', kind = 'warning') {
+  const flag = debuggerNode('span', 'debugger-flag', text);
+  flag.dataset.kind = kind;
+  if (detail) {
+    flag.title = detail;
+    flag.append(debuggerNode('span', 'debugger-visually-hidden', `. ${detail}`));
+  }
+  return flag;
+}
+
 // Replaces a container's children only when what they say changed, so a
 // poll never moves a focused control.
 function debuggerReplace(container, nodes) {
@@ -860,19 +926,21 @@ function debuggerUnread(view) {
   view.status === 'loading' ? '' : 'warning');
 }
 
-function debuggerGapNote(view) {
+function debuggerGapFlag(view) {
   const gaps = view.hooks.sequenceGaps?.();
   return typeof gaps === 'bigint' && gaps > 0n
-    ? debuggerNote(`${gaps} sequence-gap IDs in the retained window: records may be missing, so a missing row is unknown rather than absent.`, 'gap')
+    ? debuggerFlag(`${gaps.toLocaleString('en-US')} sequence ${gaps === 1n ? 'gap' : 'gaps'}`,
+      `${gaps} sequence-gap IDs in the retained window: records may be missing, so a missing row is unknown rather than absent.`, 'gap')
     : null;
 }
 
-// Threads section: the Threads view plus what the selection scopes.
+// Threads section: the Threads view, the selected thread in full, and one
+// line for the Console's state and what the event index covered.
 function debuggerThreadsSection() {
   let threadsView = null;
   return {
     id: 'threads', title: 'Threads', order: 10,
-    summary: view => view.document ? String(view.document.threads.frames.length + view.document.threads.workers.length + view.document.threads.observed.length) : '',
+    summary: view => view.document ? (view.document.threads.frames.length + view.document.threads.workers.length + view.document.threads.observed.length).toLocaleString('en-US') : '',
     render(body, view) {
       const unread = debuggerUnread(view);
       if (unread) { threadsView?.release(); threadsView = null; body.replaceChildren(unread); return; }
@@ -892,23 +960,25 @@ function debuggerThreadsSection() {
         for (const [label, value] of debuggerThreadFields(thread)) fields.append(debuggerNode('dt', '', label), debuggerNode('dd', '', value));
         notes.push(fields);
       }
+      // What the selection scopes, in one line.
       if (thread?.kind === 'observed') {
         const scope = debuggerNode('p', 'debugger-note debugger-scope');
-        scope.append(`Scoped to frame ${thread.frame_id}: Observations and the Sources tree show only this frame's records and files. `,
+        scope.append(`Observations and Sources show frame ${thread.frame_id} only. `,
           debuggerButton('Show all', 'debugger-link', () => view.selectThread(thread)));
         notes.push(scope);
       } else if (thread?.kind === 'document') {
-        notes.push(debuggerNote(`Document ${thread.target_id}: Watch rules say whether they are armed here. A Console document carries no native frame ID, so Observations and the Sources tree are not scoped; select its observed frame for that.`));
+        notes.push(debuggerNote('Nothing is scoped: a Console document carries no native frame ID. Select its observed frame instead.'));
       } else if (thread?.kind === 'worker') {
-        notes.push(debuggerNote('Workers record no observations: rules match only a document\'s main thread. Compiled worker scripts carry frame 0, so the Sources tree is not scoped.'));
+        notes.push(debuggerNote('Nothing is scoped: workers record no observations, and their scripts carry frame 0.'));
       }
+      const foot = debuggerNode('p', 'debugger-thread-foot');
+      foot.append(debuggerNode('span', '', `Console ${view.document.threads.console}`));
       const coverage = view.document.threads.coverage;
-      const covered = !coverage || coverage.scope === 'store'
-        ? 'the whole event store'
-        : `the first ${debuggerBytes(coverage.scan_end)} of the event store's ${debuggerBytes(coverage.store_end)}, while its index catches up`;
-      notes.push(debuggerNote(`Console listing: ${view.document.threads.console}. Workers and observed frames cover ${covered}.`));
-      const gap = debuggerGapNote(view);
-      if (gap) notes.push(gap);
+      if (coverage && coverage.scope !== 'store') {
+        foot.append(debuggerFlag(`Indexed ${debuggerBytes(coverage.scan_end)} of ${debuggerBytes(coverage.store_end)}`,
+          'Workers and observed frames cover the event store\'s indexed part while its index catches up.', 'gap'));
+      }
+      notes.push(foot);
       debuggerReplace(body.querySelector(':scope > .debugger-thread-notes'), notes);
     },
     release() { threadsView?.release(); threadsView = null; }
@@ -926,6 +996,21 @@ function debuggerRulesText(rules) {
   const dom = Array.isArray(rules?.dom) ? rules.dom : [];
   rows.push(['DOM mutations', dom.length ? dom.map((node, index) => `element ${index + 1} (handle ${node.handle}): ${['attributes', 'subtree', 'removal'].filter(field => node[field]).join(', ') || 'nothing'}`) : ['off']]);
   return rows;
+}
+
+// The rules that are on, one row each, then one row naming those that are
+// off, so an armed set reads at a glance. A kept scope holds no DOM rules.
+function debuggerRulesList(rules, {dom = true} = {}) {
+  const list = debuggerNode('dl', 'debugger-rules');
+  const off = [];
+  for (const [label, values] of debuggerRulesText(rules)) {
+    if (!dom && label === 'DOM mutations') continue;
+    if (values.length === 1 && values[0] === 'off') { off.push(label); continue; }
+    list.append(debuggerNode('dt', '', label));
+    for (const value of values) list.append(debuggerNode('dd', '', value));
+  }
+  if (off.length) list.append(debuggerNode('dt', 'debugger-off', 'Off'), debuggerNode('dd', 'debugger-off', off.join(', ')));
+  return list;
 }
 
 function debuggerParseRules(form, carried) {
@@ -966,24 +1051,29 @@ function debuggerWatchSection() {
     const element = debuggerNode('form', 'debugger-watch-form');
     element.noValidate = true;
     element.dataset.target = live.target_id;
+    // The label and a short hint share one line above the control.
     const field = (label, control, hint) => {
       const wrap = debuggerNode('label', 'debugger-field');
-      wrap.append(debuggerNode('span', 'debugger-field-label', label), control);
-      if (hint) wrap.append(debuggerNode('span', 'debugger-field-hint', hint));
+      const head = debuggerNode('span', 'debugger-field-head');
+      head.append(debuggerNode('span', 'debugger-field-label', label));
+      if (hint) head.append(debuggerNode('span', 'debugger-field-hint', hint));
+      wrap.append(head, control);
       return wrap;
     };
     const requests = debuggerNode('textarea', 'debugger-input');
     requests.rows = 2; requests.maxLength = 8800; requests.spellcheck = false; requests.placeholder = 'POST /api/login';
     const events = debuggerNode('input', 'debugger-input');
     events.type = 'text'; events.maxLength = 1860; events.spellcheck = false; events.autocomplete = 'off'; events.placeholder = 'click, submit';
-    const check = text => { const label = debuggerNode('label', 'debugger-check'); const box = debuggerNode('input'); box.type = 'checkbox'; label.append(box, ` ${text}`); return {label, box}; };
+    const check = text => { const label = debuggerNode('label', 'debugger-check'); const box = debuggerNode('input'); box.type = 'checkbox'; label.append(box, debuggerNode('span', '', text)); return {label, box}; };
     const timers = check('Timers'), csp = check('CSP violations');
     const exceptions = debuggerNode('select', 'debugger-select');
     for (const [value, text] of [['off', 'Off'], ['uncaught', 'Uncaught'], ['all', 'Caught and uncaught']]) {
       const option = debuggerNode('option', '', text); option.value = value; exceptions.append(option);
     }
+    const exceptionsField = debuggerNode('label', 'debugger-check debugger-exceptions');
+    exceptionsField.append(debuggerNode('span', '', 'Exceptions'), exceptions);
     const switches = debuggerNode('div', 'debugger-watch-switches');
-    switches.append(timers.label, csp.label, field('Exceptions', exceptions));
+    switches.append(timers.label, csp.label, exceptionsField);
     const dom = debuggerNode('p', 'debugger-note');
     // Keeping hands the rules to the browser, which arms every later document
     // of this document's exact origin and frame kind before its own scripts.
@@ -992,11 +1082,11 @@ function debuggerWatchSection() {
     keepBox.type = 'checkbox';
     const keepText = debuggerNode('span', 'debugger-keep-text');
     keep.append(keepBox, keepText, debuggerNode('span', 'debugger-field-hint',
-      'Each one is armed before its own scripts run, in any tab, until Clear rules or a Console Stop. DOM rules stay with this document.'));
+      'Armed before their own scripts, in any tab, until Clear rules or a Console Stop. DOM rules stay here.'));
     // What a rule cannot see, said where it is armed: a wait for it would time
     // out with nothing missing (protocol/native-debugger-observation-v1.md).
     const limits = debuggerNode('p', 'debugger-note debugger-watch-limits',
-      'Observes only the main thread of the documents it is armed on: never workers or other documents. This document\'s navigation clears its rules; kept rules arm each later document of its origin and frame kind from that document\'s first script, but not documents that are already open.');
+      'Main thread of armed documents only, never workers or other documents. Navigation clears these rules; kept rules arm later documents from their first script, not ones already open.');
     const arm = debuggerNode('button', 'secondary-button debugger-arm');
     arm.type = 'submit';
     const actions = debuggerNode('div', 'debugger-watch-actions');
@@ -1005,9 +1095,10 @@ function debuggerWatchSection() {
     const own = {element, document: {session_id: live.session_id, target_id: live.target_id, label: live.label ?? ''},
       requests, events, timers: timers.box, csp: csp.box, exceptions, dom, keep: keepBox, keepText, arm, output, sending: false, draftFor: null};
     own.clear = debuggerButton('Clear rules', 'secondary-button', () => send(view, own, null));
+    own.clear.title = 'Disarms this document\'s rules and forgets any kept ones.';
     actions.append(arm, own.clear);
-    element.append(field('Requests', requests, 'One per line: an optional method, then text the URL contains.'),
-      field('Event listeners', events, 'Event types, separated by commas.'), switches, dom, keep, limits, actions, output);
+    element.append(field('Requests', requests, 'one per line, method optional'),
+      field('Listeners', events, 'event types, comma-separated'), switches, dom, keep, limits, actions, output);
     element.addEventListener('submit', event => { event.preventDefault(); send(view, own, 'arm'); });
     return own;
   }
@@ -1088,41 +1179,53 @@ function debuggerWatchSection() {
       const text = outcome?.kind === 'armed' && (pending || watch.state === 'busy')
         ? `Armed on document ${outcome.target}. Reading the set the renderer confirmed…`
         : outcome?.kind === 'cleared' && pending ? `Cleared on document ${outcome.target}. Reading the set that is left…` : outcome?.text ?? '';
-      const nodes = [];
-      if (watch.state === 'busy') nodes.push(debuggerNote('A Console action holds the session, so the armed set is read again shortly.', 'warning'));
-      else if (!armed && !kept) nodes.push(debuggerNote('No rules armed. Nothing is observed until a set is armed on one live document.'));
-      else if (!armed) nodes.push(debuggerNote('No Console document holds rules of its own now.'));
-      else {
-        nodes.push(debuggerNote(`Armed on Console document ${armed.target_id} (Console session ${armed.session_id}). Only its main thread is observed. Navigation, a new capture, Clear rules or a Console Stop disarms them.`));
-        const thread = view.thread;
-        if (thread?.kind === 'document' && thread.target_id !== armed.target_id) nodes.push(debuggerNote(`The selected document ${thread.target_id} has no rules; they are armed on document ${armed.target_id}.`, 'warning'));
-        const list = debuggerNode('dl', 'debugger-rules');
-        for (const [label, values] of debuggerRulesText(armed.rules)) {
-          list.append(debuggerNode('dt', '', label));
-          for (const value of values) list.append(debuggerNode('dd', value === 'off' ? 'debugger-off' : '', value));
-        }
-        nodes.push(list);
-      }
-      if (kept) {
-        const frame = kept.frame === 'top' ? 'top-frame' : 'child-frame';
-        nodes.push(debuggerNote(`Kept for every later ${kept.origin} ${frame} document, armed from Console document ${kept.target_id}: each one is armed before its own scripts run. Clear rules or a Console Stop forgets it.`));
-        // The kept rules are the armed set without DOM rules; list them only
-        // when no armed set above shows them.
-        if (!armed || armed.target_id !== kept.target_id) {
-          const list = debuggerNode('dl', 'debugger-rules');
-          for (const [label, values] of debuggerRulesText(kept.rules)) {
-            if (label === 'DOM mutations') continue;
-            list.append(debuggerNode('dt', '', label));
-            for (const value of values) list.append(debuggerNode('dd', value === 'off' ? 'debugger-off' : '', value));
-          }
-          nodes.push(list);
-        }
-      }
       const live = view.hooks.consoleLive?.() ?? null;
+      const nodes = [];
+      // A heading line for each armed set: what holds it, then what it cannot see.
+      const heading = (title, limit, detail) => {
+        const line = debuggerNode('p', 'debugger-watch-head');
+        line.append(debuggerNode('strong', '', title), ' ', debuggerNode('span', 'debugger-watch-limit', limit));
+        line.title = detail;
+        return line;
+      };
+      if (watch.state === 'busy') nodes.push(debuggerNote('A Console action holds the session; reading the armed set again shortly.', 'warning'));
+      else if (!armed && !kept) {
+        // One line and, without a live connection, the way to get one.
+        const empty = debuggerNode('div', 'debugger-empty-row');
+        empty.append(debuggerNode('span', 'debugger-empty-text', 'No rules armed'));
+        if (!live && view.hooks.canOpenConsole?.()) {
+          const open = debuggerButton('Open Console', 'secondary-button debugger-open-console', () => view.hooks.openConsole());
+          open.title = 'Rules arm through the Console\'s live connection: choose Live capture there, select a document, confirm, then Connect.';
+          empty.append(open);
+        }
+        nodes.push(empty);
+      } else {
+        if (armed) {
+          nodes.push(heading(`Armed on Console document ${armed.target_id}`, kept?.target_id === armed.target_id ? 'main thread only · kept' : 'main thread only · navigation clears',
+            `Console session ${armed.session_id}. Only its main thread is observed. Navigation, a new capture, Clear rules or a Console Stop disarms them.`));
+          const thread = view.thread;
+          if (thread?.kind === 'document' && thread.target_id !== armed.target_id) nodes.push(debuggerNote(`Selected document ${thread.target_id} has no rules; they are on document ${armed.target_id}.`, 'warning'));
+          nodes.push(debuggerRulesList(armed.rules));
+        } else {
+          nodes.push(debuggerNote('No Console document holds rules of its own now.'));
+        }
+        if (kept) {
+          const frame = kept.frame === 'top' ? 'top-frame' : 'child-frame';
+          nodes.push(heading(`Kept for every later ${kept.origin} ${frame} document`, `from document ${kept.target_id}`,
+            'Each one is armed before its own scripts run, in any tab; documents already open are not. Clear rules or a Console Stop forgets it.'));
+          // The kept rules are the armed set without DOM rules; list them only
+          // when no armed set above shows them.
+          if (!armed || armed.target_id !== kept.target_id) nodes.push(debuggerRulesList(kept.rules, {dom: false}));
+        }
+        if (!live && view.hooks.canOpenConsole?.()) {
+          const open = debuggerButton('Open Console to change', 'debugger-link debugger-open-console', () => view.hooks.openConsole());
+          open.title = 'Rules change through the Console\'s live connection to the document.';
+          nodes.push(open);
+        }
+      }
       if (!live) {
         drop();
         if (text) nodes.push(debuggerNote(text, 'warning'));
-        nodes.push(debuggerNote('To arm or clear rules, connect the Console to a live capture document: select it, confirm that commands can change it, then Connect. The rules arm through that connection\'s watch command; this sidebar never selects or confirms a document.'));
         debuggerReplace(armedBox, nodes);
         return;
       }
@@ -1144,10 +1247,10 @@ function debuggerWatchSection() {
       form.keep.disabled = form.sending;
       const carried = same && Array.isArray(armed.rules?.dom) ? armed.rules.dom.length : 0;
       form.dom.textContent = carried
-        ? `Arming here keeps the ${carried} DOM ${carried === 1 ? 'rule' : 'rules'} armed from the Console. Arming replaces the whole set; a refused set leaves nothing armed.`
-        : 'DOM mutation rules need an element handle from the Console watch command. Arming replaces the whole set; a refused set leaves nothing armed.';
+        ? `Keeps the ${carried} DOM ${carried === 1 ? 'rule' : 'rules'} the Console armed here.`
+        : 'DOM rules come from the Console\'s watch command.';
       form.arm.textContent = form.sending ? 'Working…' : `Arm on document ${form.document.target_id}`;
-      form.arm.title = `Arms these rules on Console document ${form.document.target_id}${form.document.label ? ` (${form.document.label})` : ''} through the live Console connection. Nothing pauses and no value is read.`;
+      form.arm.title = `Arms these rules on Console document ${form.document.target_id}${form.document.label ? ` (${form.document.label})` : ''} through the live Console connection, replacing the whole set; a refused set leaves nothing armed. Nothing pauses and no value is read.`;
       form.arm.disabled = form.sending;
       // Clear also forgets the kept scope, even after its document navigated.
       form.clear.disabled = form.sending || !(same || kept);
@@ -1295,7 +1398,9 @@ function debuggerObservationsSection() {
     const add = (label, value) => { fields.append(debuggerNode('dt', '', label), debuggerNode('dd', '', value)); };
     add('Operation', record.type);
     add('Category', debuggerCategory(record.type));
-    add('Time', `${debuggerTime(record.monotonic_time_ns)} (monotonic)`);
+    const origin = debuggerOrigin(view.document, record);
+    add('Time', origin === null ? `${debuggerTime(record.monotonic_time_ns)} (monotonic)`
+      : `${debuggerRelativeTime(record.monotonic_time_ns, origin)} into session ${record.session_id} · ${debuggerTime(record.monotonic_time_ns)} (monotonic)`);
     add('Source', `renderer process ${record.process_id}, frame ${record.frame_id}`);
     add('Identity', `session ${record.session_id} · process ${record.process_id} · sequence ${record.sequence_number}`);
     if (record.parent_event_id !== '0') add('Parent', `sequence ${record.parent_event_id}`);
@@ -1341,39 +1446,73 @@ function debuggerObservationsSection() {
     return (observations.list?.records ?? observations.head).slice(0, DEBUGGER_SIDEBAR.rows)
       .map(record => ({key: debuggerRecordKey(record), record, height: DEBUGGER_SIDEBAR.observationRow}));
   }
-  // How much of the store the rows were read from.
-  function coverage(view, count, kind, scope) {
+  // How much of the store the rows were read from. Only what the researcher
+  // must know is said: that nothing was found where nothing exists, how much
+  // was read when that is unknown, and why a read stopped short.
+  function coverage(view, count, kind, scope, counted) {
     const observations = view.observations, query = observations.query, loaded = observations.list;
     const end = BigInt(query.store_end);
     const top = loaded ? loaded.top : end;
     const bottom = loaded ? loaded.bottom : query.next_before;
     const whole = bottom === null && !loaded?.pinned && !loaded?.dropped && (loaded ? true : query.scope === 'store');
     const read = top - (bottom === null ? 0n : BigInt(bottom));
-    const where = whole ? 'the whole event store'
-      : loaded?.dropped ? `the newest records of the event store's ${debuggerBytes(end)}`
-        : loaded?.pinned ? `${debuggerBytes(read)} of the event store's ${debuggerBytes(end)}, below the newest ${debuggerBytes(end - top)}`
-          : `the newest ${debuggerBytes(read)} of the event store's ${debuggerBytes(end)}`;
-    const why = !whole && (loaded?.query ?? query).budget_exhausted ? ', where the last read stopped at its 64 MiB budget' : '';
+    const where = loaded?.dropped ? `the newest records of ${debuggerBytes(end)}`
+      : loaded?.pinned ? `${debuggerBytes(read)} of ${debuggerBytes(end)}, below the newest ${debuggerBytes(end - top)}`
+        : `the newest ${debuggerBytes(read)} of ${debuggerBytes(end)}`;
+    const budget = !whole && (loaded?.query ?? query).budget_exhausted;
+    const why = budget ? ', where the read stopped at its 64 MiB budget' : '';
     if (!count) {
-      if (whole) return view.kind || scope ? `No ${kind}${scope} in ${where}.` : 'No observation records in the event store. Arm rules on a live document to record them; nothing pauses.';
-      return `No ${kind}${scope} in ${where}${why}. Older bytes were not read, so older records may exist: Show older records reads them.`;
+      if (whole) {
+        return {note: view.kind || scope ? `No ${kind}${scope} in the event store.`
+          : `No observation records in the event store.${view.hooks.mode() === 'live' ? ' Arm watch rules to record them.' : ''}`};
+      }
+      return {note: `No ${kind}${scope} in ${where}${why}. Older ones may exist.`};
     }
-    const capped = count >= DEBUGGER_SIDEBAR.rows ? `, the most this list keeps; get_events pages the rest` : '';
-    return `${count.toLocaleString('en-US')} ${kind}${scope}, newest first, from ${where}${why}${capped}. Enter opens a row's position in Sources, or its request in Traffic.`;
+    // With the index's counts, the count and Show older records already say
+    // that more exist; without them, or when a read ran out of budget, the
+    // part read is named.
+    if (whole || (counted && !budget)) return {};
+    return {flag: debuggerFlag(`Read ${where}`, `${count.toLocaleString('en-US')} ${kind}${scope} from ${where} of the event store${why}. Show older records reads further.`, 'gap')};
   }
+  // Records per kind from the event index: every observed frame's, or the
+  // selected frame's. Null when the backend gives no counts; `partial` while
+  // the index is still catching up with the store.
+  function counts(view) {
+    const threads = view.document?.threads, observed = threads?.observed ?? [];
+    if (!threads || observed.some(frame => !frame.kinds || typeof frame.kinds !== 'object')) return null;
+    const thread = view.thread?.kind === 'observed' ? view.thread : null;
+    const frames = thread ? observed.filter(frame => frame.session_id === thread.session_id && String(frame.process_id) === String(thread.process_id) && frame.frame_id === thread.frame_id) : observed;
+    const totals = {all: 0, partial: threads.coverage ? threads.coverage.scope !== 'store' : false};
+    for (const frame of frames) {
+      for (const [type, records] of Object.entries(frame.kinds)) {
+        if (!Object.hasOwn(DEBUGGER_OBSERVATION_KINDS, type) || !Number.isSafeInteger(records)) continue;
+        totals[type] = (totals[type] ?? 0) + records;
+        totals.all += records;
+      }
+    }
+    return totals;
+  }
+  const countText = (totals, kind) => totals ? `${(totals[kind ?? 'all'] ?? 0).toLocaleString('en-US')}${totals.partial ? '+' : ''}` : null;
   function build(view) {
     // A pane drawn again (reopened or expanded) starts at its top with no
     // selection, so it holds no place: no rows are kept from before.
     if (!selected) view.followNewest(true);
     const root = debuggerNode('div', 'debugger-observations');
-    const kinds = debuggerNode('div', 'debugger-kinds');
-    kinds.setAttribute('role', 'group');
+    // One line of controls: the kind, the frame scope, and the read state.
+    const bar = debuggerNode('div', 'debugger-observation-bar');
+    const kinds = debuggerNode('select', 'debugger-select debugger-kind-select');
     kinds.setAttribute('aria-label', 'Observation kind');
-    for (const [kind, text] of [[null, 'All'], ...Object.entries(DEBUGGER_OBSERVATION_KINDS).map(([kind, value]) => [kind, value.filter])]) {
-      const pill = debuggerButton(text, 'debugger-kind', () => { selected = null; cancelOpening(); view.setKind(kind); });
-      pill.dataset.kind = kind ?? 'all';
-      kinds.append(pill);
+    for (const [kind, text] of [[null, 'All kinds'], ...Object.entries(DEBUGGER_OBSERVATION_KINDS).map(([kind, value]) => [kind, value.filter])]) {
+      const option = debuggerNode('option', '', text);
+      option.value = kind ?? 'all';
+      option.dataset.label = text;
+      kinds.append(option);
     }
+    kinds.addEventListener('change', () => { selected = null; cancelOpening(); view.setKind(kinds.value === 'all' ? null : kinds.value); });
+    const scope = debuggerButton('', 'debugger-scope-chip', () => { if (view.thread?.kind === 'observed') view.selectThread(view.thread); });
+    scope.hidden = true;
+    const reading = debuggerNode('span', 'debugger-observation-state');
+    bar.append(kinds, scope, reading);
     const notes = debuggerNode('div', 'debugger-observation-notes');
     // A list kept at older pages says what was written since and offers the newest.
     const pinned = debuggerNode('div', 'debugger-observation-pinned');
@@ -1392,43 +1531,69 @@ function debuggerObservationsSection() {
         const record = item.record;
         row.dataset.kind = record.type;
         const head = debuggerNode('div', 'debugger-row-head');
-        head.append(debuggerNode('span', 'debugger-chip', DEBUGGER_OBSERVATION_KINDS[record.type].label), debuggerNode('span', 'debugger-row-main', debuggerObservationText(record)));
-        const meta = debuggerNode('div', 'debugger-row-meta',
-          `${debuggerTime(record.monotonic_time_ns)} · ${debuggerCategory(record.type)} · P${record.process_id} F${record.frame_id} #${record.sequence_number}${record.request_id !== '0' ? ` · R${record.request_id}` : ''}`);
-        row.title = `${debuggerObservationText(record)} · ${record.type} · session ${record.session_id} · process ${record.process_id} · frame ${record.frame_id} · sequence ${record.sequence_number}`;
+        const enter = debuggerNode('kbd', 'debugger-row-enter', '↵ Open');
+        enter.setAttribute('aria-hidden', 'true');
+        head.append(debuggerNode('span', 'debugger-chip', DEBUGGER_OBSERVATION_KINDS[record.type].label), debuggerNode('span', 'debugger-row-main', debuggerObservationText(record)), enter);
+        // Time and category, then the correlation identifiers, quieter and apart.
+        const meta = debuggerNode('div', 'debugger-row-meta');
+        const ids = `P${record.process_id} F${record.frame_id} #${record.sequence_number}${record.request_id !== '0' ? ` R${record.request_id}` : ''}`;
+        meta.append(debuggerNode('span', 'debugger-row-time', debuggerRelativeTime(record.monotonic_time_ns, debuggerOrigin(view.document, record))),
+          debuggerNode('span', 'debugger-row-category', debuggerCategory(record.type)), debuggerNode('span', 'debugger-row-ids', ` ${ids} `));
+        row.title = `${debuggerObservationText(record)}\n${record.type} · ${debuggerCategory(record.type)}\nsession ${record.session_id} · process ${record.process_id} · frame ${record.frame_id} · sequence ${record.sequence_number}` +
+          `${record.request_id !== '0' ? ` · request ${record.request_id}` : ''}\n${debuggerTime(record.monotonic_time_ns)} monotonic\nEnter opens its position in Sources${record.type === 'request_watch_match' ? ', or its request in Traffic' : ''}.`;
         row.append(head, meta);
       }});
     list.element.addEventListener('scroll', () => holdPlace(view), {passive: true});
-    const more = debuggerButton('Show older records', 'secondary-button debugger-older', () => view.older());
+    const more = debuggerButton('Show older records', 'debugger-link debugger-older', () => view.older());
     detail = debuggerNode('div', 'debugger-detail');
     detail.hidden = true;
-    root.append(kinds, notes, pinned, list.element, more, detail);
-    controls = {root, kinds, notes, pinned, pinnedText, more};
+    root.append(bar, notes, pinned, list.box, more, detail);
+    controls = {root, kinds, scope, reading, notes, pinned, pinnedText, more};
   }
   return {
     id: 'observations', title: 'Observations', order: 30,
-    summary: view => view.document ? String(rows(view).length) : '',
+    summary: view => view.document ? countText(counts(view), view.kind) ?? rows(view).length.toLocaleString('en-US') : '',
     render(body, view) {
       const unread = debuggerUnread(view);
       if (unread) { list?.release(); list = null; controls = null; detail = null; body.replaceChildren(unread); return; }
       if (!controls || !body.contains(controls.root)) { build(view); body.replaceChildren(controls.root); }
-      for (const pill of controls.kinds.children) pill.setAttribute('aria-pressed', String((pill.dataset.kind === 'all' ? null : pill.dataset.kind) === view.kind));
       const answer = view.document, observations = view.observations, loaded = observations.list;
+      const totals = counts(view);
+      // The kind menu names each kind's records in scope; a poll changes only what changed.
+      const wantedKind = view.kind ?? 'all';
+      for (const option of controls.kinds.options) {
+        const count = countText(totals, option.value === 'all' ? null : option.value);
+        const text = count === null ? option.dataset.label : `${option.dataset.label} · ${count}`;
+        if (option.textContent !== text) option.textContent = text;
+        if (option.selected !== (option.value === wantedKind)) option.selected = option.value === wantedKind;
+      }
+      const frame = view.thread?.kind === 'observed' ? view.thread : null;
+      controls.scope.hidden = !frame;
+      if (frame) {
+        const text = `Frame ${frame.frame_id} ×`;
+        if (controls.scope.textContent !== text) controls.scope.textContent = text;
+        controls.scope.setAttribute('aria-label', `Scoped to frame ${frame.frame_id} of session ${frame.session_id}. Show every frame`);
+        controls.scope.title = `Only frame ${frame.frame_id}'s records are listed. Click to list every frame.`;
+      }
       const current = Boolean(observations.query) && observations.key === `${view.kind ?? 'all'}|${view.thread?.kind === 'observed' ? view.thread.key : 'all'}`;
       // Until the new filter is read, the rows read before stay, named as what they are.
       const items = observations.query ? rows(view) : [];
+      const readingText = !current && (!observations.query || view.status === 'ready' || view.status === 'loading') ? 'Reading…' : '';
+      if (controls.reading.textContent !== readingText) controls.reading.textContent = readingText;
       // A record asked for by showObservation is chosen once a read made after
       // the ask holds it, older pages included; until then the list says so.
       const wanted = view.reveal;
       const asked = Boolean(wanted) && current && view.status === 'ready' && view.readSerial > wanted.after;
       const revealing = asked ? items.find(item => item.key === wanted.key) ?? null : null;
       if (revealing) view.reveal = null;
-      const notes = [];
-      const scope = view.thread?.kind === 'observed' ? ` in frame ${view.thread.frame_id}` : '';
+      const notes = [], flags = [];
+      const scope = frame ? ` in frame ${frame.frame_id}` : '';
       const kind = view.kind ? DEBUGGER_OBSERVATION_KINDS[view.kind].filter.toLowerCase() : 'records';
-      if (current) notes.push(debuggerNote(coverage(view, items.length, kind, scope)));
-      else if (!observations.query || view.status === 'ready' || view.status === 'loading') notes.push(debuggerNote('Reading…'));
-      else {
+      if (current) {
+        const said = coverage(view, items.length, kind, scope, totals !== null);
+        if (said.note) notes.push(debuggerNote(said.note, said.note.endsWith('may exist.') ? 'gap' : ''));
+        if (said.flag) flags.push(said.flag);
+      } else if (observations.query && view.status !== 'ready' && view.status !== 'loading') {
         const before = observations.query.type ? DEBUGGER_OBSERVATION_KINDS[observations.query.type].filter.toLowerCase() : 'records';
         const where = observations.query.thread ? ` in frame ${observations.query.thread.frame_id}` : '';
         notes.push(debuggerNote(`The ${kind}${scope} were not read. The rows below are the ${before}${where} read before.`, 'warning'));
@@ -1436,25 +1601,41 @@ function debuggerObservationsSection() {
       if (asked && !revealing) {
         notes.push(debuggerNote(`Observation #${wanted.record.sequence_number} of renderer ${wanted.record.process_id} is not among these ${kind}. Show older records reads older ones, and it is chosen once read.`, 'warning'));
       }
+      // Never hidden silently: each of these is a flag above the list.
       const malformed = answer.observations_malformed + observations.refused + (loaded?.refused ?? 0);
-      if (malformed > 0) notes.push(debuggerNote(`${malformed} ${malformed === 1 ? 'record' : 'records'} in these reads ${malformed === 1 ? 'was' : 'were'} malformed and ${malformed === 1 ? 'is' : 'are'} not shown.`, 'warning'));
-      for (const gap of answer.observation_budget_gaps.slice(0, 2)) {
-        notes.push(debuggerNote(`Renderer ${gap.process_id}, from an earlier build, reached its 1,024 observation records in frame ${gap.frame_id} (gap #${gap.sequence_number}); its later records were refused until the next capture.`, 'gap'));
+      if (malformed > 0) {
+        flags.push(debuggerFlag(`${malformed.toLocaleString('en-US')} malformed, not shown`,
+          `${malformed} ${malformed === 1 ? 'record' : 'records'} in these reads ${malformed === 1 ? 'was' : 'were'} malformed and ${malformed === 1 ? 'is' : 'are'} not shown.`));
       }
-      const gap = debuggerGapNote(view);
-      if (gap) notes.push(gap);
-      if (observations.olderError) notes.push(debuggerNote(`Older records were not read: ${observations.olderError}`, 'warning'));
+      for (const gap of answer.observation_budget_gaps.slice(0, 2)) {
+        flags.push(debuggerFlag(`Renderer ${gap.process_id} capped (older build)`,
+          `Renderer ${gap.process_id}, from an earlier build, reached its 1,024 observation records in frame ${gap.frame_id} (gap #${gap.sequence_number}); its later records were refused until the next capture.`, 'gap'));
+      }
+      if (answer.observation_budget_gaps.length > 2) {
+        flags.push(debuggerFlag(`${answer.observation_budget_gaps.length - 2} more capped`, 'Further renderers from earlier builds that reached their 1,024 observation records.', 'gap'));
+      }
+      const gap = debuggerGapFlag(view);
+      if (gap) flags.push(gap);
+      if (observations.olderError) flags.push(debuggerFlag(`Older records not read: ${observations.olderError}`));
       if (current && loaded?.dropped) {
-        notes.push(debuggerNote(`The list keeps at most ${DEBUGGER_SIDEBAR.rows.toLocaleString('en-US')} records, so ${loaded.dropped.toLocaleString('en-US')} older ${loaded.dropped === 1 ? 'row was' : 'rows were'} dropped as newer ones arrived; get_events pages them.`, 'warning'));
+        flags.push(debuggerFlag(`${loaded.dropped.toLocaleString('en-US')} older ${loaded.dropped === 1 ? 'row' : 'rows'} dropped`,
+          `The list keeps at most ${DEBUGGER_SIDEBAR.rows.toLocaleString('en-US')} records, so ${loaded.dropped.toLocaleString('en-US')} older ${loaded.dropped === 1 ? 'row was' : 'rows were'} dropped as newer ones arrived; get_events pages them.`));
+      }
+      if (flags.length) {
+        const row = debuggerNode('div', 'debugger-flags');
+        row.append(...flags);
+        notes.unshift(row);
       }
       debuggerReplace(controls.notes, notes);
+      controls.notes.hidden = !notes.length;
       const pin = current ? loaded?.pinned : null;
       controls.pinned.hidden = !pin;
       if (pin) {
-        const text = `Kept where you were: the ${debuggerBytes(pin.to - pin.from)} written since (bytes ${pin.from} to ${pin.to}) are more than ${DEBUGGER_SIDEBAR.bridge} reads and are not in this list.`;
+        const text = `${debuggerBytes(pin.to - pin.from)} of newer records are not in this list.`;
         if (controls.pinnedText.textContent !== text) controls.pinnedText.textContent = text;
+        controls.pinnedText.title = `Kept where you were: the ${debuggerBytes(pin.to - pin.from)} written since (bytes ${pin.from} to ${pin.to}) are more than ${DEBUGGER_SIDEBAR.bridge} reads.`;
       }
-      list.element.hidden = !items.length;
+      list.box.hidden = !items.length;
       shown = items;
       list.set(items, {selectedKey: selected?.key ?? null});
       if (revealing) {
@@ -1509,11 +1690,12 @@ function debuggerPausingSection() {
       state.dataset.debuggerNative = 'availability';
       state.dataset.availability = answer.availability;
       state.append(debuggerNode('strong', '', available ? 'Available. ' : 'Unsupported. '), available
-        ? others.length ? `A Brave build serves the pausing debugger. Its controls are in ${where}.`
-          : 'A Brave build serves the pausing debugger, but its controls are not part of this sidebar yet, so nothing here can pause the page.'
-        : `No Brave build serves the pausing debugger (${answer.reason}), so breakpoints, scopes, a paused call stack and stepping are unavailable. Nothing is attached and no page is paused.${others.length ? ` The controls in ${where} stay disabled.` : ''}`);
+        ? others.length ? `A Brave build serves the pausing debugger; its controls are in ${where}.`
+          : 'A Brave build serves the pausing debugger, but this sidebar has no controls for it yet.'
+        : `No Brave build serves the pausing debugger, so nothing is attached or paused.${others.length ? ` The controls in ${where} stay disabled.` : ''}`);
       const fields = debuggerNode('dl', 'debugger-fields');
       for (const [label, value] of [
+        ...(available ? [] : [['Reason', answer.reason]]),
         ['Policy', answer.policy === 'approved' ? 'approved in SAFETY.md' : 'proposed, pending maintainer approval'],
         ['Experiment', `${answer.experiment_flag}, off by default`],
         ['Pause lease', `at most ${Math.round(answer.lease_limit_ms / 1000)} seconds`],
@@ -1626,6 +1808,12 @@ for (const section of [debuggerThreadsSection(), debuggerWatchSection(), debugge
       return null;
     },
     consoleLive: () => globalThis.RebNativeConsole?.liveDocument?.() ?? null,
+    // Watch rules arm only through the Console's connection; this opens it there.
+    canOpenConsole: () => typeof globalThis.RebNativeConsole?.open === 'function',
+    openConsole() {
+      if (hooks.overlays()) debuggerSidebarController?.setOpen(false);
+      globalThis.RebNativeConsole?.open?.();
+    },
     watch: (rules, keep) => globalThis.RebNativeConsole?.watch?.(rules, keep) ?? Promise.resolve(null),
     sequenceGaps: () => typeof shownSequenceGaps === 'function' ? shownSequenceGaps() : null
   };

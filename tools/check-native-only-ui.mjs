@@ -491,6 +491,12 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   const settle = async () => { for (let turn = 0; turn < 10; turn += 1) await nextTurn(); };
   window.AbortSignal ??= AbortSignal;
   const click = node => node.dispatchEvent(new window.Event('click', {bubbles: true}));
+  // The kind menu, chosen as a change of the select's value.
+  const chooseKind = kind => {
+    const select = sidebar.querySelector('.debugger-kind-select');
+    [...select.options].find(option => option.value === kind).selected = true;
+    select.dispatchEvent(new window.Event('change', {bubbles: true}));
+  };
   runInContext(`showScreen('sources')`, context);
   await settle();
   assert.equal(context.__debuggerRequests.length, 0, 'a closed sidebar makes no requests');
@@ -522,7 +528,10 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   const statement = sidebar.querySelector(nativeAvailability);
   assert.equal(statement.dataset.availability, 'unsupported');
   assert.equal(statement.closest('[data-debugger-section]').dataset.debuggerSection, 'pausing');
-  assert.match(statement.textContent, /^Unsupported\. No Brave build serves the pausing debugger \(browser_debugger_unsupported\)/);
+  assert.match(statement.textContent, /^Unsupported\. No Brave build serves the pausing debugger, so nothing is attached or paused\./);
+  // The reason code stays readable beside the policy, not inside the sentence.
+  const reason = [...statement.closest('.debugger-section-body').querySelectorAll('.debugger-fields dt')].find(term => term.textContent === 'Reason');
+  assert.equal(reason?.nextElementSibling?.textContent, 'browser_debugger_unsupported');
   assert.equal(statement.querySelectorAll('button, input, select, textarea, a, summary, [tabindex]').length, 0, 'the pausing state is text');
   assert.equal(document.querySelectorAll(nativeAvailability).length, 1, 'the availability statement appears once');
   // Outside native sections the paused-state words never appear, and inside
@@ -583,11 +592,14 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   assert.equal(scope.includes({session_id: '2', frame_id: '200'}), false);
   assert.match(document.querySelector('#source-tree').textContent, /Frame 200 of session 1, selected in Debugger Threads/);
   // A malformed or failed read keeps the last understandable evidence.
-  for (const [body, text] of [[{contract_version: 2}, /malformed \(an unknown contract version\) and was not used/], [new Error('offline'), /Disconnected: offline/]]) {
+  for (const [body, text, why] of [[{contract_version: 2}, 'Malformed answer: an unknown contract version', /^The answer was not used\. Showing what was read at /],
+    [new Error('offline'), 'Disconnected: offline', /^Showing what was read at .+\. Reading again every \d+ seconds\.$/]]) {
     context.__debuggerAnswer = () => body;
-    click(sidebar.querySelector('.debugger-kind[data-kind="timer_observation"]'));
+    chooseKind('timer_observation');
     await settle();
-    assert.match(sidebar.querySelector('.debugger-sidebar-status').textContent, text);
+    assert.equal(sidebar.querySelector('.debugger-status-state').textContent, text);
+    assert.match(sidebar.querySelector('.debugger-status-time').textContent, /^last read /);
+    assert.match(sidebar.querySelector('.debugger-sidebar-status').title, why);
     assert(sidebar.querySelectorAll('#debugger-observations .debugger-list-row').length > 0, 'rows stay after a failed read');
     assert.equal(sidebar.querySelector('[data-debugger-section="threads"]').dataset.stale, 'true', 'a stale section says so');
   }
@@ -607,7 +619,7 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
     watch: async (rules, keep) => { __watchCalls.push(JSON.stringify(rules)); __keepCalls.push(Boolean(keep));
       globalThis.__debuggerArmed = rules ? JSON.stringify(rules) : null; globalThis.__debuggerKept = Boolean(rules && keep);
       return {status: 'ok', text: 'Armed', ...(keep ? {kept: {origin: 'https://a.test', frame: 'top'}} : {})}; }};`, context);
-  click(sidebar.querySelector('.debugger-kind[data-kind="all"]'));
+  chooseKind('all');
   await settle();
   const form = sidebar.querySelector('.debugger-watch-form');
   assert(form, 'a live Console document offers the rules form');
@@ -622,8 +634,8 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
     events: ['click', 'submit'], timers: true, csp: false, exceptions: 'uncaught', dom: []}]);
   assert.match(form.querySelector('.debugger-watch-result').textContent, /Armed on document 22/);
   // Where a rule is armed, what it cannot observe is said (protocol/native-debugger-observation-v1.md).
-  for (const limit of [/main thread of the documents it is armed on/, /never workers or other documents/, /navigation clears its rules/i,
-    /kept rules arm each later document of its origin and frame kind/, /not documents that are already open/]) {
+  for (const limit of [/^Main thread of armed documents only/, /never workers or other documents/, /Navigation clears these rules/,
+    /kept rules arm later documents from their first script/, /not ones already open\.$/]) {
     assert.match(form.querySelector('.debugger-watch-limits').textContent, limit);
   }
   // Keep names the document's own origin and frame kind, and the browser's
@@ -636,9 +648,9 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   await settle();
   assert.deepEqual(context.__keepCalls, [false, true]);
   assert.match(form.querySelector('.debugger-watch-result').textContent, /Kept for every later https:\/\/a\.test top-frame document/);
-  assert.match(sidebar.querySelector('.debugger-watch-state').textContent, /Kept for every later https:\/\/a\.test top-frame document, armed from Console document 22/);
+  assert.match(sidebar.querySelector('.debugger-watch-state').textContent, /Kept for every later https:\/\/a\.test top-frame document from document 22/);
   context.__debuggerNavigated = true;
-  click(sidebar.querySelector('.debugger-kind[data-kind="all"]'));
+  chooseKind('all');
   await settle();
   const navigated = sidebar.querySelector('.debugger-watch-state').textContent;
   assert.match(navigated, /No Console document holds rules of its own now/);

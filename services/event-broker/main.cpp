@@ -25,6 +25,7 @@
 #include <utility>
 
 #include "../local_resources.hpp"
+#include "../stop_signal.hpp"
 #include "reb/event.hpp"
 #include "reb/event_broker.hpp"
 #include "reb/evidence_guard.hpp"
@@ -36,13 +37,9 @@ namespace {
 
 using reb::services::ScopedDescriptor;
 using reb::services::ScopedSocketPath;
+using reb::services::StopSignal;
 
 constexpr std::size_t kSocketEventBatchCapacity = 256;
-volatile std::sig_atomic_t stop_requested = 0;
-
-void RequestStop(int) {
-  stop_requested = 1;
-}
 
 struct Options final {
   std::string store_path;
@@ -268,18 +265,17 @@ TimedReadStatus ReadExactUntil(const int descriptor,
                                std::string& error) {
   std::size_t offset = 0;
   while (offset < output.size()) {
-    if (stop_requested) {
+    const StopSignal::Wait wait = StopSignal::Readable(descriptor, MillisecondsUntil(deadline_ns));
+    if (wait == StopSignal::Wait::kStopped) {
       return TimedReadStatus::kStopped;
     }
-    pollfd readable{descriptor, static_cast<short>(POLLIN), 0};
-    const int poll_result = poll(&readable, 1, MillisecondsUntil(deadline_ns));
-    if (poll_result == 0) {
+    if (wait == StopSignal::Wait::kTimedOut) {
       return TimedReadStatus::kExpired;
     }
-    if (poll_result < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
+    if (wait == StopSignal::Wait::kInterrupted) {
+      continue;
+    }
+    if (wait == StopSignal::Wait::kFailed) {
       error = std::string("socket poll failed: ") + std::strerror(errno);
       return TimedReadStatus::kError;
     }
@@ -311,18 +307,18 @@ class SocketEventReader final {
                             std::string& error) {
     event_count = 0;
     while (buffered_bytes_ < sizeof(reb::EventRecord)) {
-      if (stop_requested) {
+      const StopSignal::Wait wait =
+          StopSignal::Readable(descriptor, MillisecondsUntil(deadline_ns));
+      if (wait == StopSignal::Wait::kStopped) {
         return TimedReadStatus::kStopped;
       }
-      pollfd readable{descriptor, static_cast<short>(POLLIN), 0};
-      const int poll_result = poll(&readable, 1, MillisecondsUntil(deadline_ns));
-      if (poll_result == 0) {
+      if (wait == StopSignal::Wait::kTimedOut) {
         return TimedReadStatus::kExpired;
       }
-      if (poll_result < 0) {
-        if (errno == EINTR) {
-          continue;
-        }
+      if (wait == StopSignal::Wait::kInterrupted) {
+        continue;
+      }
+      if (wait == StopSignal::Wait::kFailed) {
         error = std::string("socket poll failed: ") + std::strerror(errno);
         return TimedReadStatus::kError;
       }
@@ -442,21 +438,19 @@ bool IngestSocket(const int descriptor,
 
 int AcceptUntil(const int listener, const std::uint64_t deadline_ns) {
   for (;;) {
-    if (stop_requested) {
-      return -2;
-    }
-    pollfd readable{listener, static_cast<short>(POLLIN), 0};
-    const int poll_result = poll(&readable, 1, MillisecondsUntil(deadline_ns));
-    if (poll_result > 0) {
-      return accept(listener, nullptr, nullptr);
-    }
-    if (poll_result == 0) {
-      std::cerr << "Capture session expired\n";
-      return -2;
-    }
-    if (errno != EINTR) {
-      std::cerr << "Unable to wait for browser connection: " << std::strerror(errno) << '\n';
-      return -1;
+    switch (StopSignal::Readable(listener, MillisecondsUntil(deadline_ns))) {
+      case StopSignal::Wait::kReady:
+        return accept(listener, nullptr, nullptr);
+      case StopSignal::Wait::kStopped:
+        return -2;
+      case StopSignal::Wait::kTimedOut:
+        std::cerr << "Capture session expired\n";
+        return -2;
+      case StopSignal::Wait::kInterrupted:
+        continue;
+      case StopSignal::Wait::kFailed:
+        std::cerr << "Unable to wait for browser connection: " << std::strerror(errno) << '\n';
+        return -1;
     }
   }
 }
@@ -498,8 +492,9 @@ int main(const int argc, char* argv[]) {
     PrintUsage(argv[0]);
     return 2;
   }
-  if (!options.socket_path.empty()) {
-    std::signal(SIGUSR1, RequestStop);
+  if (!options.socket_path.empty() && !StopSignal::Install({SIGUSR1})) {
+    std::cerr << "Unable to install the broker stop signal: " << std::strerror(errno) << '\n';
+    return 1;
   }
 
   reb::SessionPolicy policy;

@@ -1,7 +1,7 @@
 # Value-flow fixture
 
 A repository-owned WebAssembly module for
-[`wasm-value-flow-v1`](../../../protocol/wasm-value-flow-v1.md). It uses no
+[`wasm-value-flow-v2`](../../../protocol/wasm-value-flow-v2.md). It uses no
 third-party code, constants or names.
 
 | Function | Shape |

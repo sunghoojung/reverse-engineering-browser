@@ -2,12 +2,14 @@
    last row of the Sources view split. Its header is one 34 px row at every
    width (the field names and then the title give way first), and its track
    never goes below that row, so the panel's controls stay whole and
-   hit-testable. The listing's track keeps 120 px (six rows) when the split
-   has room, and otherwise what is left above the header, down to two rows;
-   below that the split scrolls rather than letting the listing run over the
-   status bar. Other strips above the split (the identification summary and
-   its Details) take height at the minimum window.
-   The panel's cap must be definite; a percentage of an auto track is none.
+   hit-testable. Before a trace the panel is as tall as its header and status;
+   with one it takes up to 45% of the split (420 px at most), and the divider
+   between the listing and the panel (pane_layout.js, "value-flow") resizes
+   that share: an inline grid-template-rows on the split is the drag, and the
+   panel's own cap yields to it. The listing's track keeps 120 px (six rows)
+   when the split has room, and otherwise what is left above the header, down
+   to two rows; below that the split scrolls rather than letting the listing
+   run over the status bar.
    Only outside Graph mode: there the split's rows belong to the graph and the
    listing, and the panel is hidden. */
 #screen-sources .sources-editor:not([data-graph]) .source-view-split:has(> .value-flow:not([hidden])):not([style*="grid-template-rows"]) {
@@ -18,7 +20,7 @@
 #screen-sources .source-view-split > .value-flow { min-height: 0; }
 .value-flow {
   container-type: inline-size;
-  max-height: min(280px, 36vh);
+  max-height: min(420px, 45vh);
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -26,24 +28,40 @@
   border-top: 1px solid var(--line);
   background: var(--panel);
 }
+.value-flow[data-empty] { max-height: none; }
+.source-view-split[style*="grid-template-rows"] > .value-flow { max-height: none; }
 .value-flow[hidden] { display: none; }
 .value-flow-head { flex: none; display: flex; align-items: center; gap: 8px; min-width: 0; height: 34px; padding: 3px 8px 3px 12px; }
 .value-flow-title { flex: none; color: var(--text); font: 600 12px var(--sans); }
 .value-flow-target { flex: 1 1 auto; min-width: 4ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: 12px var(--mono); }
-.value-flow-field { flex: none; display: flex; align-items: center; gap: 4px; color: var(--muted); font: 11px var(--sans); }
+.value-flow-field, .value-flow-check { flex: none; display: flex; align-items: center; gap: 4px; color: var(--muted); font: 11px var(--sans); white-space: nowrap; }
 .value-flow-field select { height: 24px; max-width: 16ch; padding: 0 4px; border: 1px solid var(--line); border-radius: var(--control-radius); background: var(--bg); color: var(--text); font: 12px var(--sans); }
+.value-flow-check input { margin: 0; accent-color: var(--accent); }
 .value-flow-head .source-tool { flex: none; }
 .value-flow-clear { flex: none; width: 24px; height: 24px; display: grid; place-items: center; padding: 0; border: 0; border-radius: var(--control-radius); background: transparent; color: var(--muted); font-size: 14px; line-height: 1; }
 .value-flow-clear:hover { background: var(--panel-3, var(--panel)); color: var(--text); }
 .value-flow-clear[hidden] { display: none; }
-.value-flow :is(button, select):focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Rows are 24 px with no room between them, so the ring is drawn inside the
+   control rather than over the row above or below. */
+.value-flow :is(button, select, summary):focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .value-flow-status { flex: none; margin: 0; padding: 0 12px 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font: 11px var(--sans); }
 .value-flow-status[data-kind="error"] { color: var(--red); }
 .value-flow-status[data-kind="partial"] { color: var(--amber); }
-.value-flow-list { flex: 1 1 auto; min-height: 0; margin: 0; padding: 0 0 6px; overflow: auto; list-style: none; }
-.value-flow-list[hidden] { display: none; }
-.value-flow-row { display: grid; grid-template-columns: minmax(0, 1fr); padding: 0 6px; }
-.value-flow-link { min-width: 0; width: 100%; display: grid; grid-template-columns: 8ch 12ch minmax(0, 1fr); align-items: center; gap: 8px; height: 24px; padding: 0 6px; border: 0; border-radius: var(--control-radius); background: transparent; color: var(--text); font: 12px var(--mono); text-align: left; }
+/* What the slice could not follow, in full, opened on demand. */
+.value-flow-omissions { flex: none; margin: 0 12px 6px; max-height: 40%; overflow: auto; color: var(--amber); font: 11px var(--sans); }
+.value-flow-omissions[hidden] { display: none; }
+.value-flow-omissions summary { cursor: default; border-radius: var(--control-radius); }
+.value-flow-omissions ul { margin: 4px 0 0; padding: 0 0 0 16px; color: var(--muted); }
+.value-flow-omissions li { margin: 2px 0; line-height: 1.4; overflow-wrap: anywhere; }
+/* The tree: one scroller, rows at a fixed height, the undrawn rows above and
+   below as padding on the list so the scrollbar is the whole tree's. */
+.value-flow-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.value-flow-scroll[hidden] { display: none; }
+.value-flow-list { margin: 0; padding: 0 0 6px; list-style: none; }
+.value-flow-row { display: flex; align-items: center; height: 24px; min-width: 0; padding: 0 6px 0 calc(6px + var(--depth, 0) * 14px); }
+.value-flow-row.is-section { margin-top: 2px; }
+.value-flow-row.is-step { padding-left: calc(6px + var(--depth, 0) * 14px); }
+.value-flow-link { flex: 1 1 auto; min-width: 0; display: grid; grid-template-columns: 8ch 16ch minmax(0, 1fr); align-items: center; gap: 8px; height: 24px; padding: 0 6px; border: 0; border-radius: var(--control-radius); background: transparent; color: var(--text); font: 12px var(--mono); text-align: left; }
 .value-flow-link:not(:disabled):hover { background: var(--accent-soft); }
 .value-flow-link:disabled { color: var(--muted); }
 .value-flow-link > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -51,20 +69,36 @@
 .value-flow-role { color: var(--muted); font: 11px var(--sans); }
 .value-flow-row.is-seed .value-flow-role { color: var(--accent); }
 .value-flow-row:is(.is-source, .is-sink) .value-flow-role { color: var(--text); }
-/* A depth-capped row is a limit, gold in the shared state colors. */
-.value-flow-row.is-frontier .value-flow-role { color: var(--amber); }
 .value-flow-detail { min-width: 0; display: flex; align-items: baseline; gap: 8px; overflow: hidden; }
 .value-flow-detail > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.value-flow-kind { flex: 0 1 26ch; color: var(--muted); font: 11px var(--sans); }
-.value-flow-text { flex: 1 1 0; font: 400 12px var(--mono); color: var(--code-text); }
-.value-flow-join { padding: 0 6px 4px calc(20ch + 28px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font: 12px var(--mono); }
+/* The kind keeps a column of its own while there is room, and gives way
+   before the instruction text does: the text always keeps ten characters. */
+.value-flow-kind { flex: 0 3 26ch; color: var(--muted); font: 11px var(--sans); }
+.value-flow-text { flex: 1 1 12ch; min-width: 10ch; font: 400 12px var(--mono); color: var(--code-text); }
+/* Section and group rows: a caret and a label with the exact count. */
+.value-flow-toggle { flex: none; display: flex; align-items: center; gap: 6px; height: 24px; min-width: 0; padding: 0 6px; border: 0; border-radius: var(--control-radius); background: transparent; color: var(--text); font: 12px var(--sans); text-align: left; }
+.value-flow-toggle:hover { background: var(--accent-soft); }
+.value-flow-toggle.value-flow-section { font-weight: 600; }
+.value-flow-toggle.value-flow-group { color: var(--text); }
+.value-flow-toggle.value-flow-path { width: 20px; padding: 0; justify-content: center; color: var(--muted); }
+.value-flow-caret { width: 10px; color: var(--muted); font: 11px var(--sans); }
+.value-flow-toggle-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A path step's detail leads with how the value reached the row above, then
+   the node's kind and text, then a join's incoming branches. */
+.value-flow-edge { flex: 0 2 36ch; min-width: 6ch; color: var(--faint); font: 11px var(--sans); }
+.value-flow-edge::before { content: "← "; color: var(--muted); }
+.value-flow-join { flex: 0 2 36ch; color: var(--faint); font: 11px var(--mono); }
+.value-flow-note { color: var(--faint); font: 11px var(--sans); padding: 0 6px; }
+.value-flow-row.is-pending .value-flow-note { color: var(--muted); }
 @media (max-width: 900px) {
   .value-flow-kind { flex-basis: 24ch; }
+  .value-flow-edge { flex-basis: 26ch; }
 }
 /* The header stays one row: the selects keep their accessible names when
    their visible names give way, and the panel keeps its "Trace value" name
    when the title does. */
-@container (max-width: 600px) { .value-flow-field-name { display: none; } }
+@container (max-width: 720px) { .value-flow-field-name { display: none; } }
+@container (max-width: 600px) { .value-flow-check span { display: none; } }
 @container (max-width: 440px) { .value-flow-title { display: none; } }
 /* Slice rows in the Inspect listing: a tint and a left rule by role, drawn
    over the gutter; the row text is never changed. Role is not a state, so

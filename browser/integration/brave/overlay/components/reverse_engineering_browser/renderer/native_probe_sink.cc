@@ -184,8 +184,7 @@ struct CompiledScriptThreadState final {
   std::uint64_t generation = 0;
   std::array<CompiledScriptKey, kCompiledScriptTableSlots> recorded{};
   std::array<std::array<std::uint8_t, 32>, kCompiledScriptTableSlots> queued_digests{};
-  bool budget_reported = false;
-  bool too_large_reported = false;
+  bool backlog_reported = false;
 };
 
 // Frees each thread's state when that thread exits. A thread_local
@@ -1388,7 +1387,6 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
   category_mask_.store(active ? category_mask : 0, std::memory_order_relaxed);
   expires_at_monotonic_ns_.store(active ? expires_at_monotonic_ns : 0, std::memory_order_relaxed);
   capture_canvas_images_.store(active && capture_canvas_images, std::memory_order_relaxed);
-  compiled_script_source_bytes_.store(0, std::memory_order_relaxed);
   frame_id_provider_.store(active ? frame_id_provider : nullptr, std::memory_order_relaxed);
   capture_request_content_.store(active && network_scope.capture_request_content,
                                  std::memory_order_relaxed);
@@ -1760,7 +1758,7 @@ void NativeProbeSink::CaptureRuntimeTypedArray(const std::uint64_t execution_con
   scoped_script.capture_generation = generation;
   artifact_emitter(NativeArtifactKind::kBytecodeBuffer,
                    NativeArtifactCaptureOrigin::kRuntimeTypedArray, creator_event_id,
-                   execution_context_id, frame_id, sanitized_url, content, scoped_script);
+                   execution_context_id, frame_id, sanitized_url, content, scoped_script, 0);
   if (RuntimeCaptureGeneration() != generation) {
     return;
   }
@@ -1804,14 +1802,25 @@ bool NativeProbeSink::CompiledScriptNeedsRecord(const std::uint64_t execution_co
   return state->recorded[CompiledScriptSlot(key)] != key;
 }
 
-bool NativeProbeSink::ReserveCompiledScriptSource(const std::uint64_t bytes) noexcept {
-  const std::uint64_t previous =
-      compiled_script_source_bytes_.fetch_add(bytes, std::memory_order_relaxed);
-  if (previous + bytes <= kNativeCompiledScriptSourceBudget) {
-    return true;
+// Relaxed: the counter publishes no other memory.
+bool NativeProbeSink::TryChargeArtifactCredit(const std::uint64_t bytes) noexcept {
+  std::uint64_t used = artifact_credit_used_.load(std::memory_order_relaxed);
+  do {
+    if (used != 0 && (used > kNativeRendererArtifactCreditBytes ||
+                      bytes > kNativeRendererArtifactCreditBytes - used)) {
+      return false;
+    }
+  } while (
+      !artifact_credit_used_.compare_exchange_weak(used, used + bytes, std::memory_order_relaxed));
+  return true;
+}
+
+void NativeProbeSink::ReleaseArtifactCredit(const std::uint64_t bytes) noexcept {
+  // Saturating, so a release this renderer never charged cannot wrap.
+  std::uint64_t used = artifact_credit_used_.load(std::memory_order_relaxed);
+  while (!artifact_credit_used_.compare_exchange_weak(used, used - std::min(used, bytes),
+                                                      std::memory_order_relaxed)) {
   }
-  compiled_script_source_bytes_.fetch_sub(bytes, std::memory_order_relaxed);
-  return false;
 }
 
 void NativeProbeSink::RecordCompiledScript(const NativeCompiledScript& script) noexcept {
@@ -1851,17 +1860,15 @@ void NativeProbeSink::RecordCompiledScript(const NativeCompiledScript& script) n
   auto& queued_digest = state.queued_digests[CompiledScriptDigestSlot(payload.source_sha256)];
   using Retention = NativeCompiledScriptRetention;
   if (script.source.empty()) {
-    payload.retention = script.source_length > kNativeArtifactMaxContentBytes
-                            ? Retention::kTooLarge
-                            : Retention::kUnavailable;
+    payload.retention = Retention::kUnavailable;
   } else if (!NativeCompiledScriptSkipsNetwork(script)) {
     payload.retention = Retention::kNetworkFetched;
   } else if (!capture_request_content_.load(std::memory_order_relaxed)) {
     payload.retention = Retention::kNotPermitted;
   } else if (queued_digest == payload.source_sha256) {
     payload.retention = Retention::kDuplicate;
-  } else if (!ReserveCompiledScriptSource(script.source.size())) {
-    payload.retention = Retention::kBudgetSpent;
+  } else if (!TryChargeArtifactCredit(script.source.size())) {
+    payload.retention = Retention::kTransferBacklog;
   } else {
     payload.retention = Retention::kQueued;
   }
@@ -1879,20 +1886,17 @@ void NativeProbeSink::RecordCompiledScript(const NativeCompiledScript& script) n
   event.inline_payload = EncodeNativeCompiledScriptPayload(payload);
   if (EmitStatus(event, generation) != NativeProbeEmitStatus::kAdmitted) {
     if (payload.retention == Retention::kQueued) {
-      compiled_script_source_bytes_.fetch_sub(script.source.size(), std::memory_order_relaxed);
+      ReleaseArtifactCredit(script.source.size());
     }
     return;
   }
 
-  if (payload.retention == Retention::kBudgetSpent && !state.budget_reported) {
-    state.budget_reported =
+  // Each record names its own backlog; the gap puts the reason in the
+  // session's failure counts.
+  if (payload.retention == Retention::kTransferBacklog && !state.backlog_reported) {
+    state.backlog_reported =
         RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, script.frame_id,
-                                 "compiled_script_source_budget", generation,
-                                 NativeProbeCategory::kArtifact) != 0;
-  } else if (payload.retention == Retention::kTooLarge && !state.too_large_reported) {
-    state.too_large_reported =
-        RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, script.frame_id,
-                                 "compiled_script_source_too_large", generation,
+                                 "compiled_script_source_backlog", generation,
                                  NativeProbeCategory::kArtifact) != 0;
   }
   if (payload.retention != Retention::kQueued) {
@@ -1906,7 +1910,7 @@ void NativeProbeSink::RecordCompiledScript(const NativeCompiledScript& script) n
                              : NativeArtifactCaptureOrigin::kCompiledScript,
                    event.header.sequence_number, script.execution_context_id, script.frame_id,
                    script.script_url.empty() ? script.context_url : script.script_url,
-                   script.source, {});
+                   script.source, {}, script.source.size());
 }
 
 std::uint64_t NativeProbeSink::RecordRuntimeBufferEvent(
@@ -1939,8 +1943,13 @@ void NativeProbeSink::CaptureGeneratedArtifact(
     const std::string_view source_url,
     const std::span<const std::uint8_t> content) noexcept {
   if (!artifact_emitter_.load(std::memory_order_acquire) || source_url.empty() ||
-      source_url.size() > kNativeArtifactMaxUrlBytes || content.empty() ||
-      content.size() > kNativeArtifactMaxContentBytes) [[likely]] {
+      source_url.size() > kNativeArtifactMaxUrlBytes || content.empty()) [[likely]] {
+    return;
+  }
+  // A Wasm module of any size is kept against the renderer's credit; the other
+  // kinds keep their own limits.
+  const bool wasm = kind == NativeArtifactKind::kWasm;
+  if (!wasm && content.size() > kNativeArtifactMaxContentBytes) {
     return;
   }
   const bool valid_kind_and_origin =
@@ -1977,8 +1986,13 @@ void NativeProbeSink::CaptureGeneratedArtifact(
       MonotonicTimeNs() >= expires_at) {
     return;
   }
+  if (wasm && !TryChargeArtifactCredit(content.size())) {
+    RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, frame_id,
+                             "wasm_module_backlog", generation, NativeProbeCategory::kArtifact);
+    return;
+  }
   artifact_emitter(kind, capture_origin, creator_event_id, execution_context_id, frame_id,
-                   source_url, content, {});
+                   source_url, content, {}, wasm ? content.size() : 0);
 }
 
 std::uint64_t NativeProbeSink::RecordSurfaceOperation(

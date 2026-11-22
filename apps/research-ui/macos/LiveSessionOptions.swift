@@ -1,11 +1,11 @@
 import Foundation
 
-// The start panel's session options beyond the capture mode and content
-// limits: the browser profile and the native switches the launcher otherwise
-// reads only from the environment (scripts/run-live-session.sh). The page sends
-// them as one `options` object of booleans, checked here; native turns them
-// into launcher switches. A switch whose categories the mask lacks stays off,
-// as the defaults always have, instead of failing the launch.
+// The start panel's session options beyond the capture mode: the browser
+// profile and the native switches the launcher otherwise reads only from the
+// environment (scripts/run-live-session.sh). The page sends them as one
+// `options` object of booleans, checked here; native turns them into launcher
+// switches. A switch whose categories the mask lacks stays off, as the defaults
+// always have, instead of failing the launch.
 struct LiveSessionOptions: Equatable {
   // A new, empty browser profile for one session instead of the persistent
   // research profile.
@@ -157,9 +157,9 @@ struct LiveSessionOptions: Equatable {
 }
 
 // The start panel's last choices, saved for the next app run: the capture
-// mode and the session options other than Fresh profile. The content limits
-// are not saved. A file the app cannot read is ignored, and the panel starts
-// from the environment and the defaults instead.
+// mode and the session options other than Fresh profile. A file the app
+// cannot read is ignored, and the panel starts from the environment and the
+// defaults instead.
 struct LiveSessionPreferences: Equatable {
   var mode: LiveCaptureMode?
   var options: LiveSessionOptions?

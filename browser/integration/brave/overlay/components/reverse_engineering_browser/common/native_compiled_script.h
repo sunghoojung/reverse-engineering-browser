@@ -21,20 +21,22 @@ enum class NativeCompiledScriptKind : std::uint8_t {
   kFunctionConstructor = 5,
 };
 
+// Version 2 hashes every source and has no source budget or size limit
+// (protocol/native-compiled-scripts-v2.md).
+inline constexpr std::uint16_t kNativeCompiledScriptPayloadVersion = 2;
+
 // What happened to the source. Every compiled script gets exactly one.
 enum class NativeCompiledScriptRetention : std::uint8_t {
   kQueued = 1,
   kDuplicate = 2,
   kNetworkFetched = 3,
   kNotPermitted = 4,
-  kBudgetSpent = 5,
-  kTooLarge = 6,
+  // 5 and 6 are retired: version 1's source budget and 16 MiB limit.
   kUnavailable = 7,
+  // kNativeRendererArtifactCreditBytes was in use by sources and modules the
+  // browser had not yet copied out.
+  kTransferBacklog = 8,
 };
-
-// Unique source bytes one renderer may queue in one configuration. Identical
-// sources count once, so this bounds distinct generated code.
-inline constexpr std::uint64_t kNativeCompiledScriptSourceBudget = 64ULL * 1024ULL * 1024ULL;
 
 // Transient views: the sink copies what it keeps before returning.
 struct NativeCompiledScript final {
@@ -50,8 +52,7 @@ struct NativeCompiledScript final {
   std::string_view script_url;
   std::string_view context_url;
   bool is_document = false;
-  // UTF-8 length. source is empty when the text is over the artifact limit or
-  // could not be converted.
+  // UTF-8 length. source is empty when the text could not be converted.
   std::uint64_t source_length = 0;
   std::span<const std::uint8_t> source;
 };
@@ -90,7 +91,7 @@ struct NativeCompiledScriptPayload final {
     for (std::size_t i = 0; i < width; ++i)
       out[offset + i] = static_cast<std::byte>((v >> (8U * i)) & 255U);
   };
-  put(0, 1, 2);
+  put(0, kNativeCompiledScriptPayloadVersion, 2);
   put(2, 128, 2);
   put(4, static_cast<std::uint8_t>(value.kind), 1);
   put(5, static_cast<std::uint8_t>(value.retention), 1);

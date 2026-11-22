@@ -21,10 +21,21 @@
 #define COMPONENT_EXPORT(component)
 #define UNSAFE_BUFFERS(...) __VA_ARGS__
 
+#ifndef GUARDED_BY
+#define GUARDED_BY(x)
+#endif
+
 template <class T>
 using scoped_refptr = std::shared_ptr<T>;
 
 namespace base {
+using OnceClosure = OnceCallback<void()>;
+// The pipeline is single-threaded; the stream's lock discipline is unchanged.
+class Lock {};
+class AutoLock {
+ public:
+  explicit AutoLock(Lock&) {}
+};
 template <class T>
 class NoDestructor {
  public:
@@ -121,15 +132,18 @@ struct TimeDelta {
 inline TimeDelta Nanoseconds(std::int64_t value) {
   return {value};
 }
-// This pipeline never reaches session expiry; no task is ever posted.
+// This pipeline never reaches session expiry, and its artifacts fit the
+// in-flight pool, so no task is ever posted.
 struct SequencedTaskRunner {
   static bool HasCurrentDefault() { return false; }
-  static SequencedTaskRunner* GetCurrentDefault() {
-    static SequencedTaskRunner runner;
-    return &runner;
+  static const std::shared_ptr<SequencedTaskRunner>& GetCurrentDefault() {
+    static const std::shared_ptr<SequencedTaskRunner> runner(new SequencedTaskRunner,
+                                                             [](SequencedTaskRunner*) {});
+    return runner;
   }
   template <class Task>
   void PostDelayedTask(const Location&, Task&&, TimeDelta) {}
+  bool PostTask(const Location&, OnceClosure) { return false; }
 };
 }  // namespace base
 #define FROM_HERE ::base::Location()
@@ -254,7 +268,7 @@ class NativeResponseBodyCapture {
     return body;
   }
   void OnTransferCompleted(std::uint64_t, bool) {}
-  bool OnStreamRefused(std::uint64_t) { return false; }
+  bool OnStreamRefused(std::uint64_t, NativeArtifactReceiveStatus) { return false; }
   void Flush() {}
 };
 // This pipeline carries no header blocks and no deferred request bodies; the

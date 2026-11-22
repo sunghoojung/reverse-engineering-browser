@@ -440,7 +440,7 @@ conditional reads. No target/session join is inferred from URL or timing.
 
 `capture_options` labels what this session's launcher passed to Brave, for
 every live session (agent, app or `make live`): `request_content`,
-`content_limits`, `canvas_images`, `request_stacks`, `document_start`
+`canvas_images`, `request_stacks`, `document_start`
 (`permitted` or `not_permitted`; whether
 this Brave honors it is `document_start_supported` in `get_native_console`),
 and `js_invocation` with `state` (`not_armed`, `armed`, `browser_unsupported`
@@ -451,17 +451,10 @@ enable nothing. Idle and demo
 backends report `source: not_live` with everything off. Site labels and
 source URLs stay in `get_js_invocation_sites`.
 
-`content_limits` is a versioned addition to `capture_options`: for a session
-with `request_content` it is `{"version": 1, "request_content_budget_mib",
-"response_body_budget_mib", "response_media"}`, the limits the session runs
-with, named as the start options are, whichever of the app's start panel, the
-start options or the launcher environment set them. Otherwise it is null. The
-launcher passes them as `--session-request-content-budget-mib`,
-`--session-response-body-budget-mib` and `--session-response-media` (`0` or
-`1`), which the backend accepts only with `--session-request-content` and
-within the launcher's bounds; a value no launcher named is null, never a
-guessed default. The schema does not require `content_limits`: a backend from
-before the addition omits it, and a reader treats that as not reported.
+A content session keeps every request and response body whole, media and
+fonts included, so `capture_options` has no limits to report. The
+`content_limits` object that earlier backends added there named the removed
+per-session budgets and media choice; no backend reports it now.
 
 CDP was removed. Version 1 keeps its debugger fields with fixed retirement
 values so existing clients still parse it: `debugger_state` is `unavailable`,
@@ -544,7 +537,6 @@ returns 409 `dependency_unavailable` for these actions.
 `LiveSessionStart` options: `url`, `wasm_dispatch`, `wasm_call_indirect`,
 `guest_adapter`, `js_dispatch_sites`, `quiet`, `category_mask`,
 `duration_seconds`, `localhost_only`, `canvas_images`, `request_content`,
-`request_content_budget_mib`, `response_body_budget_mib`, `response_media`,
 `request_stacks`, `document_start`, `browser_internal`, `extension_traffic`,
 `fresh_profile`, `js_invocation_sites`, `js_invocation_saved_sites`,
 `js_invocation_digests`, `confirm_sensitive_capture`,
@@ -570,16 +562,11 @@ alone; an inherited capture switch, site file,
 browser profile or embedded-session variable is ignored, so an inherited
 `REB_CAPTURE_REQUEST_CONTENT`, `REB_CONSOLE_DOCUMENT_START`,
 `REB_NATIVE_JS_INVOCATION_SITES`, `REB_NATIVE_JS_INVOCATION_DIGESTS` or
-`REB_NATIVE_REQUEST_STACKS` never reaches an agent session, and neither do
-`REB_REQUEST_CONTENT_BUDGET_MIB`, `REB_RESPONSE_BODY_BUDGET_MIB` or
-`REB_CAPTURE_RESPONSE_MEDIA`.
+`REB_NATIVE_REQUEST_STACKS` never reaches an agent session.
 
 | Option | Launcher switch | Rule |
 | --- | --- | --- |
-| `request_content` | `REB_CAPTURE_REQUEST_CONTENT=1` | Sensitive: on by default with the consent (`confirm_sensitive_capture` for `reb-api session start`, session start through MCP) and category bits 256 and 1024. Off, request body length, type and digest are still recorded, but no path, query or body bytes. |
-| `request_content_budget_mib` | `REB_REQUEST_CONTENT_BUDGET_MIB` | 1..4096 MiB of unique request bodies and full targets, default 256. Needs `request_content`, so it is behind the same confirmation. |
-| `response_body_budget_mib` | `REB_RESPONSE_BODY_BUDGET_MIB` | 1..16384 MiB of unique response bodies, default 512. Needs `request_content`. |
-| `response_media` | `REB_CAPTURE_RESPONSE_MEDIA=1` | Also keeps the images, audio, video and fonts that page elements load. Needs `request_content`, so it is behind the same confirmation. |
+| `request_content` | `REB_CAPTURE_REQUEST_CONTENT=1` | Sensitive: on by default with the consent (`confirm_sensitive_capture` for `reb-api session start`, session start through MCP) and category bits 256 and 1024. Keeps every request and response body whole, media and fonts included; the artifact receiver refuses only what would leave less free disk than its reserve. Off, request body length, type and digest are still recorded, but no path, query or body bytes. |
 | `request_stacks` | `REB_NATIVE_REQUEST_STACKS=1` | The stack that started each renderer request, read with `get_request_stack`. Needs category bits 256 and 1024. Left unset, it is on with `REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED=1`, so a Brave without `--reb-request-stacks` starts without it; named `true`, it is strict and such a Brave refuses the start. |
 | `document_start` | `REB_CONSOLE_DOCUMENT_START=1` | Permits document-start Console scripts in this capture browser. Arms nothing: a rule still needs a live Console connection and a confirmed `arm_document_start`. |
 | `browser_internal` | `REB_CAPTURE_BROWSER_INTERNAL=1` | Records requests of browser pages such as `brave://settings` and DevTools, which are otherwise counted and not recorded. |
@@ -691,8 +678,8 @@ plain message:
 | `artifact_receiver_disconnected` | New scripts and Wasm modules are not stored. |
 | `no_events` | The store is empty. |
 | `wasm_without_artifacts` | Wasm compiled, but no Wasm module was stored. |
-| `artifact_capture_failed` | Some artifact bodies were not stored. |
-| `request_content_not_retained` | A content session kept less than the whole of some request bodies, full targets, response bodies, header blocks or cookie lists; `category` names which (`request_headers`, `response_headers` and `cookie_list` among them), `reason` the state and `count` how many. A request content or response body budget reason (`not_captured_session_budget` for `request_body` or `response_body`, `not_retained_session_budget` for `request_target`) adds `budget_mib`, the budget in force or null when this backend does not know it, `retained_bytes`, the unique bytes of that budget's artifacts in the indexed manifest, and `retained_complete`, false while the manifest is still being indexed, and its message names the remedy for the next session: the start panel's **Request content budget** or **Response body budget**, or the start option. Header blocks and cookie lists have their own fixed budget. `not_captured_type` names **Capture media and fonts** or `response_media`. |
+| `artifact_capture_failed` | Some artifact bodies were not stored; `reason` names why. `disk_reserve` is the artifact receiver's free-disk reserve, and `compiled_script_source_backlog` and `wasm_module_backlog` a renderer whose 256 MiB of earlier sources and modules the browser had not yet copied out. |
+| `request_content_not_retained` | A content session kept less than the whole of some request bodies, full targets, response bodies, header blocks or cookie lists; `category` names which (`request_headers`, `response_headers` and `cookie_list` among them), `reason` the state and `count` how many. `not_captured_disk_reserve` means the artifact receiver's free-disk reserve refused the content. The budget reasons (`not_captured_session_budget`, `not_retained_session_budget`), `captured_truncated` and `not_captured_type` appear only in records an older browser wrote, and their messages say so; current capture has no budget, size limit or media exception. |
 | `network_headers_unattributed` | Severity `warning`: `blocks` network header blocks and `lists` cookie lists arrived for requests the capture no longer tracked, so no row shows them. |
 | `final_headers_missing` | `count` requests of a content session ended with provisional headers and no cookie lists, one check per `reason`: `download`, `service_worker`, `from_cache` or `failed` (`info`, no request reached the network or it failed first), `not_reported` (`warning`, no observer or an untracked block) and `record_dropped` (`warning`, a full queue dropped records while it ran, so the block may have been lost). See [missing final blocks](native-network-v3.md#missing-final-blocks). |
 | `queue_drops` | Records lost to a full queue, beyond named gap markers. |
@@ -702,7 +689,7 @@ plain message:
 | `no_tab_traffic_excluded` | Capture counted extension-worker requests, DevTools loads, requests of service workers no page used in this browser, and browser-initiated prefetches with no page, instead of recording them; `count` is the requests. Not a gap. `REB_CAPTURE_EXTENSION_TRAFFIC=1` records the extension requests instead. |
 | `memory_cache_reuse_not_recorded` | Renderers counted memory-cache reuses past their 4,096 records per capture configuration instead of recording them; `count` is the reuses. Not a gap. Reuses in pages that are not ordinary (an SVG image's own document or a page popup), which no tab owns, are the separate `non_ordinary_page_reuse` exclusion. |
 | `response_bodies_not_observed` | `count` responses never reached the browser proxy, so their bodies are not retained under their own request: the message counts those a service worker served, those reused from the memory cache and those answered in the renderer. Traffic links a reuse to the request whose response it reused, and a service worker answer to the worker's own fetch of the same URL, where those were retained. |
-| `response_snapshots_withheld` | `count` response bodies had a snapshot withheld while they arrived: their snapshot allowance, the session's snapshot quarter of the response body budget, or the budget was used, so their newest snapshot is older than the schedule would make it ([partial bodies](native-network-v3.md#partial-bodies)). |
+| `response_snapshots_withheld` | `count` response bodies had a snapshot withheld while they arrived: one body's snapshots together copy at most four times what it kept plus 64 MiB, so their newest snapshot is older than the schedule would make it ([partial bodies](native-network-v3.md#partial-bodies)). Older sessions also withheld snapshots at their response body budget's shares. The body itself is retained whole when it ends. |
 | `network_tab_unresolved` | Severity `error`: `count` request rows have no tab, and the message counts them by reason. A capture bug; `request_tabs.unresolved_requests` names up to 16 by `process_id` and `request_id`, each with its `reason`. |
 | `network_tab_no_document` | Severity `warning`: `count` request rows come from a context with no parent document (a shared storage worklet), which the capture does not link; their reason is `no_document`. |
 | `malformed_lines` | Severity `warning`: `count` stored lines are not valid events, so no count includes them. |

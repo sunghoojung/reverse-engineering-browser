@@ -47,6 +47,29 @@ class OnceCallback<R(Args...)> {
   };
   std::unique_ptr<Base> impl_;
 };
+// Runs its closure once, when destroyed, like the pinned callback_helpers.h.
+class ScopedClosureRunner {
+ public:
+  ScopedClosureRunner() = default;
+  explicit ScopedClosureRunner(OnceCallback<void()> closure) : closure_(std::move(closure)) {}
+  ScopedClosureRunner(ScopedClosureRunner&&) = default;
+  ScopedClosureRunner& operator=(ScopedClosureRunner&& other) {
+    if (this != &other) {
+      RunAndReset();
+      closure_ = std::move(other.closure_);
+    }
+    return *this;
+  }
+  ~ScopedClosureRunner() { RunAndReset(); }
+  void RunAndReset() {
+    if (closure_) {
+      std::move(closure_).Run();
+    }
+  }
+
+ private:
+  OnceCallback<void()> closure_;
+};
 }  // namespace base
 
 #endif  // REB_TOOLS_NATIVE_TEST_SUPPORT_ONCE_CALLBACK_STUB_H_

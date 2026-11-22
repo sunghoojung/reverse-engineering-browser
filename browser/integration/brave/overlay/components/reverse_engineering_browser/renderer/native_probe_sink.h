@@ -261,6 +261,9 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   [[nodiscard]] bool CompiledScriptNeedsRecord(std::uint64_t execution_context_id,
                                                std::uint32_t script_id) const noexcept;
   void RecordCompiledScript(const NativeCompiledScript& script) noexcept;
+  // The browser copied out bytes this renderer charged against
+  // kNativeRendererArtifactCreditBytes. Any thread.
+  void ReleaseArtifactCredit(std::uint64_t bytes) noexcept;
   void ConfigureNativeWasmGuest(std::shared_ptr<const NativeWasmGuestAdapter> adapter,
                                 NativeGuestCaptureEmitter capture,
                                 NativeGuestHostEmitter host) noexcept;
@@ -658,7 +661,7 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                        std::string_view reason,
                        std::uint64_t generation) noexcept;
 
-  [[nodiscard]] bool ReserveCompiledScriptSource(std::uint64_t bytes) noexcept;
+  [[nodiscard]] bool TryChargeArtifactCredit(std::uint64_t bytes) noexcept;
   std::uint64_t RecordRuntimeBufferEvent(
       NativeProbeType type,
       std::uint64_t frame_id,
@@ -946,8 +949,9 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   // newer generation starts a fresh count, so reuses still in flight from a
   // replaced configuration never charge or reset the new one.
   std::atomic<std::uint64_t> memory_cache_budget_{0};
-  // Source bytes queued in this configuration, across every thread.
-  std::atomic<std::uint64_t> compiled_script_source_bytes_{0};
+  // Bytes sent to the browser and not yet released, across every thread and
+  // configuration: a buffer of a replaced configuration still pins memory.
+  std::atomic<std::uint64_t> artifact_credit_used_{0};
   // Monotonic generation claims are never reset: an old capture cannot spend
   // or release a replacement configuration's snapshot quota.
   std::array<std::atomic<std::uint64_t>, kRuntimeTypedArrayMaxSnapshots>

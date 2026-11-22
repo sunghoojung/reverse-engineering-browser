@@ -43,62 +43,6 @@ pub struct CaptureState<'a> {
     pub capture_stopped: bool,
     pub artifact_receiver_configured: bool,
     pub artifact_receiver_connected: bool,
-    /// `session_context::content_limits`: the budgets this session runs with,
-    /// or null when unknown or without request content.
-    pub content_limits: Value,
-}
-
-/// A content session's two byte budgets: which refusals and which retained
-/// artifact kinds each one counts (native-network-v2.md, native-network-v3.md).
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Budget {
-    RequestContent,
-    ResponseBody,
-}
-impl Budget {
-    fn of_refusal(category: &str, reason: &str) -> Option<Self> {
-        // Header blocks and cookie lists have their own fixed 64 MiB budget,
-        // which no start panel control sets, so they are not named here.
-        match (category, reason) {
-            ("response_body", "not_captured_session_budget") => Some(Self::ResponseBody),
-            ("request_body", "not_captured_session_budget")
-            | ("request_target", "not_retained_session_budget") => Some(Self::RequestContent),
-            _ => None,
-        }
-    }
-    fn of_kind(kind: &str) -> Option<Self> {
-        match kind {
-            "request_body" | "request_target" => Some(Self::RequestContent),
-            "response_body" => Some(Self::ResponseBody),
-            _ => None,
-        }
-    }
-    /// The start option, as content_limits and start_live_session name it.
-    fn option(self) -> &'static str {
-        match self {
-            Self::RequestContent => "request_content_budget_mib",
-            Self::ResponseBody => "response_body_budget_mib",
-        }
-    }
-    /// The start panel control that sets it.
-    fn control(self) -> &'static str {
-        match self {
-            Self::RequestContent => "Request content budget",
-            Self::ResponseBody => "Response body budget",
-        }
-    }
-    fn contents(self) -> &'static str {
-        match self {
-            Self::RequestContent => "request bodies and full targets",
-            Self::ResponseBody => "response bodies",
-        }
-    }
-}
-
-/// The start option of the budget an artifact kind is charged to; the
-/// artifact lookup index sums each budget's unique bytes under it.
-pub(crate) fn budget_of_kind(kind: &str) -> Option<&'static str> {
-    Budget::of_kind(kind).map(Budget::option)
 }
 
 /// A stored time or identifier for SQL: times stay below 2^63, and
@@ -345,7 +289,7 @@ impl Refusals {
             }
             (Some("network"), Some("response_body")) => {
                 if let Some(reason) = payload()
-                    .filter(|b| b.len() == 128 && (b[0] == 1 || b[0] == 2))
+                    .filter(|b| b.len() == 128 && (1..=3).contains(&b[0]))
                     .and_then(|b| response_refusal(b[4]))
                 {
                     *self.content.entry(("response_body", reason)).or_default() += 1;
@@ -695,7 +639,9 @@ fn missing_check(reason: &str, count: u64) -> Value {
     item
 }
 
-/// request_body states that keep less than the whole body (native-network-v2.md).
+/// request_body states that keep less than the whole body (native-network-v2.md,
+/// native-network-v3.md). 5 and 10 appear only in version 1 records, from a
+/// browser that had a size limit and a session budget.
 fn body_refusal(state: u8) -> Option<&'static str> {
     Some(match state {
         5 => "captured_truncated",
@@ -706,11 +652,13 @@ fn body_refusal(state: u8) -> Option<&'static str> {
         10 => "not_captured_session_budget",
         11 => "not_captured_credential_form",
         12 => "not_captured_read_incomplete",
+        13 => "not_captured_disk_reserve",
         _ => return None,
     })
 }
 
-/// Version 2 request_target retention states that did not retain the full target.
+/// Version 2 request_target retention states that did not retain the full
+/// target. 4 appears only from a browser that had a session budget.
 fn target_refusal(retention: u8) -> Option<&'static str> {
     Some(match retention {
         2 => "not_retained_artifact_unavailable",
@@ -722,6 +670,8 @@ fn target_refusal(retention: u8) -> Option<&'static str> {
 }
 
 /// response_body states a capture limit or policy caused (native-network-v3.md).
+/// 2, 9 and 12 appear only below version 3, from a browser that had a size
+/// limit, a media exception and a session budget.
 fn response_refusal(state: u8) -> Option<&'static str> {
     Some(match state {
         2 => "captured_truncated",
@@ -729,34 +679,29 @@ fn response_refusal(state: u8) -> Option<&'static str> {
         10 => "not_captured_artifact_unavailable",
         11 => "not_captured_transfer_refused",
         12 => "not_captured_session_budget",
+        13 => "not_captured_disk_reserve",
         _ => return None,
     })
 }
 
-/// A budget refusal names the budget in force, what this session retained
-/// against it, and the remedy: the start panel control, or the start option,
-/// for the next session.
-fn budget_meaning(
-    budget: Budget,
-    what: &str,
-    count: u64,
-    budget_mib: &Value,
-    retained: u64,
-    complete: bool,
-) -> String {
-    let size = budget_mib
-        .as_u64()
-        .map(|value| format!("{value} MiB "))
-        .unwrap_or_default();
-    format!(
-        "{count} {what} arrived after this session's {size}{} was used; {}{} of unique {} are retained. Raise {} in the start panel (New Live Session…) for the next session; an agent's start_live_session sets {}.",
-        budget.control().to_ascii_lowercase(),
-        if complete { "" } else { "at least " },
-        mib(retained),
-        budget.contents(),
-        budget.control(),
-        budget.option(),
-    )
+/// What an `artifact_capture_failed` reason means when the reason alone does
+/// not say it. Unknown reasons are reported as they are.
+fn failure_meaning(reason: &str) -> Option<&'static str> {
+    Some(match reason {
+        "disk_reserve" => {
+            "storing them would have left less free disk than the artifact receiver's reserve (4 GiB by default). Free space on the store's volume: later artifacts are kept again once there is room"
+        }
+        "compiled_script_source_backlog" => {
+            "a renderer was still waiting for the browser to copy out 256 MiB of earlier script sources and Wasm modules; each such script_compiled record keeps its source length and digest"
+        }
+        "wasm_module_backlog" => {
+            "a renderer was still waiting for the browser to copy out 256 MiB of earlier script sources and Wasm modules; the module's compile record keeps its length and digest"
+        }
+        "compiled_script_source_budget" | "compiled_script_source_too_large" => {
+            "a source budget or size limit of the browser that recorded this session. Current capture keeps every source whole"
+        }
+        _ => return None,
+    })
 }
 
 fn content_noun(category: &str) -> &'static str {
@@ -784,14 +729,22 @@ fn content_meaning(category: &str, reason: &str, count: u64) -> String {
             "were longer than the 320 KiB block limit, so only their header count and size are recorded"
         }
         "not_captured_session_budget" if headers => {
-            "arrived after the configuration retained 64 MiB of header blocks and cookie lists. Start a new session for a fresh budget"
+            "arrived after their configuration retained 64 MiB of header blocks and cookie lists, a limit of the browser that recorded this session. Current capture has none"
+        }
+        "not_captured_session_budget" | "not_retained_session_budget" => {
+            "arrived after this session's content budget was used, a limit of the browser that recorded this session. Current capture keeps every body and target whole"
+        }
+        "not_captured_disk_reserve" => {
+            "were refused because storing them would have left less free disk than the artifact receiver's reserve (4 GiB by default). Free space on the store's volume: later content is kept again once there is room"
         }
         "not_captured_url" if headers => {
             "had no HTTP(S) URL, a URL longer than 8 KiB, or a hop the capture no longer tracked"
         }
-        "captured_truncated" => "were longer than 16 MiB, so only their first 16 MiB is retained",
+        "captured_truncated" => {
+            "were longer than 16 MiB, so only their first 16 MiB is retained, a limit of the browser that recorded this session. Current capture keeps every body whole"
+        }
         "not_captured_type" => {
-            "were images, audio, video or fonts that page elements load, which are kept only when Capture media and fonts is on in the start panel (New Live Session…) for the next session, or an agent's start_live_session sets response_media"
+            "were images, audio, video or fonts that page elements load, which the browser that recorded this session skipped. Current content sessions keep them"
         }
         "not_captured_body_kind" => {
             "had a part the browser does not read, so they are described but not read"
@@ -808,7 +761,7 @@ fn content_meaning(category: &str, reason: &str, count: u64) -> String {
         "not_captured_artifact_unavailable" | "not_retained_artifact_unavailable" => {
             "had no artifact channel: the Artifact category was off or the receiver was disconnected"
         }
-        _ => "were refused by the bounded in-flight memory pool or artifact queue",
+        _ => "were refused by the in-flight memory pool, the artifact channel or the receiver",
     };
     format!("{count} {what} {why}.")
 }
@@ -1200,13 +1153,6 @@ pub fn build(
     } else {
         "indexing"
     };
-    let retained = |budget: Budget| {
-        manifest
-            .retained
-            .iter()
-            .find(|(option, _)| option == budget.option())
-            .map_or(0, |(_, bytes)| *bytes)
-    };
     let has_kind = |kind: &str| manifest.by_kind.iter().any(|(name, _)| name == kind);
     let mut checks = Vec::new();
     let live = state.capture_mode == "live";
@@ -1268,7 +1214,16 @@ pub fn build(
         let mut item = check(
             "artifact_capture_failed",
             "warning",
-            format!("{count} artifact captures failed ({reason}); those bytes are not stored."),
+            match failure_meaning(reason) {
+                Some(meaning) => format!(
+                    "{count} artifact captures failed ({reason}): {meaning}. Those bytes are not stored."
+                ),
+                None => {
+                    format!(
+                        "{count} artifact captures failed ({reason}); those bytes are not stored."
+                    )
+                }
+            },
         );
         item["reason"] = json!(reason);
         item["count"] = json!(count.to_string());
@@ -1292,29 +1247,14 @@ pub fn build(
         checks.push(item);
     }
     for (category, reason, count) in &stored.content {
-        let budget = Budget::of_refusal(category, reason);
-        let message = match budget {
-            Some(budget) => budget_meaning(
-                budget,
-                content_noun(category),
-                *count,
-                &state.content_limits[budget.option()],
-                retained(budget),
-                manifest.complete,
-            ),
-            None => content_meaning(category, reason, *count),
-        };
-        let mut item = check("request_content_not_retained", "warning", message);
+        let mut item = check(
+            "request_content_not_retained",
+            "warning",
+            content_meaning(category, reason, *count),
+        );
         item["category"] = json!(category);
         item["reason"] = json!(reason);
         item["count"] = json!(count.to_string());
-        // The budget in force (null when this backend does not know it) and
-        // the unique bytes retained against it in the indexed manifest.
-        if let Some(budget) = budget {
-            item["budget_mib"] = state.content_limits[budget.option()].clone();
-            item["retained_bytes"] = json!(retained(budget).to_string());
-            item["retained_complete"] = json!(manifest.complete);
-        }
         checks.push(item);
     }
     let (blocks, lists) = (stored.unattributed_blocks, stored.unattributed_lists);
@@ -1599,7 +1539,9 @@ pub fn build(
 fn body_case_meaning(case: &str) -> &'static str {
     match case {
         "captured" => "retained in full",
-        "captured_truncated" => "retained up to the 16 MiB capture limit",
+        "captured_truncated" => {
+            "retained up to the 16 MiB capture limit of the browser that recorded this session"
+        }
         "partial" => "still arriving; the newest snapshot is retained",
         "aborted" => "the network failed mid-body; what arrived is retained",
         "cancelled" => "the page or browser stopped reading; what arrived is retained",
@@ -1609,15 +1551,20 @@ fn body_case_meaning(case: &str) -> &'static str {
             "redirected, then ended with no other response; Chromium discards redirect bodies"
         }
         "not_captured_type" => {
-            "images, audio, video or fonts that page elements load, kept only when Capture media and fonts is on in the start panel (New Live Session…), or an agent's start_live_session sets response_media"
+            "images, audio, video or fonts that page elements load, which the browser that recorded this session skipped"
         }
         "not_captured_artifact_unavailable" => {
             "no artifact channel: the Artifact category was off or the receiver was disconnected"
         }
         "not_captured_transfer_refused" => {
-            "refused by the bounded in-flight memory pool or artifact queue"
+            "refused by the in-flight memory pool, the artifact channel or the receiver"
         }
-        "not_captured_session_budget" => "arrived after the response body budget was used",
+        "not_captured_session_budget" => {
+            "arrived after the response body budget of the browser that recorded this session was used"
+        }
+        "not_captured_disk_reserve" => {
+            "refused by the artifact receiver's free-disk reserve; earlier snapshots it kept are retained"
+        }
         "malformed" => "the response body record is malformed",
         "source_artifact" => "a script or Wasm response, retained as a source artifact",
         "no_record" => {
@@ -1707,7 +1654,7 @@ pub fn add_response_bodies(summary: &mut Value, counts: std::result::Result<Valu
             "response_snapshots_withheld",
             "info",
             format!(
-                "{withheld} response bodies had a snapshot withheld while they arrived: their own snapshot allowance, the session's snapshot quarter of the response body budget, or the budget was used, so their newest snapshot is older than the schedule would make it. Raise Response body budget in the start panel (New Live Session…) for the next session; an agent's start_live_session sets response_body_budget_mib."
+                "{withheld} response bodies had a snapshot withheld while they arrived, so their newest snapshot is older than the schedule would make it. Each snapshot copies the body so far, and one body's snapshots together copy at most four times what it kept plus 64 MiB (protocol/native-network-v3.md); the body itself is retained whole when it ends."
             ),
         );
         item["count"] = json!(withheld.to_string());
@@ -1772,17 +1719,19 @@ mod tests {
             .find(|check| check["code"] == "response_snapshots_withheld")
             .unwrap();
         assert_eq!(withheld["count"], "3");
-        // A remedy names the start panel's control, never an environment
+        // Nothing names a control that no longer exists, or an environment
         // variable a person using the packaged app cannot set.
         let remedy = withheld["message"].as_str().unwrap();
-        assert!(
-            remedy.contains("Raise Response body budget in the start panel"),
-            "{remedy}"
-        );
-        assert!(!remedy.contains("REB_"), "{remedy}");
+        assert!(remedy.contains("retained whole when it ends"), "{remedy}");
         let media = body_case_meaning("not_captured_type");
-        assert!(media.contains("Capture media and fonts"), "{media}");
-        assert!(!media.contains("REB_"), "{media}");
+        assert!(media.contains("the browser that recorded"), "{media}");
+        for text in [
+            remedy,
+            media,
+            body_case_meaning("not_captured_session_budget"),
+        ] {
+            assert!(!text.contains("REB_") && !text.contains("Raise"), "{text}");
+        }
         let cases = summary["response_bodies"]["cases"].as_array().unwrap();
         assert_eq!(cases.len(), 5);
         // A refused body that keeps an earlier snapshot is counted as such.
@@ -1879,7 +1828,6 @@ mod tests {
             capture_stopped: false,
             artifact_receiver_configured: true,
             artifact_receiver_connected: true,
-            content_limits: Value::Null,
         };
         let summary = summarize(&store, &artifacts, &state);
         let events = &summary["events"];
@@ -2006,7 +1954,6 @@ mod tests {
                 capture_stopped: false,
                 artifact_receiver_configured: false,
                 artifact_receiver_connected: false,
-                content_limits: Value::Null,
             };
             summarize(&store, &artifacts, &state)["checks"]
                 .as_array()
@@ -2039,7 +1986,6 @@ mod tests {
             capture_stopped: false,
             artifact_receiver_configured: false,
             artifact_receiver_connected: false,
-            content_limits: Value::Null,
         };
         let append = |events: &[Value]| {
             let mut file = std::fs::OpenOptions::new()
@@ -2197,7 +2143,6 @@ mod tests {
             capture_stopped: false,
             artifact_receiver_configured: false,
             artifact_receiver_connected: false,
-            content_limits: Value::Null,
         };
         let summary = summarize(&store, &artifacts, &state);
         let checks = summary["checks"].as_array().unwrap();
@@ -2268,7 +2213,7 @@ mod tests {
     }
 
     #[test]
-    fn budget_refusals_name_the_budget_what_it_holds_and_the_control() {
+    fn older_limits_are_named_as_the_recording_browsers_and_the_reserve_as_its_own() {
         let root = tempfile::tempdir().unwrap();
         let store = root.path().join("events.jsonl");
         let artifacts = root.path().join("artifacts");
@@ -2282,136 +2227,96 @@ mod tests {
             event.to_string()
         };
         let lines = [
+            // Version 1 records of the budgets, the media exception and the
+            // 16 MiB limit that current capture no longer has.
             child(1, "response_body", &|p| {
                 p[0] = 1;
                 p[4] = 12;
             }),
             child(2, "response_body", &|p| {
-                p[0] = 1;
-                p[4] = 12;
-            }),
-            child(3, "response_body", &|p| {
-                p[0] = 1;
+                p[0] = 2;
                 p[4] = 9;
             }),
-            child(4, "request_body", &|p| p[5] = 10),
-            child(5, "request_target", &|p| {
+            child(3, "request_body", &|p| p[5] = 10),
+            child(4, "request_target", &|p| {
                 p[0] = 2;
                 p[9] = 4;
             }),
-            // A header block past its own fixed budget, which no start panel
-            // control sets.
+            child(5, "request_body", &|p| p[5] = 5),
             header(6, 1, 0, false, 1, 7, 0, 0).to_string(),
+            // Current records the disk reserve refused.
+            child(7, "response_body", &|p| {
+                p[0] = 3;
+                p[4] = 13;
+            }),
+            child(8, "request_body", &|p| {
+                p[0] = 2;
+                p[5] = 13;
+            }),
+            event(9, "artifact", "artifact_capture_failed", 5, "disk_reserve").to_string(),
         ];
         std::fs::write(&store, lines.join("\n") + "\n").unwrap();
-        // Two distinct response bodies and a repeat of one, one request body
-        // and one full target: the repeat is stored once and counted once.
-        let row = |id: u64, kind: &str, digest: char, size: u64| {
-            let hash = digest.to_string().repeat(64);
-            json!({"protocol_version":1,"artifact_id":id.to_string(),"session_id":"9","navigation_id":"0",
-                "frame_id":"5","parent_artifact_id":"0","creator_event_id":"1","execution_context_id":"0",
-                "capture_origin":if kind == "response_body" {"network_response"} else {"network_request"},
-                "kind":kind,"url":"https://owned.example/x","mime_type":"application/json",
-                "byte_size":size,"sha256":hash,"sensitive":true,"content_path":format!("blobs/{hash}.bin")})
-            .to_string()
+        let state = CaptureState {
+            instance_id: "1:2",
+            capture_mode: "live",
+            broker_connected: true,
+            capture_stopped: false,
+            artifact_receiver_configured: true,
+            artifact_receiver_connected: true,
         };
-        let manifest = [
-            row(1, "response_body", 'a', 3 * 1_048_576),
-            row(2, "response_body", 'b', 1_048_576),
-            row(3, "response_body", 'a', 3 * 1_048_576),
-            row(4, "request_body", 'c', 524_288),
-            row(5, "request_target", 'd', 524_288),
-        ];
-        std::fs::write(artifacts.join("manifest.jsonl"), manifest.join("\n") + "\n").unwrap();
-        let summarize = |content_limits: Value| {
-            let state = CaptureState {
-                instance_id: "1:2",
-                capture_mode: "live",
-                broker_connected: true,
-                capture_stopped: false,
-                artifact_receiver_configured: true,
-                artifact_receiver_connected: true,
-                content_limits,
-            };
-            summarize(&store, &artifacts, &state)
-        };
-        // Different budgets, so a check that reports the other one fails.
-        let summary = summarize(json!({"version":1,"request_content_budget_mib":3,
-            "response_body_budget_mib":8,"response_media":false}));
-        let find = |summary: &Value, category: &str, reason: &str| {
+        let summary = summarize(&store, &artifacts, &state);
+        let find = |category: &str, reason: &str| {
             summary["checks"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .find(|check| check["category"] == category && check["reason"] == reason)
                 .cloned()
-                .unwrap()
+                .unwrap_or_else(|| panic!("{category} {reason}: {}", summary["checks"]))
         };
-        let response = find(&summary, "response_body", "not_captured_session_budget");
-        assert_eq!(response["count"], "2");
-        assert_eq!(response["budget_mib"], 8);
-        assert_eq!(response["retained_bytes"], (4 * 1_048_576).to_string());
-        assert_eq!(response["retained_complete"], true);
-        assert_eq!(
-            response["message"],
-            "2 response bodies arrived after this session's 8 MiB response body budget was used; 4.0 MiB of unique response bodies are retained. Raise Response body budget in the start panel (New Live Session…) for the next session; an agent's start_live_session sets response_body_budget_mib."
-        );
-        // Request bodies and full targets share the request content budget.
-        for (category, reason, noun) in [
-            (
-                "request_body",
-                "not_captured_session_budget",
-                "request bodies",
-            ),
-            (
-                "request_target",
-                "not_retained_session_budget",
-                "full request targets",
-            ),
+        // No remedy names a control or option that no longer exists.
+        for (category, reason) in [
+            ("response_body", "not_captured_session_budget"),
+            ("response_body", "not_captured_type"),
+            ("request_body", "not_captured_session_budget"),
+            ("request_target", "not_retained_session_budget"),
+            ("request_body", "captured_truncated"),
+            ("request_headers", "not_captured_session_budget"),
         ] {
-            let check = find(&summary, category, reason);
-            assert_eq!(check["budget_mib"], 3, "{category}");
-            assert_eq!(check["retained_bytes"], "1048576", "{category}");
+            let check = find(category, reason);
+            assert_eq!(check["count"], "1", "{category} {reason}");
+            assert!(check.get("budget_mib").is_none(), "{check}");
             let message = check["message"].as_str().unwrap();
-            assert!(message.starts_with(&format!("1 {noun} arrived after this session's 3 MiB request content budget was used; 1.0 MiB of unique request bodies and full targets are retained.")), "{message}");
-            assert!(message.contains("Raise Request content budget in the start panel (New Live Session…) for the next session"), "{message}");
-            assert!(message.contains("request_content_budget_mib"), "{message}");
+            assert!(
+                message.contains("the browser that recorded this session"),
+                "{message}"
+            );
+            for removed in [
+                "Raise",
+                "start panel",
+                "budget_mib",
+                "response_media",
+                "REB_",
+            ] {
+                assert!(!message.contains(removed), "{removed}: {message}");
+            }
+        }
+        for category in ["response_body", "request_body"] {
+            let reserve = find(category, "not_captured_disk_reserve");
+            let message = reserve["message"].as_str().unwrap();
+            assert!(message.contains("free disk"), "{message}");
             assert!(!message.contains("REB_"), "{message}");
         }
-        let headers = find(&summary, "request_headers", "not_captured_session_budget");
-        assert!(headers.get("budget_mib").is_none(), "{headers}");
-        assert!(headers.get("retained_bytes").is_none(), "{headers}");
+        let failed = summary["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["code"] == "artifact_capture_failed")
+            .unwrap();
+        assert_eq!(failed["reason"], "disk_reserve");
         assert!(
-            headers["message"]
-                .as_str()
-                .unwrap()
-                .contains("64 MiB of header blocks"),
-            "{headers}"
-        );
-        let media = find(&summary, "response_body", "not_captured_type");
-        assert!(
-            media.get("budget_mib").is_none(),
-            "media is not a budget refusal"
-        );
-        let media = media["message"].as_str().unwrap();
-        assert!(media.contains("Capture media and fonts is on in the start panel (New Live Session…) for the next session"), "{media}");
-        assert!(
-            media.contains("response_media") && !media.contains("REB_"),
-            "{media}"
-        );
-        // A backend that does not know the budget says so rather than guessing.
-        let unknown = find(
-            &summarize(Value::Null),
-            "response_body",
-            "not_captured_session_budget",
-        );
-        assert!(unknown["budget_mib"].is_null());
-        assert_eq!(unknown["retained_bytes"], (4 * 1_048_576).to_string());
-        assert!(
-            unknown["message"]
-                .as_str()
-                .unwrap()
-                .contains("after this session's response body budget was used; 4.0 MiB")
+            failed["message"].as_str().unwrap().contains("free disk"),
+            "{failed}"
         );
     }
 
@@ -2454,7 +2359,6 @@ mod tests {
             capture_stopped: false,
             artifact_receiver_configured: false,
             artifact_receiver_connected: false,
-            content_limits: Value::Null,
         };
         let summary = summarize(&store, &artifacts, &state);
         let gap = summary["checks"]
@@ -2536,7 +2440,6 @@ mod tests {
             capture_stopped: false,
             artifact_receiver_configured: false,
             artifact_receiver_connected: false,
-            content_limits: Value::Null,
         };
         let summary = summarize(&store, &artifacts, &state);
         assert_eq!(
@@ -2640,7 +2543,6 @@ mod tests {
             capture_stopped: false,
             artifact_receiver_configured: false,
             artifact_receiver_connected: false,
-            content_limits: Value::Null,
         };
         let summary = summarize(
             &root.path().join("events.jsonl"),

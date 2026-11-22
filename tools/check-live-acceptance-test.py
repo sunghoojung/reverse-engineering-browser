@@ -28,10 +28,11 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
-from live_acceptance import (baseline, bodies, budget, cookies, debugger, driver, headers, limits, metadata,
-                             nostacks, stacks, tabs)
+from live_acceptance import (baseline, bodies, cookies, debugger, driver, headers, limits, metadata,
+                             nostacks, reserve, stacks, tabs, volume)
 from live_acceptance.evidence import Api, ApiError, Session, decode_request_body, decode_request_target, parse_header_block
 from live_acceptance.fixture import POLL_SECONDS, payload, sha256
 from live_acceptance.pages import line_of, locate
@@ -105,7 +106,8 @@ class FixtureRoutes(unittest.TestCase):
     def test_index_links_every_page_area(self):
         status, _, body = self.get("/")
         self.assertEqual(status, 200)
-        for name in ("baseline", "stacks", "headers", "cookies", "bodies", "limits", "debugger", "tabs", "budget"):
+        for name in ("baseline", "stacks", "headers", "cookies", "bodies", "limits", "debugger", "tabs", "volume",
+                     "reserve"):
             self.assertIn(f"/{name}/index.html".encode(), body)
 
     def test_header_hops_redirect_twice_with_repeated_headers(self):
@@ -526,7 +528,8 @@ class Builder:
         self.backend.answers[("/api/request-stack", row["root"]["request_id"])] = {
             "status": "recorded", "state": "captured", "frames": frames, **fields}
 
-    def request_body(self, row: dict, state: int, data: bytes, kind: int = 1, flags: int = 0x13) -> None:
+    def request_body(self, row: dict, state: int, data: bytes, kind: int = 1, flags: int = 0x13,
+                     version: int = 2) -> None:
         """A request_body record (native network v2 and v3); flag bit 1 carries the digest."""
         artifact = "0"
         captured = 0
@@ -534,7 +537,8 @@ class Builder:
             captured = len(data) if state == 4 else 16 * 1024 * 1024
             artifact = self.backend.artifact("request_body", data[:captured])
         digest = bytes.fromhex(sha256(data)) if flags & 0x02 else bytes(32)
-        record = (b"\x01\x00\x80\x00" + bytes([kind, state, flags, 0]) + len(data).to_bytes(8, "little")
+        record = (version.to_bytes(2, "little") + b"\x80\x00" + bytes([kind, state, flags, 0])
+                  + len(data).to_bytes(8, "little")
                   + captured.to_bytes(8, "little") + bytes(8) + digest + bytes(64))
         self.event("request_body", row, record, artifact)
 
@@ -749,66 +753,175 @@ class Evidence(unittest.TestCase):
         bodies.kept(self.run_, "/bodies/json?r=1", bodies.JSON_BODY, problems)
         self.assertEqual(len(problems), 1, problems)
 
+    def test_web_font_load_after_its_cache_probe(self):
+        # Blink first asks only the cache for a web font and loads it again on a miss.
+        self.build.row("/bodies/font.woff2?r=1", failed=True, error_code=bodies.CACHE_MISS,
+                       response_body={"case": "failed_before_response"})
+        self.build.kept_body(self.build.row("/bodies/font.woff2?r=1"), bodies.FONT)
+        problems = []
+        bodies.kept(self.run_, "/bodies/font.woff2?r=1", bodies.FONT, problems, cache_probe=True)
+        self.assertEqual(problems, [])
+        bodies.kept(self.run_, "/bodies/font.woff2?r=1", bodies.FONT, problems)
+        self.assertEqual(problems, ["/bodies/font.woff2?r=1: 2 rows"])
+
     def test_limits_long_target_and_password_form(self):
         target = "/limits/graphql?query=" + "f" * 8200
         self.get(target)
         row = self.build.row(target)
         self.build.request_target(row, target.encode())
+        form = b"user=reb&secret=not-a-real-password"
+        self.get("/limits/password", method="POST", body=form)
         password = self.build.row("/limits/password", "POST")
-        self.build.request_body(password, 11, b"user=reb&secret=x", flags=0x11)
+        # A content session reads a password form post whole, keeps it and marks it.
+        self.build.request_body(password, 4, form, flags=0xD3)
         limits.verify(self.run_)
         self.assertEqual(self.statuses()["8 KB GraphQL GET URL"], "PASS", self.report.lines)
         self.assertEqual(self.statuses()["password form post"], "PASS", self.report.lines)
         self.assertEqual(self.statuses()["page step limits:json"], "FAIL")
-        self.report.lines.clear()
-        self.backend.events.clear()
-        self.build.request_body(password, 11, b"user=reb&secret=x")
-        self.run_.records(refresh=True)
-        limits.verify(self.run_)
+        # An older browser's credential-form refusal, or a kept body without the
+        # mark or the read flag, fails.
+        for state, flags, version in ((11, 0x11, 1), (4, 0x53, 2), (4, 0x93, 2), (4, 0xD3, 1)):
+            self.report.lines.clear()
+            self.backend.events.clear()
+            self.build.request_body(password, state, form, flags=flags, version=version)
+            self.run_.records(refresh=True)
+            limits.verify(self.run_)
+            self.assertEqual(self.statuses()["password form post"], "FAIL", (state, flags, version))
+        # The cleared events took the full target with them.
         self.assertEqual(self.statuses()["8 KB GraphQL GET URL"], "FAIL")
-        self.assertEqual(self.statuses()["password form post"], "FAIL")
 
-    def test_budget_order_and_summary(self):
-        self.assertEqual(budget.ordered(["captured", "captured", budget.BUDGET_CASE], "captured"), [])
-        self.assertTrue(budget.ordered(["captured", budget.BUDGET_CASE, "captured"], "captured"))
-        self.assertTrue(budget.ordered(["captured"], "captured"))
-        self.assertTrue(budget.ordered(["captured", "malformed", budget.BUDGET_CASE], "captured"))
-        refused = (budget.TRANSFER_REFUSED,)
-        self.assertEqual(budget.ordered(["captured", budget.TRANSFER_REFUSED, "captured", budget.BUDGET_CASE],
-                                        "captured", refused), [])
-        self.assertTrue(budget.ordered(["captured", budget.TRANSFER_REFUSED, budget.BUDGET_CASE], "captured"))
-        self.assertTrue(budget.ordered(["captured", budget.BUDGET_CASE, budget.TRANSFER_REFUSED],
-                                       "captured", refused))
-        for index in range(budget.RESPONSES):
-            row = self.build.row(f"/budget/response?i={index}")
-            if index < 7:
-                self.build.kept_body(row, payload(f"budget-response-{index}", budget.RESPONSE_SIZE))
-            else:
-                row["response_body"] = {"case": budget.BUDGET_CASE}
+    def volume_evidence(self, memory=(100_000, 120_000)):
+        """Rows, records and artifacts a correct capture keeps for the volume page, at small sizes."""
         connection = http.client.HTTPConnection("127.0.0.1", self.fx.port, timeout=20)
-        for index in range(budget.POSTS):
+
+        def send(method, target, body=None):
+            connection.request(method, target, body=body)
+            return connection.getresponse().read()
+
+        for index in range(volume.RESPONSES):
+            target = f"/volume/response?i={index}"
+            self.build.kept_body(self.build.row(target), send("GET", target))
+        for index in range(volume.REQUESTS):
+            data = payload(f"request-{index}", volume.REQUEST_SIZE)
+            target = f"/volume/request?i={index}"
+            send("POST", target, data)
+            self.build.request_body(self.build.row(target, "POST"), 4, data, flags=0x53)
+        source = send("GET", "/volume/script.js")
+        self.backend.artifact("javascript", source)
+        self.build.row("/volume/script.js", response_body={"case": "source_artifact"})
+        self.fx._beacons.update({name: [{"ok": True, "value": volume.REQUESTS}] for name in volume.RESULTS})
+        self.fx._beacons["volume:script"] = [{"ok": True, "value": volume.SCRIPT_BYTES * 2}]
+        for index in range(volume.POSTS):
             data = f"reb-post-{index}-".encode() + b"p" * 400
-            connection.request("POST", "/budget/post", body=data)
-            connection.getresponse().read()
-            # Two bodies the artifact queue refused before the budget ran out.
-            state = 8 if index in (100, 101) else 4 if index < 2000 else 10
-            self.build.request_body(self.build.row("/budget/post", "POST"), state, data)
+            send("POST", "/volume/post", data)
+            # Two bodies the artifact queue refused.
+            self.build.request_body(self.build.row("/volume/post", "POST"), 8 if index in (3, 4) else 4, data,
+                                    flags=0x53)
         connection.close()
-        self.backend.summary = {"checks": [
-            {"code": "request_content_not_retained", "category": category, "reason": budget.BUDGET_CASE,
-             "budget_mib": 1, "retained_bytes": "1000000", "count": "3"}
-            for category in ("response_body", "request_body")] + [
-            {"code": "request_content_not_retained", "category": "request_body",
-             "reason": budget.TRANSFER_REFUSED, "count": "2"}]}
-        budget.verify(self.run_)
-        posts = f"{budget.POSTS} small POSTs until the request budget runs out"
-        self.assertEqual(self.statuses(), {"response budget shown when it runs out": "PASS", posts: "PASS"},
-                         self.report.lines)
-        # A refusal the summary does not count was lost from view.
-        self.backend.summary["checks"][-1]["count"] = "1"
-        self.report.lines.clear()
-        budget.verify(self.run_)
-        self.assertEqual(self.statuses()[posts], "FAIL", self.report.lines)
+        self.backend.summary = {"checks": [{"code": "request_content_not_retained", "category": "request_body",
+                                            "reason": volume.TRANSFER_REFUSED, "count": "2"}]}
+        rest, peak = memory
+        self.run_.measurements[volume.NAME] = volume.Memory(
+            4242, [rest] * 8, {"responses": [rest, peak, rest], "requests": [rest, peak], "script": [rest]})
+        # The same Brave without a session grows by half as much.
+        alone = rest + (peak - rest) // 2
+        self.run_.measurements[volume.REFERENCE] = volume.Memory(
+            4343, [rest] * 8, {"responses": [rest, alone], "requests": [alone], "script": [rest]})
+
+    def test_volume_bodies_script_posts_and_memory(self):
+        sizes = {"RESPONSE_SIZE": 64 * 1024, "REQUEST_SIZE": 48 * 1024, "SCRIPT_BYTES": 4096, "POSTS": 40,
+                 "RESPONSE_TOTAL_MIN": 256 * 1024, "REQUEST_TOTAL_MIN": 128 * 1024}
+        with contextlib.ExitStack() as patches:
+            for name, value in sizes.items():
+                patches.enter_context(mock.patch.object(volume, name, value))
+            self.volume_evidence()
+            volume.verify(self.run_)
+            cases = ["response bodies past 512 MiB", "request bodies past 256 MiB", "compiled script past 16 MiB",
+                     "40 small POSTs", "no content budget or size limit", "browser memory while the bodies pass"]
+            self.assertEqual(self.statuses(), {case: "PASS" for case in cases}, self.report.lines)
+            self.assertIn("responses (0 MiB) +20 MiB with capture, +10 MiB without, capture's share +10 MiB",
+                          self.report.lines[-1].detail)
+            self.assertTrue(any(note.startswith("volume memory: ") for note in self.run_.notes), self.run_.notes)
+
+            # A body cut at an older browser's 16 MiB, a summary naming a budget, an
+            # uncounted refusal and a browser that held a whole body each fail.
+            self.backend.rows[0]["response_body"]["captured_length"] = "16"
+            self.backend.summary["checks"][0]["count"] = "1"
+            self.backend.summary["checks"].append({"code": "request_content_not_retained", "category": "response_body",
+                                                   "reason": "not_captured_session_budget", "count": "1"})
+            self.run_.measurements[volume.NAME].phases["responses"].append(
+                110_000 + volume.SHARE_LIMITS["responses"] // 1024)
+            self.report.lines.clear()
+            self.run_.rows(refresh=True)
+            volume.verify(self.run_)
+            failed = {"response bodies past 512 MiB", "40 small POSTs", "no content budget or size limit",
+                      "browser memory while the bodies pass"}
+            self.assertEqual({case for case, status in self.statuses().items() if status == "FAIL"}, failed,
+                             self.report.lines)
+
+    def test_volume_needs_the_browser_process(self):
+        self.run_.measurements[volume.NAME] = None
+        volume.check_memory(self.run_)
+        self.assertEqual(self.report.lines[-1].status, "FAIL")
+        self.assertIn("not found", self.report.lines[-1].detail)
+
+    def test_volume_memory_samples_every_phase_at_its_end(self):
+        # Phases that end before the first interval sample still have one.
+        with mock.patch.object(volume, "footprint_kib", return_value=100_000), \
+                mock.patch.object(volume, "BASELINE_SECONDS", 0), \
+                mock.patch.object(volume, "SAMPLE_SECONDS", 3600), \
+                mock.patch.object(self.run_, "wait", return_value=True), \
+                mock.patch.object(self.run_.fixture, "wait_beacons"), \
+                mock.patch.object(self.run_.fixture, "release"):
+            memory = volume.measure(self.run_, volume.NAME, 4242)
+        self.assertTrue(all(memory.phases.get(phase) for phase in volume.PHASES), memory.phases)
+
+    def test_volume_memory_needs_the_page_without_a_session(self):
+        self.run_.measurements[volume.NAME] = volume.Memory(4242, [100_000] * 8, {"responses": [120_000]})
+        self.run_.measurements[volume.REFERENCE] = "no Brave executable to run the page without a session"
+        volume.check_memory(self.run_)
+        self.assertEqual(self.report.lines[-1].status, "FAIL")
+        self.assertIn("without a session: no Brave executable", self.report.lines[-1].detail)
+
+    def test_reserve_refusals_are_named_and_counted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.run_.session.document["session_dir"] = directory
+            stats = os.statvfs(directory)
+            above = stats.f_bavail * stats.f_frsize + 2**40
+            log = Path(directory) / "artifact-receiver.log"
+            log.write_text(f"Artifact store ready\nArtifact store: disk reserve {above} bytes; an artifact ...\n")
+            response = self.build.row("/reserve/response", response_body={"case": reserve.REFUSED})
+            request_row = self.build.row("/reserve/request", "POST")
+            self.build.request_body(request_row, 13, b"x" * 1000, flags=0x51)
+            self.fx._beacons.update({name: [{"ok": True, "value": 1}] for name in reserve.RESULTS})
+            self.backend.summary = {"checks": [{"code": "request_content_not_retained", "category": category,
+                                                "reason": reserve.REFUSED, "count": "1"}
+                                               for category in ("request_body", "response_body")]}
+            reserve.verify(self.run_)
+            cases = {"receiver disk reserve": "PASS", "bodies refused for the disk reserve": "PASS"}
+            self.assertEqual(self.statuses(), cases, self.report.lines)
+
+            # A stored body, a reserve below the free space or an uncounted refusal fails.
+            response["response_body"] = {"case": "captured", "artifact_id": "9"}
+            self.backend.artifact("response_body", b"kept")
+            log.write_text("Artifact store: disk reserve 1 bytes; an artifact ...\n")
+            self.backend.summary["checks"].pop()
+            self.report.lines.clear()
+            self.run_.rows(refresh=True)
+            reserve.verify(self.run_)
+            self.assertEqual(self.statuses(), {case: "FAIL" for case in cases}, self.report.lines)
+            detail = self.report.lines[-1].detail
+            for problem in ("response case captured", "1 request or response bodies were stored",
+                            "counts no response_body"):
+                self.assertIn(problem, detail)
+
+    def test_reserve_environment_is_above_the_free_space(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stats = os.statvfs(directory)
+            free = stats.f_bavail * stats.f_frsize // 2**20
+            reserved = int(reserve.environment(Path(directory))["REB_ARTIFACT_DISK_RESERVE_MIB"])
+            self.assertGreaterEqual(reserved, free + reserve.ABOVE_FREE_MIB - 64)
+            self.assertLessEqual(len(str(reserved)), 10, "the launcher takes at most ten digits")
 
     def test_tabs_unresolved_fails_and_nothing_passes_without_rows(self):
         self.backend.summary = {"checks": [], "request_tabs": {"unresolved": "2", "unresolved_reasons": {"worker": "2"}}}
@@ -849,11 +962,11 @@ class Evidence(unittest.TestCase):
         for target in nostacks.TARGETS:
             self.build.row(target)
         nostacks.verify(self.run_)
-        self.assertEqual(self.statuses(), {"no stack walk without --request-stacks": "PASS"}, self.report.lines)
+        self.assertEqual(self.statuses(), {"no stack walk with --request-stacks=false": "PASS"}, self.report.lines)
         self.report.lines.clear()
         self.backend.events.append({"type": "request_initiator_stack", "process_id": 7, "request_id": "101"})
         nostacks.verify(self.run_)
-        self.assertEqual(self.statuses()["no stack walk without --request-stacks"], "FAIL")
+        self.assertEqual(self.statuses()["no stack walk with --request-stacks=false"], "FAIL")
 
     def test_session_context_matches_each_kind(self):
         with tempfile.NamedTemporaryFile("w", suffix=".log") as log:
@@ -867,9 +980,14 @@ class Evidence(unittest.TestCase):
             self.run_.kind = "metadata"
             driver.check_context(self.run_)
             self.assertEqual(self.report.lines[-1].status, "FAIL")
-            self.run_.kind = "budget"
+            for kind in ("volume", "reserve"):
+                self.run_.kind = kind
+                driver.check_context(self.run_)
+                self.assertEqual(self.report.lines[-1].status, "PASS", kind)
+            # A backend that still reports content limits is stale.
+            self.backend.context["capture_options"]["content_limits"] = {"request_content_budget_mib": 256}
             driver.check_context(self.run_)
-            self.assertIn("content_limits.request_content_budget_mib", self.report.lines[-1].detail)
+            self.assertIn("capture_options.content_limits", self.report.lines[-1].detail)
 
     def test_debugger_observations(self):
         page = debugger.index_page(self.fx.cross_site_origin)

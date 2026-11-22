@@ -2568,7 +2568,7 @@ pub(crate) mod tests {
         assert_eq!(unknown["coverage"]["budget_exhausted"], true);
     }
 
-    /// Compiled script capture (protocol/native-compiled-scripts-v1.md) keeps
+    /// Compiled script capture (protocol/native-compiled-scripts-v2.md) keeps
     /// inline text as `compiled_script` and eval text as `dynamic_javascript`.
     /// They hash the same UTF-8 source as the script identity, so a stored
     /// frame resolves to them when the walk kept no `stack_script` copy.

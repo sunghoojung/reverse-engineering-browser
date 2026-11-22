@@ -296,9 +296,8 @@ fn gap(reason: &str, after: usize, detail: &str) -> Value {
 // hop that initiator resolution failed to close. One millisecond bounds that
 // hop with room to spare while staying far below navigation scale.
 const ADJACENCY_WINDOW_NS: u64 = 1_000_000;
-// Canonical decimal only, matching the step projection and the native builder,
-// so a non-canonical sibling cannot count toward the uniqueness test in one
-// implementation and be skipped in the other.
+// Canonical decimal only, as the step projection requires, so a sibling the
+// projection would refuse never counts toward the uniqueness test.
 fn monotonic(value: &Value) -> Option<u64> {
     validation::canonical(&value["monotonic_time_ns"], 64, false, "monotonic_time_ns").ok()
 }

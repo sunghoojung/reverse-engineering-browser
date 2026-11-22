@@ -109,7 +109,7 @@ static_assert(offsetof(WasmDispatchObservationPayload, reserved) == 40);
   return true;
 }
 // V8's kV8MaxWasmModuleSize: no module, so no byte offset in one, is larger.
-// Before Wasm artifacts had no size limit, offsets stayed below 16 MiB.
+// Earlier browsers sent modules of at most 16 MiB, so their offsets fit too.
 inline constexpr std::uint32_t kWasmModuleByteOffsetLimit = 1U << 30U;
 [[nodiscard]] inline bool IsValidWasmDispatchObservation(const EventRecord& event) noexcept {
   WasmDispatchObservationPayload value;

@@ -2526,10 +2526,7 @@ pub(crate) fn worker_command_for(
     test_value: &'static str,
 ) -> std::io::Result<tokio::process::Command> {
     let current = std::env::current_exe()?;
-    let harness = current
-        .parent()
-        .and_then(std::path::Path::file_name)
-        .is_some_and(|name| name == "deps");
+    let harness = is_test_harness(&current);
     let mut command = tokio::process::Command::new(current);
     command.env_clear();
     #[cfg(test)]
@@ -2569,6 +2566,23 @@ pub(crate) fn worker_command_for(
         command.arg(flag);
     }
     Ok(command)
+}
+
+/// Whether `executable` is a cargo test harness, which rejects the worker
+/// flags. Cargo names one `<target>-<16 hex digit hash>`, in `deps/` before
+/// cargo 1.100 and in `build/<package>/<hash>/out/` since; a built binary keeps
+/// its plain name, so the directory alone no longer tells them apart.
+fn is_test_harness(executable: &std::path::Path) -> bool {
+    executable
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .and_then(|name| name.rsplit_once('-'))
+        .is_some_and(|(_, hash)| {
+            hash.len() == 16
+                && hash
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        })
 }
 
 fn worker_deadline(source_bytes: usize) -> std::time::Duration {
@@ -2846,6 +2860,27 @@ fn worker_drops_inherited_environment_descriptors_and_network() {
             .iter()
             .any(|site| site.role() == Role::InterpreterCandidate)
     );
+}
+
+/// Cargo 1.100 moved test harnesses out of `deps/`. Either layout re-executes
+/// through libtest, and a built binary takes the worker flag.
+#[cfg(test)]
+#[test]
+fn worker_recognizes_a_test_harness_in_either_cargo_layout() {
+    use std::path::Path;
+    for harness in [
+        "target/debug/deps/origin_trace_backend-9184accb1627aafe",
+        "target/debug/build/origin-trace-backend/9184accb1627aafe/out/origin_trace_backend-9184accb1627aafe",
+    ] {
+        assert!(is_test_harness(Path::new(harness)), "{harness}");
+    }
+    for built in [
+        "target/debug/reb-api",
+        "target/release/origin-trace-backend",
+    ] {
+        assert!(!is_test_harness(Path::new(built)), "{built}");
+    }
+    assert!(is_test_harness(&std::env::current_exe().unwrap()));
 }
 
 /// A divisor's nesting stays in the stack estimate. Debug Oxc needs about

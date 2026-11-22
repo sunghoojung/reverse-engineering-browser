@@ -1787,7 +1787,7 @@ capture, fetch anything or change a row.
 | `source_tree.js` | The Sources navigator: frame, group, origin and folder model, hand-parsed non-special URLs, mounted-window rows, keyboard, type-ahead and filter; `app.js` supplies the catalog and the open path |
 | `debugger_sidebar.js`, `debugger_sidebar.css` | The Sources debugger sidebar: its section registry, the Threads view, Watch rules, Observations and Pausing, and their reads of `get_native_debugger` and `get_request_stack` |
 | `wasm_diff_view.js`, `wasm_diff_view.css` | Compare with: the module picker, status filters and paged function match table read from `/api/wasm/diff`, with jumps to Graph on either module |
-| `value_flow_view.js`, `value_flow_view.css` | Trace value: the Inspect row it follows, one cancellable value-flow read, the slice list with offset links and the role marks on Inspect rows; the analysis is `../origin-trace-backend/src/wasm_value_flow.rs` over `wasm_def_use.rs` |
+| `value_flow_view.js`, `value_flow_view.css` | Trace value: the Inspect row it follows, cancellable paged value-flow reads, the seed-rooted tree of sources, sinks, paths and callers with offset links, a virtual row window and the role marks on Inspect rows; the analysis is `../origin-trace-backend/src/wasm_value_flow.rs` and `wasm_value_slice.rs` over `wasm_def_use.rs` |
 | `xrefs_view.js`, `xrefs_view.css` | The cross-references dock: selection following, the paged and virtualized list, and links to existing rows; the projection is [`/api/xrefs`](../../protocol/http-api.md#cross-references) in `../origin-trace-backend/src/xrefs.rs` |
 | `source_search.js` | Search all files: the paged, cancellable client of the backend's artifact search, coverage notes and the results panel; `app.js` supplies the catalog's text kinds, names and the open path |
 | `source_syntax.js` | Source names, display formatting, the inert hex view for Wasm and guest bytecode artifacts, and bounded tokenization without DOM or application state |
@@ -2600,37 +2600,54 @@ A byte budget cuts row text before structure and labels what it cut.
 
 In **Inspect**, select an instruction row (click it or Tab to its offset) and
 use the **Trace value** panel under the listing: pick **Whole instruction** or
-one operand, a direction, then **Trace value**. Instructions with a fixed
+one operand, a direction, whether to follow **Decisions** (control dependence)
+and whether to enter **Calls**, then **Trace value**. Instructions with a fixed
 stack effect (loads, stores, arithmetic, `select`, `local.set`) list their
 operands as soon as the row is chosen; calls and branches list theirs after
-the first trace, from its `operand_count`. The panel reads one
-[`wasm-value-flow-v1`](../../protocol/wasm-value-flow-v1.md) slice from
-`/api/wasm/value-flow` (or the `reb://` helper) with a 512-node cap and no
-deadline: while it runs the status counts elapsed seconds and **Trace value**
-becomes **Cancel**, which stops the request and its backend analysis. A
-superseded read is aborted, and the last slice stays when a read fails or is
-cancelled. Rows are ordered seed, backward, forward, then by distance, and show
-offset, role, kind and the instruction as inert text; a join row lists its
-incoming edges. Arrow keys, Home and End move through the rows; Enter or a click
-asks the backend for the Inspect row at that offset, moves to its page and
-focuses its gutter. The slice's mounted rows carry `data-value-flow`
-(seed, source, sink or step), reapplied as the listing remounts. **×** clears
-the trace; Hex or another module hides the panel and drops it. While the block
-graph is open the panel and its marks are hidden, since the graph owns that
-pane, and closing the graph brings the same trace back. Graph blocks are not a
-seed. Each row keeps the identifying part of its kind first (the import name,
-the local or the join kind), so it stays readable at the minimum window. A node
-that is both ends of the slice (a call whose result returns to its own
-argument around a loop) reads **source · sink**, and a loop join left open by
-a simulation stop says it is incomplete. The header always names the trace
-shown; choosing another row, or revealing one from the list, names that row on
-the button instead (**Trace 0x7e**) until it is traced. The panel's controls
-stay on one row at every width: in a narrow panel the field names and then the
-title give way, and the selects keep their accessible names. Beside the
-identification summary and its Details at the minimum window, the listing
-keeps six rows when there is room and otherwise what is left above the
-panel's header, down to two; with less room the Inspect area scrolls.
-`tools/check-value-flow-ui.mjs` checks the panel in a DOM model.
+the first trace, from its `operand_count`, every one. The panel reads one
+[`wasm-value-flow-v2`](../../protocol/wasm-value-flow-v2.md) slice from
+`/api/wasm/value-flow` (or the `reb://` helper), complete and paged, with no
+node or depth cap and no deadline: while it runs the status counts elapsed
+seconds and **Trace value** becomes **Cancel**, which stops the request and
+its backend analysis. A superseded read is aborted, and the last slice stays
+when a read fails or is cancelled.
+
+The panel is a tree rooted at the seed. **Comes from** groups every source by
+kind with its exact count (and how many are an address, a possible value
+through memory, or a decision rather than the value), **Goes to** groups every
+sink the same way, and **Callers** lists the function's direct call sites from
+`/api/wasm/call-sites`. Sections with at most 200 ends open on their own;
+larger groups open on request and read their rows a page at a time as they
+scroll into view, so a slice of a million nodes draws the same window of rows
+as one of ten. The caret on an end row opens its path to the seed: each step
+names how the value reached the row above (the operand, the join and the
+branch that carried the value into it, the forwarded store, the memory cell,
+the call it crossed and the argument it returned through, the decision it
+depended on), the locals it passed through, and the node, with a join's
+incoming branches beside it. Rows show offset, role and class, kind (with the
+import name, local, global, callee or declaration, and the function when it is
+another) and the instruction as inert text. Arrow keys, Home and End move
+through the tree, drawn or not; Left and Right fold and open a row; Enter or a
+click asks the backend for the Inspect row at that offset, in this function or
+a callee, moves to its page and focuses its gutter. The slice's mounted rows
+carry `data-value-flow` (seed, source, sink or step), reapplied as the listing
+remounts. What the slice could not follow is listed in full in a details row
+under the status. **×** clears the trace; Hex or another module hides the
+panel and drops it. While the block graph is open the panel and its marks are
+hidden, since the graph owns that pane, and closing the graph brings the same
+trace back. Graph blocks are not a seed.
+
+Each row keeps the identifying part of its kind first (the import name, the
+local or the join kind), so it stays readable at the minimum window. The
+panel's controls stay on one row at every width: in a narrow panel the field
+names, then the check labels, then the title give way, and the controls keep
+their accessible names. Before a trace the panel is as tall as its header;
+with one it takes up to 45% of the split, and the divider between the listing
+and the panel (`pane_layout.js`, `value-flow`) resizes that share, as the
+graph's does. Beside the identification summary and its Details at the
+minimum window, the listing keeps six rows when there is room and otherwise
+what is left above the panel's header, down to two; with less room the Inspect
+area scrolls. `tools/check-value-flow-ui.mjs` checks the panel in a DOM model.
 
 ## Flow workspace
 

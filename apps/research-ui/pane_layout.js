@@ -8,6 +8,8 @@ function initializePaneLayout() {
     { id: 'traffic-columns', parent: '.traffic-grid', panes: ['.request-pane', '.detail-pane'], axis: 'x', minimum: [380, 360], label: 'Traffic list and inspector' },
     { id: 'sources', parent: '#screen-sources', panes: ['.sources-navigator', '.sources-editor'], axis: 'x', minimum: [140, 320], label: 'Source navigator and editor' },
     { id: 'source-graph', parent: '#source-view-split', panes: ['#source-graph-host', '#source-code-wrap'], axis: 'y', minimum: [180, 72], label: 'block graph and linear view' },
+    // Only once a trace is shown: an empty panel keeps its own small height.
+    { id: 'value-flow', parent: '#source-view-split', panes: ['#source-code-wrap', '#value-flow:not([data-empty])'], axis: 'y', minimum: [72, 80], label: 'Inspect listing and Trace value' },
     { id: 'decoder', parent: '.decoder-grid', panes: ['.decoder-column:first-child', '.decoder-column:last-child'], axis: 'x', minimum: [340, 300], label: 'Decoder pipeline and output' },
     { id: 'agent', parent: '#workspace', panes: ['.main', '#agent-dock'], axis: 'x', minimum: [420, 300], label: 'workspace and agent' }
   ];
@@ -88,7 +90,11 @@ function initializePaneLayout() {
     document.body.append(handle);
     const property = configuration.axis === 'x' ? 'grid-template-columns' : 'grid-template-rows';
     let geometry = null;
-    const restore = () => parent.style.removeProperty(property);
+    // Two layouts can share a parent whose panes are never visible together
+    // (the block graph above the listing, the Trace value panel below it);
+    // each clears only the tracks it set, never the other's.
+    let applied = false;
+    const restore = () => { if (applied) { parent.style.removeProperty(property); applied = false; } };
     const measure = () => {
       const panes = configuration.panes.map(selector => parent.querySelector(selector));
       if (panes.some(pane => !pane || !pane.getClientRects().length)) return null;
@@ -129,6 +135,7 @@ function initializePaneLayout() {
       const size = Math.max(geometry.minimum[0], Math.min(geometry.total - geometry.minimum[1], geometry.total * ratio));
       const tracks = [`${size}px`, 'minmax(0, 1fr)', ...geometry.tracks.slice(2)];
       parent.style.setProperty(property, tracks.join(' '));
+      applied = true;
     };
     const refreshGeometry = (positionOnly = false) => {
       // Scrolling changes clipping, not the split. Temporarily restoring the

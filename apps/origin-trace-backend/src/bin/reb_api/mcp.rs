@@ -12,7 +12,13 @@ struct Projection {
     inline_limit: usize,
     summary_string_chars: usize,
     message_limit: usize,
+    /// The operation extension that names an operation's page parameters.
+    page_extension: String,
 }
+
+/// Rounds of page halving before the structural summary takes over: a page
+/// parameter of 2^20 or less reaches 1 well within it.
+const MAX_PAGE_ROUNDS: usize = 24;
 
 fn supported_protocols() -> Value {
     Value::Array(PROTOCOLS.iter().copied().map(Value::from).collect())
@@ -48,11 +54,59 @@ fn projection(spec: &Value) -> Result<Projection, String> {
         .as_u64()
         .filter(|limit| (64 * 1024..=64 * 1024 * 1024).contains(limit))
         .ok_or("Unsupported MCP message limit")?;
+    let page_extension = policy["page"]["extension"]
+        .as_str()
+        .filter(|name| name.starts_with("x-") && name.len() <= 64)
+        .ok_or("Unsupported MCP page policy")?;
     Ok(Projection {
         inline_limit: limit as usize,
         summary_string_chars: summary_string_chars as usize,
         message_limit: message_limit as usize,
+        page_extension: page_extension.to_owned(),
     })
+}
+
+/// Whether a success body would not be inlined: over the limit compact, or
+/// pretty-printed as the tool result is.
+fn oversized(bytes: &[u8], limit: usize) -> bool {
+    if bytes.len() > limit {
+        return true;
+    }
+    serde_json::from_slice::<Value>(bytes)
+        .ok()
+        .and_then(|value| serde_json::to_string_pretty(&value).ok())
+        .is_some_and(|pretty| pretty.len() > limit)
+}
+
+/// The page parameters an operation declares under the projection's page
+/// extension, each halved from its current value (the one given, or the
+/// parameter's schema default) down to 1. `None` when the operation declares
+/// none or every one is already 1: the result cannot be made smaller by
+/// paging, and the structural summary applies.
+fn shrunk_pages(
+    extension: &str,
+    definition: &Value,
+    params: &BTreeMap<String, String>,
+) -> Option<BTreeMap<String, String>> {
+    let names = definition[extension]["parameters"].as_array()?;
+    let mut shrunk = params.clone();
+    let mut changed = false;
+    for name in names.iter().filter_map(Value::as_str) {
+        let default = definition["parameters"]
+            .as_array()
+            .and_then(|list| list.iter().find(|parameter| parameter["name"] == name))
+            .and_then(|parameter| parameter["schema"]["default"].as_u64())
+            .unwrap_or(1);
+        let current = params
+            .get(name)
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(default);
+        if current > 1 {
+            shrunk.insert(name.to_owned(), (current / 2).to_string());
+            changed = true;
+        }
+    }
+    changed.then_some(shrunk)
 }
 
 fn binary_response(definition: &Value) -> bool {
@@ -1203,89 +1257,106 @@ async fn call_tool(
             true,
         );
     }
-    let mut completed = match super::exchange(super::ExchangeRequest {
-        method,
-        path,
-        definition,
-        base,
-        params: &call_params,
-        body,
-        timeout: timeout + super::wait_allowance(definition, &call_params),
-        json_errors: true,
-        missing_body: "Operation requires a JSON object body",
-        expected_instance,
-    })
-    .await
-    {
-        Ok(completed) => completed,
-        Err(error) => return tool_message(error.to_string(), true),
-    };
-    if let Some(error) = super::ignored_filters(definition, &call_params, &completed) {
-        return tool_message(error, true);
-    }
-    if name == "get_source_format"
-        && !allow_content
-        && completed.status == 200
-        && !completed.unreadable
-        && source_format_body(&completed.bytes)
-    {
-        return tool_message(SOURCE_FORMAT_BODY_REFUSED, true);
-    }
-    if name == "get_session_context" && completed.status == 200 && !completed.unreadable {
-        let value = serde_json::from_slice::<Value>(&completed.bytes);
-        if let Ok(mut value) = value
-            && value.is_object()
+    // A paged operation whose result would not be inlined is asked again
+    // with its page parameters halved, until the result fits or no page can
+    // shrink further; the structural summary is the last resort.
+    let mut rounds = 0usize;
+    let completed = loop {
+        let mut completed = match super::exchange(super::ExchangeRequest {
+            method,
+            path,
+            definition,
+            base,
+            params: &call_params,
+            body: body.clone(),
+            timeout: timeout + super::wait_allowance(definition, &call_params),
+            json_errors: true,
+            missing_body: "Operation requires a JSON object body",
+            expected_instance,
+        })
+        .await
         {
-            value["endpoint"] = json!(base.trim_end_matches('/'));
-            value["allow_effects"] = json!(allow_effects);
-            value["effects_admission"] = json!(if allow_effects {
-                "effects_exposed_not_authorized"
-            } else {
-                "read_only_projection"
-            });
-            value["mcp_admission"] = json!({
-                "permission": admission.permission,
-                "effects": allow_effects,
-                "session_start": admission.allow_session_start,
-                "content_reads": allow_content,
-                "content_omitted": omit_content,
-            });
-            completed.bytes = serde_json::to_vec(&value).expect("session context JSON");
+            Ok(completed) => completed,
+            Err(error) => return tool_message(error.to_string(), true),
+        };
+        if let Some(error) = super::ignored_filters(definition, &call_params, &completed) {
+            return tool_message(error, true);
         }
-    }
-    // Values read out of a paused page, and the page-derived names they are
-    // keyed by, are gated on content admission itself rather than on the omit
-    // flag: `--allow-effects` alone sets neither flag, and without this the
-    // raw-flag path would hand a model exactly what `--permission full` is
-    // required for.
-    let page_keys = paused_value_keys(spec, name);
-    let omit_page_values = !allow_content && !page_keys.is_empty();
-    if (omit_content || omit_page_values)
-        && completed.status == 200
-        && !completed.unreadable
-        && let Ok(value) = serde_json::from_slice::<Value>(&completed.bytes)
-    {
-        let omitted = omit_content_fields(
-            &value,
-            None,
-            projection.summary_string_chars,
-            &page_keys,
-            omit_content,
-        );
-        completed.bytes = serde_json::to_vec(&omitted).expect("omitted content JSON");
-    }
-    // Values a captured module computed, and digests of its memory, are
-    // admitted with content itself, like paused values above.
-    let run_keys = policy_keys(spec, "run_values", name);
-    if !allow_content
-        && !run_keys.is_empty()
-        && completed.status == 200
-        && !completed.unreadable
-        && let Ok(value) = serde_json::from_slice::<Value>(&completed.bytes)
-    {
-        completed.bytes =
-            serde_json::to_vec(&drop_keys(&value, &run_keys)).expect("run values JSON");
-    }
+        if name == "get_source_format"
+            && !allow_content
+            && completed.status == 200
+            && !completed.unreadable
+            && source_format_body(&completed.bytes)
+        {
+            return tool_message(SOURCE_FORMAT_BODY_REFUSED, true);
+        }
+        if name == "get_session_context" && completed.status == 200 && !completed.unreadable {
+            let value = serde_json::from_slice::<Value>(&completed.bytes);
+            if let Ok(mut value) = value
+                && value.is_object()
+            {
+                value["endpoint"] = json!(base.trim_end_matches('/'));
+                value["allow_effects"] = json!(allow_effects);
+                value["effects_admission"] = json!(if allow_effects {
+                    "effects_exposed_not_authorized"
+                } else {
+                    "read_only_projection"
+                });
+                value["mcp_admission"] = json!({
+                    "permission": admission.permission,
+                    "effects": allow_effects,
+                    "session_start": admission.allow_session_start,
+                    "content_reads": allow_content,
+                    "content_omitted": omit_content,
+                });
+                completed.bytes = serde_json::to_vec(&value).expect("session context JSON");
+            }
+        }
+        // Values read out of a paused page, and the page-derived names they are
+        // keyed by, are gated on content admission itself rather than on the omit
+        // flag: `--allow-effects` alone sets neither flag, and without this the
+        // raw-flag path would hand a model exactly what `--permission full` is
+        // required for.
+        let page_keys = paused_value_keys(spec, name);
+        let omit_page_values = !allow_content && !page_keys.is_empty();
+        if (omit_content || omit_page_values)
+            && completed.status == 200
+            && !completed.unreadable
+            && let Ok(value) = serde_json::from_slice::<Value>(&completed.bytes)
+        {
+            let omitted = omit_content_fields(
+                &value,
+                None,
+                projection.summary_string_chars,
+                &page_keys,
+                omit_content,
+            );
+            completed.bytes = serde_json::to_vec(&omitted).expect("omitted content JSON");
+        }
+        // Values a captured module computed, and digests of its memory, are
+        // admitted with content itself, like paused values above.
+        let run_keys = policy_keys(spec, "run_values", name);
+        if !allow_content
+            && !run_keys.is_empty()
+            && completed.status == 200
+            && !completed.unreadable
+            && let Ok(value) = serde_json::from_slice::<Value>(&completed.bytes)
+        {
+            completed.bytes =
+                serde_json::to_vec(&drop_keys(&value, &run_keys)).expect("run values JSON");
+        }
+        rounds += 1;
+        if completed.status == 200
+            && !completed.unreadable
+            && rounds < MAX_PAGE_ROUNDS
+            && oversized(&completed.bytes, projection.inline_limit)
+            && let Some(shrunk) = shrunk_pages(&projection.page_extension, definition, &call_params)
+        {
+            call_params = shrunk;
+            continue;
+        }
+        break completed;
+    };
     project_completed(
         spec,
         completed.status,
@@ -1886,10 +1957,11 @@ fn write_message(message: &Value) -> std::io::Result<()> {
 mod tests {
     use super::super::{operations, read_only_eligible, specification};
     use super::{
-        Admission, Connection, Frame, call_tool, decode_request, dispatch, project_completed,
-        project_success_body, read_frame, tools,
+        Admission, Connection, Frame, call_tool, decode_request, dispatch, oversized,
+        project_completed, project_success_body, read_frame, shrunk_pages, tools,
     };
     use serde_json::json;
+    use std::collections::BTreeMap;
     use std::io::Cursor;
 
     /// The workflow guide names tools an agent will call. A renamed or
@@ -2383,6 +2455,44 @@ mod tests {
     }
 
     #[test]
+    fn page_parameters_halve_from_their_value_or_default_down_to_one() {
+        let spec = specification().unwrap();
+        let ops = operations(&spec).unwrap();
+        let definition = &ops["get_wasm_value_flow"].2;
+        let given = BTreeMap::from([("node_limit".to_owned(), "1000".to_owned())]);
+        let shrunk = shrunk_pages("x-reb-mcp-page", definition, &given).unwrap();
+        assert_eq!(shrunk["node_limit"], "500");
+        assert_eq!(
+            shrunk["source_limit"], "50",
+            "from the schema default of 100"
+        );
+        assert_eq!(shrunk["sink_limit"], "50");
+        assert_eq!(shrunk["join_limit"], "32");
+        let floor = BTreeMap::from_iter(
+            ["node_limit", "source_limit", "sink_limit", "join_limit"]
+                .map(|name| (name.to_owned(), "1".to_owned())),
+        );
+        assert!(shrunk_pages("x-reb-mcp-page", definition, &floor).is_none());
+        let unpaged = &ops["get_health"].2;
+        assert!(shrunk_pages("x-reb-mcp-page", unpaged, &BTreeMap::new()).is_none());
+        assert!(oversized(&vec![b' '; 131_073], 131_072));
+        assert!(!oversized(br#"{"a":1}"#, 131_072));
+        // Pretty-printed form counts: a compact body under the limit can still
+        // print over it.
+        let compact = format!("[{}]", vec!["1"; 40_000].join(","));
+        assert!(oversized(compact.as_bytes(), 100_000));
+    }
+
+    #[test]
+    fn projection_requires_the_page_policy() {
+        let mut spec = specification().unwrap();
+        spec["x-reb-mcp"]["page"] = json!({"extension": "page"});
+        let ops = operations(&spec).unwrap();
+        let error = tools(&spec, &ops, false).unwrap_err();
+        assert!(error.contains("Unsupported MCP page policy"), "{error}");
+    }
+
+    #[test]
     fn projection_rejects_an_unknown_oversized_json_policy() {
         let mut spec = specification().unwrap();
         spec["x-reb-mcp"]["oversized_json"] = json!("truncate");
@@ -2638,7 +2748,7 @@ mod tests {
     #[test]
     fn omit_content_keeps_value_flow_structure_and_drops_instruction_text() {
         let document = json!({
-            "schema": "wasm-value-flow-v1",
+            "schema": "wasm-value-flow-v2",
             "nodes": [{"id": 0, "kind": "load", "byte_offset": 126, "role": "source", "local": 1,
                 "text": "i32.const 1337", "expression": "i32.load offset=8 (SECRET)"}],
             "edges": [{"from": 1, "to": 0, "kind": "address", "operand": 0, "result": 0}],

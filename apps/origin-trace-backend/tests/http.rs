@@ -734,7 +734,7 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 68, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 69, "Review route coverage when the API changes");
     assert!(ids.contains("get_wasm_pseudocode"));
     assert!(ids.contains("search_wasm_inspection"));
     assert!(ids.contains("get_request_headers"));
@@ -826,7 +826,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 68);
+    assert_eq!(operation_count, 69);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -5508,10 +5508,41 @@ async fn wasm_value_flow_route_matches_its_contract_and_the_native_helper() {
         &flow,
         "value flow",
     );
-    assert_eq!(flow["schema"], "wasm-value-flow-v1");
+    assert_eq!(flow["schema"], "wasm-value-flow-v2");
     assert_eq!(flow["sha256"], hash);
     assert_eq!(flow["complete"], false);
     assert!(flow["node_count"].as_u64().unwrap() > 10);
+    assert!(
+        flow["callers"]["count"].as_u64().unwrap() >= 1,
+        "{}",
+        flow["callers"]
+    );
+    let sites = server
+        .get("/api/wasm/call-sites?artifact_id=1&function=2")
+        .await;
+    assert_eq!(sites.status().as_u16(), 200);
+    let sites: Value = sites.json().await.unwrap();
+    assert_schema(
+        &spec,
+        &spec["components"]["schemas"]["WasmCallSites"],
+        &sites,
+        "call sites",
+    );
+    assert_eq!(sites["schema"], "wasm-call-sites-v1");
+    assert_eq!(sites["count"], 1);
+    let page = server
+        .get("/api/wasm/value-flow?artifact_id=1&function=2&local=0&node_limit=2&source_limit=1&join_limit=1")
+        .await;
+    assert_eq!(page.status().as_u16(), 200);
+    let page: Value = page.json().await.unwrap();
+    assert_schema(
+        &spec,
+        &spec["components"]["schemas"]["WasmValueFlow"],
+        &page,
+        "value flow page",
+    );
+    assert_eq!(page["nodes"].as_array().unwrap().len(), 2);
+    assert_eq!(page["node_count"], flow["node_count"]);
     let output = Command::new(env!("CARGO_BIN_EXE_origin-trace-wasm"))
         .arg("--artifacts")
         .arg(server.root.path().join("artifacts"))
@@ -5542,6 +5573,13 @@ async fn wasm_value_flow_route_matches_its_contract_and_the_native_helper() {
         ),
         ("/api/wasm/value-flow?artifact_id=1&function=0&local=0", 404),
         ("/api/wasm/value-flow?artifact_id=2&function=2&local=0", 404),
+        (
+            "/api/wasm/value-flow?artifact_id=1&function=2&local=0&node_limit=0",
+            400,
+        ),
+        ("/api/wasm/call-sites?artifact_id=1", 400),
+        ("/api/wasm/call-sites?artifact_id=1&function=99", 404),
+        ("/api/wasm/call-sites?artifact_id=1&function=2&extra=1", 400),
     ] {
         let response = server.get(path).await;
         assert_eq!(response.status().as_u16(), expected, "{path}");

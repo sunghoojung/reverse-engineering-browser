@@ -4686,7 +4686,7 @@
         "x-source": "apps/origin-trace-backend/src/app.rs",
         "requestBody": {
           "required": true,
-          "description": "JSON object. Explicit decimal Content-Length required; 1..1572864 encoded bytes. Chunked request bodies are not supported.",
+          "description": "JSON object of any size, parsed as it arrives. Explicit decimal Content-Length required. Chunked request bodies are not supported.",
           "content": {
             "application/json": {
               "schema": {
@@ -4695,7 +4695,7 @@
             }
           }
         },
-        "x-max-body-bytes": 1572864,
+        "x-max-body-bytes": 9007199254740991,
         "x-reb-execution": {
           "kind": "action-dependent",
           "effects": null,
@@ -22411,9 +22411,10 @@
       },
       "DecoderState": {
         "type": "object",
+        "description": "Version 2 dropped the version 1 limits object: inputs, outputs, chains, tokens, secrets and JSON nesting have no fixed size, and a decode runs until it finishes or its request goes away.",
         "properties": {
           "protocol_version": {
-            "const": 1,
+            "const": 2,
             "type": "integer"
           },
           "available": {
@@ -22422,17 +22423,27 @@
           "busy": {
             "type": "boolean"
           },
-          "limits": {
-            "type": "object",
-            "additionalProperties": true
+          "operations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "jwt_algorithms": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         },
         "required": [
           "protocol_version",
           "available",
           "busy",
-          "limits"
-        ]
+          "operations",
+          "jwt_algorithms"
+        ],
+        "additionalProperties": false
       },
       "DecoderAction": {
         "oneOf": [
@@ -22484,7 +22495,7 @@
               "input_base64": {
                 "type": "string",
                 "contentEncoding": "base64",
-                "description": "Canonical Base64, decoded input <= 1048576 bytes."
+                "description": "Canonical Base64 of the input bytes, of any length."
               }
             },
             "required": [
@@ -22517,7 +22528,7 @@
                 }
               ],
               "confirmations": [],
-              "notes": "Runs the bounded native decoder/JWT helper on caller-supplied input; JWT application failure can still be HTTP 200.",
+              "notes": "Runs the native decoder/JWT helper on caller-supplied input until it finishes or the request goes away; JWT application failure can still be HTTP 200.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/decoder.rs",
@@ -22538,8 +22549,7 @@
                 "type": "integer"
               },
               "token": {
-                "type": "string",
-                "x-max-utf8-bytes": 65536
+                "type": "string"
               }
             },
             "required": [
@@ -22570,7 +22580,7 @@
                 }
               ],
               "confirmations": [],
-              "notes": "Runs the bounded native decoder/JWT helper on caller-supplied input; JWT application failure can still be HTTP 200.",
+              "notes": "Runs the native decoder/JWT helper on caller-supplied input until it finishes or the request goes away; JWT application failure can still be HTTP 200.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/decoder.rs",
@@ -22591,12 +22601,10 @@
                 "type": "integer"
               },
               "token": {
-                "type": "string",
-                "x-max-utf8-bytes": 65536
+                "type": "string"
               },
               "secret": {
-                "type": "string",
-                "x-max-utf8-bytes": 4096
+                "type": "string"
               }
             },
             "required": [
@@ -22628,7 +22636,7 @@
                 }
               ],
               "confirmations": [],
-              "notes": "Runs the bounded native decoder/JWT helper on caller-supplied input; JWT application failure can still be HTTP 200.",
+              "notes": "Runs the native decoder/JWT helper on caller-supplied input until it finishes or the request goes away; JWT application failure can still be HTTP 200.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/decoder.rs",
@@ -22649,8 +22657,7 @@
                 "type": "integer"
               },
               "payload_json": {
-                "type": "string",
-                "x-max-utf8-bytes": 57344
+                "type": "string"
               },
               "algorithm": {
                 "type": "string",
@@ -22662,8 +22669,7 @@
                 ]
               },
               "secret": {
-                "type": "string",
-                "x-max-utf8-bytes": 4096
+                "type": "string"
               },
               "expires_in_seconds": {
                 "anyOf": [
@@ -22730,7 +22736,7 @@
                   }
                 }
               ],
-              "notes": "Runs the bounded native decoder/JWT helper on caller-supplied input; JWT application failure can still be HTTP 200.",
+              "notes": "Runs the native decoder/JWT helper on caller-supplied input until it finishes or the request goes away; JWT application failure can still be HTTP 200.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/decoder.rs",
@@ -22817,7 +22823,10 @@
                 "type": "string"
               },
               "error": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "duration_us": {
                 "type": "integer"
@@ -22887,7 +22896,10 @@
                 "type": "integer"
               },
               "error": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "duration_us": {
                 "type": "integer"

@@ -2526,7 +2526,6 @@ impl App {
     }
     async fn post(&self, path: &str, value: &Value) -> Result<Value> {
         match path {
-            "/api/decoder/actions" => self.decoder.action(value).await,
             "/api/api-collection/actions" => {
                 let store = self.collection.clone();
                 let value = value.clone();
@@ -2908,8 +2907,9 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
             } else {
                 None
             };
-            // A pack request and an analyst run's evidence snapshot parse as
-            // they arrive, so the body is held once, as its parsed value.
+            // A pack request, an analyst run's evidence snapshot and a
+            // decoder's input parse as they arrive, so the body is held once,
+            // as its parsed value.
             if matches!(
                 path,
                 "/api/analysis/vm/packs/apply" | "/api/analysis/vm/packs/compare"
@@ -2923,7 +2923,7 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                 .await
                 .map(|value| axum::Json(value).into_response());
             }
-            if path == "/api/local-analyst/actions" {
+            if matches!(path, "/api/local-analyst/actions" | "/api/decoder/actions") {
                 let value = streamed(body, length, |reader| {
                     let value: Value = serde_json::from_reader(reader)
                         .map_err(|_| Error::bad("The request body is malformed JSON"))?;
@@ -2933,10 +2933,12 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                     Ok(value)
                 })
                 .await?;
-                return app
-                    .analyst_action(value)
-                    .await
-                    .map(|value| axum::Json(value).into_response());
+                return if path == "/api/decoder/actions" {
+                    app.decoder.action(&value).await
+                } else {
+                    app.analyst_action(value).await
+                }
+                .map(|value| axum::Json(value).into_response());
             }
             let bytes = tokio::time::timeout(body_deadline(length), to_bytes(body, maximum))
                 .await

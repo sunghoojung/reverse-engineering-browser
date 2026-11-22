@@ -321,6 +321,17 @@ request must be answered within 1.5 s, since the abandoned ones would take
 seconds to drain if WebKit stopping them did not take them off the queue. It
 prints the times as a `decoder queue in the packaged app` line.
 
+`test21cDecoderRunsUntilCancelledAndHoldsLargeInput` converts two million
+decimal digits to Base36 in the packaged decoder, which takes seconds now that
+no CPU-time or size limit ends it. The notice must count past two seconds with
+**Cancel** enabled and the engine busy, in the header badge and the service;
+clicking **Cancel** must end the decode, free the engine within two seconds and
+leave the input editable. It then runs 3 MiB of different text through
+**Run transformation** and expects one 4 MiB Base64 step whose badges name no
+cap. WebKit stopped matching the page's former Base64 check past a few MB, so
+this step also proves a result that large is accepted. It writes
+`decoder-running` and `decoder-large-input` screenshots.
+
 `test22NewLiveSessionAsksAboutUnsavedWork` first opens the bundled workspace
 through **New Live Session…** and the start panel's **Continue Offline**, because the close guard
 trusts only a document the app loaded itself. When an earlier test left the

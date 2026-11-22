@@ -189,7 +189,7 @@ process and sequence identity. Reused IDs in other sessions cannot supply its
 trace; unsafe numeric identities and ambiguous rows are rejected. **Open retained source** uses
 that step's session and artifact identity. A Facts **Original bytes** link
 verifies complete retained UTF-8 bytes and SHA-256; **Decode range** copies those
-exact bytes, up to 64 KiB, into Decoder. **Open original evidence** retains the
+exact bytes, of any length, into Decoder. **Open original evidence** retains the
 source identity and half-open byte range. Evidence field handoffs distinguish
 selected string bytes from unavailable raw HTTP offsets.
 Evidence source links use the selected native record’s exact retained artifact
@@ -1587,8 +1587,9 @@ output. **Show inactive surfaces** reveals the rest of the supported families.
 Surface chips open filtered Activity. Each Canvas card keeps replay comparison,
 drawing calls, and evidence identifiers in expandable sections; open sections
 and summary focus survive evidence refreshes. Activity opens its details pane
-when an event is selected, or with **Details**. Decoder processing limits and
-result statistics are likewise available in expanders beside their controls.
+when an event is selected, or with **Details**. How Decoder processes a
+transformation and its result statistics are likewise available in expanders
+beside their controls.
 
 Flow, Analyst and Tools keep the primary task visible and secondary
 information in expandable sections. Flow's Lineage groups correlation identifiers separately from

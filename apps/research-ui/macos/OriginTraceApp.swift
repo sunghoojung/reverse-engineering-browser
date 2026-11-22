@@ -1680,11 +1680,9 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   ) {
     let action: [String: Any]
     do {
-      let body = try apiCollectionRequestBody(request)
-      guard body.count <= 1_536 * 1_024,
-        let parsed = try JSONSerialization.jsonObject(with: body) as? [String: Any]
-      else {
-        throw LocalHTTPError(status: 400, message: "Decoder action body is malformed or oversized")
+      let body = try requestBody(request, label: "Decoder action", maximumBytes: nil)
+      guard let parsed = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+        throw LocalHTTPError(status: 400, message: "Decoder action body is malformed")
       }
       action = parsed
     } catch let error as LocalHTTPError {

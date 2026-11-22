@@ -8,10 +8,6 @@ struct NativeDecoderError: Error {
 }
 
 final class NativeDecoderService {
-  private static let inputBytes = 1 << 20
-  private static let outputBytes = 1 << 20
-  private static let jwtBytes = 64 << 10
-  private static let secretBytes = 4 << 10
   private static let operations = [
     "base64-encode", "base64-decode", "base64url-encode", "base64url-decode",
     "hex-encode", "hex-decode", "url-encode", "url-decode", "base36-encode",
@@ -31,10 +27,10 @@ final class NativeDecoderService {
   private let executableURL: URL
   // One decoder runs at a time. A request waits its turn on this serial
   // queue as a work item, not as a blocked thread, so a long queue cannot
-  // take the threads that read the running decoder's output. The decoder's
-  // own CPU-time limit stops runaway work; a wall-clock deadline would only
-  // refuse it on a busy machine. The page's request going away cancels it,
-  // waiting or running.
+  // take the threads that read the running decoder's output. A decode runs
+  // as long as its input needs, with no deadline or CPU-time limit that would
+  // refuse real work on a busy machine; the page's request going away
+  // cancels it, waiting or running.
   private let queue = DispatchQueue(label: "origin-trace.native-decoder", qos: .userInitiated)
   private let requestsLock = NSLock()
   private var requests = Set<ObjectIdentifier>()
@@ -51,10 +47,11 @@ final class NativeDecoderService {
     requestsLock.unlock()
     return try JSONSerialization.data(
       withJSONObject: [
-        "protocol_version": 1,
+        "protocol_version": 2,
         "available": available,
         "busy": busy,
-        "limits": Self.limits,
+        "operations": Self.operations,
+        "jwt_algorithms": Self.algorithms,
       ]
     )
   }
@@ -113,41 +110,25 @@ final class NativeDecoderService {
     }
   }
 
-  private static var limits: [String: Any] {
-    [
-      "input_bytes": inputBytes,
-      "output_bytes": outputBytes,
-      "pipeline_steps": 16,
-      "retained_bytes": 4 << 20,
-      "jwt_bytes": jwtBytes,
-      "secret_bytes": secretBytes,
-      "json_depth": 64,
-      "json_tokens": 100_000,
-      "operations": operations,
-      "jwt_algorithms": algorithms,
-    ]
-  }
-
   private func transform(_ request: [String: Any], task: ObjectIdentifier) throws -> Data {
     guard exactKeys(
       request,
       ["protocol_version", "action", "operation_id", "operation", "input_base64"]
     ), let operationID = integer(request["operation_id"]), operationID >= 1,
       let operation = request["operation"] as? String, Self.operations.contains(operation),
-      let input = canonicalBase64(request["input_base64"], maximumBytes: Self.inputBytes)
+      let input = canonicalBase64(request["input_base64"])
     else {
       throw NativeDecoderError(status: 400, message: "Decoder transform shape is invalid")
     }
     let result = try run(arguments: ["transform", operation], input: input, task: task)
     guard result.status == 0 else {
+      // Exit 2 is the decoder refusing its input; any other status is the
+      // decoder failing.
       let error = boundedUTF8(result.error, maximumBytes: 4_096)
       throw NativeDecoderError(
-        status: result.status == 3 ? 422 : 400,
+        status: result.status == 2 ? 400 : 422,
         message: error.isEmpty ? "Native decoder rejected the transform" : error
       )
-    }
-    guard result.output.count <= Self.outputBytes else {
-      throw NativeDecoderError(status: 422, message: "Native decoder returned oversized output")
     }
     let text = String(data: result.output, encoding: .utf8)
     return try JSONSerialization.data(
@@ -169,7 +150,7 @@ final class NativeDecoderService {
 
   private func inspectJWT(_ request: [String: Any], task: ObjectIdentifier) throws -> Data {
     guard exactKeys(request, ["protocol_version", "action", "token"]),
-      let token = boundedText(request["token"], maximumBytes: Self.jwtBytes)
+      let token = request["token"] as? String
     else {
       throw NativeDecoderError(status: 400, message: "JWT inspection shape is invalid")
     }
@@ -181,8 +162,8 @@ final class NativeDecoderService {
 
   private func verifyJWT(_ request: [String: Any], task: ObjectIdentifier) throws -> Data {
     guard exactKeys(request, ["protocol_version", "action", "token", "secret"]),
-      let token = boundedText(request["token"], maximumBytes: Self.jwtBytes),
-      let secret = boundedText(request["secret"], maximumBytes: Self.secretBytes),
+      let token = request["token"] as? String,
+      let secret = request["secret"] as? String,
       !secret.isEmpty
     else {
       throw NativeDecoderError(status: 400, message: "JWT verification shape is invalid")
@@ -204,9 +185,9 @@ final class NativeDecoderService {
         "protocol_version", "action", "payload_json", "algorithm", "secret",
         "expires_in_seconds", "allow_unsigned_confirmed",
       ]
-    ), let payload = boundedText(request["payload_json"], maximumBytes: 56 << 10),
+    ), let payload = request["payload_json"] as? String,
       let algorithm = request["algorithm"] as? String, Self.algorithms.contains(algorithm),
-      let secret = boundedText(request["secret"], maximumBytes: Self.secretBytes),
+      let secret = request["secret"] as? String,
       let unsignedConfirmed = request["allow_unsigned_confirmed"] as? Bool
     else {
       throw NativeDecoderError(status: 400, message: "JWT creation shape is invalid")
@@ -244,7 +225,7 @@ final class NativeDecoderService {
   }
 
   private func jwtResponse(_ result: ProcessResult, creation: Bool) throws -> Data {
-    guard result.status == 0, result.output.count <= 256 << 10,
+    guard result.status == 0,
       var response = try JSONSerialization.jsonObject(with: result.output) as? [String: Any]
     else {
       throw NativeDecoderError(status: 422, message: "Native JWT decoder returned an invalid response")
@@ -343,14 +324,10 @@ final class NativeDecoderService {
     let stopped = cancelled.contains(task)
     requestsLock.unlock()
     if stopped { throw cancelledError }
-    // The decoder limits its own CPU time, and the kernel ends it with
-    // SIGXCPU when an input needs more.
     if process.terminationReason == .uncaughtSignal {
       throw NativeDecoderError(
         status: 422,
-        message: process.terminationStatus == SIGXCPU
-          ? "The native decoder reached its two-second CPU-time limit"
-          : "The native decoder stopped on signal \(process.terminationStatus)"
+        message: "The native decoder stopped on signal \(process.terminationStatus)"
       )
     }
     let elapsed = DispatchTime.now().uptimeNanoseconds - started
@@ -362,18 +339,18 @@ final class NativeDecoderService {
     )
   }
 
-  private func canonicalBase64(_ value: Any?, maximumBytes: Int) -> Data? {
-    guard let text = boundedText(value, maximumBytes: ((maximumBytes + 2) / 3) * 4 + 4),
-      let data = Data(base64Encoded: text), data.count <= maximumBytes,
+  private func canonicalBase64(_ value: Any?) -> Data? {
+    guard let text = value as? String, let data = Data(base64Encoded: text),
       data.base64EncodedString() == text
     else { return nil }
     return data
   }
 
+  /// Each value as an 8-byte big-endian length and its bytes.
   private func frame(_ values: [Data]) -> Data {
     var result = Data()
     for value in values {
-      var size = UInt32(value.count).bigEndian
+      var size = UInt64(value.count).bigEndian
       withUnsafeBytes(of: &size) { result.append(contentsOf: $0) }
       result.append(value)
     }
@@ -393,11 +370,6 @@ final class NativeDecoderService {
       double >= Double(Int.min), double <= Double(Int.max)
     else { return nil }
     return number.intValue
-  }
-
-  private func boundedText(_ value: Any?, maximumBytes: Int) -> String? {
-    guard let text = value as? String, text.utf8.count <= maximumBytes else { return nil }
-    return text
   }
 
   private func boundedUTF8(_ value: Data, maximumBytes: Int) -> String {

@@ -6596,16 +6596,16 @@ async fn analyst_libraries_variables_and_errors_have_no_shape_limits() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn decoder_requests_wait_their_turn_and_its_cpu_limit_is_named() {
+async fn decoder_requests_wait_their_turn_and_a_signal_is_named() {
     use std::os::unix::fs::PermissionsExt;
     let helper_root = tempfile::tempdir().unwrap();
     let decoder = helper_root.path().join("decoder-fixture");
     // A transform takes 0.1 s, so the queue below waits well past the two
     // seconds a request once had to reach the decoder. A JWT inspection
-    // ends the way the decoder's CPU-time limit ends it.
+    // ends on a signal.
     std::fs::write(
         &decoder,
-        "#!/bin/sh\n/bin/cat >/dev/null\ncase \"$1\" in\n  transform) /bin/sleep 0.1; printf ok ;;\n  *) ulimit -c 0; kill -XCPU $$ ;;\nesac\n",
+        "#!/bin/sh\n/bin/cat >/dev/null\ncase \"$1\" in\n  transform) /bin/sleep 0.1; printf ok ;;\n  *) kill -KILL $$ ;;\nesac\n",
     )
     .unwrap();
     std::fs::set_permissions(&decoder, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -6643,11 +6643,168 @@ async fn decoder_requests_wait_their_turn_and_its_cpu_limit_is_named() {
         .await;
     let bytes = assert_contract_response(response, "post", "/api/decoder/actions", 422).await;
     let result: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(result["code"], "resource_limit");
+    assert_eq!(result["error"], "The native decoder stopped on signal 9");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn decoder_runs_until_its_request_goes_away() {
+    use std::os::unix::fs::PermissionsExt;
+    let helper_root = tempfile::tempdir().unwrap();
+    let decoder = helper_root.path().join("decoder-fixture");
+    let started = helper_root.path().join("started");
+    // SHA-256 never finishes; SHA-512 answers at once.
+    std::fs::write(
+        &decoder,
+        format!(
+            "#!/bin/sh\n/bin/cat >/dev/null\ncase \"$2\" in\n  sha256) printf $$ > '{}'; exec /bin/sleep 60 ;;\n  *) printf ok ;;\nesac\n",
+            started.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&decoder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let server =
+        Server::start_with_args(&["--decoder".into(), decoder.display().to_string()]).await;
+    let transform = |operation_id: u64, operation: &str| {
+        let (client, url) = (server.client.clone(), server.url.clone());
+        let body = json!({"action":"transform","protocol_version":1,"operation_id":operation_id,"operation":operation,"input_base64":"AA=="});
+        tokio::spawn(async move {
+            client
+                .post(format!("{url}/api/decoder/actions"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+        })
+    };
+    let running = transform(1, "sha256");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let pid = loop {
+        if let Ok(pid) = std::fs::read_to_string(&started)
+            && !pid.is_empty()
+        {
+            break pid;
+        }
+        assert!(Instant::now() < deadline, "The decoder did not start");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    let queued = transform(2, "sha512");
+    // There is no deadline: past the two seconds a decode once had, both
+    // requests are still waiting and the engine reports itself busy.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(!running.is_finished() && !queued.is_finished());
+    let state: Value = server.get("/api/decoder").await.json().await.unwrap();
+    assert_eq!(state["busy"], true);
+    let alive = |pid: &str| {
+        Command::new("/bin/kill")
+            .args(["-0", pid.trim()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert!(alive(&pid));
+    // The request going away stops its decoder and lets the queue move on.
+    running.abort();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while alive(&pid) {
+        assert!(
+            Instant::now() < deadline,
+            "The abandoned decoder kept running"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let response = queued.await.unwrap();
+    assert_eq!(response.status(), 200);
     assert_eq!(
-        result["error"],
-        "The native decoder reached its two-second CPU-time limit"
+        response.json::<Value>().await.unwrap()["output_base64"],
+        "b2s="
     );
+}
+
+#[tokio::test]
+#[ignore = "requires REB_DECODER_TEST_WORKER pointing to the built reb-decoder"]
+async fn decoder_real_worker_holds_inputs_of_any_size_over_http_and_cli() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let worker = std::env::var("REB_DECODER_TEST_WORKER").expect("Set the built reb-decoder path");
+    assert!(Path::new(&worker).is_file(), "Build reb-decoder first");
+    let server = Server::start_with_args(&["--decoder".into(), worker]).await;
+    let state: Value = server.get("/api/decoder").await.json().await.unwrap();
+    assert_eq!(state["protocol_version"], 2);
+    assert!(state.get("limits").is_none());
+    let transform = |operation: &str, input: &[u8]| json!({"action":"transform","protocol_version":1,"operation_id":1,"operation":operation,"input_base64":STANDARD.encode(input)});
+    let output = async |body: Value| {
+        let response = server.action("/api/decoder/actions", body).await;
+        let bytes = assert_contract_response(response, "post", "/api/decoder/actions", 200).await;
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        STANDARD
+            .decode(value["output_base64"].as_str().unwrap())
+            .unwrap()
+    };
+    // 16 MiB in and back out: a 21 MiB request, then 16 MiB inflated.
+    let text = vec![b'a'; 16 << 20];
+    let compressed = output(transform("gzip-compress", &text)).await;
+    assert!(compressed.len() < 1 << 20);
+    assert_eq!(
+        output(transform("gzip-decompress", &compressed)).await,
+        text
+    );
+    assert_eq!(
+        output(transform("sha256", &text)).await,
+        hex::encode(Sha256::digest(&text)).into_bytes()
+    );
+    // 100,000 nesting levels, against a former 64.
+    let deep = format!("{}{}", "[".repeat(100_000), "]".repeat(100_000));
+    let request = transform("json-minify", deep.as_bytes());
+    assert_eq!(output(request.clone()).await, deep.as_bytes());
+    // A 200 KB payload signed with an 8 KiB secret, against a former 64 KiB
+    // token and 4 KiB secret.
+    let secret = "k".repeat(8192);
+    let claim = "c".repeat(200_000);
+    let response = server
+        .action(
+            "/api/decoder/actions",
+            json!({"action":"jwt_create","protocol_version":1,"payload_json":json!({"sub":claim}).to_string(),
+                "algorithm":"HS256","secret":secret,"expires_in_seconds":null,"allow_unsigned_confirmed":false}),
+        )
+        .await;
+    let bytes = assert_contract_response(response, "post", "/api/decoder/actions", 200).await;
+    let created: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(created["ok"], true, "{created}");
+    let token = created["token"].as_str().unwrap().to_owned();
+    assert!(token.len() > 200_000);
+    let response = server
+        .action(
+            "/api/decoder/actions",
+            json!({"action":"jwt_verify","protocol_version":1,"token":token,"secret":secret}),
+        )
+        .await;
+    let bytes = assert_contract_response(response, "post", "/api/decoder/actions", 200).await;
+    let verified: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(verified["signature_status"], "verified", "{verified}");
+    assert_eq!(verified["token_bytes"], token.len());
+
+    let body = server.root.path().join("decoder-request.json");
+    std::fs::write(&body, request.to_string()).unwrap();
+    let cli = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "decoder_action",
+            "--json-errors",
+            "--base-url",
+            &server.url,
+            "--body-file",
+        ])
+        .arg(&body)
+        .output()
+        .unwrap();
+    assert!(
+        cli.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cli.stderr)
+    );
+    let result: Value = serde_json::from_slice(&cli.stdout).unwrap();
+    assert_eq!(result["output_bytes"], deep.len());
 }
 
 #[cfg(unix)]

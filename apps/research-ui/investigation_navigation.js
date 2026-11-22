@@ -354,7 +354,7 @@ function provenanceDecoderBytes(value) {
 function investigationDecode(value, origin) {
   if (!investigationAllowDecoderReplace()) return false;
   const bytes = typeof value === 'string' ? provenanceDecoderBytes(value) : value;
-  if (!(bytes instanceof Uint8Array) || bytes.length > 65536) {investigationNotice('Decode links require an exact representable value of at most 64 KiB.', 'unavailable'); return false;}
+  if (!(bytes instanceof Uint8Array)) {investigationNotice('Decode links require an exactly representable value.', 'unavailable'); return false;}
   showScreen('tools');
   resetDecoderChain('Selected bytes copied. Choose a transformation explicitly; navigation never runs one.');
   toolsElements.inputEncoding.value = 'base64'; toolsElements.input.value = decoderBytesToBase64(bytes);
@@ -377,11 +377,11 @@ function renderInvestigationDecoder() {
 }
 function rememberInvestigationRange(source, range) {
   investigationRange = {identity: investigationArtifactIdentity(source), start: range.start, end: range.end};
-  document.querySelector('#investigation-decode-range').disabled = !investigationRange.identity || range.end - range.start > 65536;
+  document.querySelector('#investigation-decode-range').disabled = !investigationRange.identity;
 }
 function syncInvestigationRange(source) {
   const saved = investigationRange;
-  document.querySelector('#investigation-decode-range').disabled = !saved || !investigationSame(saved.identity, investigationArtifactIdentity(source)) || sourceFactsPanel.original(source) === undefined || state.sourceFormatted || state.sourceDeobfuscated || saved.end - saved.start > 65536;
+  document.querySelector('#investigation-decode-range').disabled = !saved || !investigationSame(saved.identity, investigationArtifactIdentity(source)) || sourceFactsPanel.original(source) === undefined || state.sourceFormatted || state.sourceDeobfuscated;
 }
 function decodeInvestigationRange() {
   const source = selectedSource(), saved = investigationRange;

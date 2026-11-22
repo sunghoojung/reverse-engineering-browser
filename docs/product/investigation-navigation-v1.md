@@ -58,7 +58,7 @@ and their DevTools request-id join were removed with CDP.
 3. Choose Facts and an Original bytes link. The existing Sources controller owns
    bounded chunk reads, SHA-256 verification, strict UTF-8/BOM decoding, range
    validation, cancellation and the original-byte display.
-4. Decode range copies no more than 64 KiB of those verified bytes in Base64 input
+4. Decode range copies those verified bytes, of any length, in Base64 input
    form. This preserves exact bytes including line endings and avoids textarea
    normalization. It does not execute a transformation. The Decoder evidence
    origin identifies session, artifact, SHA-256 and byte range. Input edits show

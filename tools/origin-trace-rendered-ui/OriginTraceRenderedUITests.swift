@@ -2915,6 +2915,74 @@ final class OriginTraceRenderedUITests: XCTestCase {
     try await returnToHarness(ui, harnessURL)
   }
 
+  // A decode has no CPU-time, size or step limit. A Base36 conversion of
+  // two million digits runs for seconds while the notice counts them, and
+  // Cancel stops it, frees the engine and roots no chain; then 3 MiB of other
+  // input runs through Run transformation whole, and its 4 MiB result passes
+  // the page's Base64 check in WebKit.
+  @MainActor
+  func test21cDecoderRunsUntilCancelledAndHoldsLargeInput() async throws {
+    let ui = try Harness()
+    try await ui.waitForInitialLoad()
+    let harnessURL = try XCTUnwrap(ui.webView.url)
+    ui.webView.load(URLRequest(url: try XCTUnwrap(URL(string: "reb://app/index.html?native=1"))))
+    try await ui.waitUntil("location.protocol === 'reb:' && document.readyState === 'complete' && typeof state === 'object'",
+      timeout: 30, "the bundled workspace did not load")
+    try await ui.click("[data-screen=\"tools\"]")
+    try await ui.waitUntil("!document.querySelector('#screen-tools').hidden && state.decoderEngine.available",
+      timeout: 30, "the packaged decoder engine did not become ready")
+    _ = try await ui.value(
+      """
+      (() => {
+        toolsElements.inputEncoding.value = 'text';
+        toolsElements.input.value = '7'.repeat(2000000);
+        toolsElements.input.dispatchEvent(new Event('input'));
+        toolsElements.operation.value = 'base36-encode';
+        toolsElements.operation.dispatchEvent(new Event('change'));
+        return true;
+      })()
+      """)
+    try await ui.click("#decoder-append")
+    try await ui.waitUntil("state.decoderPending && /… (?:[2-9]|[1-9]\\d+) s\\. Cancel stops the native decoder\\./.test(toolsElements.notice.textContent)",
+      timeout: 30, "the decode did not keep running past two seconds")
+    let running = try await ui.json(
+      "({cancel: !toolsElements.cancel.disabled, run: toolsElements.append.disabled, badge: toolsElements.engineBadge.textContent, busy: (await fetch('/api/decoder', {cache: 'no-store'}).then(response => response.json())).busy})")
+    XCTAssertEqual(running["cancel"] as? Bool, true, "Cancel is enabled while the decode runs: \(running)")
+    XCTAssertEqual(running["run"] as? Bool, true, "Run waits for the running decode: \(running)")
+    XCTAssertEqual(running["busy"] as? Bool, true, "the engine reports the running decode: \(running)")
+    XCTAssertEqual(running["badge"] as? String, "Engine busy", "the header names the running decode: \(running)")
+    try await ui.screenshot("decoder-running")
+    try await ui.click("#decoder-cancel")
+    try await ui.waitUntil("!state.decoderPending && /was cancelled\\. The chain is unchanged\\./.test(toolsElements.notice.textContent)",
+      "Cancel did not end the decode")
+    try await ui.waitUntil("fetch('/api/decoder', {cache: 'no-store'}).then(response => response.json()).then(engine => !engine.busy)",
+      timeout: 2, "the cancelled decoder kept the engine busy")
+    let steps = try await ui.value("state.decoderSteps.length") as? Int
+    XCTAssertEqual(steps, 0, "a cancelled decode adds no step")
+    _ = try await ui.value(
+      """
+      (() => {
+        toolsElements.input.value = 'a'.repeat(3 * 1024 * 1024);
+        toolsElements.input.dispatchEvent(new Event('input'));
+        toolsElements.operation.value = 'base64-encode';
+        toolsElements.operation.dispatchEvent(new Event('change'));
+        return true;
+      })()
+      """)
+    try await ui.click("#decoder-append")
+    try await ui.waitUntil("!state.decoderPending && (state.decoderSteps.length === 1 || state.decoderStatus === 'error')", timeout: 60,
+      "3 MiB of input did not finish")
+    let result = try await ui.json(
+      "({input: state.decoderSteps[0]?.input_bytes, output: state.decoderSteps[0]?.output_bytes, steps: toolsElements.pipelineBadge.textContent, retained: toolsElements.retainedBytes.textContent, notice: toolsElements.notice.textContent})")
+    print("decoder in the packaged app: \(result)")
+    XCTAssertEqual(result["input"] as? Int, 3 * 1024 * 1024, "\(result)")
+    XCTAssertEqual(result["output"] as? Int, 4 * 1024 * 1024, "\(result)")
+    XCTAssertEqual(result["steps"] as? String, "1 step", "\(result)")
+    XCTAssertFalse((result["retained"] as? String ?? "/").contains("/"), "retained bytes name no cap: \(result)")
+    try await ui.screenshot("decoder-large-input")
+    try await returnToHarness(ui, harnessURL)
+  }
+
   @MainActor
   private func panelText(_ ui: Harness) async throws -> String {
     try await ui.value("document.querySelector('#session-panel')?.innerText ?? ''") as? String ?? ""

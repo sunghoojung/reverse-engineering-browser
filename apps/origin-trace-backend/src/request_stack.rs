@@ -4,7 +4,7 @@
 //! retained bytes: an unresolved frame keeps its raw identity and a reason.
 use crate::{
     error::Result,
-    event_query::{self, EventFilter},
+    event_query::{self, EventFilter, RecordRange},
     evidence,
     request_index::RequestIndex,
 };
@@ -1183,7 +1183,7 @@ pub fn resolve_call(
     document
 }
 
-/// Resolves `get_requests` rows' innermost frames, keeping settled outcomes (protocol/request-index-v1.md).
+/// Resolves `get_requests` rows' innermost frames, keeping settled outcomes (protocol/request-index-v2.md).
 #[derive(Default)]
 pub struct InitiatorFrames(HashMap<String, Value>);
 
@@ -1562,28 +1562,85 @@ pub fn document(
     Ok(document)
 }
 
+/// The record `(session, process, sequence)` of one of `types`, wherever it
+/// sits in the store: the event index locates it by identity. None with
+/// complete coverage when the index has caught up and holds no such record,
+/// and whether the index was still behind the store.
+fn located_record(
+    store: &Path,
+    events: &std::sync::Mutex<crate::event_index::Indexes>,
+    session_id: Option<u64>,
+    process_id: u64,
+    sequence: u64,
+    types: &[&str],
+) -> Result<(Option<Value>, event_query::Coverage, bool)> {
+    let located = events
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .locate(
+            session_id,
+            process_id as u32,
+            sequence,
+            std::time::Instant::now() + crate::event_index::LOCATE_DEADLINE,
+        )?;
+    let Some(located) = located else {
+        return Ok((None, event_query::Coverage::located(0, 0, true, 0), false));
+    };
+    let mut ids = vec![("process_id", process_id), ("sequence_number", sequence)];
+    if let Some(session) = session_id {
+        ids.push(("session_id", session));
+    }
+    let filter = EventFilter::exact(types, ids);
+    let mut found = None;
+    let malformed = match located.range {
+        Some((first, end)) => event_query::visit_records_at(
+            store,
+            &[RecordRange {
+                first,
+                end,
+                indexed: true,
+            }],
+            |event| {
+                if filter.matches(&event) {
+                    found = Some(event);
+                }
+            },
+        )?,
+        None => 0,
+    };
+    let coverage = event_query::Coverage::located(
+        located.indexed_to,
+        located.store_end,
+        located.caught_up,
+        malformed,
+    );
+    Ok((found, coverage, !located.caught_up))
+}
+
 /// The `navigation_initiator_stack` a browser `navigation_initiator_link` names.
 pub fn navigation_document(
     store: &Path,
     artifacts_root: &Path,
     requests: &Mutex<RequestIndex>,
+    events: &std::sync::Mutex<crate::event_index::Indexes>,
     session_id: Option<u64>,
     process_id: u64,
     sequence: u64,
 ) -> Result<Value> {
-    let mut ids = vec![("process_id", process_id), ("sequence_number", sequence)];
-    if let Some(session) = session_id {
-        ids.push(("session_id", session));
-    }
-    let filter = EventFilter::exact(&["navigation_initiator_stack"], ids);
-    // Navigation stacks have no row, so only the newest bytes are read.
-    let detail = event_query::read_newest_record(store, None, &filter)?;
-    let coverage = detail.coverage;
-    let Some(stack) = detail.records.into_iter().next_back() else {
+    let (stack, coverage, index_behind) = located_record(
+        store,
+        events,
+        session_id,
+        process_id,
+        sequence,
+        &["navigation_initiator_stack"],
+    )?;
+    let Some(stack) = stack else {
         return Ok(json!({
             "status": absent_status(coverage),
             "request": {"process_id": process_id, "sequence_number": sequence.to_string()},
             "coverage": coverage.to_json(),
+            "index_behind": index_behind,
         }));
     };
     let Some((record, kind, target)) = payload(&stack).as_deref().and_then(decode_navigation)
@@ -1625,23 +1682,25 @@ pub fn observation_document(
     store: &Path,
     artifacts_root: &Path,
     requests: &Mutex<RequestIndex>,
+    events: &std::sync::Mutex<crate::event_index::Indexes>,
     session_id: Option<u64>,
     process_id: u64,
     sequence: u64,
 ) -> Result<Value> {
-    let mut ids = vec![("process_id", process_id), ("sequence_number", sequence)];
-    if let Some(session) = session_id {
-        ids.push(("session_id", session));
-    }
-    let filter = EventFilter::exact(&crate::debugger_observation::TYPES, ids);
-    // Observations have no row, so only the newest bytes are read.
-    let detail = event_query::read_newest_record(store, None, &filter)?;
-    let coverage = detail.coverage;
-    let Some(event) = detail.records.into_iter().next_back() else {
+    let (event, coverage, index_behind) = located_record(
+        store,
+        events,
+        session_id,
+        process_id,
+        sequence,
+        &crate::debugger_observation::TYPES,
+    )?;
+    let Some(event) = event else {
         return Ok(json!({
             "status": absent_status(coverage),
             "request": {"process_id": process_id, "sequence_number": sequence.to_string()},
             "coverage": coverage.to_json(),
+            "index_behind": index_behind,
         }));
     };
     let decoded = crate::debugger_observation::decode(&event);
@@ -2449,9 +2508,27 @@ pub(crate) mod tests {
         root
     }
 
+    /// The event identity index of `store`, which a record read locates
+    /// through, caught up: a read folds it for at most a second, which a
+    /// loaded test run must not depend on.
+    fn event_indexes(store: &Path) -> std::sync::Mutex<crate::event_index::Indexes> {
+        let mut indexes = crate::event_index::Indexes::new(
+            store,
+            &store.with_file_name("origin-trace.jsonl"),
+            &store.with_file_name("request-signals.jsonl"),
+        );
+        indexes
+            .catch_up(std::time::Instant::now() + std::time::Duration::from_secs(120))
+            .unwrap();
+        std::sync::Mutex::new(indexes)
+    }
+
     fn caught_up(index: &Mutex<RequestIndex>) {
         for _ in 0..4 {
-            index.blocking_lock().refresh().unwrap();
+            index
+                .blocking_lock()
+                .refresh(std::time::Instant::now() + std::time::Duration::from_secs(60))
+                .unwrap();
         }
     }
 
@@ -2703,8 +2780,10 @@ pub(crate) mod tests {
         std::fs::write(artifacts.join("manifest.jsonl"), format!("{entry}\n")).unwrap();
         let index = Mutex::new(RequestIndex::new(&store));
         caught_up(&index);
+        let events = event_indexes(&store);
         let read = |sequence| {
-            observation_document(&store, &artifacts, &index, Some(9), 42, sequence).unwrap()
+            observation_document(&store, &artifacts, &index, &events, Some(9), 42, sequence)
+                .unwrap()
         };
 
         let tap = read(2);
@@ -2880,6 +2959,48 @@ pub(crate) mod tests {
     }
 
     /// A listener record of renderer 42 naming `script` at `start`.
+    #[test]
+    fn an_observation_behind_more_than_a_scan_budget_is_found_by_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("events.jsonl");
+        let mut text = format!("{}\n", listener_record(1, 7, 0));
+        let mut sequence = 1;
+        while text.len() as u64 <= event_query::SCAN_BYTES + (1 << 20) {
+            sequence += 1;
+            let mut filler = store_event(sequence, "wasm", "api_call", &[]);
+            filler["process_id"] = json!(1000);
+            filler["pad"] = json!("x".repeat(3000));
+            text.push_str(&format!("{filler}\n"));
+        }
+        std::fs::write(&store, text).unwrap();
+        let artifacts = root.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        std::fs::write(artifacts.join("manifest.jsonl"), "").unwrap();
+        let index = Mutex::new(RequestIndex::new(&store));
+        caught_up(&index);
+        let events = event_indexes(&store);
+        let read = |sequence| {
+            observation_document(&store, &artifacts, &index, &events, Some(9), 42, sequence)
+                .unwrap()
+        };
+        let found = read(1);
+        assert_eq!(found["status"], "recorded", "{found}");
+        assert_eq!(found["observation"]["type"], "listener_dispatch");
+        assert_eq!(found["coverage"]["scope"], "store");
+        // Without a session, the renderer's streams name it.
+        let unscoped =
+            observation_document(&store, &artifacts, &index, &events, None, 42, 1).unwrap();
+        assert_eq!(unscoped["status"], "recorded", "{unscoped}");
+        // Another renderer's record and an identity never written are absent
+        // from the whole store, not outside a window.
+        for sequence in [2, sequence + 1] {
+            let absent = read(sequence);
+            assert_eq!(absent["status"], "not_recorded", "{absent}");
+            assert_eq!(absent["coverage"]["complete"], true);
+            assert_eq!(absent["index_behind"], false);
+        }
+    }
+
     fn listener_record(sequence: u64, script: u32, start: u32) -> Value {
         let mut payload = vec![1, 0, 128, 0, 2, 0x08, 0, 0];
         payload.resize(80, 0);
@@ -3037,11 +3158,12 @@ pub(crate) mod tests {
         assert_eq!(read().0, SiteWork::default(), "settled");
     }
 
-    /// Review round 2, A: past the index's identity cap, a site whose identity
-    /// it does not hold is answered from the index alone, never by a 64 MiB
-    /// store scan per read, and kept until the index moves.
+    /// Review round 2, A: among more identities than version 1 of the index
+    /// held, a site whose identity the store does not hold is answered from
+    /// the index alone as missing, never by a store scan per read, and kept
+    /// until the index moves.
     #[test]
-    fn an_identity_past_the_index_cap_costs_no_store_scan() {
+    fn an_identity_missing_from_a_long_index_costs_no_store_scan() {
         let root = tempfile::tempdir().unwrap();
         let (store, artifacts) = (
             root.path().join("events.jsonl"),
@@ -3077,7 +3199,7 @@ pub(crate) mod tests {
         let (work, site) = read();
         assert_eq!(
             site,
-            json!({"status": "unresolved", "reason": "script_identity_outside_scan"})
+            json!({"status": "unresolved", "reason": "script_identity_missing"})
         );
         assert_eq!(
             work,
@@ -3167,7 +3289,9 @@ pub(crate) mod tests {
                 );
             }
         }
-        let direct = observation_document(&store, &artifacts, &index, Some(9), 42, 2).unwrap();
+        let events = event_indexes(&store);
+        let direct =
+            observation_document(&store, &artifacts, &index, &events, Some(9), 42, 2).unwrap();
         assert_eq!(
             direct["observation"]["site"]["resolution"]["function_name"],
             "renameBB"
@@ -3545,7 +3669,7 @@ pub(crate) mod tests {
         wasm.push(0);
         wasm.push(custom.len() as u8);
         wasm.extend(custom);
-        let frames = vec![
+        let frames = [
             frame(1, 0, 7, fetch_at, send_at),
             frame(2, 0, 30, 0x2a1, 3),
             frame(1, 0, 8, 0, 0),

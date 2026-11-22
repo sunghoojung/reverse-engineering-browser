@@ -504,9 +504,10 @@ bytecode buffers and binary bodies. Request and response bodies are
 named in its `get_events` records. For readable JavaScript, page
 `get_source_format {"session_id": "1", "artifact_id": "41", "start_line": 1,
 "line_count": 400}` instead, which at Full access also lays out JSON and
-JavaScript bodies. `replacements` counts bytes that were not UTF-8. Header blocks and cookie
-lists are refused: read them with `get_request_headers` and
-`get_request_cookies`, which withhold credential and cookie values.
+JavaScript bodies. `replacements` counts bytes that were not UTF-8. At Full
+access header blocks and cookie lists read as text too, and
+`get_request_headers` and `get_request_cookies` return credential and cookie
+values; below it the blocks are refused and the values withheld.
 
 ## 22. Find text across every retained file
 
@@ -597,8 +598,8 @@ or cursor adds it; the unfiltered `get_events` window does not:
   armed set, `request_id` is the request, and `site` is null. Read the stack
   that started it with `get_request_stack`, passing `stack_read` as it is
   (`stack_read_operation` names that tool): `frames`, innermost first, with
-  `resolution.url`, `line`, `column` and `function_name`. That read covers
-  the newest 64 MiB of the store; an older record answers `outside_scan`.
+  `resolution.url`, `line`, `column` and `function_name`. That read finds
+  the record anywhere in the store.
 - `listener_dispatch`: `detail.event_type`,
   `detail.target`, and `site.resolution` is the listener's file, line and
   column. A click listener usually runs with no script on the stack, so

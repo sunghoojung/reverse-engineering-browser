@@ -124,6 +124,18 @@ verified destination. Private before/after backups and an audit permit checked
 recovery; unknown edits and conflicting receipts are preserved. See
 [the integrated build guide](../docs/development/integrated-brave-build.md).
 
+## Long-session evidence fixture
+
+`long-session-fixture.py OUT` writes a deterministic stored session from authored
+data only: an early Wasm module, the runtime read that starts an early request and
+that request's renderer and browser records joined by Origin Trace edges, then
+200,000 newer requests, runtime reads and 300,000 JavaScript artifacts (about
+450 MB of events; `--requests` and `--artifacts` change the counts). A reader that
+keeps only a newest window, a first page or a fixed number of rows loses the early
+records, so serve it with `origin-trace-backend --store OUT/events.jsonl
+--trace-store OUT/origin-trace.jsonl --artifacts OUT/artifacts` and check that
+reb-api, MCP and the app reach them.
+
 ## Native broker allocation benchmarks
 
 `benchmark-event-json.cpp` compares the allocating compatibility API with the

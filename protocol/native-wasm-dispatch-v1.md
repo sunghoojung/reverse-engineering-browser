@@ -698,7 +698,7 @@ Unknown versions, the wrong size, a kind other than 1 or 2, a nonzero reserved
 field, an identity that also carries an omitted count, an omitted record that
 also carries an identity, a ring index past 31, an out-of-range index or
 offset, an unknown resolution, or a nonzero artifact id or parent event id are
-invalid. C++, Rust, Python, JavaScript and the Swift trace builder reject
+invalid. C++, Rust, Python and JavaScript reject
 them. They are not partial observations. Bytes past the payload in the
 inline record must be zero.
 

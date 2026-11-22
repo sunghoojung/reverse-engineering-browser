@@ -22,9 +22,6 @@ const MAX_EVENTS: usize = 5000;
 // Damaged lines remembered between polls. A store with more of them is parsed
 // again on every poll, which is slower but keeps the cache bounded.
 const MAX_REMEMBERED_DAMAGED: usize = 65_536;
-// Browser reasons are fixed producer identifiers, so 64 distinct pairs covers
-// every documented one. A further pair stays an unexplained queue-drop marker.
-pub(crate) const MAX_NAMED_GAPS: usize = 64;
 
 #[derive(Debug, PartialEq)]
 pub struct EventWindow {
@@ -73,13 +70,6 @@ impl Identity {
             }
         }
     }
-}
-
-// Identity and change time are not enough. A same-size rewrite can restore
-// mtime without advancing ctime, and that must not produce a false 304.
-pub fn etag(path: &Path, signature: &str) -> String {
-    let identity = evidence::observed_identity(path, true);
-    evidence::resource_etag(path, &format!("{signature}:event-window-v5:{identity}"))
 }
 
 struct Record {
@@ -146,6 +136,7 @@ impl EventWindowCache {
         path: &Path,
         limit: usize,
         validate: fn(&Value) -> Result<()>,
+        end: Option<u64>,
     ) -> Result<EventWindow> {
         // Any failure invalidates the previous snapshot, including partial tails.
         let previous = self.snapshot.take();
@@ -153,7 +144,7 @@ impl EventWindowCache {
         {
             self.parsed_records = 0;
         }
-        let mut snapshot = match read_tail(path, self.maximum_bytes)? {
+        let mut snapshot = match read_tail(path, self.maximum_bytes, end)? {
             Some(snapshot) => snapshot,
             None => return Ok(summarize(&mut [], 0, 0, self.maximum_bytes, limit, &[], 0)?.0),
         };
@@ -373,7 +364,7 @@ pub(crate) fn add(total: &mut u64, saturated: &mut bool, count: u64) {
     }
 }
 
-fn read_tail(path: &Path, maximum: usize) -> Result<Option<Snapshot>> {
+fn read_tail(path: &Path, maximum: usize, bound: Option<u64>) -> Result<Option<Snapshot>> {
     let mut file = match evidence::regular_file(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -383,7 +374,7 @@ fn read_tail(path: &Path, maximum: usize) -> Result<Option<Snapshot>> {
     if !metadata.is_file() {
         return Err(Error::new(500, "Evidence store must be a regular file"));
     }
-    let end = metadata.len();
+    let end = bound.map_or(metadata.len(), |bound| bound.min(metadata.len()));
     let start = end.saturating_sub(maximum as u64);
     let predecessor = if start == 0 {
         None
@@ -429,6 +420,7 @@ fn summarize(
         coverage: Value::Null,
     };
     let mut marks: HashMap<(u64, u64), (u64, u64, HashSet<u64>)> = HashMap::new();
+    let mut named_positions: HashMap<(String, String), usize> = HashMap::new();
     let mut retained = vec![false; records.len()];
     let general_start = records.len().saturating_sub(limit);
     let network_count = records.iter().filter(|record| record.network).count();
@@ -446,20 +438,18 @@ fn summarize(
             record.drops,
         );
         if let Some(named) = &record.named_gap {
-            let (category, reason) = named.as_ref();
-            // At most 64 entries, and only gap markers reach this lookup.
             let gaps = &mut window.named_gaps;
-            if let Some(gap) = gaps
-                .iter_mut()
-                .find(|gap| gap.category == *category && gap.reason == *reason)
-            {
-                gap.count += 1;
-            } else if gaps.len() < MAX_NAMED_GAPS {
-                gaps.push(NamedGap {
-                    category: category.clone(),
-                    reason: reason.clone(),
-                    count: 1,
-                });
+            match named_positions.get(named.as_ref()) {
+                Some(&position) => gaps[position].count += 1,
+                None => {
+                    let (category, reason) = named.as_ref().clone();
+                    named_positions.insert(named.as_ref().clone(), gaps.len());
+                    gaps.push(NamedGap {
+                        category,
+                        reason,
+                        count: 1,
+                    });
+                }
             }
         }
         let keep_general = index >= general_start;
@@ -495,11 +485,18 @@ fn summarize(
             high - low - (seen.len() as u64 - 1),
         );
     }
+    // Older events are read with `before` from the oldest one this answer holds.
+    let next_before = (general_start > 0 || start > 0).then(|| {
+        records
+            .get(general_start)
+            .map_or(start, |record| record.start)
+    });
     window.coverage = json!({
         "scope": if start == 0 { "store" } else { "bounded_tail" },
         "scan_start": start.to_string(), "scan_end": end.to_string(), "scan_limit": maximum,
         "events_limited": records.len() > limit, "network_events_limited": network_count > limit,
-        "malformed_lines": malformed_lines
+        "malformed_lines": malformed_lines,
+        "next_before": next_before.map(|offset| offset.to_string()),
     });
     Ok((window, retained))
 }
@@ -527,7 +524,7 @@ mod tests {
         bytes
     }
     fn poll(cache: &mut EventWindowCache, path: &Path, limit: usize) -> EventWindow {
-        cache.read(path, limit, validate_event).unwrap()
+        cache.read(path, limit, validate_event, None).unwrap()
     }
     fn ids(events: &[Value]) -> Vec<u64> {
         events
@@ -646,7 +643,6 @@ mod tests {
         assert_eq!(cache.parsed_records, 4);
         write(&path, &events);
         let _ = poll(&mut cache, &path, 10);
-        let previous_etag = etag(&path, "test");
         let old_time = fs::metadata(&path).unwrap().modified().unwrap();
         let mut rewritten = events.clone();
         rewritten[6]["sequence_number"] = json!("99");
@@ -657,7 +653,6 @@ mod tests {
             .unwrap()
             .set_times(fs::FileTimes::new().set_modified(old_time))
             .unwrap();
-        assert_ne!(etag(&path, "test"), previous_etag);
         assert_eq!(
             ids(&poll(&mut cache, &path, 10).events),
             vec![15, 99, 17, 18, 19]
@@ -837,6 +832,7 @@ mod tests {
 
     #[test]
     fn named_gap_reasons_are_listed_by_category_beside_unchanged_drop_weights() {
+        const PAIRS: u64 = 200;
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("events");
         // The live Wasm budgets from one capture, plus a real numeric queue gap.
@@ -894,22 +890,22 @@ mod tests {
         let window = poll(&mut cache, &path, 1);
         assert!(window.named_gaps.is_empty());
         assert_eq!(window.queue_drops, 2);
-        // A 65th distinct pair is not listed, so its weight stays a queue drop.
-        events = (0..=MAX_NAMED_GAPS as u64)
+        // Every distinct pair is listed, however many there are.
+        events = (0..=PAIRS)
             .map(|n| event(n + 1, "vm", "gap", &format!("native_reason_{n}")))
             .collect();
         write(&path, &events);
         let window = poll(&mut cache, &path, 1);
-        assert_eq!(window.named_gaps.len(), MAX_NAMED_GAPS);
+        assert_eq!(window.named_gaps.len(), PAIRS as usize + 1);
         assert_eq!(window.named_gaps[0].reason, "native_reason_0");
-        assert_eq!(window.queue_drops, MAX_NAMED_GAPS as u64 + 1);
+        assert_eq!(window.queue_drops, PAIRS + 1);
         // Summaries follow the scanned scope: an older named marker leaves with it.
         let first = line(&events[0]).len();
         cache.maximum_bytes = fs::metadata(&path).unwrap().len() as usize - first;
         let window = poll(&mut cache, &path, 1);
         assert_eq!(window.coverage["scope"], "bounded_tail");
         assert_eq!(window.named_gaps[0].reason, "native_reason_1");
-        assert_eq!(window.named_gaps.len(), MAX_NAMED_GAPS);
+        assert_eq!(window.named_gaps.len(), PAIRS as usize);
     }
 
     #[test]

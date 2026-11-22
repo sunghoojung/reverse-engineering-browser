@@ -88,9 +88,11 @@ Guard filenames and artifact-owned manifest/blob destinations are reserved from
 broker output configuration. Broker outputs cannot live in an artifact root.
 This prevents a second writer role or filename alias from bypassing a held lease.
 
-Descriptors and anchored entries are checked for device/inode, complete size,
-mtime and ctime; root, blob-directory and guard identities are rechecked before
-return. File replacement, append, truncation and ordinary out-of-contract edits
+File descriptors and anchored entries are checked for device/inode, complete
+size, mtime and ctime; root, blob-directory and guard identities are rechecked
+before return. A directory is checked for device/inode only: its size and times
+move whenever an entry is added or removed, and the backend keeps derived
+indexes beside the stores on its own timers. File replacement, append, truncation and ordinary out-of-contract edits
 abort instead of returning an old inode as a new snapshot. Advisory leases
 coordinate supported REB writers; they do not authenticate evidence or defeat a
 malicious same-user/privileged writer restoring metadata. Only ordinary local

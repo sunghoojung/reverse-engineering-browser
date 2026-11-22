@@ -82,7 +82,8 @@ document.workspaces.push(second);
 const analysisResult = workspace => ({{artifact_id:workspace.interpreter_artifact_id,
   artifact_sha256:workspace.source_artifact_sha256, finding_id:workspace.finding_id, runtime:'javascript',
   status:'complete',tier:'candidate',vm_score:20,anti_bot_score:0,evidence_families:[],observations:[],
-  related_request_ids:[],coverage:{{complete:true}}}});
+  runtime_context:{{session_id:'1',navigation_id:'1',frame_id:'1',frame_attribution:'available',request_records:0,
+    signal_records:[],events_filter:{{session_id:'1',navigation_id:'1',frame_id:'1'}}}},coverage:{{complete:true}}}});
 const analysis = {{contract_version:1,document_kind:'vm-analysis',document_digest:document.analysis_digest,
   profile_digest:'a'.repeat(64),profile:{{profile_id:'anti-bot-vm-detection-v1'}},
   input_coverage:{{complete:true,omissions:[]}},capture_mode:'unknown',
@@ -164,7 +165,8 @@ const position = {{sample_event:sample.event, invocation_event:sample.invocation
   instruction_pointer_units:sample.instruction_pointer_units}};
 const valid = {{contract_version:1, document_kind:'vm-host-links', workspace_document_digest:workspace.document_digest,
   document_digest:'e'.repeat(64), workspaces:[{{interpreter_artifact_id:source.interpreter_artifact_id,
-  source_artifact_sha256:source.source_artifact_sha256, omissions:[], links:[{{host_event:host, category:'runtime', type:'api_call',
+  source_artifact_sha256:source.source_artifact_sha256, omissions:[], frame_host_records:1, attributed_host_records:1,
+  events_filter:{{session_id:host.session_id, navigation_id:'1', frame_id:'1'}}, links:[{{host_event:host, category:'runtime', type:'api_call',
   state:'observed', reason:'direct-dispatch-parent', guest_position:position}}]}}]}};
 const accepted = isVmHostLinksDocument(valid, workspace);
 const mutations = [
@@ -579,7 +581,7 @@ process.stdout.write(JSON.stringify({accepted, javascriptRejected, zeroContextRe
         result = self.run_evidence_model(
             """
 const event = {session_id:'15158926864691407161', process_id:7, sequence_number:'40'};
-const absent = {omissions:['dispatch-samples-unavailable'], links:[{
+const absent = {omissions:['dispatch-samples-unavailable'], frame_host_records:4, attributed_host_records:1, links:[{
   host_event:event, category:'network', type:'request_initiated', state:'unknown',
   reason:'dispatch-samples-unavailable', guest_position:null}]};
 const none = {omissions:['dispatch-samples-unavailable','host-events-unavailable'], links:[]};
@@ -593,6 +595,8 @@ process.stdout.write(JSON.stringify({
   absentHeadline: absentView.headline,
   absentLine: absentView.lines[0],
   absentOmission: absentView.omissionLines[0],
+  absentCount: absentView.countLine,
+  emptyCount: vmHostLinksView(none).countLine,
   emptyStatic: vmHostLinksView(none).headline,
   unbound: vmHostLinksView(null).headline,
   correlatedStatic: vmHostLinksView(correlated).staticOnly,
@@ -612,6 +616,12 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("guest_position PC", result["absentLine"])
         self.assertEqual(result["absentOmission"]["reason"], "dispatch-samples-unavailable")
         self.assertIn("missing sampler", result["absentOmission"]["detail"])
+        self.assertEqual(
+            result["absentCount"],
+            "4 host events share this frame and 1 names this interpreter. "
+            "1 with a VM-record parent is listed; the others have no guest position to show.",
+        )
+        self.assertIsNone(result["emptyCount"])
         self.assertIn("host-events-unavailable", result["emptyStatic"])
         self.assertIn("Guest position unknown", result["unbound"])
         self.assertFalse(result["correlatedStatic"])

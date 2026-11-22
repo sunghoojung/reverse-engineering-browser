@@ -360,6 +360,7 @@ javascript-check: capture-completeness-check $(UI_STARTUP_DEPS)
 	node tools/check-captured-client-export.mjs
 	node tools/check-captured-har.mjs
 	node tools/check-captured-export-ui.mjs
+	node tools/check-traffic-copy.mjs
 	node tools/check-local-overrides.mjs
 	node tools/check-graphql-sdl.mjs
 	node tools/check-passive-security.mjs

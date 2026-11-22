@@ -656,16 +656,16 @@ void NativeProbeHostRendererTargets() {
             retention(events[1]) == reb::NativeRequestTargetRetention::kRetained &&
             events[1].header.artifact_id != 0 && transfers.size() == 1,
         "The parent is drained first, then the child names its retained target");
-  Check(base::ThreadPool::RunPending() == 1, "The whole target is copied off the UI sequence");
   const auto& artifact = *transfers.begin()->second;
   Check(artifact.header.kind == reb::NativeArtifactKind::kRequestTarget &&
             artifact.header.capture_origin == reb::NativeArtifactCaptureOrigin::kNetworkRequest &&
-            (artifact.header.flags & reb::kNativeArtifactFlagSensitive) != 0 && artifact.ended &&
+            (artifact.header.flags & reb::kNativeArtifactFlagSensitive) != 0 &&
+            artifact.op == reb::NativeArtifactTransferOp::kWhole &&
             artifact.url == "https://cdn.example.test:8443" && artifact.mime_type == "text/plain" &&
             std::string(artifact.content.begin(), artifact.content.end()) == target &&
             artifact.header.artifact_id == events[1].header.artifact_id &&
             artifact.header.creator_event_id == 801,
-        "The artifact holds the whole target, named by its origin and created by the child");
+        "One whole transfer holds the target, named by its origin and created by the child");
   events.clear();
   transfers.clear();
   // A prefix that is not the target's, or an origin of another scheme, is

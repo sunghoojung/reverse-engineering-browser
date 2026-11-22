@@ -467,10 +467,10 @@ def check_receiver_stop(receiver: str) -> None:
                 str(token),
                 "--session-id",
                 "7",
-                "--max-artifact-bytes",
-                str(len(content)),
-                "--max-store-bytes",
-                str(2 * len(content)),
+                # The reserve is not under test here; keep the check
+                # independent of the volume's free space.
+                "--disk-reserve-bytes",
+                "1",
             ],
             stderr=subprocess.PIPE,
         )

@@ -6475,6 +6475,52 @@ async fn analyst_runs_read_whole_selected_artifacts_and_evidence_with_no_limits(
     assert!(response.text().await.unwrap().contains("protocol 2"));
 }
 
+/// The real Node runner serializes a result and a log nested 100,000 and
+/// 50,000 levels deep whole, past the 256 levels it once marked [MaxDepth].
+#[tokio::test]
+async fn analyst_results_and_logs_keep_every_nesting_level() {
+    let server = Server::start().await;
+    let source = "let deep = {leaf: 'bottom'}; for (let i = 0; i < 100000; i++) deep = {next: deep};\n\
+        let list = []; for (let i = 0; i < 50000; i++) list = [list];\n\
+        const loop = {name: 'loop'}; loop.self = loop;\n\
+        console.log(list, loop); return deep;";
+    let saved = server.action("/api/local-analyst/actions", json!({"action":"replace_local_analyst_workspace",
+        "expected_generation":0,"folders":[{"id":1,"name":"Analyst Workspace","parent_id":null}],
+        "files":[{"id":1,"folder_id":1,"name":"Deep","kind":"analyst-script","language":"javascript","content":source}]})).await;
+    assert_eq!(saved.status(), 200, "{}", saved.text().await.unwrap());
+    let response = server
+        .action(
+            "/api/local-analyst/actions",
+            json!({"action":"run_local_analyst_script","protocol_version":2,
+            "run_id":1,"script_id":1,"library_generation":1,"source":source,"variables":{},
+            "evidence":{"events":[],"artifacts":[],"trace_edges":[],"signal_profiles":[],"vm_analysis":null,
+                "selected_artifact":null,"summary":{}},"confirmed":true,"confirmed_sensitive":false}),
+        )
+        .await;
+    let bytes = assert_contract_response(response, "post", "/api/local-analyst/actions", 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["outcome"], "completed", "{result}");
+    let text = result["result_text"].as_str().unwrap();
+    let expected = format!(
+        "{}{{\"leaf\":\"bottom\"}}{}",
+        "{\"next\":".repeat(100_000),
+        "}".repeat(100_000)
+    );
+    assert!(text == expected, "every level of the result is written");
+    assert_eq!(result["result_truncated"], false);
+    let log = result["logs"][0]["text"].as_str().unwrap();
+    assert_eq!(
+        log,
+        format!(
+            "{}{} {{\"name\":\"loop\",\"self\":\"[Circular]\"}}",
+            "[".repeat(50_001),
+            "]".repeat(50_001)
+        )
+    );
+    assert_eq!(result["logs_truncated"], false);
+    assert!(!log.contains("[MaxDepth]") && !text.contains("[MaxDepth]"));
+}
+
 /// The library, a run's variables and its error have no shape limits: 40
 /// folders nested 39 deep, 100 files, 64 variables of 8 KiB each and a 4,000
 /// character error all go through, where 32 folders, 4 levels, 64 files, 32

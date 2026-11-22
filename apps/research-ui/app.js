@@ -6510,7 +6510,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           nodes.push(logs);
         }
         if (run.result_truncated || run.logs_truncated) nodes.push(textElement('p', 'experiment-privacy',
-          `${run.result_truncated ? 'The result' : 'A log entry'} nests deeper than 256 levels or could not be serialized; those values are marked.`));
+          `${run.result_truncated ? 'The result' : 'A log entry'} could not be serialized; those values are marked.`));
         analystElements.result.replaceChildren(...nodes);
       }
 

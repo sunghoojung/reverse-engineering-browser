@@ -84,8 +84,10 @@ class StopSignal final {
   static void Request(int) noexcept {
     const int saved = errno;
     requested_ = 1;
-    // The write end is nonblocking: a full pipe already wakes every wait.
-    static_cast<void>(write(write_end_.load(std::memory_order_relaxed), "", 1));
+    // The write end is nonblocking: a full pipe already wakes every wait, so
+    // the result needs no check. GCC warns on a void cast of glibc's write.
+    [[maybe_unused]] const ssize_t written =
+        write(write_end_.load(std::memory_order_relaxed), "", 1);
     errno = saved;
   }
 

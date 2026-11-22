@@ -369,18 +369,19 @@ an `invocation_value_flow` step, counted as a correlated link, only when
 exactly one settle record of the same session and renderer process, earlier in
 that process's sequence and with a present digest, has a body window of
 exactly its digested length whose rolling hash and SHA-256 both match. Two
-matches are the gap `value_flow_ambiguous`; a search past 16 MiB of hashed
-windows is `value_flow_unsearched`. Only the stated encoding is matched: a
-percent-encoded, escaped or encrypted copy is not found and is not reported as
-a negative. The body is the sensitive `request_body` artifact of
-[native network v2](native-network-v2.md) (capture origin `network_request`)
-whose creator is the traced request's `request_body` child record, read only
-when its size and SHA-256 match the manifest. It exists only under request
-content capture (`REB_CAPTURE_REQUEST_CONTENT=1`) and holds at most the first
-16 MiB of the body. The join reads a body only when it is at most 1 MiB
-(`REQUEST_BODY_LIMIT` in `apps/origin-trace-backend/src/origin_trace.rs`).
-Without a retained body, or past that size, the join has no input and reports
-nothing.
+matches are the gap `value_flow_ambiguous`. Every candidate's digest is
+searched in one rolling pass per distinct value length over the whole body,
+with no byte bound; a request that goes away stops the search with 499. Only
+the stated encoding is matched: a percent-encoded, escaped or encrypted copy
+is not found and is not reported as a negative. The body is the sensitive
+`request_body` artifact of [native network v2](native-network-v2.md) (capture
+origin `network_request`) whose creator is the traced request's `request_body`
+child record, read whole and only when its size and SHA-256 match the
+manifest. It exists only under request content capture
+(`REB_CAPTURE_REQUEST_CONTENT=1`) and holds at most the first 16 MiB of the
+body. A retained body that cannot be read or verified is the gap
+`value_flow_unsearched`, with the reason; without a retained body the join has
+no input and reports nothing.
 
 ## Validation boundary
 

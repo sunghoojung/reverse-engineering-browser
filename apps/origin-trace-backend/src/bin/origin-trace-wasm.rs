@@ -49,7 +49,7 @@ struct Options {
     /// Comma separated row statuses for the diff page. Omit for every row.
     #[arg(long, requires = "diff_with")]
     status: Option<String>,
-    /// Print `wasm-value-flow-v1` for the query of `GET /api/wasm/value-flow`
+    /// Print `wasm-value-flow-v2` for the query of `GET /api/wasm/value-flow`
     /// without its artifact_id, for example `function=1&offset=40`.
     #[arg(long, conflicts_with = "diff_with")]
     value_flow: Option<String>,

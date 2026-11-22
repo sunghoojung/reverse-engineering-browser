@@ -5,10 +5,19 @@ use crate::{
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 
 pub type Reference = (String, u32, String);
 /// Raw request body bytes keyed by the retained event that carries them.
-pub type RequestBodies = BTreeMap<Reference, Vec<u8>>;
+pub type RequestBodies = BTreeMap<Reference, RetainedBody>;
+
+/// A request body the trace can search, or why it cannot: a retained body
+/// that could not be read whole is a named gap, never a silent miss.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RetainedBody {
+    Read(Vec<u8>),
+    Unread(String),
+}
 // Stored edge relations in priority order. The two invocation relations are
 // exact identities drawn by the broker's index (protocol/native-js-invocation-v1.md).
 const RELATIONS: [&str; 6] = [
@@ -334,8 +343,6 @@ fn adjacent_candidate(
     }
     found.cloned()
 }
-/// A request body is searched only as retained raw bytes, at most this many.
-const REQUEST_BODY_LIMIT: usize = 1 << 20;
 /// Raw request bodies retained under sensitive capture for `request_id`, keyed
 /// by the browser request record each belongs to. Native network v2
 /// (protocol/native-network-v2.md) writes a `request_body` record as a child
@@ -393,31 +400,38 @@ fn request_bodies(
         ) else {
             continue;
         };
-        if let Ok(bytes) = evidence::content(root, &artifact, REQUEST_BODY_LIMIT) {
-            bodies.insert((session.into(), process as u32, parent.into()), bytes);
-        }
+        // The body is read whole, whatever its size; a read that fails is
+        // reported at trace time as the value_flow_unsearched gap.
+        let body = match evidence::read(root, &artifact) {
+            Ok(bytes) => RetainedBody::Read(bytes),
+            Err(error) => RetainedBody::Unread(error.message),
+        };
+        bodies.insert((session.into(), process as u32, parent.into()), body);
     }
     bodies
 }
 /// The single settle record whose exact digested value occurs in `body`.
 /// Candidates share the session and the renderer process of `request`, and
 /// precede it in that process's sequence: causal order inside one stream, not
-/// a time window. `settles` are that stream's `js_invocation_settle` records.
-/// `Err` names why no link is drawn when more than one matches or the search
-/// was not run.
+/// a time window. `settles` are that stream's `js_invocation_settle` records,
+/// and every candidate's digest is searched in one pass per value length.
+/// The inner `Err` names why no link is drawn when more than one matches;
+/// the outer one is a cancelled request.
 fn value_flow(
     settles: &[Value],
     visited: &BTreeSet<Reference>,
     request: &Value,
     body: &[u8],
-) -> std::result::Result<Option<Value>, (&'static str, String)> {
+    cancelled: &AtomicBool,
+) -> Result<std::result::Result<Option<Value>, (&'static str, String)>> {
     let Some(limit) = request["sequence_number"]
         .as_str()
         .and_then(|s| s.parse::<u64>().ok())
     else {
-        return Ok(None);
+        return Ok(Ok(None));
     };
-    let mut found: Vec<&Value> = Vec::new();
+    let mut candidates: Vec<&Value> = Vec::new();
+    let mut digests = Vec::new();
     for event in settles {
         let Ok(key) = reference(event) else {
             continue;
@@ -433,27 +447,25 @@ fn value_flow(
         let Some(digest) = crate::js_invocation::settle(event).and_then(|s| s.digest) else {
             continue;
         };
-        match crate::js_invocation::body_contains(body, &digest) {
-            Some(true) => found.push(event),
-            Some(false) => {}
-            None => {
-                return Err((
-                    "value_flow_unsearched",
-                    "A retained returned value could not be searched in this request body within the bounded search, so no value-flow link is reported.".to_owned(),
-                ));
-            }
-        }
+        candidates.push(event);
+        digests.push(digest);
     }
-    match found.len() {
+    let found = crate::js_invocation::find_values(body, &digests, cancelled)?;
+    let matched: Vec<&Value> = candidates
+        .into_iter()
+        .zip(found)
+        .filter_map(|(event, found)| found.then_some(event))
+        .collect();
+    Ok(match matched.len() {
         0 => Ok(None),
-        1 => Ok(Some(found[0].clone())),
+        1 => Ok(Some(matched[0].clone())),
         count => Err((
             "value_flow_ambiguous",
             format!(
                 "{count} returned values with retained digests occur in this request body. None is chosen."
             ),
         )),
-    }
+    })
 }
 
 /// What a trace reads, by identity: the slices of a test or a shared case,
@@ -646,6 +658,7 @@ pub fn build_with_bodies(
     session_id: Option<&str>,
     root_process: Option<u32>,
     root_sequence: Option<&str>,
+    cancelled: &AtomicBool,
 ) -> Result<Value> {
     check_selectors(request_id, session_id, root_process, root_sequence)?;
     let mut retained = Retained::new(events, edges, artifacts)?;
@@ -656,11 +669,13 @@ pub fn build_with_bodies(
         session_id,
         root_process,
         root_sequence,
+        cancelled,
     )
 }
 
 /// Traces `request_id` back through `evidence`, reading the raw request
-/// bodies value flow searches from `artifact_root`.
+/// bodies value flow searches from `artifact_root`, until it is done or
+/// `cancelled` is set.
 pub fn build(
     evidence: &mut impl Evidence,
     request_id: &str,
@@ -668,6 +683,7 @@ pub fn build(
     root_process: Option<u32>,
     root_sequence: Option<&str>,
     artifact_root: &Path,
+    cancelled: &AtomicBool,
 ) -> Result<Value> {
     check_selectors(request_id, session_id, root_process, root_sequence)?;
     let events = evidence.request_events(request_id)?;
@@ -692,6 +708,7 @@ pub fn build(
         session_id,
         root_process,
         root_sequence,
+        cancelled,
     )
 }
 
@@ -723,6 +740,7 @@ pub(crate) fn trace(
     session_id: Option<&str>,
     root_process: Option<u32>,
     root_sequence: Option<&str>,
+    cancelled: &AtomicBool,
 ) -> Result<Value> {
     let request_events = evidence.request_events(request_id)?;
     let candidates: Vec<&Value> = request_events
@@ -817,23 +835,42 @@ pub(crate) fn trace(
                             event["sequence_number"].as_str()?.to_owned(),
                         ))
                     });
-                    if let Some(body) = body {
-                        let (session, process, _) = reference(&current)?;
-                        let settles = evidence.settles(&session, process)?;
-                        match value_flow(&settles, &visited, &current, body) {
-                            Ok(Some(settle)) => {
-                                visited.insert(reference(&settle)?);
-                                steps.push(step(&settle, "invocation_value_flow", "correlated")?);
-                                correlated += 1;
-                                current = settle;
-                                continue;
-                            }
-                            Ok(None) => {}
-                            Err((reason, detail)) => {
-                                gaps.push(gap(reason, steps.len() - 1, &detail));
-                                break;
+                    match body {
+                        Some(RetainedBody::Read(body)) => {
+                            let (session, process, _) = reference(&current)?;
+                            let settles = evidence.settles(&session, process)?;
+                            match value_flow(&settles, &visited, &current, body, cancelled)? {
+                                Ok(Some(settle)) => {
+                                    visited.insert(reference(&settle)?);
+                                    steps.push(step(
+                                        &settle,
+                                        "invocation_value_flow",
+                                        "correlated",
+                                    )?);
+                                    correlated += 1;
+                                    current = settle;
+                                    continue;
+                                }
+                                Ok(None) => {}
+                                Err((reason, detail)) => {
+                                    gaps.push(gap(reason, steps.len() - 1, &detail));
+                                    break;
+                                }
                             }
                         }
+                        Some(RetainedBody::Unread(reason)) => {
+                            // A body exists but could not be read whole: the
+                            // search did not run, and the trace says so.
+                            gaps.push(gap(
+                                "value_flow_unsearched",
+                                steps.len() - 1,
+                                &format!(
+                                    "This request's retained body could not be read, so no returned value was searched in it and no value-flow link is reported: {reason}"
+                                ),
+                            ));
+                            break;
+                        }
+                        None => {}
                     }
                 }
                 if !SOURCES.contains(&current["category"].as_str().unwrap_or("")) {
@@ -1051,6 +1088,7 @@ mod tests {
             Some("9"),
             Some(84),
             Some("1"),
+            &AtomicBool::new(false),
         )
         .unwrap()
     }
@@ -1099,7 +1137,10 @@ mod tests {
         assert_eq!(document["coverage"]["correlated_links"], 0);
 
         let mut bodies = RequestBodies::new();
-        bodies.insert(key(84, 1), b"v=1&n=P1_token-a&c=x".to_vec());
+        bodies.insert(
+            key(84, 1),
+            RetainedBody::Read(b"v=1&n=P1_token-a&c=x".to_vec()),
+        );
         let document = trace(&events, &edges, &bodies);
         assert_eq!(
             relations(&document),
@@ -1120,13 +1161,13 @@ mod tests {
         assert_eq!(document["coverage"]["observed_links"], 2);
 
         // The interleaved call's value is a different invocation.
-        bodies.insert(key(84, 1), b"n=P1_token-b".to_vec());
+        bodies.insert(key(84, 1), RetainedBody::Read(b"n=P1_token-b".to_vec()));
         let document = trace(&events, &edges, &bodies);
         assert_eq!(document["steps"][3]["event"]["sequence_number"], "2");
 
         // Transformed, truncated or absent bytes never link.
         for body in [&b"n=P1%5Ftoken-a"[..], b"n=P1_token-", b"n=unrelated"] {
-            bodies.insert(key(84, 1), body.to_vec());
+            bodies.insert(key(84, 1), RetainedBody::Read(body.to_vec()));
             let document = trace(&events, &edges, &bodies);
             assert_eq!(relations(&document), ["trace_target", "request_initiator"]);
             assert_eq!(document["gaps"][0]["reason"], "no_predecessor");
@@ -1137,7 +1178,7 @@ mod tests {
     fn value_flow_refuses_ambiguity_later_values_and_other_processes() {
         let (mut events, edges) = session(b"same-token", b"same-token");
         let mut bodies = RequestBodies::new();
-        bodies.insert(key(84, 1), b"n=same-token".to_vec());
+        bodies.insert(key(84, 1), RetainedBody::Read(b"n=same-token".to_vec()));
         let document = trace(&events, &edges, &bodies);
         assert_eq!(relations(&document), ["trace_target", "request_initiator"]);
         assert_eq!(document["gaps"][0]["reason"], "value_flow_ambiguous");
@@ -1147,7 +1188,7 @@ mod tests {
         let (mut later, edges) = session(b"late-token", b"other");
         later[3]["sequence_number"] = json!("8");
         later[3]["monotonic_time_ns"] = json!("8");
-        bodies.insert(key(84, 1), b"n=late-token".to_vec());
+        bodies.insert(key(84, 1), RetainedBody::Read(b"n=late-token".to_vec()));
         assert_eq!(
             relations(&trace(&later, &edges, &bodies)),
             ["trace_target", "request_initiator"]
@@ -1156,7 +1197,7 @@ mod tests {
         // Another renderer's equal value is not a candidate, so the one left
         // in the request's own process is no longer ambiguous.
         events[3]["process_id"] = json!(43);
-        bodies.insert(key(84, 1), b"n=same-token".to_vec());
+        bodies.insert(key(84, 1), RetainedBody::Read(b"n=same-token".to_vec()));
         let document = trace(&events, &edges, &bodies);
         assert_eq!(document["steps"][2]["event"]["process_id"], 42);
         assert_eq!(document["steps"][2]["event"]["sequence_number"], "3");
@@ -1185,7 +1226,7 @@ mod tests {
                 let parts: Vec<&str> = body["event"].as_str().unwrap().split(':').collect();
                 bodies.insert(
                     (parts[0].into(), parts[1].parse().unwrap(), parts[2].into()),
-                    hex::decode(body["hex"].as_str().unwrap()).unwrap(),
+                    RetainedBody::Read(hex::decode(body["hex"].as_str().unwrap()).unwrap()),
                 );
             }
             let query = &case["query"];
@@ -1198,6 +1239,7 @@ mod tests {
                 query["session_id"].as_str(),
                 query["root_process_id"].as_u64().map(|n| n as u32),
                 query["root_sequence_number"].as_str(),
+                &AtomicBool::new(false),
             )
             .unwrap();
             let steps = document["steps"].as_array().unwrap();
@@ -1242,6 +1284,35 @@ mod tests {
     /// The request-body capture contract's pairing: a `request_body` child
     /// record of the request and its own sensitive artifact, verified bytes.
     #[test]
+    fn an_unread_body_is_a_named_gap_not_a_silent_miss() {
+        let (events, edges) = session(b"P1_token-a", b"P1_token-b");
+        let mut bodies = RequestBodies::new();
+        bodies.insert(
+            key(84, 1),
+            RetainedBody::Unread("Artifact content hash is invalid".into()),
+        );
+        let document = trace(&events, &edges, &bodies);
+        let gaps = document["gaps"].as_array().unwrap();
+        assert_eq!(gaps.len(), 1, "{document}");
+        assert_eq!(gaps[0]["reason"], "value_flow_unsearched");
+        assert!(
+            gaps[0]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("hash is invalid"),
+            "{}",
+            gaps[0]["detail"]
+        );
+        assert!(
+            document["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|step| step["relation"] != "invocation_value_flow")
+        );
+    }
+
+    #[test]
     fn retained_bodies_need_the_exact_record_and_verified_artifact() {
         use sha2::{Digest, Sha256};
         let root = tempfile::tempdir().unwrap();
@@ -1261,7 +1332,10 @@ mod tests {
             "900",
             root.path(),
         );
-        assert_eq!(bodies.get(&key(84, 1)), Some(&body));
+        assert_eq!(
+            bodies.get(&key(84, 1)),
+            Some(&RetainedBody::Read(body.clone()))
+        );
         assert!(
             retained_request_bodies(
                 &[record.clone()],
@@ -1271,11 +1345,20 @@ mod tests {
             )
             .is_empty()
         );
+        // A body whose bytes fail verification exists but cannot be searched:
+        // it is kept as unread, and the trace reports the gap.
+        let mut forged = artifact.clone();
+        forged["sha256"] = json!("00".repeat(32));
+        match retained_request_bodies(&[record.clone()], &[forged], "900", root.path())
+            .get(&key(84, 1))
+        {
+            Some(RetainedBody::Unread(reason)) => assert!(reason.contains("hash"), "{reason}"),
+            other => panic!("a forged body is unread: {other:?}"),
+        }
         for (field, value) in [
             ("creator_event_id", json!("3")),
             ("kind", json!("response_body")),
             ("capture_origin", json!("unknown")),
-            ("sha256", json!("00".repeat(32))),
         ] {
             let mut wrong = artifact.clone();
             wrong[field] = value;
@@ -1296,7 +1379,7 @@ mod tests {
         let (mut events, edges) = session(b"token-a", b"token-b");
         events[3] = renderer(4, "js_invocation_settle", &settle_payload(5, None), 0);
         let mut bodies = RequestBodies::new();
-        bodies.insert(key(84, 1), b"n=token-a".to_vec());
+        bodies.insert(key(84, 1), RetainedBody::Read(b"n=token-a".to_vec()));
         assert_eq!(
             relations(&trace(&events, &edges, &bodies)),
             ["trace_target", "request_initiator"]

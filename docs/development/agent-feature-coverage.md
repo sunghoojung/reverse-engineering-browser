@@ -114,7 +114,8 @@ Every option is off unless the start names it, and none is inherited.
 | Inspect identification summary, Details and Functions menu badges | `get_wasm_identification` with `row_offset`, `row_limit` | R (structure), F (matched bytes `hex`) | Added |
 | Readable (lifted function) | `get_wasm_pseudocode` with `line_offset`, `line_limit` | R (structure, ranges, callees), F (lifted text) | Added; below Full access the lifted text is omitted |
 | Compare with (Wasm module diff) | `get_wasm_module_diff` with `status`, `row_offset`, `row_limit` | R | Added; structure only, so nothing is omitted below Full access |
-| Trace value (Wasm value flow for one operand or local) | `get_wasm_value_flow` | R (structure), F (instruction text) | Added; below Full access `text` and `expression` are omitted |
+| Trace value (complete Wasm value flow for one operand or local, through calls) | `get_wasm_value_flow` with `node_offset`, `node_limit`, `source_*`, `sink_*`, `join_*`, `control`, `interprocedural` | R (structure), F (instruction text) | Added; paged, no node or depth cap; below Full access `text` and `expression` are omitted |
+| Show callers (direct call sites of a Wasm function) | `get_wasm_call_sites` with `offset`, `limit` | R | Added; structure only |
 | Map (entropy and kind map) | `get_artifact_map` | R | Covered |
 | Facts | `get_source_facts`, `list_source_fact_rows` | A | Covered |
 | Track calls (saved invocation sites) | `get_js_invocation_sites`, `resolve_js_invocation_site`, `js_invocation_site_action` | R to read, A to change | Covered |

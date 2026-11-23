@@ -188,8 +188,8 @@ std::string OriginOf(const GURL& url, const NativeRequestTarget& target) {
   return spec;
 }
 
-// The whole URL when it fits the manifest's 8 KiB, else the origin; empty
-// unless HTTP(S).
+// The whole URL, which fits an artifact URL as every URL Chromium carries
+// does, else the origin; empty unless HTTP(S).
 std::string ArtifactUrlOf(const GURL& url, const NativeRequestTarget& target) {
   if (target.scheme != NativeRequestScheme::kHttp && target.scheme != NativeRequestScheme::kHttps) {
     return {};
@@ -496,13 +496,14 @@ void NativeNetworkCaptureSink::EmitHeaderBlock(const NativeProbeEmitter emitter,
   });
   summary.header_count = count;
   summary.block_length = static_cast<std::uint32_t>(
-      std::min<std::uint64_t>(length, std::numeric_limits<std::uint32_t>::max()));
+      std::min<std::uint64_t>(length, kNativeHeaderLengthUnrepresentable));
   NativeProbeEvent event = MakeChildEvent(type, parent);
   if (count == 0) {
     summary.state = NativeHeaderState::kEmpty;
     crypto::hash::Hasher hasher(crypto::hash::HashKind::kSha256);
     hasher.Finish(summary.sha256);
-  } else if (length > kNativeHeaderBlockLimitBytes) {
+  } else if (length >= kNativeHeaderLengthUnrepresentable) {
+    // A block of any size is retained; only the record's length field bounds it.
     summary.state = NativeHeaderState::kNotCapturedBlockLimit;
   } else {
     std::vector<std::uint8_t> block;
@@ -586,9 +587,9 @@ void NativeNetworkCaptureSink::EmitCookieList(const NativeProbeEmitter emitter,
     summary.state = NativeHeaderState::kEmpty;
     crypto::hash::Hasher hasher(crypto::hash::HashKind::kSha256);
     hasher.Finish(summary.sha256);
-  } else if (length > kNativeCookieListLimitBytes) {
-    summary.list_length = static_cast<std::uint32_t>(
-        std::min<std::uint64_t>(length, std::numeric_limits<std::uint32_t>::max()));
+  } else if (length >= kNativeHeaderLengthUnrepresentable) {
+    // A list of any size is retained; only the record's length field bounds it.
+    summary.list_length = static_cast<std::uint32_t>(kNativeHeaderLengthUnrepresentable);
     summary.state = NativeHeaderState::kNotCapturedBlockLimit;
   } else {
     summary.list_length = static_cast<std::uint32_t>(length);

@@ -19,6 +19,7 @@ const REQUEST_STACK_REASONS = Object.freeze({
   script_identity_outside_scan: 'not in the scanned range',
   source_unavailable: 'source unavailable',
   source_not_retained: 'source not retained',
+  source_backlog: 'source not sent: the renderer had too much waiting to transfer',
   source_artifact_missing: 'source artifact missing',
   source_artifact_unreadable: 'source artifact unreadable',
   source_not_utf8: 'source is not UTF-8',

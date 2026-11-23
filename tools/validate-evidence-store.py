@@ -263,7 +263,7 @@ def valid_stack_scope(scope: bytes) -> bool:
 
 def scoped_tail(tail: bytes, version: int, scoped_version: int) -> bool:
     """A record tail: the scope then zero from scoped_version on, else all zero."""
-    if version != scoped_version:
+    if version < scoped_version:
         return not any(tail)
     return valid_stack_scope(tail[:16]) and not any(tail[16:])
 
@@ -466,30 +466,40 @@ def valid_stack_summary(payload: bytes) -> bool:
 
 
 def valid_script_identity(event: dict, payload: bytes) -> bool:
-    """Version 2 adds the scope at byte 72."""
-    if (not valid_stack_child(event, payload, (1, 2)) or event["request_id"] != "0"
+    """Version 2 adds the scope at byte 72. Version 3 digests a source of any
+    length, so it never sets source_too_large (0x04), and adds source_backlog
+    (0x20)."""
+    if (not valid_stack_child(event, payload, (1, 2, 3)) or event["request_id"] != "0"
             or not scoped_tail(payload[72:], payload[0], 2)):
         return False
+    any_length = payload[0] == 3
     kind, flags = payload[4], payload[5]
     script_id = int.from_bytes(payload[8:12], "little")
     context = int.from_bytes(payload[24:32], "little")
     length = int.from_bytes(payload[32:40], "little")
     digest = payload[40:72]
-    retention = flags & 0x1E
-    if (any(payload[20:24]) or script_id == 0 or context == 0 or flags & ~0x1F
+    retention = flags & 0x3E
+    if (any(payload[20:24]) or script_id == 0 or context == 0 or flags & ~0x3F
+            or flags & (0x04 if any_length else 0x20)
             or retention & (retention - 1) or kind not in (1, 2)
             or (kind == 2 and flags & ~0x0C) or (kind == 1 and retention == 0)):
         return False
     if retention == 0x08:
         return length == 0 and not any(digest)
     if retention == 0x04:
-        return length > 16 * 1024 * 1024 and not any(digest)
-    return 0 < length <= 16 * 1024 * 1024 and any(digest)
+        return length > SCRIPT_IDENTITY_V2_SOURCE_LIMIT and not any(digest)
+    return (0 < length and (any_length or length <= SCRIPT_IDENTITY_V2_SOURCE_LIMIT)
+            and any(digest))
 
 
 # Older sessions only: request body payload v1 and response body payloads v1
 # and v2 kept at most this prefix.
 RESPONSE_CAPTURE_BYTES = 16 * 1024 * 1024
+# V8's largest Wasm module (kV8MaxWasmModuleSize); include/reb/wasm_dispatch.hpp
+# kWasmModuleByteOffsetLimit.
+WASM_MODULE_OFFSET_LIMIT = 1 << 30
+# script_identity versions 1 and 2 digest only a source of at most this length.
+SCRIPT_IDENTITY_V2_SOURCE_LIMIT = 16 * 1024 * 1024
 
 
 def request_body_fields_valid(payload: bytes) -> bool:
@@ -675,12 +685,20 @@ def valid_response_body(event: dict, payload: bytes) -> bool:
     }[state]
 
 
-HEADER_BLOCK_LIMIT = 320 * 1024
+# Version 2 retains a block or cookie list of any length, so its
+# not_captured_block_limit is only a length past the 32-bit field; version 1
+# had a 320 KiB block and 2 MiB list limit.
+HEADER_BLOCK_LIMIT_V1 = 320 * 1024
+LENGTH_UNREPRESENTABLE = 0xFFFFFFFF
+
+
+def too_long(version: int, length: int, v1_limit: int) -> bool:
+    return length > v1_limit if version == 1 else length == LENGTH_UNREPRESENTABLE
 
 
 def valid_header_block(event: dict, payload: bytes) -> bool:
     """Every rule of the native-network-v3.md header record, mirrored from the C++ core."""
-    if not valid_request_child(event, payload):
+    if not valid_request_child(event, payload, (1, 2)):
         return False
 
     def at(offset: int, size: int) -> int:
@@ -709,17 +727,18 @@ def valid_header_block(event: dict, payload: bytes) -> bool:
         return False
     empty, limited = state == 3, state == 4
     if ((count == 0) != empty or (length == 0) != empty or length < 5 * count
-            or limited != (length > HEADER_BLOCK_LIMIT) or (not any(digest)) != limited):
+            or limited != too_long(payload[0], length, HEADER_BLOCK_LIMIT_V1)
+            or (not any(digest)) != limited):
         return False
     return (event["artifact_id"] != "0") == (state in (1, 2))
 
 
-COOKIE_LIST_LIMIT = 2 * 1024 * 1024
+COOKIE_LIST_LIMIT_V1 = 2 * 1024 * 1024
 
 
 def valid_cookie_list(event: dict, payload: bytes) -> bool:
     """The native-network-v3.md cookie_list record, mirrored from the C++ core."""
-    if not valid_request_child(event, payload):
+    if not valid_request_child(event, payload, (1, 2)):
         return False
 
     def at(offset: int, size: int) -> int:
@@ -734,7 +753,8 @@ def valid_cookie_list(event: dict, payload: bytes) -> bool:
     empty, limited = state == 3, state == 4
     if ((count == 0) != empty or (length == 0) != empty
             or (not empty and length < 16 + 64 * count)
-            or limited != (length > COOKIE_LIST_LIMIT) or (not any(digest)) != limited):
+            or limited != too_long(payload[0], length, COOKIE_LIST_LIMIT_V1)
+            or (not any(digest)) != limited):
         return False
     return (event["artifact_id"] != "0") == (state in (1, 2))
 
@@ -1199,7 +1219,7 @@ def validate_event(event: object, line_number: int) -> None:
         or payload[0] not in (1, 2, 3)
         or payload[1:4] != bytes((0, 128, 0))
         or int.from_bytes(payload[4:8], "little") >= 16777216
-        or not 8 <= int.from_bytes(payload[8:12], "little") < 16777216
+        or not 8 <= int.from_bytes(payload[8:12], "little") < WASM_MODULE_OFFSET_LIMIT
         or int.from_bytes(payload[16:20], "little") >= 16777216
         or int.from_bytes(payload[20:24], "little") == 0xFFFFFFFF
         or wasm_context_invalid(payload, payload[0], 2, 24)
@@ -1221,7 +1241,7 @@ def validate_event(event: object, line_number: int) -> None:
         or payload[0] not in (1, 2)
         or payload[1:4] != bytes((0, 128, 0))
         or int.from_bytes(payload[4:8], "little") >= 16777216
-        or not 8 <= int.from_bytes(payload[8:12], "little") < 16777216
+        or not 8 <= int.from_bytes(payload[8:12], "little") < WASM_MODULE_OFFSET_LIMIT
         or int.from_bytes(payload[12:16], "little") >= 16777216
         or int.from_bytes(payload[20:24], "little") >= 16777216
         or int.from_bytes(payload[24:28], "little") >= 5
@@ -1261,7 +1281,8 @@ def validate_event(event: object, line_number: int) -> None:
             or stream > 2
             or invocation == 0
             or (function_index >= 16777216 if known & 1 else function_index != 0)
-            or (module_offset < 8 or module_offset >= 16777216 if known & 2 else module_offset != 0)
+            or (module_offset < 8 or module_offset >= WASM_MODULE_OFFSET_LIMIT
+                if known & 2 else module_offset != 0)
             or (reason != 0 or bounds != 0 if kind == 1 else reason >= 6)
             or (bounds >= 7 if reason == 3 else bounds != 0)
             or ((sample == 0xFFFFFFFF) != (stream == 0))
@@ -1358,7 +1379,7 @@ def validate_event(event: object, line_number: int) -> None:
                                  or parent_dispatch >= int(event["sequence_number"]))))
         else:
             invalid |= (not 0 < int(event["parent_event_id"]) < int(event["sequence_number"])
-                        or not 8 <= at(8, 4) < 16777216 or at(16, 4) >= 16777216
+                        or not 8 <= at(8, 4) < WASM_MODULE_OFFSET_LIMIT or at(16, 4) >= 16777216
                         or at(20, 4) >= 256 or at(24, 8) == 0 or at(32, 8) == 0
                         or at(56, 8) == 0 or at(56, 8) == int(event["artifact_id"])
                         or not 0 < at(72, 4) <= 65536 or at(40, 8) >= at(72, 4)

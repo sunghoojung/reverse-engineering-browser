@@ -20,17 +20,18 @@ inline constexpr std::uint16_t kNativeArtifactProtocolVersion = 1;
 inline constexpr std::size_t kNativeArtifactHeaderSize = 128;
 inline constexpr std::uint32_t kNativeArtifactAckMagic = 0x4b414252U;
 inline constexpr std::size_t kNativeArtifactAckSize = 32;
-inline constexpr std::uint32_t kNativeArtifactMaxUrlBytes = 8'192;
+// url::kMaxURLChars, the longest URL Chromium carries between processes. Only
+// a script's own name (a sourceURL comment) can be longer, and such a name is
+// handled as a script with no name.
+inline constexpr std::uint32_t kNativeArtifactMaxUrlBytes = 2U * 1024U * 1024U;
 inline constexpr std::uint32_t kNativeArtifactMaxMimeTypeBytes = 255;
-// The size limit of the Wasm observation, guest, runtime buffer, canvas and
-// stack paths, which have their own records. Compiled script sources, Wasm
-// modules and network bodies have none.
-inline constexpr std::size_t kNativeArtifactMaxContentBytes = 16U * 1024U * 1024U;
-// Compiled script sources and Wasm modules a renderer has handed to the browser
-// that the browser has not yet copied out. A compiling thread cannot wait, so
-// this bounds the shared memory a page that compiles faster than the receiver
-// writes can pin. Past it the record is kept and the bytes are not sent. One
-// item larger than the bound goes when nothing else is waiting.
+// Artifact content has no size limit. This is the content a renderer has
+// handed to the browser that the browser has not yet copied out: script
+// sources, Wasm modules, runtime buffers, canvas images and stack scripts. A
+// producing thread cannot wait, so this bounds the shared memory a page that
+// produces faster than the receiver writes can pin. Past it the record is kept
+// and the bytes are not sent. One item larger than the bound goes when nothing
+// else is waiting.
 inline constexpr std::uint64_t kNativeRendererArtifactCreditBytes = 256ULL * 1024ULL * 1024ULL;
 inline constexpr std::uint16_t kNativeArtifactFlagSensitive = 1U << 0U;
 // Version 2 streams teed bodies: an open header, then stream frames.

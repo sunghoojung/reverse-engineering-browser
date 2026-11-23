@@ -6,10 +6,10 @@
 #ifndef BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_COMMON_NATIVE_CONSOLE_PROTOCOL_H_
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_COMMON_NATIVE_CONSOLE_PROTOCOL_H_
 
+#include <algorithm>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <span>
 #include <string_view>
 #include <type_traits>
@@ -145,15 +145,21 @@ inline constexpr std::uint16_t kNativeConsoleTargetTopFrame = 2;
                                                   std::string_view& url) noexcept {
   if (offset > payload.size() || payload.size() - offset < sizeof(target))
     return false;
-  std::memcpy(&target, payload.data() + offset, sizeof(target));
+  const auto record = payload.subspan(offset);
+  std::ranges::copy(record.first(sizeof(target)),
+                    std::as_writable_bytes(std::span(&target, 1)).begin());
   const std::uint64_t bytes =
       std::uint64_t{target.origin_bytes} + target.label_bytes + target.url_bytes;
-  if (payload.size() - offset - sizeof(target) < bytes)
+  const auto strings = record.subspan(sizeof(target));
+  if (strings.size() < bytes)
     return false;
-  const auto* text = reinterpret_cast<const char*>(payload.data() + offset + sizeof(target));
-  origin = std::string_view(text, target.origin_bytes);
-  label = std::string_view(text + target.origin_bytes, target.label_bytes);
-  url = std::string_view(text + target.origin_bytes + target.label_bytes, target.url_bytes);
+  const auto text = [strings](std::size_t at, std::size_t size) {
+    const auto part = strings.subspan(at, size);
+    return std::string_view(reinterpret_cast<const char*>(part.data()), part.size());
+  };
+  origin = text(0, target.origin_bytes);
+  label = text(target.origin_bytes, target.label_bytes);
+  url = text(std::size_t{target.origin_bytes} + target.label_bytes, target.url_bytes);
   offset += sizeof(target) + static_cast<std::size_t>(bytes);
   return true;
 }

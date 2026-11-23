@@ -234,6 +234,23 @@ final class Harness {
     try await settle()
   }
 
+  // A native secondary click: WebKit turns it into the page's contextmenu event.
+  func rightClick(_ selector: String, containing text: String? = nil) async throws {
+    try await activate()
+    let point = try await reveal(selector, containing: text)
+    try await activate()
+    let location = NSPoint(x: point.x, y: webView.isFlipped ? point.y : webView.bounds.height - point.y)
+    let windowPoint = webView.convert(location, to: nil)
+    for type in [NSEvent.EventType.rightMouseDown, .rightMouseUp] {
+      guard let event = NSEvent.mouseEvent(
+        with: type, location: windowPoint, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+        windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: type == .rightMouseDown ? 1 : 0)
+      else { throw HarnessError("Could not create a mouse event") }
+      window.sendEvent(event)
+    }
+    try await settle()
+  }
+
   // A native press, move and release between two CSS points, as a researcher
   // drags a pane divider. Each move settles so the page sees every step.
   func drag(from start: NSPoint, to end: NSPoint, steps: Int = 8) async throws {
@@ -853,6 +870,14 @@ final class OriginTraceRenderedUITests: XCTestCase {
     XCTAssertEqual(droppedColumnsRead, 0, "\(context): a column the width dropped must not read as shown")
     try await assertLayout(ui, ".column-menu", "\(context) column menu")
     try await ui.screenshot("traffic-column-menu-\(context)")
+    // A mouse click toggles a column and keeps the menu open: WebKit does not
+    // focus a clicked button, so the press must not read as focus leaving.
+    let protocolItem = ".column-menu [data-column-id=\"protocol\"]"
+    try await ui.click(protocolItem)
+    try await ui.waitUntil("document.querySelector('\(protocolItem)')?.getAttribute('aria-checked') !== 'false'", "\(context): a click did not turn the Protocol column on")
+    try await ui.click(protocolItem)
+    try await ui.waitUntil("document.querySelector('\(protocolItem)')?.getAttribute('aria-checked') === 'false'", "\(context): a second click did not turn the Protocol column off")
+    _ = try await ui.value("document.querySelector('.column-menu [role=menuitemcheckbox]:not(:disabled)').focus()")
     try await ui.key(53, "\u{1B}")
     try await ui.waitUntil("document.querySelector('.column-menu') === null && document.activeElement?.dataset.column === 'name'",
       "\(context): Escape did not close the column menu and return focus")
@@ -1773,17 +1798,26 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#open-captured-export")
       try await ui.waitUntil("document.querySelector('#captured-export-dialog').open", "export dialog did not open")
       let exportState = try await ui.json("""
-        ({formatHidden: document.querySelector('[data-export-format-field]').hidden,
-          sourceHidden: document.querySelector('[data-export-source-field]').hidden,
+        ({formats: [...document.querySelector('[data-export-format]').options].filter(option => !option.hidden).map(option => option.value),
+          format: document.querySelector('[data-export-format]').value,
+          scope: document.querySelector('[data-export-scope]').value,
+          scopes: [...document.querySelector('[data-export-scope]').options].filter(option => !option.hidden).map(option => option.textContent),
+          policy: document.querySelector('[data-export-policy]').value,
+          policies: [...document.querySelector('[data-export-policy]').options].filter(option => !option.hidden).map(option => option.value),
           fileShown: !document.querySelector('[data-export-file-field]').hidden,
           title: document.querySelector('#captured-export-title').innerText,
           context: document.querySelector('#captured-export-context').innerText})
         """)
-      XCTAssertEqual(exportState["formatHidden"] as? Bool, true, "\(size.name): no format choice when only one mode works")
-      XCTAssertEqual(exportState["sourceHidden"] as? Bool, true, "\(size.name): no schema-source choice")
-      XCTAssertEqual(exportState["fileShown"] as? Bool, true, "\(size.name): local introspection file stays available")
-      XCTAssertEqual(exportState["title"] as? String, "Export GraphQL schema")
-      XCTAssertTrue((exportState["context"] as? String ?? "").contains("HAR exports are unavailable here"), "\(size.name): unavailable modes are explained: \(exportState)")
+      XCTAssertEqual(exportState["formats"] as? [String], ["traffic_har", "sdl"], "\(size.name): Traffic exports its HAR, or converts a local schema: \(exportState)")
+      XCTAssertEqual(exportState["format"] as? String, "traffic_har")
+      XCTAssertEqual(exportState["scope"] as? String, "list", "\(size.name): the list's Export starts on the list")
+      XCTAssertEqual((exportState["scopes"] as? [String])?.first, "Selected request", "\(size.name): \(exportState)")
+      XCTAssertTrue((exportState["scopes"] as? [String])?.last?.hasPrefix("All requests · ") == true, "\(size.name): \(exportState)")
+      XCTAssertEqual(exportState["policy"] as? String, "raw", "\(size.name): Raw is the default")
+      XCTAssertEqual(exportState["policies"] as? [String], ["raw", "credentials_withheld"], "\(size.name): \(exportState)")
+      XCTAssertEqual(exportState["fileShown"] as? Bool, false, "\(size.name): the file field is the SDL format's")
+      XCTAssertEqual(exportState["title"] as? String, "Export Traffic")
+      XCTAssertTrue((exportState["context"] as? String ?? "").hasPrefix("Selected: GET "), "\(size.name): the selected row is named: \(exportState)")
       try await assertLayout(ui, "#captured-export-dialog", "\(size.name) export dialog")
       try await ui.screenshot("export-native-\(size.name)")
       try await ui.key(53, "\u{1B}")
@@ -1821,6 +1855,102 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // protocol/native-network-v3.md: a service worker's install-time fetch sits in
   // the tab that registered it, marked as such, and requests no page caused are
   // named in the footer instead of listed.
+  // The row menu copies what the request sent, read from its HAR entry, and
+  // the dialog exports that HAR. Each copy is read back from the pasteboard.
+  @MainActor
+  func test43TrafficCopyMenuAndHarExport() async throws {
+    let expected = try Expectations.load()
+    let pasteboard = NSPasteboard.general
+    let saved = pasteboard.string(forType: .string)
+    defer { pasteboard.clearContents(); if let saved { pasteboard.setString(saved, forType: .string) } }
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "traffic")
+      try await ui.click("#screen-traffic .request-row", containing: expected.requestBodyHost)
+      try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
+      try await ui.click("#request-copy-url")
+      try await ui.waitUntil("document.querySelector('.traffic-row-menu') !== null", "the Copy menu did not open")
+      let menu = try await ui.json("""
+        ({items: [...document.querySelectorAll('.traffic-row-menu [role=menuitem]')].map(item => item.textContent + (item.disabled ? ' (disabled)' : '')),
+          focused: document.activeElement?.textContent, expanded: document.querySelector('#request-copy-url').getAttribute('aria-expanded')})
+        """)
+      XCTAssertEqual(menu["items"] as? [String], ["Copy URL", "Copy as cURL", "Copy as fetch", "Export HAR…"], "\(size.name): \(menu)")
+      XCTAssertEqual(menu["focused"] as? String, "Copy URL", "\(size.name): the first action takes focus")
+      XCTAssertEqual(menu["expanded"] as? String, "true")
+      try await assertLayout(ui, ".traffic-row-menu", "\(size.name) copy menu")
+      try await ui.screenshot("traffic-copy-menu-\(size.name)")
+      pasteboard.clearContents()
+      try await ui.click(".traffic-row-menu [role=menuitem]", containing: "Copy as cURL")
+      try await ui.waitUntil("document.querySelector('#request-copy-url').textContent !== 'Copy'", "Copy as cURL did not finish")
+      let copied = try await ui.json("({label: document.querySelector('#request-copy-url').textContent, notice: document.querySelector('#investigation-notice')?.textContent ?? ''})")
+      XCTAssertEqual(copied["label"] as? String, "Copied", "\(size.name): \(copied)")
+      let curl = pasteboard.string(forType: .string) ?? ""
+      XCTAssertTrue(curl.hasPrefix("curl 'https://\(expected.requestBodyHost)/getcaptcha/site-key?s="), "\(size.name): \(curl)")
+      for part in ["-H 'cookie: sid=fixture'", "-H 'x-note: \(expected.headerValueMarker)'", "--data-raw '"] {
+        XCTAssertTrue(curl.contains(part), "\(size.name): cURL carries \(part): \(curl)")
+      }
+      XCTAssertFalse(curl.contains(":method") || curl.contains(" -X "), "\(size.name): pseudo-headers and a redundant -X are left out: \(curl)")
+      let focus = try await ui.value("document.activeElement?.id ?? ''") as? String
+      XCTAssertEqual(focus, "request-copy-url", "\(size.name): focus returns to Copy")
+      try await assertInert(ui, "\(size.name) copy menu")
+
+      // Shift+F10 on the focused row opens the same menu; Escape returns focus to the row.
+      _ = try await ui.value("document.querySelector('#screen-traffic .request-row[aria-selected=\"true\"]').focus({focusVisible:true})")
+      try await ui.key(109, "\u{F70D}", modifiers: [.shift, .function])
+      try await ui.waitUntil("document.querySelector('.traffic-row-menu') !== null", "Shift+F10 did not open the row menu")
+      try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad])
+      let moved = try await ui.value("document.activeElement?.textContent") as? String
+      XCTAssertEqual(moved, "Copy as cURL", "\(size.name): Down moves through the actions")
+      try await ui.key(53, "\u{1B}")
+      try await ui.waitUntil("document.querySelector('.traffic-row-menu') === null", "Escape did not close the row menu")
+      let rowFocus = try await ui.value("document.activeElement?.classList.contains('request-row') ?? false") as? Bool
+      XCTAssertEqual(rowFocus, true, "\(size.name): Escape returns focus to the row")
+
+      // A right-click selects the row it is on and opens its menu: a host-only row has no URL to copy.
+      try await ui.rightClick("#screen-traffic .request-row", containing: "item-3.scroll.test")
+      try await ui.waitUntil("document.querySelector('.traffic-row-menu') !== null", "right-click did not open the row menu")
+      let other = try await ui.json("""
+        ({selected: document.querySelector('#screen-traffic .request-row[aria-selected=\"true\"]')?.innerText ?? '',
+          url: document.querySelector('.traffic-row-menu [role=menuitem]').disabled})
+        """)
+      XCTAssertTrue((other["selected"] as? String ?? "").contains("item-3.scroll.test"), "\(size.name): right-click selects its row: \(other)")
+      XCTAssertEqual(other["url"] as? Bool, true, "\(size.name): a host-only row has no URL to copy")
+      try await ui.screenshot("traffic-row-menu-\(size.name)")
+      try await ui.key(53, "\u{1B}")
+      try await ui.waitUntil("document.querySelector('.traffic-row-menu') === null", "Escape did not close the right-click menu")
+
+      // Export HAR… opens the dialog on that row; Copy puts its archive on the pasteboard.
+      try await ui.click("#screen-traffic .request-row", containing: expected.requestBodyHost)
+      try await ui.waitUntil("document.querySelector('#selected-url').textContent.includes('\(expected.requestBodyHost)')", "the body row was not selected again")
+      try await ui.click("#request-copy-url")
+      try await ui.waitUntil("document.querySelector('.traffic-row-menu') !== null", "the Copy menu did not reopen")
+      try await ui.click(".traffic-row-menu [role=menuitem]", containing: "Export HAR")
+      try await ui.waitUntil("document.querySelector('#captured-export-dialog').open", "Export HAR… did not open the dialog")
+      let dialog = try await ui.json("""
+        ({scope: document.querySelector('[data-export-scope]').value, policy: document.querySelector('[data-export-policy]').value,
+          context: document.querySelector('#captured-export-context').innerText})
+        """)
+      XCTAssertEqual(dialog["scope"] as? String, "selected", "\(size.name): \(dialog)")
+      XCTAssertEqual(dialog["policy"] as? String, "raw")
+      XCTAssertTrue((dialog["context"] as? String ?? "").hasPrefix("Selected: POST https://\(expected.requestBodyHost)/"), "\(size.name): \(dialog)")
+      try await assertInert(ui, "\(size.name) Traffic export")
+      try await assertLayout(ui, "#captured-export-dialog", "\(size.name) Traffic export")
+      try await ui.screenshot("traffic-har-export-\(size.name)")
+      _ = try await ui.value("(() => { const field = document.querySelector('[data-export-destination]'); field.value = 'copy'; field.dispatchEvent(new Event('change')); return true; })()")
+      pasteboard.clearContents()
+      try await ui.click("[data-export-submit]")
+      try await ui.waitUntil("document.querySelector('[data-export-status]').textContent.includes('Copied locally')", "the HAR was not copied")
+      let har = try JSONSerialization.jsonObject(with: Data((pasteboard.string(forType: .string) ?? "").utf8)) as? [String: Any]
+      let log = har?["log"] as? [String: Any]
+      let entries = log?["entries"] as? [[String: Any]] ?? []
+      XCTAssertEqual((log?["_reb"] as? [String: Any])?["complete"] as? Bool, true, "\(size.name): \(String(describing: log?["_reb"]))")
+      XCTAssertEqual(entries.count, 1, "\(size.name): one hop, one entry")
+      XCTAssertEqual((entries.first?["request"] as? [String: Any])?["method"] as? String, "POST")
+      try await ui.key(53, "\u{1B}")
+      try await ui.waitUntil("!document.querySelector('#captured-export-dialog').open", "Escape did not close export")
+    }
+  }
+
   @MainActor
   func test28ServiceWorkerRegistrantAndNoPageCounts() async throws {
     let expected = try Expectations.load()
@@ -3117,6 +3247,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#source-graph")
       // The largest function in this module is one block: "1 block".
       try await ui.waitUntil("/\\d+ blocks?\\b/.test(document.querySelector('#source-graph-host .block-graph-stats')?.textContent ?? '')", timeout: 30, "the block graph did not finish laying out")
+      // The stage's resize observer fits the canvas to the stage in the next
+      // frame, so a layout read in between finds the canvas cut off.
+      try await ui.settle()
       let hidden = try await ui.value("getComputedStyle(document.querySelector('#wasm-identification')).display") as? String
       XCTAssertEqual(hidden, "none", "\(size.name): the graph keeps the height")
       try await assertLayout(ui, "#screen-sources", "\(size.name) wasm identification graph")

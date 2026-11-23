@@ -63,8 +63,8 @@ inconsistent identities, duplicate JSON keys, invalid UTF-8/Unicode, unsafe
 integer values, excessive nesting and inputs above 1 MiB. The existing exporter
 also enforces its 768 KiB evidence and 2 MiB ZIP bounds. A valid response from
 the API can exceed these smaller export limits; rejection never truncates it.
-Missing, loading, binary, multipart, credential-bearing and truncated request
-representations preserve their evidence and explicit unsupported-input reasons.
+Missing, loading, binary, multipart and truncated request representations
+preserve their evidence and explicit unsupported-input reasons.
 They require a complete reviewed `config.request` before a send. No unsupported
 input becomes a faithful replay claim.
 
@@ -307,13 +307,16 @@ dispatchers and proxy variables, with explicit certificate verification and no
 automatic decompression.
 
 The initial runnable clients support one complete UTF-8 text request with a
-supported uppercase method, complete HTTP(S) URL, at most 64 header pairs and
-64 KiB body. It rejects Fetch-forbidden methods, URL credentials/fragments,
-duplicate header names, header whitespace/control/encoding losses, non-UTF-8
-charsets, multipart/binary/unrecognized media types, encoded bodies, missing or
-truncated inputs, and GET/HEAD bodies. Credentials and transport-controlled
-headers (including Authorization, Cookie, Host, Content-Length and
-Transfer-Encoding) require deliberate manual reconstruction; nothing is
+supported uppercase method, complete HTTP(S) URL, at most 64 header pairs with
+values of at most 64 KiB, and a 64 KiB body. It rejects Fetch-forbidden methods,
+URL credentials/fragments, duplicate header names, header whitespace/control/encoding
+losses, non-UTF-8 charsets, multipart/binary/unrecognized media types, encoded
+bodies, missing or truncated inputs, and GET/HEAD bodies. Captured headers are
+sent as reviewed, `Authorization`, `Cookie`, `Origin`, `Referer`, `User-Agent`
+and `Sec-*` included, so an authenticated request replays as captured. Only
+the framing and hop-by-hop headers the HTTP client computes (`Host`,
+`Content-Length`, `Connection`, `Transfer-Encoding`, `Keep-Alive`,
+`Proxy-Connection`, `TE`, `Trailer`, `Upgrade`) are refused; nothing is
 silently stripped into a supposedly equivalent request. Literal Repeater
 template delimiters are blocked from import but preserved in direct projects.
 

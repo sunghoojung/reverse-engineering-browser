@@ -62,12 +62,12 @@ const validContentTypes = ['text/plain; charset="UTF-8"','text/plain; note="a;b"
 
 const problems = [
   ['duplicate header',value=>value.requests[0].request.headers.push(['content-type','text/plain'])],
-  ['Authorization',value=>value.requests[0].request.headers.push(['Authorization','synthetic-only'])],
-  ['Accept-Charset',value=>value.requests[0].request.headers.push(['Accept-Charset','utf-8'])],
-  ['legacy Cookie2',value=>value.requests[0].request.headers.push(['Cookie2','synthetic-only'])],
   ['method override',value=>value.requests[0].request.headers.push(['X-HTTP-Method-Override','POST, trace'])],
-  ['Cookie',value=>value.requests[0].request.headers.push(['Cookie','synthetic-only'])],
   ['Host',value=>value.requests[0].request.headers.push(['Host','example.test'])],
+  ['Connection',value=>value.requests[0].request.headers.push(['Connection','close'])],
+  ['Keep-Alive',value=>value.requests[0].request.headers.push(['Keep-Alive','timeout=5'])],
+  ['Upgrade',value=>value.requests[0].request.headers.push(['Upgrade','websocket'])],
+  ['header value size',value=>value.requests[0].request.headers.push(['X-Large','x'.repeat(65537)])],
   ['Content-Length',value=>value.requests[0].request.headers.push(['Content-Length','1'])],
   ['Transfer-Encoding',value=>value.requests[0].request.headers.push(['Transfer-Encoding','chunked'])],
   ['forbidden method',value=>value.requests[0].method='CONNECT'],
@@ -103,6 +103,14 @@ for (const [name,mutate] of problems) {
 for (const type of validContentTypes) {
   const value=fixture();value.requests[0].request.headers[0][1]=type;
   assert.equal(capture(value).problems.length,0,type);
+}
+// Credentials, cookies and browser headers replay as captured; only framing is the client's.
+for (const header of [['Authorization','Bearer synthetic-only'],['Cookie','sid=synthetic-only'],['Cookie2','$Version=1'],
+  ['Proxy-Authorization','Basic c3ludGhldGlj'],['Origin','https://example.test'],['Referer','https://example.test/page'],
+  ['User-Agent','Mozilla/5.0 synthetic'],['Sec-Fetch-Mode','cors'],['Accept-Encoding','gzip, br'],['Accept-Charset','utf-8'],
+  ['X-Large','x'.repeat(65536)]]) {
+  const value=fixture();value.requests[0].request.headers.push(header);
+  const {problems}=capture(value);assert.equal(problems.length,0,`${header[0]}: ${problems.join(' ')}`);
 }
 for (const text of ['{{variable}}','{{=escaped}}']) {
   const value=fixture();value.requests[0].request.body.text=text;const selected=capture(value);
@@ -204,8 +212,8 @@ async function checkGeneratedProject() {
     assert.equal(receivedWithoutTimeout(),4);
     await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:'https://wrong.test',request:override}));
     result=await execute('--send');assert.notEqual(result.code,0);assert.equal(receivedWithoutTimeout(),4);
-    await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin,request:{...override,headers:[['Authorization','synthetic-only']]}}));
-    result=await execute('--send');assert.notEqual(result.code,0);assert.equal(receivedWithoutTimeout(),4,'Credential/transport refusal happens before fetch');
+    await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin,request:{...override,headers:[['Connection','close']]}}));
+    result=await execute('--send');assert.notEqual(result.code,0);assert.equal(receivedWithoutTimeout(),4,'Framing refusal happens before fetch');
     for(const type of invalidContentTypes) {
       await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin,request:{...copy(local.input),headers:[['Content-Type',type]]}}));
       result=await execute('--send');assert.notEqual(result.code,0,type);assert.match(result.stderr,/invalid_input/);assert.equal(receivedWithoutTimeout(),4,'Malformed/ambiguous charset is refused before send');
@@ -219,8 +227,11 @@ async function checkGeneratedProject() {
     await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin}));
     result=await execute();assert.equal(result.code,0);assert.equal(JSON.parse(result.stdout).ready,false);
     result=await execute('--send');assert.notEqual(result.code,0);assert.equal(receivedWithoutTimeout(),4,'Redacted inputs require a complete reviewed replacement');
-    await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin,request:{...override,url:origin+'/configured'}}));
+    await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin,request:{...override,url:origin+'/configured',
+      headers:[...override.headers,['Authorization','Bearer synthetic-only'],['Cookie','sid=synthetic-only']]}}));
     result=await execute('--send');assert.equal(result.code,0,result.stderr);assert.equal(receivedWithoutTimeout(),5);
+    assert.equal(seen.at(-1).headers.authorization,'Bearer synthetic-only','A reviewed Authorization header is sent as captured');
+    assert.equal(seen.at(-1).headers.cookie,'sid=synthetic-only','A reviewed Cookie header is sent as captured');
     // Exercise the pre-connect deadline deterministically. This authored preload
     // defers only this fixture request until its real AbortSignal fires, then
     // calls Node's real transport with the already-aborted signal. Product

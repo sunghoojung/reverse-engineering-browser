@@ -90,12 +90,16 @@ try {
     assert.equal(base.configVersion,'reb-python-client-config-v1');
     const configure=async value=>writeFile(join(cwd,'config.json'),JSON.stringify(value));
     await configure(base);result=await command(python,['client.py'],cwd);assert.equal(result.code,0,result.stderr);assert.equal(JSON.parse(result.stdout).ready,true);assert.equal(seen.length,providerStart);
+    // Reviewed credentials and browser headers are sent as captured; only framing is refused.
+    await configure({...base,request:{...req,headers:[...req.headers,['Authorization','Bearer synthetic-only'],['Cookie','sid=synthetic-only'],['User-Agent','Mozilla/5.0 synthetic'],['Origin',origin]]}});
+    result=await command(python,['client.py'],cwd);assert.equal(result.code,0,result.stderr);assert.deepEqual(JSON.parse(result.stdout).problems,[]);assert.equal(seen.length,providerStart);
+    await configure(base);
     result=await command(python,['-S','client.py','--send'],cwd);assert.match(result.stderr,/missing_dependency/);assert.equal(seen.length,providerStart);
     result=await command(python,['-S','-c',"import client\nr=client.read_json('requests/request-001.json',integers_only=True);c=client.read_json('config.json',integers_only=True);p=client.read_json('provenance.json')\nfor value in [None,False,0,1,'false',{},[]]:\n result=client.send_request(r,config=c,provenance=p,send=value)\n assert result['dry_run'] and result['network_requests']==0"],cwd);assert.equal(result.code,0,result.stderr);assert.equal(seen.length,providerStart);
     await configure({...base,configVersion:'reb-client-config-v1'});result=await command(python,['client.py','--send'],cwd);assert.match(result.stderr,/invalid_config/);assert.equal(seen.length,providerStart);
     for(const config of [{...base,transport:{mode:'browser-profile',browserProfile:{browser:'chrome',version:'133.0.0.0',platform:'linux'}}},
       {...base,cookiePolicy:'include'},{...base,allowedOrigin:'http://example.test'},{...base,unknown:true},
-      {...base,request:{...req,headers:[['Authorization','synthetic-only']]}},
+      {...base,request:{...req,headers:[['Connection','close']]}},
       {...base,timeoutMs:true},{...base,responseChecks:{statuses:[200,200]}},{...base,responseChecks:{statuses:[true]}},
       {...base,responseChecks:{contentType:'Application/json'}},{...base,responseChecks:{jsonFields:[{pointer:'/bad~x',type:'string'}]}},
       {...base,responseChecks:{jsonFields:[{pointer:'',type:'object',equals:{}}]}},

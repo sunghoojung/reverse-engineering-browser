@@ -59,10 +59,7 @@ pub(crate) struct Artifact {
 
 pub(crate) fn artifact(root: &Path, id: &str) -> Result<Artifact> {
     validation::canonical(&serde_json::json!(id), 64, true, "Artifact ID")?;
-    let record = evidence::artifacts(root, 10000)?
-        .into_iter()
-        .find(|a| a["artifact_id"] == id)
-        .ok_or_else(|| Error::new(404, "Artifact not found"))?;
+    let record = evidence::find_artifact(root, id)?;
     if record["kind"] != "wasm" {
         return Err(Error::bad("Artifact is not WebAssembly"));
     }
@@ -1452,7 +1449,7 @@ mod tests {
                 .iter()
                 .any(|edge| edge.2 == "table_default" && edge.3.as_deref() == Some("default"))
         );
-        assert_eq!(document["instruction_count"].as_u64().unwrap() > 900, true);
+        assert!(document["instruction_count"].as_u64().unwrap() > 900);
     }
 
     use std::collections::BTreeSet;

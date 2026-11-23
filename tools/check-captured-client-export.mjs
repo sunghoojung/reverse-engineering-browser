@@ -96,7 +96,7 @@ try {
     ['truncated body',v=>v.request.request.body.truncated=true],['truncated headers',v=>v.request.request.headers_truncated=true],
     ['truncated URL',v=>v.request.url_truncated=true],['binary body',v=>v.request.request.body.base64='AP8='],
     ['multipart',v=>v.request.request.headers[0][1]='multipart/form-data; boundary=synthetic'],
-    ['credential header',v=>v.request.request.headers.push(['Cookie','synthetic-only'])],
+    ['framing header',v=>v.request.request.headers.push(['Transfer-Encoding','chunked'])],
     ['duplicate headers',v=>v.request.request.headers.push(['content-type','application/json'])],
   ];
   let index=0;

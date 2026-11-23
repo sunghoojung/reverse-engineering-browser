@@ -407,15 +407,37 @@ so Origin Trace has no in-app report. See
 [Passive security report v1](../../docs/product/passive-security-report-v1.md)
 for the schema, rules, bounds and commands.
 
-## Captured request exports
+## Traffic exports and copies
 
-Live native Traffic has no CDP exchange to replay, so Traffic has no capture
-actions. **Export…** in the Traffic toolbar converts a local
-introspection JSON file (`__schema` or `data.__schema`, up to 1 MiB) to GraphQL
-SDL; duplicate keys, invalid UTF-8, partial/error schemas and unsafe SDL
-literals are refused. Export never queries an introspection endpoint or sends a
-request. SDL is a raw schema export: descriptions and identifiers can be
-sensitive.
+**Export…** in the Traffic toolbar saves the request index's HAR
+(`export_requests_har`, see
+[Request HAR export](../../protocol/http-api.md#request-har-export)): the
+selected request, or the list as shown, with its filters, sort and the index
+position it was read at, so rows indexed later are not added. Every hop is an
+entry, redirects and failures included. **Raw** is the default and asks for
+credential header and cookie values; **Credential values withheld** leaves
+them out. A redacted copy is not offered: the backend withholds credentials but
+does not rewrite URLs or bodies. The browser development UI downloads the
+archive; the native app streams it from the backend to the file chosen in a
+macOS Save panel without passing it through the page, and reports how many
+entries it holds and whether `log._reb.complete` is true. One request can also
+be copied to the clipboard.
+
+The selection strip's **Copy**, a right-click on a row, or the context-menu key
+or Shift+F10 on a focused row, opens the row menu: **Copy URL**, **Copy as
+cURL**, **Copy as fetch** and **Export HAR…**. cURL and fetch are built from
+the first hop of the row's HAR entry, with the headers and body the capture
+kept, credentials included; pseudo-headers, Host, Content-Length, Connection
+and Transfer-Encoding are left to the client. A binary body is decoded from
+base64 by the shell for cURL and by `atob` for fetch. When the capture did not
+keep the body whole, or the URL is not the whole captured target, the copy says
+so. Copying sends nothing.
+
+The same dialog converts a local introspection JSON file (`__schema` or
+`data.__schema`, up to 1 MiB) to GraphQL SDL; duplicate keys, invalid UTF-8,
+partial/error schemas and unsafe SDL literals are refused. Export never queries
+an introspection endpoint or sends a request. SDL is a raw schema export:
+descriptions and identifiers can be sensitive.
 
 Saved `reb-network-request-v1` documents remain usable through offline
 commands: `tools/export-captured-client.mjs` (client projects, see
@@ -423,7 +445,9 @@ commands: `tools/export-captured-client.mjs` (client projects, see
 `tools/export-captured-har.mjs` and `tools/export-graphql-sdl.mjs`. They read
 local files only and never send captured requests.
 `node tools/check-captured-export-ui.mjs` exercises the dialog handlers with an
-in-memory DOM; native Save-panel testing remains a macOS gate.
+in-memory DOM, and `node tools/check-traffic-copy.mjs` runs each generated cURL
+command and fetch call against a loopback server. The packaged native Save-panel
+test saves a Traffic HAR from the bundled backend.
 
 ## Saved investigation notebook
 
@@ -536,7 +560,7 @@ client connected through `scripts/reb-api-mcp.sh` can run at the same level
 | **Read only** (default) | Structural reads | Nothing | Question, pins, structural results |
 | **Ask for actions** | Reads and actions | **Allow once** per action | The same |
 | **Auto-approve actions** | Reads and actions | Nothing; every call and result is in the transcript | The same |
-| **Full access** | Also content reads (`get_artifact_text`, `search_artifact_text`, `search_wasm_inspection`), offline runs of captured Wasm (`run_wasm_function`, `get_wasm_runs`), store-path and draft reads, and its own live sessions (`start_live_session`, `session_action`) | Nothing | Also source, Wasm bytes and disassembly, VM bytecode, request and response bodies and every content field of results |
+| **Full access** | Also content reads (`get_artifact_text`, `search_artifact_text`, `search_wasm_inspection`, `export_requests_har`), offline runs of captured Wasm (`run_wasm_function`, `get_wasm_runs`), store-path and draft reads, and its own live sessions (`start_live_session`, `session_action`) | Nothing | Also source, Wasm bytes and disassembly, VM bytecode, request and response bodies, cookie values and credential headers, and every content field of results |
 
 Below Full access the tool server omits captured content from every result,
 and reads that return local store paths (`get_health`) or the researcher's own
@@ -1263,7 +1287,7 @@ that fails or gets an error status keeps the last read copy and its reason
 and is read again on the next refresh; a size or SHA-256 mismatch, whether the
 bytes differ, the store reports `artifact_integrity`, or the request record's digest
 differs from the artifact's, shows no bytes and is not reread. A path and query past the 116-byte row prefix is loaded from
-its retained full target for General's Request URL and Copy URL, or General
+its retained full target for General's Request URL and the row menu's Copy URL, or General
 says why it was not retained. Sources never lists or opens request bodies or
 full targets.
 
@@ -1481,7 +1505,7 @@ The layout follows familiar [network inspection conventions](https://developer.c
 while keeping Origin Trace's own controls and Rosé Pine Moon palette.
 
 Traffic lists every request of the session from the backend request index
-(`get_requests`, [request index v1](../../protocol/request-index-v1.md)). The
+(`get_requests`, [request index v2](../../protocol/request-index-v2.md)). The
 ledger reads one 500-row page of the index around the view and mounts only
 the fixed-height rows in view plus 8 on each side, with spacers for the rest,
 so every request is reachable. Each row names its place in the whole list
@@ -1542,8 +1566,9 @@ footer count them separately from sampling budgets and from reported losses.
 Every other reason, including transport, input, document, module, expiry,
 compiled-before-arming, capacity and parent-link reasons and any reason this
 build does not know, reads as reported lost evidence with its raw reason as text.
-The Swift stored-evidence reader uses the same newest-general and
-newest-network windows, 64 MiB tail, and summary scope as the Rust endpoint.
+Stored-evidence native mode forwards the event poll to the bundled Rust
+backend, so its windows and whole-store counts are the same answer; the app
+adds only its own broker state and capture mode.
 A response that omits those fields is still labeled visible-window-only, and
 no whole-capture count is inferred for it. Filtering
 and sorting cover the whole session through the index. Rows and capture-tab controls are
@@ -1559,7 +1584,7 @@ Arrow keys select adjacent request rows; inspector tabs use Left/Right and
 Home/End. Escape closes the inspector and returns focus to the ledger. The close
 button has the same behavior. A dismissed inspector stays closed across
 refreshes; selecting a request reopens it. Full URLs remain available in General
-and Copy URL, and host-only metadata never implies a captured path or query.
+and the row menu's Copy URL, and host-only metadata never implies a captured path or query.
 
 Collection uses a saved-request library and a template editor; it never sends
 a request. Headers, Body, and Variables are keyboard-accessible request
@@ -1790,6 +1815,7 @@ capture, fetch anything or change a row.
 | `traffic_filter.js` | The filter grammar, Invert, Hide internal, 3rd-party, Failed and the time range over the newest window, mirroring the request index |
 | `traffic_columns.js` | Column widths, hidden columns, the header menu, saved layout and fitting columns to the table width |
 | `traffic_overview.js` | The timing strip and its pointer and keyboard time-range selection |
+| `traffic_copy.js` | The row menu (right-click, Shift+F10 and the strip's Copy): Copy URL, Copy as cURL and Copy as fetch from the row's HAR entry, and Export HAR… |
 | `evidence_names.js` | Researcher names: exact identities, the closed names document, its Analyst-library store, the inline rename editor and the command palette provider |
 | `wasm_function_names.js` | Wasm function names in Inspect, the Graph and its function list, Flow cards, Initiator frames and cross-references: inert name spans, the F2 and Rename entry points, and in-place refresh after a rename |
 | `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |
@@ -1830,7 +1856,7 @@ session budget, queue, channel or URL), network blocks that arrived after
 their request ended ("late header records on no row"), and requests that
 ended with only provisional headers, by reason (HTTP cache, service worker,
 download, failed, not reported); `get_session_summary` has the same counts
-over the newest 64 MiB. Sources reads retained artifact bytes only. A failed
+over the whole session. Sources reads retained artifact bytes only. A failed
 refresh preserves the last valid catalog, and a detached pending load is
 cancelled and cannot restore obsolete source text. Artifact loads, including
 Canvas previews, have no deadline: they show bytes read so far and can be
@@ -3295,7 +3321,7 @@ supply arguments, return values, exceptions or Promise settlement. Observer,
 placement, producer and historical build remain unknown. IDs and original hashes
 are available in **Provenance & exact identifiers**; they do not crowd every row.
 **Coverage & gaps** separates missing parent references, queue markers, sequence
-holes, arrival discontinuities, unavailable request records and the retained-window limit without adding
+holes, arrival discontinuities and which range of the store is in view without adding
 them into a loss total or inventing capture completeness. Numeric holes are counted
 from sorted unique session/process IDs, so a later-arriving record can fill one;
 absent numbers alone do not prove capture loss. Long request headings ellipsize
@@ -3304,9 +3330,19 @@ scrollable disclosure above the workspace and never consumes the pane height;
 Escape closes it and restores the summary focus. Records remain in retained
 order within relationship groups, not a cross-process execution timeline.
 
-The view inspects at most 5,000 events and 500 artifact descriptors, renders 50
-observations per page, bounds each parent lookup to 32 links and does not fetch
-missing evidence. Search filters existing observations only. Arrow keys, Home and
+The view holds one range of up to 5,000 stored records at a time: the newest,
+which each poll replaces, or an older one. When the store holds more, the range
+bar above the list says where the range lies in the stored session, by byte
+position, and **Oldest**, **Earlier**, **Later** and **Newest** move through it
+with the event route's `after` and `before` cursors (`GET /api/events`), one read
+at a time; a newer move supersedes a read still running, a failed read keeps the
+view and says why, and a read that reaches the end of the store is the live newest
+range again. A clear or another store returns to the newest range, since cursors
+do not survive it. The selected request's own lifecycle records, read by ID from
+the request index, stay in view in every range. Artifact references resolve
+against the whole catalog. The view renders 50 observations per page, bounds each
+parent lookup to 32 links and does not fetch a missing parent; the range that holds
+it shows it. Search filters existing observations only. Arrow keys, Home and
 End move through the displayed order. At 760 px and below, **Observations / Selected
 record** switches between full-width panes. Unchanged refreshes preserve inspector
 DOM, disclosures, focus and scroll. Eviction explicitly clears the selected record

@@ -278,7 +278,11 @@ console.log('PASS native JS invocation sites opt-in, VM-category gate, sensitive
 // A session started as another ends waits for that session's Brave to close
 // instead of refusing the profile it still holds. The holder is a stand-in
 // whose command line names the profile, as a running Brave's does; the shell
-// starts it so the shell, not this check, reaps it when it exits.
+// starts it so the shell, not this check, reaps it when it exits. Until perl
+// replaces the forked shell, that command line is the shell's and names no
+// profile, so the launch code runs only once it names one, as a Brave that is
+// already running does. The closing one outlives a slow first look by a second
+// and still ends well inside the release wait.
 {
   const holderCode = section('# Only one browser can hold a profile', '# The project V8 flags');
   const quick = holderCode.replace('profile_release_wait_seconds=10', 'profile_release_wait_seconds=4');
@@ -289,7 +293,9 @@ console.log('PASS native JS invocation sites opt-in, VM-category gate, sensitive
       const profile = join(profiles, `${kind}-${hold}`);
       await mkdir(profile);
       const holder = hold === 'none' ? 'holder=""' :
-        `perl -e 'sleep shift' ${hold === 'closing' ? 1 : 30} "--user-data-dir=$1" & holder=$!; ln -s "test-host-$holder" "$1/SingletonLock"`;
+        `perl -e 'sleep shift' ${hold === 'closing' ? 2 : 30} "--user-data-dir=$1" & holder=$!; ln -s "test-host-$holder" "$1/SingletonLock"
+waited=0; until /bin/ps -ww -o command= -p "$holder" | grep -q -F -e "--user-data-dir=$1"; do
+  ((waited++ < 500)) || { echo "The stand-in holder never ran"; exit 3; }; sleep 0.01; done`;
       return spawnSync(shell, ['-c', `set -eu; fail_live_session() { shift; printf '%s' "$*"; exit 2; }
 trap '[[ -z "$holder" ]] || kill "$holder" 2>/dev/null || true' EXIT
 profile_kind=${kind}; profile_path="$1"; ${holder}

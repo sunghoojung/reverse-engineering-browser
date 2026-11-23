@@ -118,9 +118,10 @@ is allowed. A start beyond total is rejected.
   detail page is kept.
 - Artifact manifest: the artifact is found by ID through the backend's
   disk-backed manifest index (`manifest.jsonl.lookup-v1`), however long the
-  manifest is, with the 8,192-byte record limit. A lookup waits at most five
-  seconds for the index to reach the end of the manifest and returns `408`
-  past that, keeping its progress for the next read.
+  manifest is, with records up to the manifest's bound, which fits a 2 MiB
+  URL. A lookup waits at most five seconds for the index to reach the end of
+  the manifest and returns `408` past that, keeping its progress for the next
+  read.
 - A comparison waits for one of the four blocking-I/O readers with no deadline
   and then reads every sample. A caller that goes away sets the flag the
   comparison checks every 65,536 samples, so its reader comes back promptly.

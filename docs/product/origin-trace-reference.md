@@ -85,7 +85,7 @@ recording each body's length, type and SHA-256 (see
 [Native network v2](../../protocol/native-network-v2.md)).
 
 It also retains complete Canvas data URLs by default. The output is sensitive
-local evidence, limited to 2 MiB, and linked to the exact readback event. With
+local evidence, kept at any size, and linked to the exact readback event. With
 `REB_CAPTURE_CANVAS_IMAGES=0`, Canvas drawing and readback operation names
 remain visible but image bytes are not retained.
 

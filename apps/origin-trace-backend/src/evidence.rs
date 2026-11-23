@@ -1,4 +1,5 @@
 use crate::{
+    artifact_query::MANIFEST_RECORD_BYTES,
     error::{Code, Error, Result, check_cancelled},
     validation,
 };
@@ -632,12 +633,15 @@ pub fn manifest_from(root: &Path, offset: u64) -> Result<(Vec<Value>, u64)> {
     let (mut records, mut at) = (Vec::new(), offset);
     loop {
         let mut bytes = Vec::new();
-        let size = reader.by_ref().take(8193).read_until(b'\n', &mut bytes)?;
+        let size = reader
+            .by_ref()
+            .take(MANIFEST_RECORD_BYTES as u64 + 1)
+            .read_until(b'\n', &mut bytes)?;
         if size == 0 || bytes.last() != Some(&b'\n') {
             // The end, or a line still being written: read it next time.
             break;
         }
-        if size > 8192 {
+        if size > MANIFEST_RECORD_BYTES {
             return Err(Error::new(
                 500,
                 "The artifact manifest contains an oversized record",
@@ -682,7 +686,10 @@ fn scan_manifest(
             ));
         }
         let mut bytes = Vec::new();
-        let size = reader.by_ref().take(8193).read_until(b'\n', &mut bytes)?;
+        let size = reader
+            .by_ref()
+            .take(MANIFEST_RECORD_BYTES as u64 + 1)
+            .read_until(b'\n', &mut bytes)?;
         scanned = scanned.saturating_add(size as u64);
         if size > 0 {
             records = records.saturating_add(1);
@@ -696,7 +703,7 @@ fn scan_manifest(
         if size == 0 {
             break;
         }
-        if size > 8192 {
+        if size > MANIFEST_RECORD_BYTES {
             return Err(Error::new(
                 500,
                 "The artifact manifest contains an oversized record",

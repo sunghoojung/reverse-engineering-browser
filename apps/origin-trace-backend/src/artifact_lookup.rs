@@ -27,7 +27,9 @@ use std::{
 pub const SUFFIX: &str = ".lookup-v1";
 /// The second layout adds the summary's counts and manifest order, the
 /// third JavaScript artifacts by digest and URL, the fourth Wasm modules.
-const FORMAT: &str = "reb-artifact-lookup-v1/4";
+/// The fifth folds records of any URL length, which the fourth recorded as
+/// damage past 8 KiB.
+const FORMAT: &str = "reb-artifact-lookup-v1/5";
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS artifacts(id INTEGER PRIMARY KEY, start INTEGER NOT NULL, end INTEGER NOT NULL, parent INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS artifacts_parent ON artifacts(parent) WHERE parent != 0;
@@ -38,8 +40,9 @@ const SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS scripts_sha256 ON scripts(sha256);
     CREATE INDEX IF NOT EXISTS scripts_url ON scripts(url);
     CREATE TABLE IF NOT EXISTS wasm(id INTEGER PRIMARY KEY);";
-/// A manifest line, its newline included, as the receiver writes it.
-pub const RECORD_BYTES: usize = 8192;
+/// A manifest line, its newline included, as the receiver writes it: one
+/// with a URL as long as Chromium carries, 2 MiB, fits.
+pub const RECORD_BYTES: usize = crate::artifact_query::MANIFEST_RECORD_BYTES;
 /// Bytes folded per call, so a lookup never holds the index for long.
 const FOLD_BYTES: u64 = 64 * 1024 * 1024;
 /// How long one lookup may spend bringing the index up to the manifest.
@@ -609,6 +612,31 @@ mod tests {
         assert!(index_db::sidecar_path(&path, SUFFIX).exists());
     }
 
+    // An artifact URL can be as long as any URL Chromium carries, 2 MiB.
+    #[test]
+    fn a_record_with_a_two_mib_url_is_found_and_listed() {
+        let root = tempfile::tempdir().unwrap();
+        let url = format!(
+            "https://synthetic.invalid/{}",
+            "a".repeat(2 * 1024 * 1024 - 26)
+        );
+        let mut long: Value = serde_json::from_slice(&record(2)).unwrap();
+        long["url"] = json!(url);
+        let manifest = [record(1), format!("{long}\n").into_bytes()].concat();
+        fs::write(root.path().join("manifest.jsonl"), manifest).unwrap();
+        compare(root.path(), "2");
+        assert_eq!(
+            evidence::find_artifact(root.path(), "2").unwrap()["url"],
+            url
+        );
+        let filter = crate::artifact_query::ArtifactFilter::default();
+        let page =
+            crate::artifact_query::read(root.path(), &filter, crate::event_query::Cursor::Tail, 10)
+                .unwrap();
+        assert_eq!(page.records.len(), 2);
+        assert_eq!(page.records[1]["url"], url);
+    }
+
     #[cfg(unix)]
     #[test]
     fn appends_rewrites_replacement_and_removal_match_a_complete_scan() {
@@ -659,7 +687,7 @@ mod tests {
             record(1),
             b"{\"protocol_version\":".to_vec(),
             b"{}\n".to_vec(),
-            vec![b' '; 8193],
+            vec![b' '; crate::artifact_query::MANIFEST_RECORD_BYTES + 1],
         ] {
             fs::write(&path, record(1)).unwrap();
             compare(root.path(), "1");

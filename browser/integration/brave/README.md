@@ -261,7 +261,7 @@ Canvas drawing metadata does not contain text, pixel data, or drawing
 arguments. When `--reb-capture-canvas-images` is explicitly present for an
 authorized session, the renderer may also submit the complete data URL returned
 by `HTMLCanvasElement.toDataURL()`. That output is marked sensitive, linked to
-the exact readback event, limited to 2 MiB, and sent through the separate
+the exact readback event, kept at any size, and sent through the separate
 artifact channel. It is disabled by default and never enters the renderer event
 ring.
 
@@ -364,9 +364,11 @@ and remains the only process that owns the authenticated artifact socket.
 The VM category separately enables runtime-buffer snapshots for `ArrayBuffer`,
 `Uint8Array`, `Uint16Array`, and `Uint32Array` constructor results. V8 invokes
 an embedder callback after initialization; no JavaScript constructor or host
-builtin is wrapped. Buffers from 32 bytes through 16 MiB are copied into
-`bytecode_buffer` artifacts, with at most 16 snapshots per session sharing the
-32 MiB in-flight artifact pool.
+builtin is wrapped. Buffers of 32 bytes or more, of any size, are copied into
+`bytecode_buffer` artifacts, with at most 16 snapshots per session. A buffer
+and its allocating script's source are charged to the renderer's 256 MiB
+artifact credit until the browser has copied them out; one that the credit
+cannot take records `runtime_typed_array_backlog`.
 
 Runtime snapshots now carry exact allocating-script provenance. After the VM
 capture gate, V8 exposes the innermost JavaScript frame's native script identity,
@@ -467,9 +469,10 @@ it, and no arbitrary write/guest tracing or page API wrappers are installed.
 The allocator identity is captured at allocation and survives writes by another
 script. The currently executing mutator never becomes the source parent.
 
-Pending storage is separately capped at 16 objects and 32 MiB including whole
-backing-buffer lengths and source UTF-8 sizes (a tiny view cannot retain a giant
-backing buffer). Rejected pending entries name `runtime_buffer_checkpoint_limit`.
+Pending storage is separately capped at 16 objects, of any size: each keeps its
+buffer and source alive for the rest of one task, and its bytes are read once,
+at the checkpoint, into the artifact transfer. Rejected pending entries name
+`runtime_buffer_checkpoint_limit`.
 Disable, expiry or generation changes stop the drain before retained handle
 access or byte copying. Context destruction, detach, shared/resizable backing,
 and changed lengths fail closed at the checkpoint with named omissions. Isolate

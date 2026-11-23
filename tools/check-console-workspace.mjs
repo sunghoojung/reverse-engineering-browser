@@ -530,6 +530,18 @@ export async function checkConsoleDOM(root) {
       assert.equal(await press(key,modifiers),false,`${key} with ${JSON.stringify(modifiers)} is left to the engine`);
     assert.equal(asked.length,handled);
     reducedMotion=true;await press('End');assert.equal(asked.at(-1).behavior,'auto','with reduced motion an edge key jumps');reducedMotion=false;
+    // WebKit can drop the scroll an edge key asks for while its own keyboard
+    // scroll still moves, so the request is made again once the transcript
+    // stands still short of the edge, a bounded number of times, until it
+    // arrives or the reader takes over.
+    await press('PageDown');asked.length=0;
+    await press('Home');frames(3);assert.equal(asked.length,1,'a request is not repeated while the transcript may still start moving');
+    frames(1);assert.equal(asked.length,2,'a request the engine dropped is made again once the transcript stands still');
+    frames(100);assert.equal(asked.length,9,'a dropped request is made again at most eight times');
+    asked.length=0;await press('Home');await scroll.emit('wheel');frames(20);assert.equal(asked.length,1,'a wheel takes over from an edge key');
+    asked.length=0;await press('Home');await press('ArrowDown');frames(20);assert.equal(asked.length,1,'another key takes over from an edge key');
+    asked.length=0;scroll.scrollTo=options=>{asked.push(options);scroll.scrollTop=options.top;};
+    await press('Home');frames(20);assert.deepEqual([asked.length,top],[1,0],'a request the engine honors is made once');
     delete scroll.scrollTo;
     await get('latest').click();await settle();
     Node.prototype.getBoundingClientRect=rect;delete scroll.getBoundingClientRect;delete output.getBoundingClientRect;

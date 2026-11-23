@@ -109,8 +109,9 @@ the position it last knew and would land short by what PageDown had left. A
 try in which PageDown finished first is made again, up to five times. End,
 Command-Up and Command-Down must reach the last line of the 1 MiB message, the
 first entry and the last line again, each handled by the transcript. A
-timed-out wait prints each scroll, `scrollend`, key, layout write and changed
-frame that led to it. Search
+timed-out wait prints each scroll, `scrollend`, key, scroll request, layout
+write and changed frame that led to it, and how many scroll requests each key
+made. Search
 must find `rendered message 4242` among rows that are not drawn and draw only
 that match, and Escape must restore every entry. Screenshots
 `console-transcript-{end,middle,start,search}-*` show each state.

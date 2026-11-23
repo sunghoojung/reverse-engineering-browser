@@ -2442,10 +2442,11 @@ final class OriginTraceRenderedUITests: XCTestCase {
       })()
       """
     let frames = "new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => done(true))))"
-    // Records each scroll, scrollend, key and layout write on the transcript,
-    // and each frame whose geometry changed, so a failed wait shows how the
-    // transcript got where it is. keys() says, for each key, whether a scroll
-    // still moved when it went down and whether the transcript handled it.
+    // Records each scroll, scrollend, key, layout write and scroll request on
+    // the transcript, and each frame whose geometry changed, so a failed wait
+    // shows how the transcript got where it is. keys() says, for each key,
+    // whether a scroll still moved when it went down, whether the transcript
+    // handled it, and how many scrolls the transcript asked for after it.
     // still(ms) resolves once the transcript has not scrolled for that long,
     // and moved(from) once its offset is no longer from, counted in frames.
     let recorder = """
@@ -2457,10 +2458,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
         const note = text => { log.push(`${performance.now().toFixed(1)} ${text}`); if (log.length > 500) log.splice(0, 100); last = ''; };
         Object.defineProperty(scroll, 'scrollTop', {configurable: true, get() { return offset.get.call(this); },
           set(value) { note(`write ${value} over ${geometry()}`); offset.set.call(this, value); }});
+        const scrollTo = scroll.scrollTo;
+        scroll.scrollTo = function (options) { if (keys.length) ++keys[keys.length - 1].requests; note(`scrollTo ${JSON.stringify(options)} over ${geometry()}`); return scrollTo.call(this, options); };
         scroll.addEventListener('scroll', () => { moved = performance.now(); ++scrolls; note(`scroll ${geometry()}`); });
         scroll.addEventListener('scrollend', () => { ended = true; note(`scrollend ${geometry()}`); });
         document.addEventListener('keydown', event => {
-          keys.push({key: event.key, moving: scrolls > 0 && !ended, handled: false}); scrolls = 0; ended = false;
+          keys.push({key: event.key, moving: scrolls > 0 && !ended, handled: false, requests: 0}); scrolls = 0; ended = false;
           note(`keydown ${event.key}${event.metaKey ? ' with Command' : ''}`);
         }, true);
         document.addEventListener('keydown', event => { if (keys.length) keys[keys.length - 1].handled = event.defaultPrevented; });
@@ -2515,7 +2518,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       catch {
         let state = (try? await ui.json(window)) ?? [:]
         let events = (try? await ui.value("window.__rebTranscript?.log() ?? ''")) as? String ?? ""
-        throw HarnessError("\(error) \(state)\n\(events)")
+        let keys = (try? await ui.value("JSON.stringify(window.__rebTranscript?.keys() ?? [])")) as? String ?? ""
+        throw HarnessError("\(error) \(state)\nkeys \(keys)\n\(events)")
       }
     }
     for size in windowSizes {
@@ -2658,7 +2662,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.key(125, "\u{F701}", modifiers: [.command, .function, .numericPad])
       try await wait(ui, atEnd, "\(size.name): Command-Down did not return to the 1 MiB message")
       let edges = try await ui.value("window.__rebTranscript.keys().slice(-3).map(key => `${key.key} ${key.handled}`).join(', ')") as? String ?? ""
-      XCTAssertEqual(edges, "End true, ArrowUp true, ArrowDown true", "\(size.name): the transcript scrolled to each edge itself")
+      let requests = try await ui.value("JSON.stringify(window.__rebTranscript.keys())") as? String ?? ""
+      XCTAssertEqual(edges, "End true, ArrowUp true, ArrowDown true", "\(size.name): the transcript scrolled to each edge itself: \(requests)")
 
       // Search runs over every entry, drawn or not, and Escape restores them.
       try await ui.click("#native-console-search")

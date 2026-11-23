@@ -133,7 +133,11 @@ an animation that a newer scroll cancels, such as a PageDown that Home
 interrupts. Home, End, Command-Up and Command-Down scroll the focused
 transcript to that edge itself, as WebKit does after bug 330293; before it,
 WebKit aims them by a distance from the position it last knew, so one pressed
-while PageDown still moves would land short. The end is followed when entries
+while PageDown still moves would land short. That WebKit can also drop a
+scroll asked for while its keyboard scroll still moves, stopping PageDown and
+starting nothing, so the transcript asks again once it has stood still short
+of the edge for four frames, up to eight times, until another key, a wheel or
+a pointer takes over. The end is followed when entries
 arrive or **Latest** is chosen, never against the reader's scroll, and a
 scroll down that ends within 40 px of the end lands on it.
 WebKit measures a word, text with no break opportunity, as one width, and past
@@ -188,7 +192,8 @@ silently loses data.
   transcript scrolled step by step and by drag to both ends, a reader's scroll
   whose offset and extent the layout never moves, even past a `scrollend` from a
   cancelled animation, Home, End and Command-Up and -Down scrolled to their edge
-  by the transcript and every other key left to WebKit, a long word drawn in
+  by the transcript and asked again when the engine drops the request, every
+  other key left to WebKit, a long word drawn in
   bounded runs on grapheme boundaries with the text around it whole, a command
   past 64 MiB sent whole, the incremental completion
   lexer against a fresh lex, and the document-start panel's add, remove and

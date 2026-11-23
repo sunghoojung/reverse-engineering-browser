@@ -331,19 +331,38 @@
     // the transcript, as WebKit does after bug 330293. Before it, WebKit aims
     // them by a distance from the position it last knew, so one pressed while
     // another scroll still moves, such as PageDown, lands short by what that
-    // scroll had left.
+    // scroll had left. That WebKit can also drop a scroll asked for while its
+    // keyboard scroll still moves: it stops PageDown and starts nothing. So
+    // the request is made again once the transcript has stood still for four
+    // frames short of the edge, up to eight times, until another key, a wheel
+    // or a pointer takes over.
     function edge(event) {
       if (event.altKey || event.ctrlKey || event.shiftKey) return 0;
       if (event.metaKey) return event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : 0;
       return event.key === 'Home' ? -1 : event.key === 'End' ? 1 : 0;
     }
+    let edgeRun = 0;
+    function toEdge(toward) {
+      const run = ++edgeRun, scroll = controls.scroll;
+      const request = () => scroll.scrollTo({top: toward < 0 ? 0 : scroll.scrollHeight,
+        behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'});
+      let last = scroll.scrollTop, still = 0, tries = 0;
+      request();
+      requestAnimationFrame(function check() {
+        if (run !== edgeRun) return;
+        const top = scroll.scrollTop;
+        if (Math.abs(top - (toward < 0 ? 0 : scroll.scrollHeight - scroll.clientHeight)) < 1) return;
+        if (top !== last) { last = top; still = 0; }
+        else if (++still >= 4) { if (++tries > 8) return; still = 0; request(); }
+        requestAnimationFrame(check);
+      });
+    }
     controls.scroll.addEventListener('keydown', event => {
       const toward = edge(event);
-      if (!toward || event.defaultPrevented || event.target.closest('input, textarea, select, [contenteditable]')) return;
-      event.preventDefault();
-      controls.scroll.scrollTo({top: toward < 0 ? 0 : controls.scroll.scrollHeight,
-        behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'});
+      if (!toward || event.defaultPrevented || event.target.closest('input, textarea, select, [contenteditable]')) { ++edgeRun; return; }
+      event.preventDefault(); toEdge(toward);
     });
+    for (const type of ['wheel', 'pointerdown', 'touchstart']) controls.scroll.addEventListener(type, () => { ++edgeRun; }, {passive: true});
     new ResizeObserver(schedule).observe(controls.scroll);
     return {
       size: () => entries.length,

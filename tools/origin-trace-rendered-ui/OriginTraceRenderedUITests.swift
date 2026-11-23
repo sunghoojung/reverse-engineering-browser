@@ -3297,10 +3297,15 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertRunResultVisible(ui, "\(size.name) import trap")
       _ = try await ui.value("""
         (() => { const d = document.querySelector('.wasm-run-dialog');
-          d.querySelector('textarea').value = '[{"module":"env","field":"now","results":[{"type":"f64","value":"1000"}]}]'; return true; })()
+          const field = label => [...d.querySelectorAll('.wasm-run-field')].find(node => node.querySelector('.wasm-run-label')?.textContent === label).querySelector('input');
+          d.querySelector('textarea').value = '[{"module":"env","field":"now","results":[{"type":"f64","value":"1000"}]}]';
+          field('Memory writes before the call').value = '16:6869';
+          field('Memory reads after the call').value = '16:2'; return true; })()
         """)
       try await ui.click(".wasm-run-actions button", containing: "Run")
       try await ui.waitUntil("(document.querySelector('.wasm-run-outcome')?.textContent ?? '').startsWith('Returned')", timeout: 30, "the stubbed run returns")
+      // The read's bytes come from the run's stored memory, after the record.
+      try await ui.waitUntil("(document.querySelector('.wasm-run-reads')?.textContent ?? '').includes('16:2 · read · 6869')", timeout: 30, "the read shows its stored bytes")
       let returned = try await ui.value("document.querySelector('.wasm-run-output').textContent") as? String ?? ""
       XCTAssertTrue(returned.contains("i32 1001"), "\(size.name): the result is shown: \(returned)")
       try await assertLayout(ui, ".wasm-run-dialog", "\(size.name) run offline result")

@@ -108,6 +108,7 @@ Every option is off unless the start names it, and none is inherited.
 | Wasm function names (Inspect, Graph, Flow) | Read: `analyst_name` and `analyst_names` in `inspect_wasm`, `get_wasm_functions`, `get_wasm_function_graph`, `get_wasm_pseudocode`, `get_xrefs`, `get_flow_graph`, `get_request_stack`. Write: `analyst_action` `set_wasm_function_name` | R to read, A to write | Added; names are joined at every level and the write needs no other Analyst file |
 | Run offline… (one function in the stubbed local interpreter) | `run_wasm_function` | F | Added; Full access only, because a run's outcome, fuel, import calls, timing and expectations all disclose computed values |
 | Stored offline runs | `get_wasm_runs` | F | Added; Full access only, for the same reason |
+| Memory a stored run read | `get_wasm_run_memory` with `start`, `length` | F | Added; reads of any size in pages, Full access only for the same reason |
 | Inspect identification summary, Details and Functions menu badges | `get_wasm_identification` with `row_offset`, `row_limit` | R (structure), F (matched bytes `hex`) | Added |
 | Readable (lifted function) | `get_wasm_pseudocode` with `line_offset`, `line_limit` | R (structure, ranges, callees), F (lifted text) | Added; below Full access the lifted text is omitted |
 | Compare with (Wasm module diff) | `get_wasm_module_diff` with `status`, `row_offset`, `row_limit` | R | Added; structure only, so nothing is omitted below Full access |

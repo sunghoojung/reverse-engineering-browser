@@ -124,8 +124,9 @@ async function artifact(root, fields, bytes) {
 }
 
 // Run offline (test42): add(a, b) returns a + b, and stamp(a, b) adds a clock
-// read from the import env.now, so it traps until that import is stubbed. The
-// export names are markup, which must stay text. Built by hand like the module
+// read from the import env.now, so it traps until that import is stubbed. One
+// page of memory takes the dialog's writes and reads. The export names are
+// markup, which must stay text. Built by hand like the module
 // below; tools/fixtures/wasm-runs/ holds the .wat fixtures the Rust tests use.
 export const RUN_OFFLINE_ARTIFACT_ID = '450';
 function offlineRunnerWasm() {
@@ -138,6 +139,7 @@ function offlineRunnerWasm() {
     ...section(1, [2, 0x60, 2, 0x7f, 0x7f, 1, 0x7f, 0x60, 0, 1, 0x7c]),
     ...section(2, [1, ...name('env'), ...name('now'), 0x00, 1]),
     ...section(3, [2, 0, 0]),
+    ...section(5, [1, 0x00, 1]),
     ...section(7, [2, ...name('add'), 0x00, 1, ...name('stamp<b>'), 0x00, 2]),
     ...section(10, [2, add.length, ...add, stamp.length, ...stamp])]);
 }

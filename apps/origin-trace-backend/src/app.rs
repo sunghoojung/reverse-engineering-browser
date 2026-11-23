@@ -678,6 +678,26 @@ impl App {
                 .await?;
             return Ok(axum::Json(value).into_response());
         }
+        if path == "/api/wasm/runs/memory" {
+            let q = Query::new(raw_query);
+            q.only(&["run_id", "read", "start", "length"], &[])?;
+            let run_id = q.required("run_id")?.to_owned();
+            if run_id.len() > 128
+                || !run_id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            {
+                return Err(Error::bad("run_id is invalid"));
+            }
+            let read = q.number("read", None, 64, false)? as usize;
+            let start = q.number("start", Some("0"), 64, false)?;
+            let length = q.number("length", Some("32768"), 64, true)?;
+            let root = self.options.artifacts.clone();
+            let value = self
+                .blocking(move || crate::wasm_run::memory(&root, &run_id, read, start, length))
+                .await?;
+            return Ok(axum::Json(value).into_response());
+        }
         if path == "/api/wasm/pseudocode" {
             return self.wasm_pseudocode_route(raw_query).await;
         }
@@ -2919,8 +2939,9 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                 None
             };
             // A pack request, an analyst run's evidence snapshot, a decoder's
-            // input, a Binary32 request and a Collection replacement parse as
-            // they arrive, so the body is held once, as its parsed value.
+            // input, a Wasm run, a Binary32 request and a Collection
+            // replacement parse as they arrive, so the body is held once, as
+            // its parsed value.
             if matches!(
                 path,
                 "/api/analysis/vm/packs/apply" | "/api/analysis/vm/packs/compare"
@@ -2933,6 +2954,15 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                 })
                 .await
                 .map(|value| axum::Json(value).into_response());
+            }
+            // Typed parse with unknown and duplicate keys refused.
+            if path == "/api/wasm/runs" {
+                let request = streamed(body, length, crate::wasm_run::Request::parse).await?;
+                return app
+                    .wasm_runs
+                    .run(request)
+                    .await
+                    .map(|value| axum::Json(value).into_response());
             }
             if path == "/api/float32/compare" {
                 let request = streamed(body, length, float32::parse_reader).await?;
@@ -2981,14 +3011,6 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                     .package_operation(Vec::from(bytes), operation, comparison_permit)
                     .await
                     .map(|bytes| ([("content-type", "application/json")], bytes).into_response());
-            }
-            // Typed parse with unknown and duplicate keys refused.
-            if path == "/api/wasm/runs" {
-                return app
-                    .wasm_runs
-                    .run(&bytes)
-                    .await
-                    .map(|value| axum::Json(value).into_response());
             }
             // Typed parse of up to 8 MiB of numbers, never a generic JSON tree.
             if path == "/api/graph-layout" {

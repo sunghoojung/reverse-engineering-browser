@@ -178,8 +178,9 @@ authorization.
 
 `x-reb-mcp.content_reads` names the operations whose purpose is captured
 content, `get_artifact_text`, `search_artifact_text`, `search_wasm_inspection`
-and `export_requests_har`, and the offline Wasm runs `run_wasm_function` and
-`get_wasm_runs`, since running captured code discloses what it computes. They are listed only
+and `export_requests_har`, and the offline Wasm runs `run_wasm_function`,
+`get_wasm_runs` and `get_wasm_run_memory`, since running captured code
+discloses what it computes. They are listed only
 with `--allow-content` (which `full` sets, and which conflicts with
 `--omit-content`), and a call without it is refused before any request. With
 it, `get_source_format` also lays out request and response bodies. Content is
@@ -389,10 +390,11 @@ below `--allow-content`. See [WASM pseudocode](wasm-pseudocode-v1.md).
 
 `run_wasm_function` projects `POST /api/wasm/runs`: one confirmed run of one
 function of a captured module in the backend's `wasmi` interpreter, with every
-import stubbed. Running captured code is a content read, so MCP lists it, and
-`get_wasm_runs` (`GET /api/wasm/runs`, the stored derived records), only with
-`--allow-content` (`x-reb-mcp.content_reads`, which only `--permission full`
-sets). Running is also effectful (`code-execution`, `filesystem-write`), so it
+import stubbed. Running captured code is a content read, so MCP lists it,
+`get_wasm_runs` (`GET /api/wasm/runs`, the stored derived records) and
+`get_wasm_run_memory` (`GET /api/wasm/runs/memory`, the bytes of one read, in
+pages) only with `--allow-content` (`x-reb-mcp.content_reads`, which only
+`--permission full` sets). Running is also effectful (`code-execution`, `filesystem-write`), so it
 needs `--allow-effects` too, and the server refuses a body without
 `confirm_offline_execution: true` before reading the artifact. See
 [WASM run v1](wasm-run-v1.md).

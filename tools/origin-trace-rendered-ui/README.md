@@ -284,7 +284,9 @@ whose second export (`stamp<b>`) reads the import `env.now`, and chooses
 above every field, list the export names as text, and keep **Run** disabled
 until the confirmation is checked with a pointer click. A run without stubs
 must show **Import trapped** with the recorded `env.now` call; a run with
-`env.now` stubbed to 1000 must return `i32 1001`. After each run the outcome
+`env.now` stubbed to 1000, a write of `6869` at offset 16 and a two-byte read
+there must return `i32 1001` and show `16:2 · read · 6869`, fetched from the
+run's stored memory after the record arrives. After each run the outcome
 line must be inside the dialog's visible frame and be the topmost element at
 its position, since the result follows the fields and starts below the visible
 area until the dialog scrolls to it. Nothing may be clipped, captured names stay

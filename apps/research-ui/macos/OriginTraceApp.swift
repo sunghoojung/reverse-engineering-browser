@@ -245,7 +245,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           "error": "Metadata packages are unavailable in stored-evidence native mode. Open a live workspace or the browser development UI.",
           "code": "dependency_unavailable", "details": [:]
         ]), "application/json; charset=utf-8", 503, [:])
-      case "/api/wasm/runs":
+      case "/api/wasm/runs", "/api/wasm/runs/memory":
         // Offline runs execute in the Rust backend's interpreter, which the
         // stored-evidence scheme does not host.
         response = (try JSONSerialization.data(withJSONObject: [

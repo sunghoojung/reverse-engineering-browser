@@ -400,6 +400,8 @@ enum AgentCoreChecks {
       ("get_wasm_runs", true, .readOnly, [:], refuse),
       ("get_wasm_runs", true, .auto, [:], refuse),
       ("get_wasm_runs", true, .full, [:], .run),
+      ("get_wasm_run_memory", true, .auto, [:], refuse),
+      ("get_wasm_run_memory", true, .full, [:], .run),
       ("search_wasm_inspection", true, .auto, [:], refuse),
       ("search_wasm_inspection", true, .full, [:], .run),
     ]

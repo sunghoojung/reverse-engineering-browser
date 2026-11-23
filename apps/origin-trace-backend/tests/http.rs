@@ -5487,11 +5487,15 @@ async fn wasm_runs_need_confirmation_run_offline_and_store_derived_records() {
 }
 
 #[tokio::test]
-async fn wasm_run_reads_are_capped_at_32_kib_in_total() {
-    // The cap was checked only by a unit test against its own constant, so
-    // restoring the old 256 KiB cap passed every test.
+async fn wasm_run_reads_of_any_size_are_read_whole_in_pages() {
+    // Reads were refused past 32 KiB in total and writes past 256 KiB, in a
+    // request body of at most 1 MiB, so that a record fit what reb-api mcp
+    // inlines. A second run while one was in progress got 409.
     let server = Server::start().await;
-    let bytes = wat::parse_str(r#"(module (memory 1) (func (export "run")))"#).unwrap();
+    let bytes = wat::parse_str(
+        r#"(module (memory 64) (func (export "run")) (func (export "spin") (loop $l (br $l))))"#,
+    )
+    .unwrap();
     let hash = hex::encode(Sha256::digest(&bytes));
     let artifact = json!({"protocol_version":1,"artifact_id":"1","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":"https://example.test/module.wasm","mime_type":"application/wasm","byte_size":bytes.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
     server.file(
@@ -5499,25 +5503,18 @@ async fn wasm_run_reads_are_capped_at_32_kib_in_total() {
         format!("{artifact}\n").as_bytes(),
     );
     server.file(&format!("artifacts/blobs/{hash}.bin"), &bytes);
-    let run = |length: u64| {
-        json!({"artifact_id":"1","sha256":hash,"export":"run","confirm_offline_execution":true,
-            "memory_reads":[{"offset":0,"length":length},{"offset":length,"length":length}]})
-    };
-    let body = assert_contract_response(
-        server.action("/api/wasm/runs", run(16_385)).await,
-        "post",
-        "/api/wasm/runs",
-        400,
-    )
-    .await;
-    assert!(
-        String::from_utf8_lossy(&body).contains("32 KiB"),
-        "{}",
-        String::from_utf8_lossy(&body)
-    );
+    let mib = 1usize << 20;
+    let pattern = (0..2 * mib)
+        .map(|i| (i * 13 % 251) as u8)
+        .collect::<Vec<_>>();
+    let run = json!({"artifact_id":"1","sha256":hash,"export":"run","confirm_offline_execution":true,
+        "memory_writes":[{"offset":0,"hex":hex::encode(&pattern)}],
+        "memory_reads":[{"offset":0,"length":2 * mib},{"offset":0,"length":2 * mib},{"offset":mib,"length":3 * mib}],
+        "expect":{"memory":[{"read":0,"hex":hex::encode(&pattern)}]}});
+    let started = std::time::Instant::now();
     let record: Value = serde_json::from_slice(
         &assert_contract_response(
-            server.action("/api/wasm/runs", run(16_384)).await,
+            server.action("/api/wasm/runs", run).await,
             "post",
             "/api/wasm/runs",
             200,
@@ -5525,20 +5522,122 @@ async fn wasm_run_reads_are_capped_at_32_kib_in_total() {
         .await,
     )
     .unwrap();
-    let total: u64 = record["memory_reads"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|read| read["length"].as_u64().unwrap())
-        .sum();
-    assert_eq!(total, 32_768);
+    eprintln!(
+        "a run with a 2 MiB write and 7 MiB of reads took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(record["stored"], true, "{}", record["store_error"]);
+    assert_eq!(record["expectation"]["all_match"], true);
+    assert_eq!(record["size_trimmed"], json!([]));
+    // Three reads of 7 MiB in all cover the first 4 MiB once.
+    assert_eq!(record["memory_snapshot"]["byte_size"], 4 * mib);
     assert!(
         record["memory_reads"]
             .as_array()
             .unwrap()
             .iter()
-            .all(|read| read["status"] == "read")
+            .all(|read| read["status"] == "read" && read.get("hex").is_none())
     );
+    let run_id = record["run_id"].as_str().unwrap().to_owned();
+    let mut whole = Vec::new();
+    let mut start = 0;
+    let mut pages = 0;
+    loop {
+        let route = format!("/api/wasm/runs/memory?run_id={run_id}&read=0&start={start}");
+        let page: Value = serde_json::from_slice(
+            &assert_contract_response(
+                server.get(&route).await,
+                "get",
+                "/api/wasm/runs/memory",
+                200,
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(page["total"], 2 * mib);
+        whole.extend(hex::decode(page["hex"].as_str().unwrap()).unwrap());
+        pages += 1;
+        match page["next_start"].as_u64() {
+            Some(next) => start = next,
+            None => break,
+        }
+    }
+    assert_eq!(pages, 64, "32 KiB pages by default");
+    assert_eq!(whole, pattern);
+    assert_eq!(
+        hex::encode(Sha256::digest(&whole)),
+        record["memory_reads"][0]["sha256"]
+    );
+    // The same bytes through reb-api, as one 3 MiB page.
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "get_wasm_run_memory",
+            "--read-only",
+            "--base-url",
+            &server.url,
+            "--param",
+            &format!("run_id={run_id}"),
+            "--param",
+            "read=2",
+            "--param",
+            &format!("length={}", 3 * mib),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let page: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let shifted = hex::decode(page["hex"].as_str().unwrap()).unwrap();
+    assert_eq!(page["next_start"], Value::Null);
+    assert_eq!(&shifted[..mib], &pattern[mib..]);
+    assert!(shifted[mib..].iter().all(|&byte| byte == 0));
+    assert_eq!(
+        hex::encode(Sha256::digest(&shifted)),
+        record["memory_reads"][2]["sha256"]
+    );
+    for (route, status) in [
+        (format!("/api/wasm/runs/memory?run_id={run_id}&read=3"), 404),
+        (format!("/api/wasm/runs/memory?run_id=wr-1-00&read=0"), 404),
+        (
+            format!(
+                "/api/wasm/runs/memory?run_id={run_id}&read=0&start={}",
+                2 * mib + 1
+            ),
+            400,
+        ),
+        (
+            format!("/api/wasm/runs/memory?run_id={run_id}&read=0&length=0"),
+            400,
+        ),
+        (format!("/api/wasm/runs/memory?run_id={run_id}"), 400),
+        ("/api/wasm/runs/memory?run_id=..%2Fx&read=0".to_owned(), 400),
+    ] {
+        assert_contract_response(
+            server.get(&route).await,
+            "get",
+            "/api/wasm/runs/memory",
+            status,
+        )
+        .await;
+    }
+    // Two runs at once: the second waits its turn instead of being refused.
+    let spin = json!({"artifact_id":"1","sha256":hash,"export":"spin","confirm_offline_execution":true,
+        "limits":{"deadline_ms":300,"fuel":10_000_000_000u64}});
+    let (first, second) = tokio::join!(
+        server.action("/api/wasm/runs", spin.clone()),
+        server.action("/api/wasm/runs", spin)
+    );
+    for response in [first, second] {
+        let record: Value = serde_json::from_slice(
+            &assert_contract_response(response, "post", "/api/wasm/runs", 200).await,
+        )
+        .unwrap();
+        assert_eq!(record["outcome"]["status"], "deadline_exceeded");
+    }
 }
 
 #[tokio::test]

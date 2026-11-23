@@ -4,7 +4,6 @@
  * values and bytes are inserted as text only. */
 const WASM_RUN_TYPES = ['i32', 'i64', 'f32', 'f64', 'v128', 'funcref', 'externref'];
 const WASM_RUN_HEX_PREVIEW = 64;
-const WASM_RUN_TIMEOUT_MS = 20000;
 
 /** "i32 7, f64 1.5" as typed values. Throws an Error naming the bad entry. */
 function wasmRunValues(text) {
@@ -118,7 +117,7 @@ function createWasmRunDialog({button, getSource}) {
     field('args', 'Arguments', input('i32 7, i32 5'), 'Type and value per parameter, comma separated.'),
     field('imports', 'Import stubs (JSON)', imports, 'A function import without a stub traps when called. Supply every clock or random source.'),
     field('writes', 'Memory writes before the call', input('16:01020304'), 'offset:hex, comma separated; memory 0.'),
-    field('reads', 'Memory reads after the call', input('0:32'), 'offset:length, comma separated; 32 KiB in total.'),
+    field('reads', 'Memory reads after the call', input('0:32'), 'offset:length, comma separated; memory 0.'),
     limits, startField, confirmField, error, actions, output);
   dialog.append(form);
   document.body.append(dialog);
@@ -155,7 +154,26 @@ function createWasmRunDialog({button, getSource}) {
     sync();
   }
 
-  function renderRecord(record) {
+  /** The first bytes of each stored read, from the backend, which keeps a
+   * run's reads beside its record rather than in it. */
+  async function loadPreviews(runId, previews, owner) {
+    for (const [index, read, item] of previews) {
+      let text;
+      try {
+        const response = await fetch(`/api/wasm/runs/memory?run_id=${encodeURIComponent(runId)}&read=${index}&length=${WASM_RUN_HEX_PREVIEW}`, {cache: 'no-store'});
+        const page = await response.json();
+        if (!response.ok) throw Error(page?.error || `The memory read returned ${response.status}.`);
+        if (page?.schema !== 'wasm-run-memory-v1' || typeof page.hex !== 'string') throw Error('The memory read returned an invalid page.');
+        text = `${page.hex}${read.length > WASM_RUN_HEX_PREVIEW ? ' …' : ''}`;
+      } catch (failure) {
+        text = `bytes unavailable: ${failure instanceof TypeError ? 'the evidence service is unreachable' : failure.message}`;
+      }
+      if (owner !== generation) return;
+      item.textContent = `${item.textContent} · ${text}`;
+    }
+  }
+
+  function renderRecord(record, owner) {
     const rows = [];
     const outcome = el('p', 'wasm-run-outcome', wasmRunOutcomeText(record));
     outcome.dataset.status = String(record.outcome?.status ?? 'unknown');
@@ -168,9 +186,6 @@ function createWasmRunDialog({button, getSource}) {
     fact('Elapsed', `${record.elapsed_ms} ms`);
     if (record.memory_grow_denied) fact('Growth denied', `${record.memory_grow_denied} memory.grow call(s) past the limit returned -1`);
     fact('Record', `${record.run_id}${record.stored === false ? ` · not stored: ${record.store_error}` : ' · stored as a derived run'}`);
-    // What the backend trimmed so the record fits what an agent receives.
-    const trimmed = Array.isArray(record.size_trimmed) ? record.size_trimmed.filter(step => typeof step === 'string') : [];
-    if (trimmed.length) fact('Trimmed for size', trimmed.join('; '));
     rows.push(facts);
     const calls = Array.isArray(record.import_calls) ? record.import_calls : [];
     const callTitle = el('h3', '', `Import calls · ${Number(record.import_calls_total ?? 0).toLocaleString()} attempted${record.import_calls_truncated ? `, first ${calls.length} recorded` : ''}`);
@@ -182,23 +197,22 @@ function createWasmRunDialog({button, getSource}) {
       for (const call of calls) {
         const row = el('tr');
         row.append(el('td', '', String(call.sequence)), el('td', '', `${call.module}.${call.field} (func ${call.function_index})`),
-          el('td', '', `${wasmRunTyped(call.args)}${call.args_truncated ? ' …' : ''}`),
+          el('td', '', wasmRunTyped(call.args)),
           el('td', '', call.outcome === 'returned' ? `returned ${wasmRunTyped(call.results)}` : 'trapped (no stub value)'));
         table.append(row);
       }
       rows.push(table);
-    } else if (record.import_calls_truncated && Number(record.import_calls_total) > 0) {
-      rows.push(el('p', 'wasm-run-hint', 'The import calls were omitted to fit the record; their count is above.'));
     } else rows.push(el('p', 'wasm-run-hint', 'No import was called.'));
     const reads = Array.isArray(record.memory_reads) ? record.memory_reads : [];
+    const previews = [];
     if (reads.length) {
       rows.push(el('h3', '', 'Memory reads'));
       const list = el('ul', 'wasm-run-reads');
-      for (const read of reads) {
-        const hex = typeof read.hex === 'string' ? read.hex : '';
-        const preview = hex.slice(0, WASM_RUN_HEX_PREVIEW * 2) + (hex.length > WASM_RUN_HEX_PREVIEW * 2 ? ' …' : '');
-        list.append(el('li', '', `${read.offset}:${read.length} · ${read.status}${hex ? ` · ${preview}` : ''}`));
-      }
+      reads.forEach((read, index) => {
+        const item = el('li', '', `${read.offset}:${read.length} · ${read.status}${read.status === 'read' && record.stored === false ? ' · bytes not stored' : ''}`);
+        if (read.status === 'read' && record.stored !== false) previews.push([index, read, item]);
+        list.append(item);
+      });
       rows.push(list);
     }
     output.replaceChildren(...rows);
@@ -206,6 +220,7 @@ function createWasmRunDialog({button, getSource}) {
     // The result follows the fields, below the dialog's visible area; bring
     // its outcome line into view.
     output.scrollIntoView?.({block: 'start'});
+    if (previews.length) loadPreviews(record.run_id, previews, owner);
   }
 
   run.addEventListener('click', async () => {
@@ -220,7 +235,10 @@ function createWasmRunDialog({button, getSource}) {
     try { body = wasmRunRequest(source, fields); } catch (failure) { error.textContent = failure.message; error.hidden = false; return; }
     const owner = ++generation;
     abort?.abort(); abort = new AbortController();
-    const timer = setTimeout(() => abort?.abort(), WASM_RUN_TIMEOUT_MS);
+    // A run waits for the one before it and has no client deadline: its own
+    // deadline ends it, and the button counts the seconds until it answers.
+    const started = Date.now();
+    const ticker = setInterval(() => { if (owner === generation) run.textContent = `Running… ${Math.floor((Date.now() - started) / 1000)} s`; }, 1000);
     run.dataset.busy = 'true'; run.textContent = 'Running…'; sync();
     try {
       const response = await fetch('/api/wasm/runs', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body), signal: abort.signal, cache: 'no-store'});
@@ -228,15 +246,15 @@ function createWasmRunDialog({button, getSource}) {
       if (owner !== generation) return;
       if (!response.ok) throw Error(record?.error || wasmRunFailureText(response.status));
       if (record?.schema !== 'wasm-run-v1' || record.provenance?.module_sha256 !== source.sha256) throw Error('The runner returned an invalid record.');
-      renderRecord(record);
+      renderRecord(record, owner);
     } catch (failure) {
       if (owner !== generation) return;
       // A failed run has no result, so the previous one must not look like its result.
       output.hidden = true; output.replaceChildren();
-      error.textContent = failure.name === 'AbortError' ? 'The run did not answer in time, so its outcome is unknown: it may still finish and be stored as a derived run. Wait at least 10 seconds before running it again.' : failure instanceof TypeError ? 'The evidence service is unreachable.' : failure.message;
+      error.textContent = failure instanceof TypeError ? 'The evidence service is unreachable.' : failure.message;
       error.hidden = false;
     } finally {
-      clearTimeout(timer);
+      clearInterval(ticker);
       if (owner === generation) { run.dataset.busy = 'false'; run.textContent = 'Run'; sync(); }
     }
   });

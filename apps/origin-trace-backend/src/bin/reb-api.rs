@@ -97,10 +97,10 @@ enum Action {
         omit_content: bool,
         /// Also list the content reads (get_artifact_text, search_artifact_text,
         /// search_wasm_inspection, export_requests_har, and the offline Wasm
-        /// runs run_wasm_function and get_wasm_runs, which also need
-        /// --allow-effects to run) and lay out request and response bodies
-        /// with get_source_format. Their results are captured content
-        /// that goes to the model provider. Not authorization.
+        /// runs run_wasm_function, get_wasm_runs and get_wasm_run_memory, the
+        /// first of which also needs --allow-effects) and lay out request and
+        /// response bodies with get_source_format. Their results are captured
+        /// content that goes to the model provider. Not authorization.
         #[arg(long, conflicts_with = "omit_content")]
         allow_content: bool,
         /// One ordered level in place of the individual flags: read-only, ask,
@@ -1646,6 +1646,7 @@ mod tests {
             "get_wasm_functions",
             "get_wasm_function_graph",
             "get_wasm_runs",
+            "get_wasm_run_memory",
             "get_wasm_identification",
             "get_wasm_pseudocode",
             "get_wasm_module_diff",

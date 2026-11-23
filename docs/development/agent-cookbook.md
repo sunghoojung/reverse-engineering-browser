@@ -666,8 +666,9 @@ means someone renamed it first: read again and pass the current name as
 
 Needs Full access (`--permission full`). Running captured code is a content
 read: a run's outcome, fuel, import calls, timing and repeated expectations can
-all disclose values the code computed, so `run_wasm_function` and
-`get_wasm_runs` are not listed at Read only, Ask or Auto-approve. Call it only
+all disclose values the code computed, so `run_wasm_function`,
+`get_wasm_runs` and `get_wasm_run_memory` are not listed at Read only, Ask or
+Auto-approve. Call it only
 when the researcher asked for that test. It runs in a local interpreter with every import stubbed, never in
 the page. Find the module and the function first:
 
@@ -690,11 +691,19 @@ and call order, and supply every clock or random source), `fuel_exhausted`,
 `deadline_exceeded` or `call_depth_exceeded` (raise `limits` or choose another
 function), `memory_limit` or `table_limit` (the limits are totals across every
 memory and table), and `memory_write_out_of_bounds`. Each read takes at most
-one expected entry. A
-match holds for these inputs only. Keep reads within 32 KiB in total; a run
-result always inlines, and `size_trimmed` says what was dropped to make it fit.
-`get_wasm_runs {"artifact_id": "9"}` returns the newest run; pass a larger
-`limit` only when the records are small. Details: [WASM run v1](../../protocol/wasm-run-v1.md).
+one expected entry. A match holds for these inputs only. Reads and writes take
+any size within memory 0. The record gives each read's `sha256`. Read its bytes
+in pages, following `next_start`, and check the digest once the last page
+arrives:
+
+```text
+get_wasm_run_memory {"run_id": "<run_id>", "read": 0}
+get_wasm_run_memory {"run_id": "<run_id>", "read": 0, "start": 32768}
+```
+
+`get_wasm_runs {"artifact_id": "9"}` returns the newest run whole. A record
+that echoes large memory writes returns a structural summary; its `run_id` and
+read digests are still there. Details: [WASM run v1](../../protocol/wasm-run-v1.md).
 
 ## 28. Tell library code from custom code in a Wasm module
 

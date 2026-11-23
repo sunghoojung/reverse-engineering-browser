@@ -109,7 +109,8 @@
       "flag": "--allow-content",
       "operations": [
         "run_wasm_function",
-        "get_wasm_runs"
+        "get_wasm_runs",
+        "get_wasm_run_memory"
       ],
       "keys": [
         "value",
@@ -119,7 +120,7 @@
         "match",
         "inputs_digest"
       ],
-      "description": "A second line behind content_reads, which lists both operations only with --allow-content. If either were ever returned to a client without content admission, every value under these keys would be replaced by {\"omitted\":\"content\"} with no length: results, stub values and import arguments (value), memory bytes (hex), memory read digests (sha256), per-entry expectation results (results_match, match) and the inputs digest. This alone does not protect values a run computed: its outcome, fuel, import call count, timing and repeated expectations disclose them too, which is why running captured code is Full access only."
+      "description": "A second line behind content_reads, which lists these operations only with --allow-content. If one were ever returned to a client without content admission, every value under these keys would be replaced by {\"omitted\":\"content\"} with no length: results, stub values and import arguments (value), memory bytes (hex), memory read and snapshot digests (sha256), per-entry expectation results (results_match, match) and the inputs digest. This alone does not protect values a run computed: its outcome, fuel, import call count, timing and repeated expectations disclose them too, which is why running captured code is Full access only."
     },
     "content_reads": {
       "flag": "--allow-content",
@@ -130,9 +131,10 @@
         "search_wasm_inspection",
         "run_wasm_function",
         "get_wasm_runs",
+        "get_wasm_run_memory",
         "export_requests_har"
       ],
-      "description": "Operations whose purpose is captured content (source, bytecode, disassembly and request and response bodies) are listed only with --allow-content. With it, get_source_format also lays out request and response bodies, and no result has content fields omitted below the inline limit. Larger documents still return a structural summary, so content is read in pages: get_artifact_text, get_source_format with start_line and line_count, inspect_wasm with row_offset or byte_offset and row_limit, and get_wasm_pseudocode with line_offset and line_limit. Binary responses are still refused. An analyst_action run_local_analyst_script that names a selected_artifact reads that stored artifact whole, so without --allow-content it is refused before any request."
+      "description": "Operations whose purpose is captured content (source, bytecode, disassembly and request and response bodies) are listed only with --allow-content. With it, get_source_format also lays out request and response bodies, and no result has content fields omitted below the inline limit. Larger documents still return a structural summary, so content is read in pages: get_artifact_text, get_source_format with start_line and line_count, inspect_wasm with row_offset or byte_offset and row_limit, get_wasm_pseudocode with line_offset and line_limit, and get_wasm_run_memory with start and length. Binary responses are still refused. An analyst_action run_local_analyst_script that names a selected_artifact reads that stored artifact whole, so without --allow-content it is refused before any request."
     },
     "session_start": {
       "tool": "start_live_session",
@@ -6027,7 +6029,7 @@
             "name": "limit",
             "in": "query",
             "required": false,
-            "description": "Runs to return, 1 to 64. Default 1: one record always fits the MCP inline limit, and several large records may come back as a structural summary.",
+            "description": "Runs to return, 1 to 64, default 1. Through reb-api mcp a listing larger than the inline limit is asked for again with half the limit; one record larger than it, such as one that echoes large memory writes, returns a structural summary. Memory a run read is read in pages with get_wasm_run_memory.",
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -6078,6 +6080,11 @@
             }
           }
         },
+        "x-reb-mcp-page": {
+          "parameters": [
+            "limit"
+          ]
+        },
         "x-source": "apps/origin-trace-backend/src/wasm_run.rs",
         "x-reb-execution-schema": {
           "$ref": "#/components/schemas/RebExecutionMetadata"
@@ -6106,7 +6113,7 @@
       "post": {
         "operationId": "run_wasm_function",
         "summary": "Run one function of a captured Wasm module offline",
-        "description": "Explicit, confirmed offline execution of one exported or indexed function of a hash-verified captured core Wasm module in wasmi 2.0.0, a pure-Rust interpreter with fuel metering and no JIT, inside the local backend. Every import is a stub: a function import returns the results the request supplies (results, or one sequence entry per call) and otherwise traps with outcome import_trap; imported memories and tables are fresh and empty, imported globals are zero. No filesystem, network, clock, randomness, browser or page is reachable, so supply every nondeterministic import. Data and element segments initialize as usual; the start function runs only with run_start. memory_writes apply after instantiation (and the start function) and before the call; memory_reads are taken after it, whatever the outcome. Every limit (fuel, memory_pages, table_elements, call_depth, deadline_ms) and every trap is a named outcome.status, with outcome.phase and outcome.trap_kind; wasmi does not report trap byte offsets. Every import call is recorded (first 256, with up to 16 arguments and 16 results each). The memory and table limits are totals across every memory and table of the run. expect compares results and reads exactly, with at most one expected entry per read. The result carries module_sha256, inputs_digest, the interpreter and the limits, and is stored as a derived experiment record, never captured evidence. Running captured code is a content read: through reb-api mcp this tool is listed only at Full access (--allow-content, with --allow-effects), because the outcome, fuel, import calls, timing and repeated expectations of a run can each disclose values the code computed. Requires confirm_offline_execution true; nothing runs without it.",
+        "description": "Explicit, confirmed offline execution of one exported or indexed function of a hash-verified captured core Wasm module in wasmi 2.0.0, a pure-Rust interpreter with fuel metering and no JIT, inside the local backend. Every import is a stub: a function import returns the results the request supplies (results, or one sequence entry per call) and otherwise traps with outcome import_trap; imported memories and tables are fresh and empty, imported globals are zero. No filesystem, network, clock, randomness, browser or page is reachable, so supply every nondeterministic import. Data and element segments initialize as usual; the start function runs only with run_start. memory_writes apply after instantiation (and the start function) and before the call; memory_reads are taken after it, whatever the outcome. Every limit (fuel, memory_pages, table_elements, call_depth, deadline_ms) and every trap is a named outcome.status, with outcome.phase and outcome.trap_kind; wasmi does not report trap byte offsets. Every import call is recorded with every argument and result; the first 256 are kept and import_calls_total counts them all. memory_writes and memory_reads take any number of regions of any size within memory 0; the bytes the reads cover are stored once beside the record and read in pages with get_wasm_run_memory. The memory and table limits are totals across every memory and table of the run. expect compares results and reads exactly, with at most one expected entry per read. The result carries module_sha256, inputs_digest, the interpreter and the limits, and is stored as a derived experiment record, never captured evidence. Running captured code is a content read: through reb-api mcp this tool is listed only at Full access (--allow-content, with --allow-effects), because the outcome, fuel, import calls, timing and repeated expectations of a run can each disclose values the code computed. Requires confirm_offline_execution true; nothing runs without it.",
         "tags": [
           "artifacts"
         ],
@@ -6114,7 +6121,7 @@
         "x-reb-execution-schema": {
           "$ref": "#/components/schemas/RebExecutionMetadata"
         },
-        "x-max-body-bytes": 1048576,
+        "x-max-body-bytes": 9007199254740991,
         "requestBody": {
           "required": true,
           "content": {
@@ -6177,7 +6184,7 @@
             }
           },
           "409": {
-            "description": "The artifact's SHA-256 differs from the request, or another run is in progress.",
+            "description": "The artifact's SHA-256 differs from the request.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6243,11 +6250,146 @@
               "when": {}
             }
           ],
-          "notes": "Runs captured code only on this explicit request, offline, in a pure interpreter with every import stubbed and fuel, memory, table, call depth and deadline limits. Never automatic and never started by analysis. One run at a time per backend. Writes one derived record to artifacts/analysis/wasm-runs-v1.json, evicting the oldest past 64. No automatic retry.",
+          "notes": "Runs captured code only on this explicit request, offline, in a pure interpreter with every import stubbed and fuel, memory, table, call depth and deadline limits. Never automatic and never started by analysis. One run at a time per backend; a later request waits its turn. The request is parsed as it arrives, at any size. Writes one derived record to artifacts/analysis/wasm-runs-v1.json, and the bytes its reads cover to artifacts/analysis/wasm-run-memory/<run_id>.bin, evicting the oldest run and its bytes past 64. No automatic retry.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/wasm_run.rs",
               "symbol": "Runs::run"
+            }
+          ]
+        }
+      }
+    },
+    "/api/wasm/runs/memory": {
+      "get": {
+        "operationId": "get_wasm_run_memory",
+        "summary": "Read the bytes of one memory read of a stored Wasm run, in pages",
+        "description": "Returns length bytes from start within one memory read of a stored run, as hex, with the read's SHA-256 and next_start to continue. A read of any size is read whole this way. Reads the run store and the run's stored memory only: nothing executes. A page is not checked against the SHA-256, which covers the whole read; check it once every page has arrived. Memory a run computed is content, so through reb-api mcp this read is listed only at Full access (--allow-content).",
+        "tags": [
+          "artifacts"
+        ],
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "query",
+            "required": true,
+            "description": "A stored run's run_id.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9-]{1,128}$"
+            }
+          },
+          {
+            "name": "read",
+            "in": "query",
+            "required": true,
+            "description": "Index into the run's memory_reads.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "start",
+            "in": "query",
+            "required": false,
+            "description": "First byte within the read. A start equal to the read's length returns an empty page.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "length",
+            "in": "query",
+            "required": false,
+            "description": "Bytes to return; a page ends early at the end of the read.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 32768
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of the read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WasmRunMemory"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown or missing parameter, an invalid run_id, a zero length, or a start past the end of the read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Local origin rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No stored run has this run_id, the run made no read with this index, or the read was out of bounds and holds no bytes (code target_unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The run store, or the run's stored memory, is unreadable or differs from its record (code artifact_integrity).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-reb-mcp-page": {
+          "parameters": [
+            "length"
+          ]
+        },
+        "x-source": "apps/origin-trace-backend/src/wasm_run.rs",
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads artifacts/analysis/wasm-runs-v1.json and artifacts/analysis/wasm-run-memory/<run_id>.bin. Never executes a module.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/wasm_run.rs",
+              "symbol": "memory"
             }
           ]
         }
@@ -28499,7 +28641,6 @@
           },
           "imports": {
             "type": "array",
-            "maxItems": 256,
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -28525,7 +28666,6 @@
                 "sequence": {
                   "type": "array",
                   "minItems": 1,
-                  "maxItems": 256,
                   "items": {
                     "type": "array",
                     "maxItems": 1000,
@@ -28539,8 +28679,7 @@
           },
           "memory_writes": {
             "type": "array",
-            "maxItems": 16,
-            "description": "Bytes written to memory 0 before the call, 256 KiB in total.",
+            "description": "Bytes written to memory 0 before the call, in order, each within memory 0.",
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -28562,8 +28701,7 @@
           },
           "memory_reads": {
             "type": "array",
-            "maxItems": 16,
-            "description": "Regions of memory 0 read after the call, 32 KiB in total, so the hex and the rest of the record fit the MCP inline limit.",
+            "description": "Regions of memory 0 read after the call, any number and of any length. The record gives each read's SHA-256; get_wasm_run_memory returns its bytes in pages.",
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -28578,8 +28716,7 @@
                 },
                 "length": {
                   "type": "integer",
-                  "minimum": 1,
-                  "maximum": 32768
+                  "minimum": 1
                 }
               }
             }
@@ -28639,7 +28776,6 @@
               },
               "memory": {
                 "type": "array",
-                "maxItems": 16,
                 "description": "At most one entry per memory_reads index.",
                 "items": {
                   "type": "object",
@@ -28918,14 +29054,14 @@
           },
           "memory_reads": {
             "type": "array",
+            "description": "Each requested read: its status and the SHA-256 of the bytes read. get_wasm_run_memory returns the bytes in pages.",
             "items": {
               "type": "object",
               "required": [
                 "offset",
                 "length",
                 "status",
-                "sha256",
-                "hex"
+                "sha256"
               ],
               "properties": {
                 "status": {
@@ -28945,7 +29081,60 @@
                   "type": [
                     "string",
                     "null"
-                  ]
+                  ],
+                  "description": "Only in records stored before memory snapshots, whose reads were at most 32 KiB in total: the bytes read."
+                }
+              }
+            }
+          },
+          "memory_snapshot": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "required": [
+              "sha256",
+              "byte_size",
+              "ranges"
+            ],
+            "description": "The bytes the reads cover, stored once as the merged ranges of memory 0 they span, so overlapping and repeated reads cost their memory once. Null when no read was in bounds. Absent from records stored before snapshots.",
+            "properties": {
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "byte_size": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "ranges": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "offset",
+                    "length",
+                    "at"
+                  ],
+                  "properties": {
+                    "offset": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Where the range starts in memory 0."
+                    },
+                    "length": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "at": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Where the range starts in the stored snapshot."
+                    }
+                  }
                 }
               }
             }
@@ -29000,7 +29189,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Each trimming step that removed something, in order, so the record fits 120 KiB pretty-printed as a one-record get_wasm_runs listing: the request echo, import lists past 32, the function type lists, results past 64, the import calls past the longest prefix that fits, then the import lists to what fits. Each step is sized with this list included. Empty when nothing was trimmed. The store keeps the trimmed record."
+            "description": "Empty: a record is kept whole. Records stored by earlier builds list each step that trimmed them to fit 120 KiB as a one-record get_wasm_runs listing."
           },
           "store_notice": {
             "type": [
@@ -29014,6 +29203,69 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "WasmRunMemory": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema",
+          "run_id",
+          "read",
+          "memory_offset",
+          "sha256",
+          "total",
+          "start",
+          "length",
+          "hex",
+          "next_start"
+        ],
+        "properties": {
+          "schema": {
+            "const": "wasm-run-memory-v1"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "read": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "memory_offset": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Where the read starts in memory 0."
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "SHA-256 of the whole read, not of this page."
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Bytes in the whole read."
+          },
+          "start": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "length": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "hex": {
+            "type": "string",
+            "pattern": "^([0-9a-f]{2})*$"
+          },
+          "next_start": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "description": "The start of the next page, or null after the last."
           }
         }
       },

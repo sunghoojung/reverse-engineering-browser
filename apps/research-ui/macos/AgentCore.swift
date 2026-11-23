@@ -302,7 +302,7 @@ enum AgentToolGate {
   // values the code computed.
   static let fullOnly: Set<String> = [
     "get_artifact_text", "search_artifact_text", "search_wasm_inspection", "export_requests_har", "run_wasm_function",
-    "get_wasm_runs", "start_live_session", "session_action",
+    "get_wasm_runs", "get_wasm_run_memory", "start_live_session", "session_action",
   ]
   // Whether a tool the server listed is offered to the model at this level.
   static func lists(_ name: String, readOnly: Bool, level: AgentPermission) -> Bool {

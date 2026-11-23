@@ -94,17 +94,23 @@ control, and leave arming disabled. Nothing connects, arms or runs.
 capture document that the test's own page `fetch` stands in for. That document
 logs twelve thousand messages, every 97th of them two lines tall, in pages of
 a thousand, and then one message of 1 MiB. At both window sizes, the
-transcript must follow its end, with the 1 MiB message drawn whole. Fewer than
+transcript must follow its end, with the 1 MiB message drawn whole. Every
+line of that message must stay inside its wrap width: the line count, the last
+line's box and the widest line must match a monospace wrap of the message, and
+a failure prints them. Fewer than
 250 rows may be in the document at the end, a quarter of the way down, and
 through forty scroll steps there and back, and those rows must be consecutive
-messages that cover the viewport with no gap. PageDown, Home and End must
-scroll the focused transcript through WebKit's own scroll animation, which
-the layout never interrupts: Home must reach the first entry and End the
-last line of the 1 MiB message. Each key waits for the previous scroll to
-stop, because WebKit before bug 330293 aims Home and End by a distance from
-the position it last knew, so on any page one pressed while PageDown still
-moves lands short by what PageDown had left. A timed-out wait prints each
-scroll, `scrollend`, key, layout write and changed frame that led to it. Search
+messages that cover the viewport with no gap. PageDown must scroll the focused
+transcript through WebKit's own scroll animation, which the layout never
+interrupts. Home is then pressed while a second PageDown still moves, with no
+wait between them, and must reach the first entry; the transcript scrolls to
+its edge itself, because WebKit before bug 330293 aims Home by a distance from
+the position it last knew and would land short by what PageDown had left. A
+try in which PageDown finished first is made again, up to five times. End,
+Command-Up and Command-Down must reach the last line of the 1 MiB message, the
+first entry and the last line again, each handled by the transcript. A
+timed-out wait prints each scroll, `scrollend`, key, layout write and changed
+frame that led to it. Search
 must find `rendered message 4242` among rows that are not drawn and draw only
 that match, and Escape must restore every entry. Screenshots
 `console-transcript-{end,middle,start,search}-*` show each state.

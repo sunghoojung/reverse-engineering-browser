@@ -890,9 +890,13 @@ visible/retained counts and a no-match state. The transcript keeps every entry
 until Clear and renders only the rows near the viewport, so hours of output
 scroll, filter and follow at the same cost, and filters search rows that are
 not rendered. The transcript never moves a scroll the reader is making, or
-the extent it scrolls through, so wheel momentum and the PageUp, PageDown, Home
-and End animations run to their end and Home and End reach the first and last
-entry; a row measured on the way is taken up once that scroll has stood still.
+the extent it scrolls through, so wheel momentum and the PageUp and PageDown
+animations run to their end; a row measured on the way is taken up once that
+scroll has stood still. Home, End, Command-Up and Command-Down scroll the
+focused transcript straight to its first or last entry, even while another
+scroll still moves. A word of more than 4096 characters with no space, such
+as a long base64 or JSON string, wraps at any character, so every line of a
+1 MiB message stays inside the wrap width.
 An evaluation link in Traffic scrolls its command into view wherever it is. Clear removes output and releases retained values while
 preserving command history. Object expansion loads one native property
 page at a time; Previous/Next replace that page rather than growing the DOM.

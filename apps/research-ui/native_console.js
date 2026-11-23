@@ -327,6 +327,23 @@
       layout(); updateOutputState();
     });
     controls.scroll.addEventListener('scrollend', () => { if (scrolling) ended = true; });
+    // Home, End, Command-Up and Command-Down scroll straight to that edge of
+    // the transcript, as WebKit does after bug 330293. Before it, WebKit aims
+    // them by a distance from the position it last knew, so one pressed while
+    // another scroll still moves, such as PageDown, lands short by what that
+    // scroll had left.
+    function edge(event) {
+      if (event.altKey || event.ctrlKey || event.shiftKey) return 0;
+      if (event.metaKey) return event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : 0;
+      return event.key === 'Home' ? -1 : event.key === 'End' ? 1 : 0;
+    }
+    controls.scroll.addEventListener('keydown', event => {
+      const toward = edge(event);
+      if (!toward || event.defaultPrevented || event.target.closest('input, textarea, select, [contenteditable]')) return;
+      event.preventDefault();
+      controls.scroll.scrollTo({top: toward < 0 ? 0 : controls.scroll.scrollHeight,
+        behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'});
+    });
     new ResizeObserver(schedule).observe(controls.scroll);
     return {
       size: () => entries.length,
@@ -532,6 +549,56 @@
       catch (error) { notice(`${error.message}. The action was not retried.`, true); }
     }); return control;
   }
+  // WebKit measures a word, text with no break opportunity in it, as one
+  // width, and past a few thousand characters that width loses precision:
+  // the lines of a 1 MiB message held a character too many or too few, and
+  // its last line ran past the wrap width. A word of more than 4096 code
+  // units, without a space, tab or line break, goes in as runs of at most
+  // that many, each ending on a grapheme boundary and the next after a <wbr>.
+  // The <wbr> keeps WebKit from laying out the runs as one word, which takes
+  // seconds, and the word breaks anywhere, so each line stays full up to the
+  // wrap width. Copy, Find and textContent see one text. Absent text is
+  // empty, as it is for textContent.
+  const textRun = 4096, graphemes = new Intl.Segmenter(undefined, {granularity: 'grapheme'});
+  function textRuns(text) {
+    if (text.length <= textRun) return text ? [text] : [];
+    const nodes = [];
+    let segments = null, plain = 0;
+    for (let at = 0, first = 0; at <= text.length; ++at) {
+      const code = at < text.length ? text.charCodeAt(at) : 32;
+      if (code !== 32 && code !== 9 && code !== 10 && code !== 12 && code !== 13) continue;
+      if (at - first > textRun) {
+        segments ??= graphemes.segment(text);
+        const start = segments.containing(first).index, word = document.createElement('span');
+        word.className = 'native-console-word';
+        for (let from = start; from < at;) {
+          let next = Math.min(from + textRun, at);
+          if (next < at) { const cluster = segments.containing(next); next = cluster.index > from ? cluster.index : cluster.index + cluster.segment.length; }
+          if (from > start) word.append(document.createElement('wbr'));
+          word.append(text.slice(from, next)); from = next;
+        }
+        if (start > plain) nodes.push(text.slice(plain, start));
+        nodes.push(word); plain = at;
+      }
+      first = at + 1;
+    }
+    if (plain < text.length) nodes.push(text.slice(plain));
+    return nodes;
+  }
+  function appendText(node, value) { node.append(...textRuns(value == null ? '' : String(value))); return node; }
+  // A command or function source is colored over its first 8192 characters,
+  // as the composer colors it. A long word in a colored token or in the
+  // plain rest goes in as runs.
+  const coloredCode = 8192;
+  function appendCode(container, value) {
+    const source = value == null ? '' : String(value), colored = source.length <= coloredCode ? source.length : graphemes.segment(source).containing(coloredCode).index;
+    const code = document.createDocumentFragment(); appendCommandColors(code, source.slice(0, colored));
+    for (const node of [...code.childNodes]) {
+      if (node.nodeType === 3) container.append(...textRuns(node.data));
+      else { if (node.textContent.length > textRun) node.replaceChildren(...textRuns(node.textContent)); container.append(node); }
+    }
+    return appendText(container, source.slice(colored));
+  }
   const locationText = value => value && typeof value.url === 'string' && Number.isInteger(value.line) && value.line >= 1 ? `${value.url || 'console'}:${value.line}:${value.column || 1}` : '';
   function location(container, value) {
     if (!locationText(value)) return;
@@ -562,7 +629,7 @@
     checkValue(value);
     if (value.handle && ['object', 'function', 'promise'].includes(value.type)) {
       const disclosure = document.createElement('details'); disclosure.className = 'native-console-object';
-      const summary = document.createElement('summary'); appendCommandColors(summary, value.text);
+      const summary = document.createElement('summary'); appendCode(summary, value.text);
       const children = document.createElement('div'); children.className = 'native-console-properties';
       const actions = document.createElement('div'); actions.className = 'native-console-actions';
       const status = document.createElement('div'); status.className = 'native-console-property-status'; status.setAttribute('role', 'status');
@@ -628,7 +695,7 @@
       location(actions, value.location);
       if (value.type === 'function') actions.append(button('Show function source', async () => {
         const result = await runtime({operation: 'source', handle: value.handle}, scope.target, false, scope.session, scope.generation);
-        if (result?.text && disclosure.isConnected) { pager.hidden = true; status.textContent = result.status === 'ok' ? 'Native function source' : 'Source unavailable'; const source = document.createElement('pre'); appendCommandColors(source, result.text); children.replaceChildren(source); disclosure.open = true; loaded = true; changedRow(container.closest('article')); }
+        if (result?.text && disclosure.isConnected) { pager.hidden = true; status.textContent = result.status === 'ok' ? 'Native function source' : 'Source unavailable'; const source = document.createElement('pre'); appendCode(source, result.text); children.replaceChildren(source); disclosure.open = true; loaded = true; changedRow(container.closest('article')); }
       }));
       // An element describes itself by its tag; window and document describe
       // themselves as a plain Object, and the runtime lists their listeners
@@ -638,7 +705,7 @@
         const result = await runtime({operation: 'listeners', handle: value.handle}, scope.target, false, scope.session, scope.generation);
         if (!result) return;
         children.replaceChildren(); pager.hidden = true; status.textContent = 'Registered event listeners'; loaded = true; disclosure.open = true;
-        if (result.status !== 'ok') { children.textContent = result.text; return; }
+        if (result.status !== 'ok') { appendText(children, result.text); return; }
         if (!result.properties?.length) children.textContent = 'No registered listeners.';
         for (const property of result.properties || []) {
           const row = document.createElement('div'); row.className = 'native-console-property'; row.append(document.createTextNode(property.name + ': ')); renderValue(row, property.value, scope); children.append(row);
@@ -657,7 +724,7 @@
       }
     } else {
       const output = document.createElement('span'); output.className = 'native-console-primitive'; output.dataset.type = value.type;
-      output.textContent = value.type === 'string' ? JSON.stringify(value.text) : value.text; container.append(output);
+      appendText(output, value.type === 'string' ? JSON.stringify(value.text) : value.text); container.append(output);
     }
   }
   async function awaitValue(container, value, scope, replace = false) {
@@ -677,7 +744,7 @@
         if (result.status === 'pending') { polling = true; setTimeout(tick, delay()); return; }
         const settled = document.createElement('div'); settled.className = 'native-console-value';
         if (result.value) { renderValue(settled, result.value, scope); const row = container.closest('article'); row.dataset.status = result.status; row.dataset.level = result.status === 'ok' ? 'result' : 'error'; }
-        else settled.textContent = result.text || 'Await stopped';
+        else appendText(settled, result.text || 'Await stopped');
         if (replace && result.value) { container.replaceChildren(); renderValue(container, result.value, scope); }
         else if (replace) container.replaceChildren(settled);
         else { container.querySelector('summary').textContent = result.status === 'rejected' ? 'Promise {<rejected>}' : result.status === 'ok' ? 'Promise {<fulfilled>}' : value.text; container.append(settled); }
@@ -696,7 +763,7 @@
     const output = document.createElement('div'); output.className = 'native-console-value';
     row.append(output);
     if (value.value) { row.dataset.type = value.value.type; renderValue(output, value.value, scope); }
-    else { output.textContent = value.text || value.status; location(row, value.location); }
+    else { appendText(output, value.text || value.status); location(row, value.location); }
     if (Array.isArray(value.stack)) for (const frame of value.stack) { const entry = document.createElement('div'); location(entry, frame); row.append(entry); }
     const details = document.createElement('details'); details.className = 'native-console-result-details';
     const summary = document.createElement('summary'); summary.textContent = '⋯'; summary.setAttribute('aria-label', `Result details: ${value.status}`);
@@ -719,8 +786,8 @@
   function logRow(message) {
     const row = document.createElement('article'); row.className = 'native-console-result native-console-log'; row.dataset.level = message.level;
     const time = document.createElement('span'); time.className = 'native-console-time'; time.textContent = new Date(message.time).toLocaleTimeString(); row.append(time);
-    const output = document.createElement('pre'); output.textContent = message.text; row.append(output); location(row, message);
-    if (message.stack) { const details = document.createElement('details'); const summary = document.createElement('summary'); summary.textContent = 'Stack'; const stack = document.createElement('pre'); stack.textContent = message.stack; details.append(summary, stack); row.append(details); }
+    const output = document.createElement('pre'); appendText(output, message.text); row.append(output); location(row, message);
+    if (message.stack) { const details = document.createElement('details'); const summary = document.createElement('summary'); summary.textContent = 'Stack'; const stack = document.createElement('pre'); appendText(stack, message.stack); details.append(summary, stack); row.append(details); }
     return row;
   }
   function logs(value, epoch = outputGeneration) {
@@ -1172,7 +1239,7 @@
     controls.source.value = ''; sizeInput(); controls.source.focus();
     const commandRow = document.createElement('article'); commandRow.className = 'native-console-result native-console-command'; commandRow.dataset.level = 'result'; commandRow.dataset.commandId = scope.command; commandRow.dataset.commandNumber = scope.command; commandRow.dataset.consoleSession = scope.session; commandRow.dataset.consoleDocument = scope.target;
     const commandStatus = document.createElement('span'); commandStatus.className = 'native-console-command-status'; commandStatus.textContent = `#${scope.command} · Running`; commandStatus.setAttribute('role', 'status'); commandRow.append(commandStatus);
-    const expression = document.createElement('pre'); expression.className = 'native-console-expression'; expression.append(document.createTextNode('> ')); appendCommandColors(expression, source); commandRow.append(expression);
+    const expression = document.createElement('pre'); expression.className = 'native-console-expression'; expression.append(document.createTextNode('> ')); appendCode(expression, source); commandRow.append(expression);
     transcript.add({node: commandRow});
     try {
       const value = await runtime({operation: 'evaluate', source: helper ? helper[2] : source}, scope.target, false, scope.session, scope.generation);

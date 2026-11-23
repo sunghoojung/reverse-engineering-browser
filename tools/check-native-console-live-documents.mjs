@@ -17,6 +17,9 @@ async function mount(root, fetch) {
     }
     get isConnected() { return this === document.body || !!this.parentNode?.isConnected; }
     get firstElementChild() { return this.children[0]; }
+    get childNodes() { return this.children; }
+    get nodeType() { return this.tagName === 'text' ? 3 : 1; }
+    get data() { return this.textContent; }
     get textContent() { return this._text + this.children.map(child => child.textContent).join(''); }
     set textContent(text) { this.replaceChildren(); this._text = String(text); }
     get options() { return this.children; }

@@ -130,9 +130,20 @@ end of the transcript. The scroll offset and extent take up the difference
 once the scroll has stood still, for three frames after `scrollend` or for
 300 ms. A `scrollend` alone does not end it, because WebKit also fires one for
 an animation that a newer scroll cancels, such as a PageDown that Home
-interrupts. The end is followed when entries arrive or **Latest** is chosen,
-never against the reader's scroll, and a scroll down that ends within 40 px of
-the end, such as **End**, lands on it.
+interrupts. Home, End, Command-Up and Command-Down scroll the focused
+transcript to that edge itself, as WebKit does after bug 330293; before it,
+WebKit aims them by a distance from the position it last knew, so one pressed
+while PageDown still moves would land short. The end is followed when entries
+arrive or **Latest** is chosen, never against the reader's scroll, and a
+scroll down that ends within 40 px of the end lands on it.
+WebKit measures a word, text with no break opportunity, as one width, and past
+a few thousand characters that width loses precision, so a 1 MiB message's
+lines held a character too many or too few. A word of more than 4096 code
+units, without a space, tab or line break, is drawn as runs of at most that
+many, each ending on a grapheme boundary and the next after a `<wbr>`, in a
+span that breaks anywhere: every line stays full up to the wrap width, the
+layout stays linear, and copy, Find and `textContent` see one text. Text
+around such a word wraps as before.
 Search and level filters run over every entry, including rows that are not in
 the document, and an evaluation link reveals its command wherever it is. A
 command is shown whole in the transcript. History keeps every command, a
@@ -176,7 +187,10 @@ silently loses data.
   not rendered, a tall row that does not stretch the estimate, a compressed
   transcript scrolled step by step and by drag to both ends, a reader's scroll
   whose offset and extent the layout never moves, even past a `scrollend` from a
-  cancelled animation, a command past 64 MiB sent whole, the incremental completion
+  cancelled animation, Home, End and Command-Up and -Down scrolled to their edge
+  by the transcript and every other key left to WebKit, a long word drawn in
+  bounded runs on grapheme boundaries with the text around it whole, a command
+  past 64 MiB sent whole, the incremental completion
   lexer against a fresh lex, and the document-start panel's add, remove and
   paged reads.
 

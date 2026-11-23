@@ -258,6 +258,9 @@ export async function checkConsoleDOM(root) {
     constructor(tag='div') {this.tagName=tag;this.children=[];this.parentNode=null;this.dataset={};this.style={};this.attributes={};this.listeners={};this._text='';this.className='';this.value='';this.hidden=false;this.disabled=false;this.scrollTop=0;this.clientHeight=100;this.clientWidth=600;this.scrollHeight=100;this.selectionStart=0;this.selectionEnd=0;}
     get isConnected(){return this===document.body||!!this.parentNode?.isConnected;}
     get firstElementChild(){return this.children[0];}
+    get childNodes(){return this.children;}
+    get nodeType(){return this.tagName==='text'?3:1;}
+    get data(){return this.textContent;}
     get textContent(){return this._text+this.children.map(child=>child.textContent).join('');}
     set textContent(text){this.replaceChildren();this._text=String(text);}
     get options(){return this.children;}
@@ -294,9 +297,9 @@ export async function checkConsoleDOM(root) {
   const fixture=createConsoleFixture();let copies=0;
   const source=await readFile(join(root,'apps/research-ui/native_console.js'),'utf8');
   // Animation frames run only when a check advances them, 16 ms apart.
-  const animation=[];let clock=0;
+  const animation=[];let clock=0,reducedMotion=false;
   const frames=(count=1)=>{for(let frame=0;frame<count;frame+=1){clock+=16;for(const callback of animation.splice(0))callback(clock);}};
-  const context={document,TextEncoder,console,setTimeout,clearTimeout,setInterval(){},requestAnimationFrame:callback=>animation.push(callback),ResizeObserver:class{observe(){}},MutationObserver:class{observe(){}},CustomEvent:class{},navigator:{clipboard:{writeText:async()=>{copies++;}}},createNativeConsoleCompletion:()=>({close(){},keydown(){return false;}}),codeViewColor:(node,text)=>{node.append(document.createTextNode(text));return node;},sourcePrettyTokens:()=>[],fetch:async(path,options)=>{const reply=await fixture.respond(path,options?.body?JSON.parse(options.body):null);return {ok:reply.status===200,status:reply.status,json:async()=>reply.body};}};
+  const context={document,TextEncoder,console,setTimeout,clearTimeout,setInterval(){},requestAnimationFrame:callback=>animation.push(callback),matchMedia:query=>({matches:reducedMotion&&query==='(prefers-reduced-motion: reduce)'}),ResizeObserver:class{observe(){}},MutationObserver:class{observe(){}},CustomEvent:class{},navigator:{clipboard:{writeText:async()=>{copies++;}}},createNativeConsoleCompletion:()=>({close(){},keydown(){return false;}}),codeViewColor:(node,text)=>{node.append(document.createTextNode(text));return node;},sourcePrettyTokens:()=>[],fetch:async(path,options)=>{const reply=await fixture.respond(path,options?.body?JSON.parse(options.body):null);return {ok:reply.status===200,status:reply.status,json:async()=>reply.body};}};
   // The layout extent becomes settable so a model transcript can pass it.
   const staged=source.replace('const transcriptExtent = 1 << 24;','let transcriptExtent = 1 << 24;');assert.notEqual(staged,source,'the transcript extent is declared where the fixture expects it');
   runInNewContext(staged.replace(/\}\)\(\);\s*$/, 'globalThis.testConsole = {initialize, logs, poll, renderControls, extent:value=>{transcriptExtent=value;}, state:()=>({session,pending,submitting,generation,outputGeneration,entries:transcript.size()})};})();'),context);
@@ -352,6 +355,8 @@ export async function checkConsoleDOM(root) {
   const long='/*'+'x'.repeat(10000)+'*/ fixture.long';await submit(long);await settle();
   const longRow=get('output').querySelectorAll('.native-console-command').at(-1);
   assert(longRow.textContent.includes(long),'A long command is shown whole');
+  const texts=node=>node.tagName==='text'?[node.textContent]:node.children.flatMap(texts);
+  assert(longRow.querySelector('.native-console-word')&&texts(longRow.querySelector('pre')).every(text=>text.length<=4096),'A long word in a command is drawn in bounded runs');
   assert.equal(fixture.calls.filter(call=>call.command?.source===long).length,1,'A long command is sent whole');
   const huge='x'.repeat(64*1024*1024+1);await submit(huge);await settle();
   assert.equal(fixture.calls.filter(call=>call.command?.source===huge).length,1,'A command past 64 MiB is sent whole');
@@ -511,12 +516,46 @@ export async function checkConsoleDOM(root) {
     assert.equal(top,content()-viewport,'a scroll down that ends within reach of the end lands on it');
     scroll.scrollTop=top-20;await scroll.emit('scroll');quiet();
     assert.equal(top,content()-viewport-20,'a scroll up from the end is never pulled back, even once it settles');
+    // Home, End, Command-Up and Command-Down scroll straight to that edge,
+    // smoothly unless the reader asked for reduced motion. Other keys, and
+    // these with another modifier, are left to the engine.
+    const asked=[];scroll.scrollTo=options=>asked.push(options);
+    const press=async(key,modifiers={})=>{let prevented=false;await scroll.emit('keydown',{key,altKey:false,ctrlKey:false,shiftKey:false,metaKey:false,defaultPrevented:false,...modifiers,preventDefault(){prevented=true;}});return prevented;};
+    for(const [key,modifiers,top,name] of [['Home',{},0,'Home'],['End',{},content(),'End'],['ArrowUp',{metaKey:true},0,'Command-Up'],['ArrowDown',{metaKey:true},content(),'Command-Down']]){
+      assert.equal(await press(key,modifiers),true,`${name} is the transcript's own`);
+      assert.deepEqual({...asked.at(-1)},{top,behavior:'smooth'},`${name} scrolls straight to that edge`);
+    }
+    const handled=asked.length;
+    for(const [key,modifiers] of [['Home',{shiftKey:true}],['End',{altKey:true}],['End',{ctrlKey:true}],['ArrowUp',{}],['PageDown',{}],['ArrowDown',{metaKey:true,shiftKey:true}],['Home',{defaultPrevented:true}]])
+      assert.equal(await press(key,modifiers),false,`${key} with ${JSON.stringify(modifiers)} is left to the engine`);
+    assert.equal(asked.length,handled);
+    reducedMotion=true;await press('End');assert.equal(asked.at(-1).behavior,'auto','with reduced motion an edge key jumps');reducedMotion=false;
+    delete scroll.scrollTo;
     await get('latest').click();await settle();
     Node.prototype.getBoundingClientRect=rect;delete scroll.getBoundingClientRect;delete output.getBoundingClientRect;
     Object.defineProperties(scroll,{clientHeight:{value:1e9,writable:true,configurable:true},scrollHeight:{value:100,writable:true,configurable:true},scrollTop:{value:0,writable:true,configurable:true}});
   }
   get('filter').value='no-such-value';await get('filter').emit('input');assert.equal(get('no-matches').hidden,false);await get('filter-close').click();assert.equal(get('no-matches').hidden,true);
   await get('clear').click();assert.equal(get('output').children.length,0);assert.equal(get('empty').hidden,false);assert.equal(copies,0);
+  // A word of more than 4096 code units is drawn as runs of at most that
+  // many, each ending on a grapheme boundary and the next after a <wbr>, in
+  // a span that breaks anywhere; the message reads as one text. Text with
+  // spaces stays one text node however long, and a short message is one.
+  {
+    const word='a'.repeat(4095)+'\u{1F44D}\u{1F3FD}'+'b'.repeat(4091)+'e\u0301'+'c'.repeat(5000),mixed='lead words '+'d'.repeat(5000)+' tail'+' words'.repeat(1000);
+    api.logs({messages:[{level:'info',text:word,time:0},{level:'info',text:mixed,time:0},{level:'info',text:'short',time:0}],dropped:0});await settle();
+    const [pre,both,short]=get('output').querySelectorAll('pre').slice(-3),[span]=pre.children,runs=span.children.filter(child=>child.tagName==='text').map(child=>child.textContent);
+    assert.equal(pre.textContent,word,'a long word reads as one text');
+    assert(pre.children.length===1&&span.className==='native-console-word','a long word is drawn in a span that breaks anywhere');
+    assert(span.children.every((child,index)=>child.tagName===(index%2?'wbr':'text')),`runs alternate with <wbr>: ${span.children.map(child=>child.tagName)}`);
+    assert(runs.length===4&&runs.every(run=>run.length<=4096),`a long word is drawn in bounded runs: ${runs.map(run=>run.length)}`);
+    assert.equal(runs[0],'a'.repeat(4095),'a run ends before an emoji it would split');
+    assert(runs[1].startsWith('\u{1F44D}\u{1F3FD}')&&runs[2].startsWith('e\u0301'),'a run starts at a grapheme, never inside one');
+    assert.equal(both.textContent,mixed,'a message with a long word among others reads as one text');
+    assert.deepEqual(both.children.map(child=>child.tagName==='text'?child.textContent.length:child.className),[11,'native-console-word',6005],'only the long word is split; the text around it stays whole');
+    assert.equal(short.children.length,1,'a short message is one text');
+    await get('clear').click();
+  }
   get('source').value='reconnect draft';const oldSession=fixture.session;await get('stop').click();await settle();await get('start').click();await settle();assert.notEqual(fixture.session,oldSession);assert.equal(get('source').value,'reconnect draft');assert.equal(get('target').value,'');
   const broken=createConsoleFixture();const request={url:'/api/native-console/actions',async *[Symbol.asyncIterator](){yield '{malformed';}},reply={destroyed:false,writeHead(status){this.status=status;},end(text){this.text=text;}};assert.equal(await broken.handle(request,reply),true);assert.equal(reply.status,500);assert.equal(broken.errors.length,1);
   const wrong={url:'/api/native-console/actions',async *[Symbol.asyncIterator](){yield JSON.stringify({action:'runtime',session_id:'wrong',target_id:'101',command:{operation:'poll'}});}};await broken.handle(wrong,reply);assert.equal(reply.status,500);assert.equal(broken.receipts.at(-1).phase,'failed');assert.equal(broken.errors.length,2);

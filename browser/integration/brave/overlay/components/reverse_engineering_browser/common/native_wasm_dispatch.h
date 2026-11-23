@@ -123,6 +123,8 @@ struct NativeWasmDispatchObservation final {
 // Views are valid only during this call; transport must bound/copy before returning.
 using NativeWasmDispatchEmitter = bool (*)(const NativeWasmDispatchObservation&,
                                            std::uint64_t) noexcept;
+// V8's kV8MaxWasmModuleSize: no module, so no byte offset in one, is larger.
+inline constexpr std::uint32_t kNativeWasmModuleByteOffsetLimit = 1U << 30U;
 // Every field of a record that names a module of module_size bytes. A record
 // bound to a module an earlier record carried is checked this far only: the
 // browser does not keep the bytes, and the backend matches each offset to a
@@ -133,8 +135,8 @@ using NativeWasmDispatchEmitter = bool (*)(const NativeWasmDispatchObservation&,
   if (!value.execution_context_id || !value.header.frame_id ||
       !(value.document_token_high || value.document_token_low) || value.source_url.empty() ||
       value.source_url.size() > kNativeArtifactMaxUrlBytes || module_size < 8 ||
-      module_size > kNativeArtifactMaxContentBytes || value.module_byte_offset < 8 ||
-      value.module_byte_offset >= module_size || value.sample_index > kNativeWasmLastSampleIndex ||
+      value.module_byte_offset < 8 || value.module_byte_offset >= module_size ||
+      value.sample_index > kNativeWasmLastSampleIndex ||
       value.function_index >= 16U * 1024U * 1024U || value.table_count >= 16U * 1024U * 1024U ||
       !IsValidNativeJsInvocationContext(value.js_invocation_state, value.js_invocation_id))
     return false;
@@ -294,10 +296,9 @@ using NativeWasmIndirectEmitter = bool (*)(const NativeWasmIndirectObservation&,
   return value.execution_context_id && value.header.frame_id &&
          (value.document_token_high || value.document_token_low) && !value.source_url.empty() &&
          value.source_url.size() <= kNativeArtifactMaxUrlBytes && module_size >= 8 &&
-         module_size <= kNativeArtifactMaxContentBytes && value.module_byte_offset >= 8 &&
-         value.module_byte_offset < module_size && value.function_index < kLimit &&
-         value.table_index < kLimit && resolution < kNativeWasmIndirectResolutionCount &&
-         value.callee_function_index < kLimit &&
+         value.module_byte_offset >= 8 && value.module_byte_offset < module_size &&
+         value.function_index < kLimit && value.table_index < kLimit &&
+         resolution < kNativeWasmIndirectResolutionCount && value.callee_function_index < kLimit &&
          (value.resolution == NativeWasmIndirectResolution::kResolved ||
           value.callee_function_index == 0) &&
          value.sample_index <= kNativeWasmLastSampleIndex &&
@@ -594,14 +595,14 @@ using NativeWasmExecutionNudge = void (*)() noexcept;
     return false;
   }
   if (offset_known) {
-    if (value.module_byte_offset < 8 || value.module_byte_offset >= kLimit)
+    if (value.module_byte_offset < 8 ||
+        value.module_byte_offset >= kNativeWasmModuleByteOffsetLimit)
       return false;
   } else if (value.module_byte_offset != 0) {
     return false;
   }
   if (!bytes.empty()) {
-    if (bytes.size() < magic.size() || bytes.size() > kNativeArtifactMaxContentBytes ||
-        !std::equal(magic.begin(), magic.end(), bytes.begin()) ||
+    if (bytes.size() < magic.size() || !std::equal(magic.begin(), magic.end(), bytes.begin()) ||
         (offset_known && value.module_byte_offset >= bytes.size()))
       return false;
   }

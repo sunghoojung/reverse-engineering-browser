@@ -227,7 +227,7 @@ await settle();
 assert.match(panel.textContent, /do not match the recorded SHA-256/);
 assert.match(panel.textContent, /receiver refused this block: sensitive_capture_disabled/);
 assert.match(panel.textContent, /after 64 MiB of header blocks were retained, a limit of the browser that recorded this session/);
-assert.match(panel.textContent, /320 KiB block limit/);
+assert.match(panel.textContent, /320 KiB block limit of the browser that recorded this session/);
 
 // Metadata-only and legacy rows say why there is nothing to show.
 api.renderTrafficHeaders(panel, {id: 'm', origin: 'live', method: 'GET', path: 'echo.test', status: 200, hostOnly: true, headerBlocks: []}, () => {});

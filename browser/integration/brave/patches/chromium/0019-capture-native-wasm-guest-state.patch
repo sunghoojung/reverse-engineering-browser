@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-index 7cc9b4c6ea3e7578c2c2be515f39201804f249c9..3a4baf7a40c7539f5382716cfafeb5302b4e1108 100644
+index 8db9e9fcf0064d7febf38b16b8cd500444bf6346..ea304548c3edea365b6efc6acaa70d656064070c 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 @@ -25,13 +25,8 @@
@@ -60,7 +60,7 @@ index 7cc9b4c6ea3e7578c2c2be515f39201804f249c9..3a4baf7a40c7539f5382716cfafeb530
  #include "third_party/blink/renderer/platform/wtf/sanitizers.h"
  #include "third_party/blink/renderer/platform/wtf/stack_util.h"
  #include "third_party/blink/renderer/platform/wtf/text/strcat.h"
-@@ -390,6 +390,137 @@ void CaptureWasmBrTableDispatch(v8::Local<v8::Context> context,
+@@ -388,6 +388,136 @@ void CaptureWasmBrTableDispatch(v8::Local<v8::Context> context,
        document_token.GetLowForSerialization());
  }
  
@@ -156,8 +156,7 @@ index 7cc9b4c6ea3e7578c2c2be515f39201804f249c9..3a4baf7a40c7539f5382716cfafeb530
 +  // Revoke the preceding configured-site parent before any metadata rejection.
 +  sink.InvalidateNativeWasmGuest(state);
 +  if (!sink.IsNativeWasmGuestEnabled() || context.IsEmpty() ||
-+      module_bytes == nullptr || module_size < 8 ||
-+      module_size > reb::kNativeArtifactMaxContentBytes) {
++      module_bytes == nullptr || module_size < 8) {
 +    return;
 +  }
 +  ExecutionContext* execution_context = ToExecutionContext(context);
@@ -198,7 +197,7 @@ index 7cc9b4c6ea3e7578c2c2be515f39201804f249c9..3a4baf7a40c7539f5382716cfafeb530
  void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
                              const v8::WasmModuleBytesOrigin origin,
                              const std::uint8_t* bytes,
-@@ -1382,6 +1513,12 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+@@ -1360,6 +1490,12 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
    isolate->SetWasmModuleBytesCallback(CaptureWasmModuleBytes);
    isolate->SetWasmBrTableDispatchCallback(CaptureWasmBrTableDispatch,
                                          NativeWasmBrTableDispatchEnabled);

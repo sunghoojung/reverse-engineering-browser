@@ -96,12 +96,12 @@ the frame never recorded is absent), so a reader can name each kind's count
 without reading the records. The event index (`events.jsonl.events-v1`,
 layout 5) keeps them as it folds the store, beside `threads.workers` (every
 worker that started a request) and `observation_budget_gaps` (every
-`debugger_observation_budget` gap, above, which only earlier builds write),
-so a frame observed early in a long session is still listed.
-`threads.coverage` says what they cover: scope `store` once the index has
-caught up, else its indexed prefix, which the backend's indexer extends every
-second. `time_origins` gives the first record time (`monotonic_time_ns`) of
-each session an observed frame belongs to, so a record's time reads from its
+`debugger_observation_budget` gap, above, which only earlier builds write), so
+a frame observed early in a long session is still listed. `threads.coverage`
+says what they cover: scope `store` once the index has caught up, else its
+indexed prefix, which the backend's indexer extends every second.
+`time_origins` gives the first record time (`monotonic_time_ns`) of each
+session an observed frame belongs to, so a record's time reads from its
 session's start; a store can hold sessions from different boots, whose
 monotonic clocks never compare, so no origin spans sessions.
 

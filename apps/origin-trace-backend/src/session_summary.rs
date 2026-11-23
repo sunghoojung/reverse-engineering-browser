@@ -1143,6 +1143,7 @@ pub fn build(
             Position {
                 epoch: String::new(),
                 indexed_to: 0,
+                scanned_to: 0,
                 file_end: 0,
                 reopened: false,
             },

@@ -16,8 +16,10 @@
 #include <vector>
 
 #include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/no_destructor.h"
 #include "base/scoped_multi_source_observation.h"
+#include "base/task/sequenced_task_runner.h"
 #include "brave/components/reverse_engineering_browser/common/native_js_invocation.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_transport.mojom.h"
@@ -77,9 +79,10 @@ class NativeProbeSession final : public content::RenderProcessHostObserver {
   // --reb-js-invocation-digests: the session's sensitive opt-in for
   // settled-value digests. Only meaningful with invocation sites.
   [[nodiscard]] bool js_invocation_digests() const noexcept { return js_invocation_digests_; }
-  // A revision of the session's --reb-js-invocation-sites file, sent to every
-  // renderer. Every slot keeps its site for the browser lifetime; a revision
-  // that renumbers one, or that cannot be read, changes nothing and is the
+  // A revision of the session's --reb-js-invocation-sites file, parsed off
+  // this sequence and then sent to every renderer. Every slot keeps its site
+  // for the browser lifetime; a revision that renumbers one, or that cannot be
+  // read or parsed, changes nothing and is the
   // `native_js_invocation_sites_revision_refused` gap.
   void UpdateJsInvocationSites(const std::string& json) noexcept;
   // samples_per_function is kNativeWasmDefaultSamplesPerFunction unless the
@@ -143,6 +146,9 @@ class NativeProbeSession final : public content::RenderProcessHostObserver {
   [[nodiscard]] bool KeepsJsInvocationSlots(
       const std::vector<NativeJsInvocationSite>& sites) const noexcept;
   void AdoptJsInvocationSlots(const std::vector<NativeJsInvocationSite>& sites) noexcept;
+  // A parsed revision, applied only to the session that asked for it.
+  void ApplyJsInvocationSites(std::uint64_t session_id,
+                              std::optional<std::vector<NativeJsInvocationSite>> sites) noexcept;
 
   std::string guest_adapter_json_, guest_startup_adapter_json_;
   std::string js_dispatch_startup_sites_json_;
@@ -151,6 +157,9 @@ class NativeProbeSession final : public content::RenderProcessHostObserver {
   // their slots across sessions, so no later file may renumber one.
   std::vector<NativeJsInvocationSite> js_invocation_slots_;
   std::optional<std::vector<std::uint8_t>> js_invocation_sites_;
+  // Parses revisions in order. A site list has no fixed size, so a long one
+  // never blocks the browser sequence.
+  scoped_refptr<base::SequencedTaskRunner> js_invocation_parser_;
   bool js_invocation_digests_ = false;
   NativeWasmSampleBudgetPolicy wasm_sample_budget_{};
   mojom::NativeWatchScopePtr debugger_watch_scope_;

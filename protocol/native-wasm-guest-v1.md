@@ -39,14 +39,15 @@ spelling, and makes every activation belong to exactly one site, so its parent
 walk and host attribution stay unambiguous. Two dispatch loops in one function
 are not supported.
 
-All sites share one `sample_limit` (at most 256), the renderer's 128 tracked
-activations and its 16 document bindings. The 16 MiB snapshot budget is therefore
-never multiplied per site: it stays at most 256 snapshots of 65536 bytes. When
-the shared limit is reached the next sample at any site records
-`native_guest_sample_limit`, as with one site. The browser's session parser
-refuses a malformed version 2 adapter (too large, 0 or more than 8 sites, a
-duplicate or out-of-order site, a per-site or over-limit budget, or version 1
-keys mixed in) and the native session does not start.
+All sites share one `sample_limit`, the renderer's 128 tracked activations and
+its 16 document bindings, so no budget is multiplied per site. The recipe
+chooses the limit, any count from 1 to 2,147,483,647: the largest integer
+Chromium's JSON reader keeps exact, and no smaller ceiling applies. Browsers
+before v0.6.0 refused a limit past 256. When the shared limit is reached the
+next sample at any site records `native_guest_sample_limit`, as with one site.
+The browser's session parser refuses a malformed version 2 adapter (too large,
+0 or more than 8 sites, a duplicate or out-of-order site, a per-site or zero
+budget, or version 1 keys mixed in) and the native session does not start.
 
 ## Capture and identity
 
@@ -72,8 +73,12 @@ Numeric local indices include parameters and are not limited to the first 32
 locals. Compiler metadata and active-frame checks control access; reference
 values and host addresses are never exposed. Memory snapshots reject shared
 memory and out-of-bounds/overflowing ranges. A snapshot is at most 65536 bytes;
-adapter sample limit is 1–256, with a 16 MiB aggregate bytecode-snapshot budget
-(module and adapter artifacts are additional). Each renderer thread tracks at
+each sample is one snapshot, and the recipe's sample limit is the only count
+of them. A claim of the renderer's sample budget is one atomic step whatever
+the limit, and the browser visits only work still waiting on a receipt, so a
+large limit costs per sample, not per sample already taken. The browser keeps
+each published dispatch for its configuration so a late host can still name
+it. Each renderer thread tracks at
 most 128 sampled activations at once. Activations have no exit callback, so a
 full table reclaims the least recently sampled activation that is not an
 ancestor of the one being sampled, following the engine's resolved parent
@@ -151,9 +156,10 @@ binding; after that the renderer records `native_guest_module_unavailable` and
 stops sampling that binding. Samples sent while a transfer is pending bind to
 it, and become explicit gaps if it is rejected.
 
-The renderer keeps the latest 256 verdicts, which covers every verdict of one
-configuration (one per delivered capture). It counts verdict writes, and a
-binding that finds no verdict after 256 writes since its send treats the
+The renderer keeps the latest 256 verdicts. Each answers one capture that
+carried module bytes, and a binding has at most one pending, so this covers
+every pending verdict whatever the sample limit. It counts verdict writes, and
+a binding that finds no verdict after 256 writes since its send treats the
 verdict as lost and resends the bytes without spending an attempt; the browser
 confirms an accepted binding at once. Each renderer thread keeps 16 document
 bindings and replaces the least recently sampled one when a new document
@@ -171,26 +177,28 @@ reuses the refused dispatch's own renderer process and sequence number, every
 time, so it closes that provisional hole instead of leaving it. Invocation
 sequence numbers are reused by later samples and are not filled this way. A
 capture the renderer transport refuses never reached the browser: its sample
-index is free again, and the renderer fills its dispatch slot, and the slot of
+index is free again unless another thread claimed one since (then the budget is
+one sample smaller), and the renderer fills its dispatch slot, and the slot of
 an invocation marker created for it, with `native_guest_transport_unavailable`.
 A malformed host record from the renderer fills its own slot with
 `native_guest_host_malformed`; one naming another identity gets one
 browser-sequence marker.
 
-Host API-call and property-read records travel the parent-binding path for at
-most 256 records per capture configuration; later ones stay on the ordinary
-queue without a parent after one `native_guest_host_parent_budget` marker. The
-browser publishes each routed host exactly once: with its parent and module
-artifact when that dispatch is published, or immediately without a parent when
-the parent was lost (`native_guest_host_parent_lost`) or more than 64 hosts are
-already held (`native_guest_host_parent_omitted`). Host records are never
-dropped because their parent was. About 250 ms before session expiry the
-browser turns unresolved guest dispatches into `native_guest_pending_at_expiry`
-gaps and publishes their held hosts unparented, because the session refuses
-every record after expiry. Ending the capture does the same with
-`native_guest_pending_at_capture_end`, and each browser host first drains the
-records its renderer already queued. Without the artifact channel no parent can
-be published, so a routed host is published unparented.
+Every host API-call and property-read record whose activation has a current
+dispatch travels the parent-binding path, with no count limit. The browser
+publishes each routed host exactly once: with its parent and module artifact
+when that dispatch is published, holding as many as wait for it, or immediately
+without a parent when the parent was lost (`native_guest_host_parent_lost`).
+Host records are never dropped because their parent was. Browsers before v0.6.0
+routed at most 256 hosts per configuration (`native_guest_host_parent_budget`)
+and held at most 64 (`native_guest_host_parent_omitted`); those markers name
+their limits. About 250 ms before session expiry the browser turns unresolved
+guest dispatches into `native_guest_pending_at_expiry` gaps and publishes their
+held hosts unparented, because the session refuses every record after expiry.
+Ending the capture does the same with `native_guest_pending_at_capture_end`,
+and each browser host first drains the records its renderer already queued.
+Without the artifact channel no parent can be published, so a routed host is
+published unparented.
 
 ### Engine cost and module admission
 

@@ -667,20 +667,29 @@ enum OriginTraceDocumentBuilder {
 
   private static func version1(_ p: [UInt8]) -> Bool { le(p, 0, 2) == 1 }
 
+  // The site slot and where the reserved bytes start. Version 1 names it in
+  // byte 4; version 2 leaves byte 4 zero and names it in the u32 at wide.
+  private static func siteSlot(_ p: [UInt8], _ wide: Int) -> (slot: UInt64, reserved: Int)? {
+    if version1(p) { return p[4] < 8 ? (UInt64(p[4]), wide) : nil }
+    return p[4] == 0 ? (le(p, wide, 4), wide + 4) : nil
+  }
+
   private static func validKind(_ kind: UInt8, _ low: UInt64) -> Bool {
     (1...14).contains(kind) && (kind == 1 || (kind == 7 ? low <= 1 : low == 0))
   }
 
   private static func invocationStart(_ event: [String: Any])
-    -> (slot: UInt8, id: UInt64, parent: UInt64, parentUnknown: Bool, arguments: UInt64)?
+    -> (slot: UInt64, id: UInt64, parent: UInt64, parentUnknown: Bool, arguments: UInt64)?
   {
     guard let p = invocationPayload(event, "js_invocation_start"),
       event["frame_id"] as? String != "0", event["request_id"] as? String == "0"
     else { return nil }
-    let (slot, flags, argc, id, parent) = (p[4], p[5], le(p, 6, 2), le(p, 20, 4), le(p, 24, 4))
-    guard !version1(p) || (slot < 8 && le(p, 28, 2) < 64 && le(p, 30, 2) < 256),
+    guard let named = siteSlot(p, 112) else { return nil }
+    let (slot, reserved) = named
+    let (flags, argc, id, parent) = (p[5], le(p, 6, 2), le(p, 20, 4), le(p, 24, 4))
+    guard !version1(p) || (le(p, 28, 2) < 64 && le(p, 30, 2) < 256),
       flags & ~0x03 == 0, le(p, 8, 4) != 0, le(p, 16, 4) != 0, le(p, 12, 4) < le(p, 16, 4), id != 0,
-      le(p, 104, 8) != 0, p[112...].allSatisfy({ $0 == 0 }),
+      le(p, 104, 8) != 0, p[reserved...].allSatisfy({ $0 == 0 }),
       parent == 0 || (parent < id && flags & 0x01 == 0), (flags & 0x02 != 0) == (argc > 8)
     else { return nil }
     for index in 0..<8 {
@@ -696,13 +705,14 @@ enum OriginTraceDocumentBuilder {
     guard let p = invocationPayload(event, "js_invocation_settle"),
       event["frame_id"] as? String != "0", event["request_id"] as? String == "0"
     else { return nil }
-    let (slot, outcome, via, kind) = (p[4], p[5], p[6], p[7])
+    guard let reserved = siteSlot(p, 72)?.reserved else { return nil }
+    let (outcome, via, kind) = (p[5], p[6], p[7])
     let (length, state, encoding, flags) = (le(p, 12, 4), p[16], p[17], p[18])
     let (byteLength, rolling) = (le(p, 20, 4), le(p, 24, 8))
     let (fulfilled, rejected) = (outcome == 1, outcome == 2)
     let (string, bytes) = (kind == 3, kind == 12 || kind == 13)
-    guard !version1(p) || slot < 8, fulfilled || rejected, (1...14).contains(kind), le(p, 8, 4) != 0,
-      le(p, 64, 8) != 0, p[19] == 0, flags & ~0x01 == 0, p[72...].allSatisfy({ $0 == 0 }),
+    guard fulfilled || rejected, (1...14).contains(kind), le(p, 8, 4) != 0,
+      le(p, 64, 8) != 0, p[19] == 0, flags & ~0x01 == 0, p[reserved...].allSatisfy({ $0 == 0 }),
       (via == 1 && fulfilled) || (via == 2 && rejected) || via == 3,
       length == 0 || string || bytes || kind == 11
     else { return nil }

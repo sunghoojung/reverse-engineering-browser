@@ -71,6 +71,7 @@ with `--fresh-profile` so no browser state carries from one kind to the next:
 | --- | --- | --- |
 | `content` | The runbook's content flags, with `--promise-stacks` | baseline, #425 tabs, #427 headers, #428 bodies, #429 stacks, #430 cookies, #434 phase 1 debugger, #436 limits, Wasm sampling windows and reset |
 | `volume` | The content flags | #428 and #436: over 256 MiB of request and 512 MiB of response bodies, each over 64 MiB, a 24 MiB script and 5,000 POSTs kept whole, while the browser process's footprint is measured against the same page in the same Brave without a session |
+| `wasm-every` | The content flags, with `--wasm-every-record` | The Wasm sampling loop with every record kept: one full `br_table` and `call_indirect` record per call, one unbroken ordinal, no sampling gap or overflow identity, and a `NOTE` with the page's calls per second, the store's records per second, the drain after the loop and the browser's footprint |
 | `reserve` | The content flags, with `REB_ARTIFACT_DISK_RESERVE_MIB` 1 TiB above the free space | #436: every body is refused for the disk reserve and named so in its record, row and the session summary |
 | `metadata` | Without `--request-content`, `--confirm-sensitive-capture` and `--canvas-images` | No header, cookie or body value is recorded; an `eval` frame reports `source_not_retained` |
 | `no-stacks` | `--request-stacks=false` in place of `--request-stacks` | No stack walk runs |

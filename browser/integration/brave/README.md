@@ -303,11 +303,12 @@ authenticates to the event broker with a session identifier and a mode-0600
 token file, then sends exact fixed-size records over a Unix socket. A
 browser-process queue keeps those socket writes off the capture paths: an
 8,192-record lock-free ring and, behind it, a spill for a burst the broker
-cannot take as fast as renderers produce it. The spill is allocated only while
-a burst outruns the writer and freed once sent. It keeps each thread's records
-in order and is bounded at 256 MiB, about 800,000 records, which bounds the
-browser's memory when a page outruns the broker for longer than a burst. The
-renderer queue holds 8,192 records. Full queues still drop rather than block
+cannot take as fast as renderers produce it. The spill is mapped only while
+a burst outruns the writer and unmapped once sent. It keeps each thread's
+records in order and has no bound of its own: it holds what the broker has not
+taken yet while the system maps pages for it, and a record it has none for is a
+counted transport gap. Earlier browsers stopped it at 256 MiB, about 800,000
+records. The renderer queue holds 8,192 records. Full queues still drop rather than block
 the renderer; a dropped gap report carries the number of source records it
 represents into the next queue's drop counter. Queue-wide gap reports remain
 unattributed because both queues can mix tabs and frames. Sequence discontinuities
@@ -659,7 +660,7 @@ needs the pinned Chromium build.
 
 ## Native JavaScript invocation identity (opt-in)
 
-Rebuilt browsers can give each call of up to 256 armed functions (for example
+Rebuilt browsers can give each call of every armed function (for example
 the hCaptcha challenge frame's `window.hsw`) an invocation identity that V8
 carries across the call's awaits and promise jobs. Write the site file with
 `tools/native-js-invocation-site.py` and launch with

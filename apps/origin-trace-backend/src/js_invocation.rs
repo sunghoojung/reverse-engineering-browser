@@ -97,9 +97,19 @@ fn payload(event: &Value, kind: &str) -> Option<Vec<u8>> {
 }
 
 /// Payload version 1, from earlier builds, armed at most 8 sites and sampled
-/// its records; version 2 records every call of up to 256 sites.
+/// its records; version 2 records every call of every site.
 fn version_1(p: &[u8]) -> bool {
     le16(p, 0) == 1
+}
+
+/// The site slot and where the reserved bytes start. Version 1 names it in
+/// byte 4; version 2 leaves byte 4 zero and names it in the u32 at `wide`.
+fn site_slot(p: &[u8], wide: usize) -> Option<(u32, usize)> {
+    if version_1(p) {
+        (p[4] < 8).then_some((u32::from(p[4]), wide))
+    } else {
+        (p[4] == 0).then_some((le32(p, wide), wide + 4))
+    }
 }
 
 fn kind_valid(kind: u8, low32: u32) -> bool {
@@ -113,7 +123,7 @@ fn kind_valid(kind: u8, low32: u32) -> bool {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Start {
-    pub site_slot: u8,
+    pub site_slot: u32,
     pub invocation_id: u32,
     pub parent_invocation_id: u32,
     pub parent_unknown: bool,
@@ -134,21 +144,22 @@ pub fn start(event: &Value) -> Option<Start> {
     if event["frame_id"] == "0" || event["request_id"] != "0" {
         return None;
     }
-    let (slot, flags, argc) = (p[4], p[5], le16(&p, 6));
+    let (slot, reserved) = site_slot(&p, 112)?;
+    let (flags, argc) = (p[5], le16(&p, 6));
     let (id, parent) = (le32(&p, 20), le32(&p, 24));
     let (site_sample_index, sample_index) = if version_1(&p) {
         (u32::from(le16(&p, 28)), Some(le16(&p, 30)))
     } else {
         (le32(&p, 28), None)
     };
-    if (version_1(&p) && (slot >= 8 || site_sample_index >= 64 || sample_index >= Some(256)))
+    if (version_1(&p) && (site_sample_index >= 64 || sample_index >= Some(256)))
         || flags & !0x03 != 0
         || le32(&p, 8) == 0
         || le32(&p, 16) == 0
         || le32(&p, 12) >= le32(&p, 16)
         || id == 0
         || le64(&p, 104) == 0
-        || p[112..].iter().any(|b| *b != 0)
+        || p[reserved..].iter().any(|b| *b != 0)
         || (parent != 0 && (parent >= id || flags & 0x01 != 0))
         || (flags & 0x02 != 0) != (argc > 8)
     {
@@ -189,7 +200,7 @@ pub struct Digest32 {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settle {
-    pub site_slot: u8,
+    pub site_slot: u32,
     pub invocation_id: u32,
     pub fulfilled: bool,
     /// 1 synchronous return, 2 synchronous throw, 3 the caller's promise.
@@ -206,20 +217,20 @@ pub fn settle(event: &Value) -> Option<Settle> {
     if event["frame_id"] == "0" || event["request_id"] != "0" {
         return None;
     }
-    let (slot, outcome, via, kind) = (p[4], p[5], p[6], p[7]);
+    let (slot, reserved) = site_slot(&p, 72)?;
+    let (outcome, via, kind) = (p[5], p[6], p[7]);
     let (length, state, encoding, flags) = (le32(&p, 12), p[16], p[17], p[18]);
     let (byte_length, rolling) = (le32(&p, 20), le64(&p, 24));
     let (fulfilled, rejected) = (outcome == 1, outcome == 2);
     let string = kind == 3;
     let bytes = kind == 12 || kind == 13;
-    if (version_1(&p) && slot >= 8)
-        || !(fulfilled || rejected)
+    if !(fulfilled || rejected)
         || !(1..=14).contains(&kind)
         || le32(&p, 8) == 0
         || le64(&p, 64) == 0
         || p[19] != 0
         || flags & !0x01 != 0
-        || p[72..].iter().any(|b| *b != 0)
+        || p[reserved..].iter().any(|b| *b != 0)
         || !((via == 1 && fulfilled) || (via == 2 && rejected) || via == 3)
         || (length != 0 && !(string || bytes || kind == 11))
     {
@@ -600,16 +611,24 @@ pub(crate) mod tests {
         let mut no_document = start_payload(5, 0);
         no_document[104] = 0;
         assert!(start(&event("js_invocation_start", 1, 0, &no_document)).is_none());
-        // Version 2 takes every slot and a u32 ordinal; version 1 evidence
-        // keeps its 8 slots and its indexes below 64 and 256.
+        // Version 2 names any u32 slot in bytes 112-115 and takes a u32
+        // ordinal; its byte 4 and the bytes after the slot stay zero. Version
+        // 1 evidence keeps its 8 one-byte slots and its indexes below 64 and
+        // 256.
         let mut wide = start_payload(5, 0);
-        wide[4] = 255;
+        wide[112..116].copy_from_slice(&u32::MAX.to_le_bytes());
         wide[28..32].copy_from_slice(&u32::MAX.to_le_bytes());
-        let wide = start(&event("js_invocation_start", 1, 0, &wide)).unwrap();
+        let decoded = start(&event("js_invocation_start", 1, 0, &wide)).unwrap();
         assert_eq!(
-            (wide.site_slot, wide.site_sample_index, wide.sample_index),
-            (255, u32::MAX, None)
+            (decoded.site_slot, decoded.site_sample_index, decoded.sample_index),
+            (u32::MAX, u32::MAX, None)
         );
+        let mut narrow = wide;
+        narrow[4] = 1;
+        assert!(start(&event("js_invocation_start", 1, 0, &narrow)).is_none());
+        let mut reserved = wide;
+        reserved[116] = 1;
+        assert!(start(&event("js_invocation_start", 1, 0, &reserved)).is_none());
         let old = |slot: u8, site: u16, sample: u16| {
             let mut p = start_payload(5, 0);
             p[0] = 1;
@@ -621,18 +640,36 @@ pub(crate) mod tests {
         };
         assert_eq!(old(7, 63, 255), Some((7, 63, Some(255))));
         assert_eq!(old(8, 0, 0), None);
+        // A version 1 record has no wide slot.
+        let mut both = start_payload(5, 0);
+        both[0] = 1;
+        both[112] = 1;
+        assert!(start(&event("js_invocation_start", 1, 0, &both)).is_none());
         assert_eq!(old(0, 64, 0), None);
         assert_eq!(old(0, 0, 256), None);
         let mut version = start_payload(5, 0);
         version[0] = 3;
         assert!(start(&event("js_invocation_start", 1, 0, &version)).is_none());
         let mut last = settle_payload(5, None);
-        last[4] = 255;
-        assert!(settle(&event("js_invocation_settle", 2, 0, &last)).is_some());
+        last[72..76].copy_from_slice(&70_000u32.to_le_bytes());
+        assert_eq!(
+            settle(&event("js_invocation_settle", 2, 0, &last)).map(|s| s.site_slot),
+            Some(70_000)
+        );
+        last[76] = 1;
+        assert!(settle(&event("js_invocation_settle", 2, 0, &last)).is_none());
+        last[76] = 0;
+        last[4] = 7;
+        assert!(settle(&event("js_invocation_settle", 2, 0, &last)).is_none());
         last[0] = 1;
         assert!(settle(&event("js_invocation_settle", 2, 0, &last)).is_none());
-        last[4] = 7;
-        assert!(settle(&event("js_invocation_settle", 2, 0, &last)).is_some());
+        last[72..76].fill(0);
+        assert_eq!(
+            settle(&event("js_invocation_settle", 2, 0, &last)).map(|s| s.site_slot),
+            Some(7)
+        );
+        last[4] = 8;
+        assert!(settle(&event("js_invocation_settle", 2, 0, &last)).is_none());
         let ordinal = |version: u8, value: u32| {
             let mut p = request_payload(2, 5);
             p[0] = version;

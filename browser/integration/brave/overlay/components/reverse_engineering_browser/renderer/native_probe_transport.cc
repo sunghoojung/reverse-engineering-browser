@@ -16,7 +16,9 @@
 #include "brave/components/reverse_engineering_browser/renderer/native_request_stack.h"
 
 #include "base/functional/bind.h"
+#include "base/location.h"
 #include "base/task/sequenced_task_runner.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation.h"
@@ -45,6 +47,15 @@ std::uint64_t CurrentFrameId() noexcept {
 std::vector<std::uint8_t> EventRecordBytes(const NativeProbeEvent& event) {
   const auto bytes = std::bit_cast<std::array<std::uint8_t, sizeof(NativeProbeEvent)>>(event);
   return {bytes.begin(), bytes.end()};
+}
+
+// The sites of a table, or nullopt for a malformed one or one the browser
+// could not place in shared memory.
+std::optional<std::vector<NativeJsInvocationSite>> DecodeInvocationSites(
+    const mojo_base::BigBuffer& records) {
+  if (records.storage_type() == mojo_base::BigBuffer::StorageType::kInvalidBuffer)
+    return std::nullopt;
+  return DecodeNativeJsInvocationSites(std::span<const std::uint8_t>(records));
 }
 
 }  // namespace
@@ -79,19 +90,18 @@ void NativeProbeTransport::BindClient(
   receiver_.Bind(std::move(receiver));
 }
 
-void NativeProbeTransport::Configure(
-    const std::uint64_t session_id,
-    const std::uint64_t category_mask,
-    const std::uint64_t expires_at_monotonic_ns,
-    const bool capture_canvas_images,
-    base::UnsafeSharedMemoryRegion queue_region,
-    const std::uint64_t wasm_capture_epoch,
-    const std::string& guest_adapter_json,
-    const std::vector<std::uint8_t>& js_dispatch_sites,
-    const std::optional<std::vector<std::uint8_t>>& js_invocation_sites,
-    const bool js_invocation_digests,
-    const bool capture_request_content,
-    const bool capture_browser_internal) {
+void NativeProbeTransport::Configure(const std::uint64_t session_id,
+                                     const std::uint64_t category_mask,
+                                     const std::uint64_t expires_at_monotonic_ns,
+                                     const bool capture_canvas_images,
+                                     base::UnsafeSharedMemoryRegion queue_region,
+                                     const std::uint64_t wasm_capture_epoch,
+                                     const std::string& guest_adapter_json,
+                                     const std::vector<std::uint8_t>& js_dispatch_sites,
+                                     std::optional<mojo_base::BigBuffer> js_invocation_sites,
+                                     const bool js_invocation_digests,
+                                     const bool capture_request_content,
+                                     const bool capture_browser_internal) {
   Disable();
   const std::uint64_t now =
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
@@ -137,13 +147,14 @@ void NativeProbeTransport::Configure(
         std::span<const NativeJsDispatchSite>(sites.data(), count ? count : 1));
   }
   if (js_invocation_sites) {
-    // A malformed list arms nothing and is the configuration's input gap. An
-    // empty one tracks functions that later revisions arm.
-    std::array<NativeJsInvocationSite, kNativeJsInvocationSiteLimit> sites{};
-    const auto count = DecodeNativeJsInvocationSites(*js_invocation_sites, sites);
+    // A malformed list, or one the browser could not place in shared memory,
+    // arms nothing and is the configuration's input gap. An empty one tracks
+    // functions that later revisions arm.
+    const auto sites = DecodeInvocationSites(*js_invocation_sites);
     NativeProbeSink::Get().ConfigureNativeJsInvocation(
-        std::span<const NativeJsInvocationSite>(sites.data(), count.value_or(0)),
-        js_invocation_digests, count.has_value());
+        sites ? std::span<const NativeJsInvocationSite>(*sites)
+              : std::span<const NativeJsInvocationSite>(),
+        js_invocation_digests, sites.has_value());
   }
   // After emitters, so a jitless notice can be admitted.
   NativeProbeSink::Get().ProbeNativeWasmLimits();
@@ -160,12 +171,12 @@ void NativeProbeTransport::ResetWasmSampleBudgets() {
   NativeProbeSink::Get().ResetNativeWasmSampleBudgets();
 }
 
-void NativeProbeTransport::UpdateJsInvocationSites(
-    const std::vector<std::uint8_t>& js_invocation_sites) {
-  std::array<NativeJsInvocationSite, kNativeJsInvocationSiteLimit> sites{};
-  const auto count = DecodeNativeJsInvocationSites(js_invocation_sites, sites);
+void NativeProbeTransport::UpdateJsInvocationSites(mojo_base::BigBuffer js_invocation_sites) {
+  const auto sites = DecodeInvocationSites(js_invocation_sites);
   NativeProbeSink::Get().UpdateNativeJsInvocationSites(
-      std::span<const NativeJsInvocationSite>(sites.data(), count.value_or(0)), count.has_value());
+      sites ? std::span<const NativeJsInvocationSite>(*sites)
+            : std::span<const NativeJsInvocationSite>(),
+      sites.has_value());
 }
 
 void NativeProbeTransport::SetDebuggerWatchScope(mojom::NativeWatchScopePtr scope) {
@@ -241,16 +252,18 @@ bool NativeProbeTransport::EmitWasmDispatch(const NativeWasmDispatchObservation&
   if (!*host || !NativeProbeSink::Get().CanAdmitEvent(event, generation) ||
       epoch != transport.wasm_capture_epoch_.load(std::memory_order_acquire))
     return false;
-  (*host)->CaptureWasmDispatch(
-      epoch, event.header.session_id, event.header.sequence_number, event.header.monotonic_time_ns,
-      event.header.process_id, event.header.thread_id, event.header.frame_id,
-      observation.execution_context_id, observation.document_token_high,
-      observation.document_token_low, observation.function_index, observation.module_byte_offset,
-      observation.selector, observation.table_count, observation.caller_observed,
-      observation.caller_kind, observation.caller_function_index, observation.sample_index,
-      observation.js_invocation_state, observation.js_invocation_id,
-      std::string(observation.source_url), observation.module_token,
-      mojo_base::BigBuffer(observation.module_bytes));
+  transport.AppendWasmRecord(
+      *host, epoch,
+      mojom::NativeWasmRecord::NewDispatch(mojom::NativeWasmDispatchRecord::New(
+          event.header.session_id, event.header.sequence_number, event.header.monotonic_time_ns,
+          event.header.process_id, event.header.thread_id, event.header.frame_id,
+          observation.execution_context_id, observation.document_token_high,
+          observation.document_token_low, observation.function_index,
+          observation.module_byte_offset, observation.selector, observation.table_count,
+          observation.caller_observed, observation.caller_kind, observation.caller_function_index,
+          observation.sample_index, observation.js_invocation_state, observation.js_invocation_id,
+          std::string(observation.source_url), observation.module_token,
+          mojo_base::BigBuffer(observation.module_bytes))));
   return true;
 }
 
@@ -266,16 +279,18 @@ bool NativeProbeTransport::EmitWasmIndirect(const NativeWasmIndirectObservation&
   if (!*host || !NativeProbeSink::Get().CanAdmitEvent(event, generation) ||
       epoch != transport.wasm_capture_epoch_.load(std::memory_order_acquire))
     return false;
-  (*host)->CaptureWasmIndirect(
-      epoch, event.header.session_id, event.header.sequence_number, event.header.monotonic_time_ns,
-      event.header.process_id, event.header.thread_id, event.header.frame_id,
-      observation.execution_context_id, observation.document_token_high,
-      observation.document_token_low, observation.function_index, observation.module_byte_offset,
-      observation.table_index, observation.slot, observation.callee_function_index,
-      static_cast<std::uint32_t>(observation.resolution), observation.sample_index,
-      observation.js_invocation_state, observation.js_invocation_id,
-      std::string(observation.source_url), observation.module_token,
-      mojo_base::BigBuffer(observation.module_bytes));
+  transport.AppendWasmRecord(
+      *host, epoch,
+      mojom::NativeWasmRecord::NewIndirect(mojom::NativeWasmIndirectRecord::New(
+          event.header.session_id, event.header.sequence_number, event.header.monotonic_time_ns,
+          event.header.process_id, event.header.thread_id, event.header.frame_id,
+          observation.execution_context_id, observation.document_token_high,
+          observation.document_token_low, observation.function_index,
+          observation.module_byte_offset, observation.table_index, observation.slot,
+          observation.callee_function_index, static_cast<std::uint32_t>(observation.resolution),
+          observation.sample_index, observation.js_invocation_state, observation.js_invocation_id,
+          std::string(observation.source_url), observation.module_token,
+          mojo_base::BigBuffer(observation.module_bytes))));
   return true;
 }
 
@@ -291,17 +306,20 @@ bool NativeProbeTransport::EmitWasmExecution(const NativeWasmExecutionObservatio
   if (!*host || !NativeProbeSink::Get().CanAdmitEvent(event, generation) ||
       epoch != transport.wasm_capture_epoch_.load(std::memory_order_acquire))
     return false;
-  (*host)->CaptureWasmExecution(
-      epoch, event.header.session_id, event.header.sequence_number, event.header.monotonic_time_ns,
-      event.header.process_id, event.header.thread_id, event.header.frame_id,
-      observation.execution_context_id, observation.document_token_high,
-      observation.document_token_low, observation.invocation_id, observation.function_index,
-      observation.module_byte_offset, observation.related_sample_index,
-      static_cast<std::uint8_t>(observation.kind), static_cast<std::uint8_t>(observation.reason),
-      static_cast<std::uint8_t>(observation.bounds), observation.known,
-      static_cast<std::uint8_t>(observation.related_stream), observation.js_invocation_state,
-      observation.js_invocation_id, std::string(observation.source_url), observation.module_token,
-      mojo_base::BigBuffer(observation.module_bytes));
+  transport.AppendWasmRecord(
+      *host, epoch,
+      mojom::NativeWasmRecord::NewExecution(mojom::NativeWasmExecutionRecord::New(
+          event.header.session_id, event.header.sequence_number, event.header.monotonic_time_ns,
+          event.header.process_id, event.header.thread_id, event.header.frame_id,
+          observation.execution_context_id, observation.document_token_high,
+          observation.document_token_low, observation.invocation_id, observation.function_index,
+          observation.module_byte_offset, observation.related_sample_index,
+          static_cast<std::uint8_t>(observation.kind),
+          static_cast<std::uint8_t>(observation.reason),
+          static_cast<std::uint8_t>(observation.bounds), observation.known,
+          static_cast<std::uint8_t>(observation.related_stream), observation.js_invocation_state,
+          observation.js_invocation_id, std::string(observation.source_url),
+          observation.module_token, mojo_base::BigBuffer(observation.module_bytes))));
   return true;
 }
 
@@ -320,6 +338,7 @@ bool NativeProbeTransport::EmitNativeGuest(const NativeGuestCapture& capture,
     return false;
   const auto invocation = EventRecordBytes(capture.invocation);
   const auto dispatch = EventRecordBytes(capture.dispatch);
+  transport.FlushWasmRecords();
   (*host)->CaptureNativeGuest(epoch, invocation, dispatch, capture.execution_context_id,
                               capture.document_token_high, capture.document_token_low,
                               std::string(capture.source_url), std::string(capture.adapter_json),
@@ -338,6 +357,7 @@ bool NativeProbeTransport::EmitNativeGuestHost(const NativeProbeEvent& event,
   if (!*host || epoch != transport.wasm_capture_epoch_.load(std::memory_order_acquire) ||
       !NativeProbeSink::Get().CanAdmitEvent(event, generation))
     return false;
+  transport.FlushWasmRecords();
   (*host)->CaptureNativeGuestHost(epoch, EventRecordBytes(event));
   return true;
 }
@@ -357,6 +377,7 @@ bool NativeProbeTransport::EmitRendererTarget(const NativeProbeEvent& child,
   if (!*host) {
     return false;
   }
+  transport.FlushWasmRecords();
   (*host)->CaptureRendererTarget(EventRecordBytes(child), std::string(origin), std::string(target));
   return true;
 }
@@ -442,12 +463,71 @@ void NativeProbeTransport::EmitGeneratedArtifact(const NativeArtifactKind kind,
   }
   // The browser releases credit_bytes once it has copied the content out, on
   // every path, including a buffer it could not map.
+  FlushWasmRecords();
   (*thread_host)
       ->CaptureGeneratedArtifact(
           static_cast<std::uint16_t>(kind), static_cast<std::uint16_t>(capture_origin),
           creator_event_id, execution_context_id, frame_id, std::string(source_url),
           mojo_base::BigBuffer(content), script.script_id, script.is_eval,
           mojo_base::BigBuffer(script.source), script.session_id, credit_bytes);
+}
+
+NativeProbeTransport::WasmRecordBatch::~WasmRecordBatch() {
+  Send();
+}
+
+void NativeProbeTransport::WasmRecordBatch::Send() {
+  if (records.empty())
+    return;
+  if (host)
+    host->CaptureWasmRecords(epoch, std::move(records));
+  records.clear();
+}
+
+void NativeProbeTransport::AppendWasmRecord(const mojo::SharedRemote<mojom::NativeProbeHost>& host,
+                                            const std::uint64_t epoch,
+                                            mojom::NativeWasmRecordPtr record) {
+  auto* batch = wasm_batches_.Get();
+  if (!batch) {
+    wasm_batches_.Set(std::make_unique<WasmRecordBatch>());
+    batch = wasm_batches_.Get();
+  }
+  // A batch carries one configuration: an older one's records go first, and
+  // the browser refuses them as it refuses any stale record.
+  if (batch->epoch != epoch)
+    batch->Send();
+  // A batch goes to the remote its first record was recorded with.
+  if (batch->records.empty())
+    batch->host = host;
+  batch->epoch = epoch;
+  batch->records.push_back(std::move(record));
+  if (batch->records.size() >= kWasmRecordsPerMessage) {
+    batch->Send();
+    return;
+  }
+  if (batch->flush_posted)
+    return;
+  // The rest go when the task that recorded them ends. The flush must run on
+  // this thread, whose batch it sends, so a thread without a task runner of
+  // its own sends each record at once.
+  if (!base::SingleThreadTaskRunner::HasCurrentDefault()) {
+    batch->Send();
+    return;
+  }
+  batch->flush_posted = true;
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE, base::BindOnce([] {
+                                                                auto* const posted =
+                                                                    Get().wasm_batches_.Get();
+                                                                if (!posted)
+                                                                  return;
+                                                                posted->flush_posted = false;
+                                                                posted->Send();
+                                                              }));
+}
+
+void NativeProbeTransport::FlushWasmRecords() {
+  if (auto* const batch = wasm_batches_.Get())
+    batch->Send();
 }
 
 mojo::SharedRemote<mojom::NativeProbeHost>* NativeProbeTransport::HostForCurrentSequence() {

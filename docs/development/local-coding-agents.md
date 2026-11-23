@@ -149,8 +149,8 @@ scripts/reb-api-mcp.sh --allow-effects --allow-session-start
 The server then lists `start_live_session` and starts even when no live
 endpoint exists yet. Until a session is bound, other tools refuse without
 sending a request. `start_live_session` takes named capture options (`url`,
-`wasm_dispatch`, `wasm_call_indirect`, `wasm_samples_per_function`,
-`wasm_samples_per_indirect_site`, `wasm_function_allow`,
+`wasm_dispatch`, `wasm_call_indirect`, `wasm_every_record`,
+`wasm_samples_per_function`, `wasm_samples_per_indirect_site`, `wasm_function_allow`,
 `wasm_function_deny`, `wasm_module_allowlist`, `guest_adapter`, `js_dispatch_sites`,
 `quiet`, `category_mask`, `duration_seconds`, `localhost_only`,
 `document_start`, `request_content`, `request_stacks`, `browser_internal`,

@@ -130,7 +130,7 @@
         "start"
       ],
       "title": "Start a live capture session",
-      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. An option left unset takes the Origin Trace app's default, false turns a default off, and none is inherited from the environment. On by default: request_content, canvas_images, request_stacks (the call stack that started each renderer request, get_request_stack), wasm_dispatch, wasm_call_indirect, quiet, document_start (permits document-start Console scripts; arming is a separate Console action), and js_invocation_digests with armed sites. Off by default: browser_internal, extension_traffic and fresh_profile. Allowing this tool is the researcher's consent to that sensitive capture, so a start needs no confirm_sensitive_capture. Agent sessions share one browser profile of their own, so a sign-in carries over; fresh_profile starts signed out in a new profile. The session runs until it is ended; duration_seconds sets a limit. request_content keeps request paths, queries and bodies, request and response headers including Cookie, Set-Cookie and Authorization, each request's cookies, and every response body, media and fonts included, each kept whole. js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set) arm invocation sites. wasm_samples_per_function, wasm_samples_per_indirect_site, wasm_function_allow, wasm_function_deny and wasm_module_allowlist restrict the Wasm sample windows (1024 full records per stream per second, 64 per function by default) and require wasm_dispatch or wasm_call_indirect. The result options and get_session_context capture_options show what the session runs with. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Next: get_session_context, then get_session_summary; get_native_console for the Console. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started. reset_wasm_sample_budgets opens a new Wasm sample window at once without a new session.",
+      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. An option left unset takes the Origin Trace app's default, false turns a default off, and none is inherited from the environment. On by default: request_content, canvas_images, request_stacks (the call stack that started each renderer request, get_request_stack), wasm_dispatch, wasm_call_indirect, quiet, document_start (permits document-start Console scripts; arming is a separate Console action), and js_invocation_digests with armed sites. Off by default: browser_internal, extension_traffic and fresh_profile. Allowing this tool is the researcher's consent to that sensitive capture, so a start needs no confirm_sensitive_capture. Agent sessions share one browser profile of their own, so a sign-in carries over; fresh_profile starts signed out in a new profile. The session runs until it is ended; duration_seconds sets a limit. request_content keeps request paths, queries and bodies, request and response headers including Cookie, Set-Cookie and Authorization, each request's cookies, and every response body, media and fonts included, each kept whole. js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set) arm invocation sites. wasm_samples_per_function, wasm_samples_per_indirect_site, wasm_function_allow, wasm_function_deny and wasm_module_allowlist restrict the Wasm sample windows (1024 full records per stream per second, 64 per function by default) and require wasm_dispatch or wasm_call_indirect; wasm_every_record keeps every record the filters admit instead. The result options and get_session_context capture_options show what the session runs with. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Next: get_session_context, then get_session_summary; get_native_console for the Console. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started. reset_wasm_sample_budgets opens a new Wasm sample window at once without a new session.",
       "input": {
         "$ref": "#/components/schemas/LiveSessionStart"
       },
@@ -10537,7 +10537,7 @@
       "get": {
         "operationId": "get_js_invocation_sites",
         "summary": "Get the saved JavaScript invocation sites",
-        "description": "The saved native-js-invocation-sites-v1 set this backend edits (at most 256), each with its label, source URL, whether this capture arms it and whether this session retained the saved script version or another version the site will not match, plus session: what this capture arms. In the Origin Trace app it is the app's set; in an agent session it is the agent sessions' own set, used by start_live_session with js_invocation_saved_sites, and the researcher's set is never read or changed. A capture with session.live true follows the set: a saved site arms at once and a removed one disarms. Otherwise the set applies from the next capture. A function a page compiled before its site was armed is tracked only after the page reloads.",
+        "description": "The saved native-js-invocation-sites-v1 set this backend edits (at most 48,806,446), each with its label, source URL, whether this capture arms it and whether this session retained the saved script version or another version the site will not match, plus session: what this capture arms. In the Origin Trace app it is the app's set; in an agent session it is the agent sessions' own set, used by start_live_session with js_invocation_saved_sites, and the researcher's set is never read or changed. A capture with session.live true follows the set: a saved site arms at once and a removed one disarms. Otherwise the set applies from the next capture. A function a page compiled before its site was armed is tracked only after the page reloads.",
         "tags": [
           "js-invocation-sites"
         ],
@@ -10839,7 +10839,7 @@
       "post": {
         "operationId": "js_invocation_site_action",
         "summary": "Add, remove or clear saved JavaScript invocation sites",
-        "description": "add resolves a name or byte offset in one exact artifact on the server and saves the site (refusals save nothing and return the reason and candidates); remove deletes one site by source_sha256 and anchor_offset; clear deletes the set. At most 256 sites; a duplicate function is refused. A capture whose set.session.live is true applies the change at once: functions compiled after it record or stop recording calls, and a call in flight still settles. Otherwise the next capture arms the set. In the app, a Content-mode capture records settled-value digests. In an agent session it edits the agent sessions' own set, which a start_live_session with js_invocation_saved_sites follows.",
+        "description": "add resolves a name or byte offset in one exact artifact on the server and saves the site (refusals save nothing and return the reason and candidates); remove deletes one site by source_sha256 and anchor_offset; clear deletes the set. Any number of sites up to 48,806,446, the most one capture can carry to a renderer; a duplicate function is refused. A capture whose set.session.live is true applies the change at once: functions compiled after it record or stop recording calls, and a call in flight still settles. Otherwise the next capture arms the set. In the app, a Content-mode capture records settled-value digests. In an agent session it edits the agent sessions' own set, which a start_live_session with js_invocation_saved_sites follows.",
         "tags": [
           "js-invocation-sites"
         ],
@@ -33102,8 +33102,8 @@
                 "maximum": 2147483647
               },
               "events": {
+                "description": "traffic: the selected document's oldest resource completions that fit one 64 KiB reply. The browser keeps every event until it is read; more is true while some remain, and dropped counts only events of documents a listing can no longer name.",
                 "type": "array",
-                "maxItems": 64,
                 "items": {
                   "$ref": "#/components/schemas/NativeConsoleActivity"
                 }
@@ -33853,7 +33853,7 @@
                   "count": {
                     "type": "integer",
                     "minimum": 0,
-                    "maximum": 256,
+                    "maximum": 48806446,
                     "description": "Sites armed now."
                   },
                   "digests": {
@@ -33876,7 +33876,7 @@
                   "module_allowlist",
                   "reset"
                 ],
-                "description": "Version 1 of the session's Wasm sampling, as the launcher passed it to Brave: set by the start options wasm_dispatch, wasm_call_indirect and the wasm_samples_* and wasm_function_* options, or the launcher's REB_NATIVE_WASM_* variables. Each renderer keeps at most records_per_window full records per stream in each window_ms window, and samples_per_function of one function; the next window records again. Null when neither stream records or the backend is not live. Not required: a backend from before this object omits it.",
+                "description": "Version 1 of the session's Wasm sampling, as the launcher passed it to Brave: set by the start options wasm_dispatch, wasm_call_indirect and the wasm_samples_* and wasm_function_* options, or the launcher's REB_NATIVE_WASM_* variables. Each renderer keeps at most records_per_window full records per stream in each window_ms window, and samples_per_function of one function; the next window records again. With every_record, set by wasm_every_record, every record the filters admit is kept: there is no window budget or allowance, and records_per_window is null. Null when neither stream records or the backend is not live. Not required: a backend from before this object omits it.",
                 "properties": {
                   "version": { "const": 1 },
                   "streams": {
@@ -33887,7 +33887,14 @@
                     "items": { "type": "string", "enum": ["br_table", "call_indirect"] }
                   },
                   "window_ms": { "const": 1000 },
-                  "records_per_window": { "const": 1024 },
+                  "every_record": {
+                    "type": "boolean",
+                    "description": "The session keeps every record the filters admit: no per-window budget in the renderer, no browser ceiling, and no per-function or per-site allowance. Absent from a backend before v0.6.0, which means false."
+                  },
+                  "records_per_window": {
+                    "enum": [1024, null],
+                    "description": "Full records of one stream per renderer per window; null with every_record."
+                  },
                   "samples_per_function": {
                     "type": ["integer", "null"],
                     "minimum": 1,
@@ -43437,6 +43444,11 @@
             },
             "description": "SHA-256 digests of Wasm modules to admit. A module whose digest is not listed does not advance either sample index. Requires wasm_dispatch or wasm_call_indirect."
           },
+          "wasm_every_record": {
+            "type": "boolean",
+            "default": false,
+            "description": "Keep every Wasm record the filters admit, in place of the one-second pacing: no per-window budget in the renderer, no browser ceiling, and no per-function or per-site allowance, so it takes neither wasm_samples_per_function nor wasm_samples_per_indirect_site. The function and module filters still apply. Requires wasm_dispatch or wasm_call_indirect."
+          },
           "guest_adapter": {
             "type": "string",
             "minLength": 2,
@@ -43514,7 +43526,7 @@
             "type": "string",
             "minLength": 2,
             "maxLength": 4096,
-            "description": "Absolute path of a native-js-invocation-sites-v1 file (1 to 256 sites) to arm, from resolve_js_invocation_site entries. Armed from a private copy for the whole session. Needs category bit 512 and a Brave with invocation capture; a Brave without it refuses the start. Not with js_invocation_saved_sites."
+            "description": "Absolute path of a native-js-invocation-sites-v1 file (at least one site, no size limit) to arm, from resolve_js_invocation_site entries. Armed from a private copy for the whole session. Needs category bit 512 and a Brave with invocation capture; a Brave without it refuses the start. Not with js_invocation_saved_sites."
           },
           "js_invocation_saved_sites": {
             "type": "boolean",
@@ -43875,16 +43887,16 @@
             "const": "reb-js-invocation-site-set-v1"
           },
           "limit": {
-            "const": 256
+            "const": 48806446
           },
           "count": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 256
+            "maximum": 48806446
           },
           "sites": {
             "type": "array",
-            "maxItems": 256,
+            "maxItems": 48806446,
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -43902,7 +43914,7 @@
                 },
                 "armed_in_capture": {
                   "type": "boolean",
-                  "description": "This capture arms the site now. False for a site saved after a capture that does not follow the set started, or saved once all 256 of a following capture's slots were used; the next capture arms it."
+                  "description": "This capture arms the site now. False for a site saved after a capture that does not follow the set started, or saved once all 48,806,446 of a following capture's slots were used; the next capture arms it."
                 },
                 "label": {
                   "type": "string",
@@ -43999,7 +44011,7 @@
               "count": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 256,
+                "maximum": 48806446,
                 "description": "Sites armed now."
               },
               "revision": {
@@ -44020,7 +44032,7 @@
               },
               "sites": {
                 "type": "array",
-                "maxItems": 256,
+                "maxItems": 48806446,
                 "description": "The capture's slot table in order: entry n is site_slot n of this session's js_invocation records, and its source_sha256 and anchor_offset equal theirs. A slot keeps its site for the capture; armed false means the site was removed from the saved set, so its functions record no new calls. label comes from the saved set, or Unlabeled function.",
                 "items": {
                   "type": "object",
@@ -44188,7 +44200,7 @@
                 },
                 {
                   "id": "set-capacity",
-                  "condition": "The saved set holds at most 256 sites and refuses a duplicate source_sha256 and anchor_offset."
+                  "condition": "The saved set holds up to 48,806,446 sites and refuses a duplicate source_sha256 and anchor_offset."
                 }
               ],
               "confirmations": [],

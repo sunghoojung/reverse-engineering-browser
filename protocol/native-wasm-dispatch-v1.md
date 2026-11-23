@@ -130,6 +130,29 @@ its launch file, from 1 to 1024. Without one, a function keeps 64 per window,
 so one hot loop cannot take a whole window from the other functions. 1024, the
 whole window, removes the per-function limit.
 
+A session can instead keep every record (`every_record`, byte 11 of the policy;
+`--reb-wasm-every-record`, `REB_NATIVE_WASM_EVERY_RECORD=1`, or the start
+option `wasm_every_record`). Each admitted `br_table`, `call_indirect` and
+execution outcome is then a full record: the renderer claims no window and the
+browser counts none, so neither the 1024 nor the 2048 per second applies, and
+no per-function or per-site count is allowed with it. The filters still
+apply. The only bound left is the stream's `sample_index`, a `u32` on the wire:
+an execution past 4294967294 retained records of one configuration is the
+budget gap and an overflow identity, as a full window is. Earlier browsers
+required byte 11 to be 0 and refuse the policy.
+
+Full records reach the browser in batches. Each renderer thread holds its
+`br_table`, `call_indirect` and execution records in the order they took their
+sequence numbers and sends them as one `CaptureWasmRecords` message of up to
+512, when the task that recorded them ends, before any other message of that
+thread, and when the thread exits. A hot loop therefore costs one message and
+one browser task per 512 records instead of one each, and the browser handles
+each record of a batch exactly as it handled its own message. A batch is
+under one capture epoch, so a reconfiguration sends the held records first.
+The socket writer's spill file (see
+[Brave integration](../browser/integration/brave/README.md)) then carries a
+burst the broker has not yet read, so it is delayed, not dropped.
+
 A session can also restrict admission before a sample index is taken: a
 module-digest allowlist and a function-index allowlist and denylist (deny
 wins). A module whose digest is not allowed, and a function that is denied or
@@ -147,7 +170,7 @@ the last one it applied. The backend replaces that file by rename under an
 exclusive lock, so a reader sees a whole decimal and two overlapping resets
 cannot publish the same generation. Executions before that wake still belong
 to the previous window. A rebuilt Brave is required before a live session
-honors the policy, the windows, the reset, or the overflow records.
+honors the policy, the windows, every record, the reset, or the overflow records.
 
 `sample_index` is the configuration's ordinal for that stream: 0 for its first
 retained sample and one more for each later one, across windows and resets,
@@ -366,7 +389,7 @@ Blink, the renderer sink, the browser host and the artifact sink apply the same
 document, session, generation, category and expiry rules as `br_table`
 observations, through the same bounded transport. A separate window allows
 1024 records per second in the renderer and 2048 in the browser, so one stream
-never starves the other. Executions that a window refuses keep compact
+never starves the other, unless the session keeps every record. Executions that a window refuses keep compact
 identities in the same [overflow ring](#overflow-identities). The stream stays
 enabled past a full window until the omitted counter saturates, and the next
 window records full observations again. The sample-budget policy in the
@@ -579,7 +602,7 @@ The invocation id is assigned by the renderer for one host-visible call,
 including across an outermost `return_call`. A trap with no open host call
 emits nothing. The outcome window is 1024 records per second in the renderer
 and 2048 in the browser, separate from `br_table` and `call_indirect`, and
-turns over with them. Renderer gaps are
+turns over with them; a session that keeps every record has none. Renderer gaps are
 `native_wasm_execution_input_unavailable`,
 `native_wasm_execution_budget_incomplete`, and
 `native_wasm_execution_transport_unavailable`. Browser gaps are

@@ -29,11 +29,19 @@ TEST(NativeWasmGuestAdapter, RejectsAmbiguityAndUnsupportedInputs) {
   EXPECT_FALSE(ParseNativeWasmGuestAdapter(std::string(kRecipe) + "\n"));
   EXPECT_FALSE(ParseNativeWasmGuestAdapter(
       "{" + std::string(kRecipe).substr(1, kRecipe.size() - 2) + ",\"version\":1}"));
-  for (const auto replacement : {"0", "257", "-1", "1.0", "\"16\""}) {
+  for (const auto replacement : {"0", "2147483648", "-1", "1.0", "\"16\""}) {
     std::string text(kRecipe);
     const auto at = text.find("\"sample_limit\":256");
     text.replace(at + 15, 3, replacement);
     EXPECT_FALSE(ParseNativeWasmGuestAdapter(text));
+  }
+  {
+    // No ceiling past the JSON reader's integer range.
+    std::string text(kRecipe);
+    text.replace(text.find("\"sample_limit\":256") + 15, 3, "2147483647");
+    const auto widest = ParseNativeWasmGuestAdapter(text);
+    ASSERT_TRUE(widest);
+    EXPECT_EQ(widest->sample_limit, 2147483647U);
   }
   for (const auto replacement : {"i16", "f32", "ref"}) {
     std::string text(kRecipe);

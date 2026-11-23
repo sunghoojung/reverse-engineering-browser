@@ -246,8 +246,8 @@ bool GuestQueueHasGap(std::string_view reason) {
 }
 
 // Module bytes are resent until the browser accepts them, within a bounded
-// number of attempts; host parent routing is bounded without losing hosts.
-void NativeGuestModuleVerdictsAndHostBudget() {
+// number of attempts; every host is routed to its parent dispatch.
+void NativeGuestModuleVerdictsAndHostRoutes() {
   const std::array<std::uint8_t, 11> module{0, 97, 115, 109, 1, 0, 0, 0, 0x0e, 0, 0};
   const auto adapter = GuestTestAdapter(module);
   const auto configure = [&] {
@@ -296,27 +296,22 @@ void NativeGuestModuleVerdictsAndHostBudget() {
   record();
   assert(guest_dispatches.size() == attempts + 3 && guest_module_sizes.back() == 0);
 
+  // Every host travels the parent path: 1,000, past the 256 an earlier
+  // renderer routed per configuration, each naming the current dispatch.
   guest_context = {7, 21, 414, 8, 9, 9};
   const auto routed_before = guest_hosts.size();
-  for (std::size_t n = 0; n < reb::kNativeGuestHostParentLimit; ++n)
+  const auto parent = guest_dispatches.back().header.sequence_number;
+  for (std::size_t n = 0; n < 1000; ++n)
     sink.RecordApiCall(kRuntime, "Math.acos");
-  assert(guest_hosts.size() == routed_before + reb::kNativeGuestHostParentLimit);
-  const auto queued_before = guest_queue_events.size();
-  sink.RecordApiCall(kRuntime, "Math.acos");
-  assert(guest_hosts.size() == routed_before + reb::kNativeGuestHostParentLimit);
-  bool unparented_host = false;
-  for (std::size_t n = queued_before; n < guest_queue_events.size(); ++n)
-    unparented_host |= guest_queue_events[n].header.type == reb::NativeProbeType::kApiCall &&
-                       guest_queue_events[n].header.parent_event_id == 0;
-  assert(unparented_host);  // Over budget: kept on the ordinary queue, not lost.
-  assert(GuestQueueHasGap("native_guest_host_parent_budget"));
-  configure();
-  sink.RecordApiCall(kRuntime, "Math.acos");
-  assert(guest_hosts.size() == routed_before + reb::kNativeGuestHostParentLimit);
+  assert(guest_hosts.size() == routed_before + 1000);
+  assert(std::all_of(guest_hosts.begin() + static_cast<std::ptrdiff_t>(routed_before),
+                     guest_hosts.end(),
+                     [&](const auto& e) { return e.header.parent_event_id == parent; }));
+  assert(!GuestQueueHasGap("native_guest_host_parent_budget"));
   sink.SetEmitters(nullptr, nullptr, 0, 0, 0);
   sink.SetNativeWasmGuestRuntime(nullptr, nullptr);
-  std::cout << "PASS guest module verdict resend, bounded attempts, stale verdicts and bounded "
-               "host parent routing without host loss\n";
+  std::cout << "PASS guest module verdict resend, bounded attempts, stale verdicts and "
+               "host parent routing for every host\n";
 }
 
 // An inner activation names its parent's retained current dispatch exactly.
@@ -707,12 +702,12 @@ void NativeGuestModuleVerdictOverflow() {
   assert(guest_dispatches.size() == 1 && guest_module_sizes.back() == module.size());
   const auto token = guest_dispatches.back().header.sequence_number;
   sink.NoteNativeGuestModuleStatus(token, false);
-  for (std::uint64_t n = 1; n < reb::kNativeGuestSampleLimit; ++n)
+  for (std::uint64_t n = 1; n < reb::kNativeGuestModuleVerdictRing; ++n)
     sink.NoteNativeGuestModuleStatus(token + 1'000'000 + n, true);
   record();  // The rejection is still in the ring: resend.
   assert(guest_dispatches.size() == 2 && guest_module_sizes.back() == module.size());
   const auto resent = guest_dispatches.back().header.sequence_number;
-  for (std::uint64_t n = 1; n < reb::kNativeGuestSampleLimit; ++n)
+  for (std::uint64_t n = 1; n < reb::kNativeGuestModuleVerdictRing; ++n)
     sink.NoteNativeGuestModuleStatus(resent + 2'000'000 + n, true);
   sink.NoteNativeGuestModuleStatus(resent + 3'000'000, true);
   record();  // A full ring of other writes: the verdict may be lost, resend.

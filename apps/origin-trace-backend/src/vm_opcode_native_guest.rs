@@ -12,6 +12,9 @@ const MAX_ADAPTER_BYTES: usize = 8192;
 const MAX_SNAPSHOT_BYTES: usize = 65536;
 // Match kNativeGuestSiteLimit: dispatch sites one adapter recipe configures.
 const MAX_SITES: usize = 8;
+// The browser parses a recipe with Chromium's JSON reader, whose integers
+// are 32-bit signed; that is the only bound on a shared sample budget.
+const SAMPLE_LIMIT_MAX: u64 = i32::MAX as u64;
 #[derive(Default)]
 pub(super) struct Samples {
     pub rows: Vec<Value>,
@@ -232,7 +235,7 @@ fn read_recipe(
         || sites.len() > MAX_SITES
         || recipe["sample_limit"]
             .as_u64()
-            .is_none_or(|n| n == 0 || n > 256)
+            .is_none_or(|n| n == 0 || n > SAMPLE_LIMIT_MAX)
         || recipe["module_sha256"] != module["sha256"]
     {
         return None;
@@ -764,7 +767,7 @@ mod tests {
         let mut per_site = site.clone();
         per_site["sample_limit"] = json!(16);
         let mut over = with(vec![site.clone()]);
-        over["sample_limit"] = json!(257);
+        over["sample_limit"] = json!(SAMPLE_LIMIT_MAX + 1);
         let mut mixed = with(vec![site.clone()]);
         mixed["function_index"] = json!(0);
         // Each marker names the site that would otherwise match the sample.
@@ -814,7 +817,7 @@ mod tests {
         for (path, value) in [
             ("/version", json!(2)),
             ("/sample_limit", json!(0)),
-            ("/sample_limit", json!(257)),
+            ("/sample_limit", json!(SAMPLE_LIMIT_MAX + 1)),
             ("/pc/local_index", json!(999)),
             ("/pc/value_type", json!("i64")),
             ("/pc/adjustment", json!("-0")),
@@ -948,7 +951,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(v2["properties"]["sites"]["maxItems"], MAX_SITES);
-        assert_eq!(v2["properties"]["sample_limit"]["maximum"], 256);
+        assert_eq!(v2["properties"]["sample_limit"]["maximum"], SAMPLE_LIMIT_MAX);
         assert!(
             v2["$defs"]["site"]["properties"]
                 .get("sample_limit")

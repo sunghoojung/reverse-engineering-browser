@@ -51,6 +51,7 @@ Every option is off unless the start names it, and none is inherited.
 | Wasm `br_table` dispatch | `wasm_dispatch` | F | Covered |
 | Wasm `call_indirect` targets | `wasm_call_indirect` | F | Covered |
 | Sampling budgets per function and per indirect site | `wasm_samples_per_function`, `wasm_samples_per_indirect_site` | F | Covered |
+| Every Wasm record, with no window or browser ceiling | `wasm_every_record` | F | Covered |
 | Function allow and deny lists, module allowlist | `wasm_function_allow`, `wasm_function_deny`, `wasm_module_allowlist` | F | Covered |
 | Guest adapter recipe | `guest_adapter` | F | Covered |
 | JavaScript dispatch sites | `js_dispatch_sites` | F | Covered |

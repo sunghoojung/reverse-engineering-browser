@@ -828,12 +828,19 @@ def valid_js_invocation(event: dict, payload: bytes) -> bool:
     def at(offset: int, size: int) -> int:
         return int.from_bytes(payload[offset:offset + size], "little")
 
-    # Version 2 records every call of up to 256 sites with u32 ordinals.
-    # Version 1, from earlier builds, had 8 sites and sampled indexes.
+    # Version 2 records every call of every site with u32 ordinals: byte 4 is
+    # zero and the u32 slot is at 112 (start) or 72 (settle). Version 1, from
+    # earlier builds, had 8 one-byte slots and sampled indexes.
     version = at(0, 2)
     if version not in (1, 2) or at(2, 2) != 128:
         return False
     v1 = version == 1
+
+    def reserved_from(wide: int) -> int | None:
+        if v1:
+            return wide if payload[4] < 8 else None
+        return wide + 4 if payload[4] == 0 else None
+
     kind = event["type"]
     if kind == "js_invocation_request":
         state = payload[4]
@@ -844,12 +851,13 @@ def valid_js_invocation(event: dict, payload: bytes) -> bool:
     if event["frame_id"] == "0" or event["request_id"] != "0":
         return False
     if kind == "js_invocation_start":
-        slot, flags, argc = payload[4], payload[5], at(6, 2)
+        reserved = reserved_from(112)
+        flags, argc = payload[5], at(6, 2)
         invocation, parent = at(20, 4), at(24, 4)
-        if ((v1 and (slot >= 8 or at(28, 2) >= 64 or at(30, 2) >= 256))
+        if (reserved is None or (v1 and (at(28, 2) >= 64 or at(30, 2) >= 256))
                 or flags & ~0x03 or at(8, 4) == 0 or at(16, 4) == 0
                 or at(12, 4) >= at(16, 4) or invocation == 0 or at(104, 8) == 0
-                or any(payload[112:])):
+                or any(payload[reserved:])):
             return False
         if parent != 0 and (parent >= invocation or flags & 0x01):
             return False
@@ -864,13 +872,14 @@ def valid_js_invocation(event: dict, payload: bytes) -> bool:
                 return False
         return True
     # js_invocation_settle
-    slot, outcome, via, value_kind = payload[4], payload[5], payload[6], payload[7]
+    reserved = reserved_from(72)
+    outcome, via, value_kind = payload[5], payload[6], payload[7]
     length, state, encoding, flags = at(12, 4), payload[16], payload[17], payload[18]
     byte_length, rolling = at(20, 4), at(24, 8)
     fulfilled, rejected = outcome == 1, outcome == 2
-    if ((v1 and slot >= 8) or not (fulfilled or rejected) or not 1 <= value_kind <= 14
+    if (reserved is None or not (fulfilled or rejected) or not 1 <= value_kind <= 14
             or at(8, 4) == 0 or at(64, 8) == 0 or payload[19] != 0 or flags & ~0x01
-            or any(payload[72:])):
+            or any(payload[reserved:])):
         return False
     if not ((via == 1 and fulfilled) or (via == 2 and rejected) or via == 3):
         return False

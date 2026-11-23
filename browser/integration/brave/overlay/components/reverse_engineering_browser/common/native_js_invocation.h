@@ -9,6 +9,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <span>
 #include <tuple>
@@ -24,8 +25,11 @@ namespace reb {
 // count. Records name a site by its u32 slot.
 inline constexpr std::size_t kNativeJsInvocationArgumentLimit = 8;
 inline constexpr std::size_t kNativeJsInvocationSiteRecordSize = 44;
-// The records' u32 slot is the only bound on a site table.
-inline constexpr std::uint64_t kNativeJsInvocationSlotCount = std::uint64_t{1} << 32U;
+// The only bound on a site table. Each renderer receives the whole table as
+// one BigBuffer, whose shared memory region Chromium maps only up to INT_MAX
+// bytes: 48,806,446 sites, well inside the records' u32 slot.
+inline constexpr std::size_t kNativeJsInvocationSiteListLimit =
+    static_cast<std::size_t>(std::numeric_limits<int>::max()) / kNativeJsInvocationSiteRecordSize;
 // Payload version 2 replaces version 1's sample indexes, which counted into
 // the removed per-configuration budgets, with u32 ordinals.
 inline constexpr std::uint16_t kNativeJsInvocationPayloadVersion = 2;
@@ -491,13 +495,13 @@ EncodeNativeJsInvocationSite(const NativeJsInvocationSite& site) noexcept {
 }
 
 // Decodes every record by slot, or nullopt when any record is malformed, a
-// (source_sha256, anchor_offset) key repeats, or a slot would not fit the
-// records' u32. A session that tracks functions but has armed none yet sends
-// no records.
+// (source_sha256, anchor_offset) key repeats, or the table passes
+// kNativeJsInvocationSiteListLimit. A session that tracks functions but has
+// armed none yet sends no records.
 [[nodiscard]] inline std::optional<std::vector<NativeJsInvocationSite>>
 DecodeNativeJsInvocationSites(std::span<const std::uint8_t> bytes) {
   if (bytes.size() % kNativeJsInvocationSiteRecordSize != 0 ||
-      bytes.size() / kNativeJsInvocationSiteRecordSize > kNativeJsInvocationSlotCount)
+      bytes.size() / kNativeJsInvocationSiteRecordSize > kNativeJsInvocationSiteListLimit)
     return std::nullopt;
   const std::size_t count = bytes.size() / kNativeJsInvocationSiteRecordSize;
   std::vector<NativeJsInvocationSite> sites;

@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 
 from live_acceptance import (baseline, bodies, cookies, debugger, headers, limits, metadata, nostacks, reserve,
-                             stacks, tabs, volume, wasm)
+                             stacks, tabs, volume, wasm, wasm_every)
 from live_acceptance.evidence import Session, StartError, start_session
 from live_acceptance.fixture import Fixture
 from live_acceptance.pages import document
@@ -55,6 +55,8 @@ class Kind:
 KINDS = {
     "content": Kind(CONTENT_FLAGS, [baseline, stacks, headers, cookies, bodies, limits, debugger, tabs, wasm], 3600),
     "volume": Kind(CONTENT_FLAGS, [volume], 1800),
+    # Every Wasm record is session-wide, so the paced `wasm` area keeps its own session.
+    "wasm-every": Kind([*CONTENT_FLAGS, "--wasm-every-record"], [wasm_every], 1800),
     "reserve": Kind(CONTENT_FLAGS, [reserve], 900, reserve.environment),
     "metadata": Kind([flag for flag in CONTENT_FLAGS if flag not in METADATA_DROPS], [metadata], 900),
     # Request stacks are on unless a start turns them off, and Promise stacks ride on them.

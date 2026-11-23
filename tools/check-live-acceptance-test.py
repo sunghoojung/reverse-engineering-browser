@@ -32,7 +32,7 @@ from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
 from live_acceptance import (baseline, bodies, cookies, debugger, driver, headers, limits, metadata,
-                             nostacks, reserve, stacks, tabs, volume, wasm)
+                             nostacks, reserve, stacks, tabs, volume, wasm, wasm_every)
 from live_acceptance.evidence import Api, ApiError, Session, decode_request_body, decode_request_target, parse_header_block
 from live_acceptance.fixture import POLL_SECONDS, payload, sha256
 from live_acceptance.pages import line_of, locate
@@ -107,7 +107,7 @@ class FixtureRoutes(unittest.TestCase):
         status, _, body = self.get("/")
         self.assertEqual(status, 200)
         for name in ("baseline", "stacks", "headers", "cookies", "bodies", "limits", "debugger", "tabs", "volume",
-                     "reserve", "wasm"):
+                     "reserve", "wasm", "wasm-every"):
             self.assertIn(f"/{name}/index.html".encode(), body)
 
     def test_header_hops_redirect_twice_with_repeated_headers(self):
@@ -309,6 +309,54 @@ console.log(JSON.stringify({picks: [0, 1, 2, 3].map(pick), stack, runs: [0, 1, 3
         self.assertEqual(result["runs"], [1, 2, 2, 2, 2])
         self.assertRegex(result["stack"], r"reb_inner[\s\S]*reb_run")
 
+
+
+class WasmEveryRecordStore(unittest.TestCase):
+    """The every-record area counts the store as it grows and finds a repeated or missing ordinal."""
+
+    @staticmethod
+    def record(kind: str, process: int, index: int, offset: int) -> bytes:
+        payload = bytearray(128)
+        payload[offset:offset + 4] = index.to_bytes(4, "little")
+        return json.dumps({"process_id": process, "monotonic_time_ns": str(1_000 + index), "category": "vm",
+                           "type": kind, "payload_encoding": "hex", "payload": payload.hex()},
+                          separators=(",", ":")).encode() + b"\n"
+
+    def test_counts_a_growing_store_and_names_holes(self):
+        dispatch, indirect = "wasm_dispatch_observation", "wasm_indirect_observation"
+        lines = [self.record(dispatch, 7, index, 20) for index in range(3)]
+        lines += [self.record(indirect, 7, index, 28) for index in (0, 2, 2)]
+        lines.append(self.record("wasm_dispatch_overflow", 7, 0, 20))
+        lines.append(self.record(dispatch, 8, 0, 20))
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "events.jsonl"
+            whole = b"".join(lines)
+            tail = wasm_every.Tail(path)
+            tail.read()
+            self.assertEqual(tail.counted, 0, "a store not yet written counts nothing")
+            # A line cut mid-write is counted once it is whole.
+            path.write_bytes(whole[:len(lines[0]) + 20])
+            tail.read()
+            self.assertEqual(tail.counted, 1)
+            path.write_bytes(whole)
+            tail.read()
+            self.assertEqual(tail.counted, 7)
+            decoded = wasm_every.decode(path)
+        streams = decoded.streams
+        self.assertEqual(streams[dispatch].count, 4)
+        self.assertEqual(streams[dispatch].holes(), {})
+        self.assertEqual(streams[dispatch].repeats, 0)
+        self.assertEqual(streams[indirect].count, 3)
+        self.assertEqual(streams[indirect].repeats, 1)
+        self.assertEqual(streams[indirect].holes(), {7: 1})
+        self.assertEqual(decoded.losses, {"wasm_dispatch_overflow": 1})
+        self.assertEqual(decoded.total(), 7)
+
+    def test_the_kind_starts_with_every_record(self):
+        kind = driver.KINDS["wasm-every"]
+        self.assertEqual(kind.flags, [*driver.CONTENT_FLAGS, "--wasm-every-record"])
+        self.assertEqual(kind.areas, [wasm_every])
+        self.assertNotIn("--wasm-every-record", driver.KINDS["content"].flags, "the paced area keeps its windows")
 
 SCRIPT = re.compile(r"<script(?P<attributes>[^>]*)>(?P<body>[\s\S]*?)</script>")
 # Pages served only with a query, beside every exact .html route.

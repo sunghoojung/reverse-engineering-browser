@@ -73,6 +73,17 @@ printf '%s\\n' "${'${brave_arguments[@]}'}"`], {encoding:'utf8'});
     '--reb-wasm-module-allowlist=/tmp/mods.txt',
     '--reb-wasm-budget-reset-file=/tmp/reset']);
 }
+{
+  // Every record replaces the pacing; filters still apply.
+  const result = spawnSync(shell, ['-c', `set -eu; brave_arguments=(); native_quiet_mode=0; native_wasm_dispatch=1; native_wasm_call_indirect=1; native_guest_adapter=""; native_wasm_every_record=1; native_wasm_function_deny=9; wasm_budget_reset_file=/tmp/reset; ${flagsCode}
+printf '%s\\n' "${'${brave_arguments[@]}'}"`], {encoding:'utf8'});
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.stdout.trimEnd().split('\n'), [
+    '--js-flags=--reb-wasm-br-table-dispatch --reb-wasm-call-indirect-dispatch',
+    '--reb-wasm-every-record',
+    '--reb-wasm-function-deny=9',
+    '--reb-wasm-budget-reset-file=/tmp/reset']);
+}
 for (const [variable, options] of [['REB_NATIVE_WASM_DISPATCH', {REB_NATIVE_WASM_DISPATCH:'invalid'}],
   ['REB_NATIVE_WASM_DISPATCH', {REB_NATIVE_WASM_DISPATCH:'1',REB_CAPTURE_CATEGORY_MASK:'1'}],
   ['REB_NATIVE_WASM_CALL_INDIRECT', {REB_NATIVE_WASM_CALL_INDIRECT:'invalid'}],
@@ -87,6 +98,10 @@ for (const [options, pattern] of [
   [{REB_NATIVE_WASM_FUNCTION_ALLOW:'1,1', REB_NATIVE_WASM_DISPATCH:'1'}, /unique/],
   [{REB_NATIVE_WASM_FUNCTION_ALLOW:'16777216', REB_NATIVE_WASM_DISPATCH:'1'}, /16777216/],
   [{REB_NATIVE_WASM_MODULE_ALLOWLIST:'relative.txt', REB_NATIVE_WASM_DISPATCH:'1'}, /REB_NATIVE_WASM_MODULE_ALLOWLIST/],
+  [{REB_NATIVE_WASM_EVERY_RECORD:'2', REB_NATIVE_WASM_DISPATCH:'1'}, /REB_NATIVE_WASM_EVERY_RECORD must be 0 or 1/],
+  [{REB_NATIVE_WASM_EVERY_RECORD:'1'}, /require REB_NATIVE_WASM_DISPATCH/],
+  [{REB_NATIVE_WASM_EVERY_RECORD:'1', REB_NATIVE_WASM_SAMPLES_PER_FUNCTION:'2', REB_NATIVE_WASM_DISPATCH:'1'},
+    /takes no REB_NATIVE_WASM_SAMPLES_PER_FUNCTION/],
 ]) {
   const result = spawnSync(shell, [join(root,'scripts/run-live-session.sh')], {env:{...process.env, REB_NATIVE_WASM_DISPATCH:'0', REB_NATIVE_WASM_CALL_INDIRECT:'0', ...options}, encoding:'utf8'});
   assert.equal(result.status, 2, result.stderr);
@@ -101,7 +116,7 @@ console.log('PASS native Wasm launch is explicit opt-in, category-gated, and com
   const run = variables => {
     const result = spawnSync(shell, ['-c', `set -eu; ui_arguments=(); capture_canvas_images=0; console_document_start=0; request_stacks_state=off;
       native_wasm_dispatch=0; native_wasm_call_indirect=0; native_wasm_samples_per_function=; native_wasm_samples_per_indirect_site=;
-      native_wasm_function_allow=; native_wasm_function_deny=; native_wasm_module_allowlist=; ${variables}; ${labels}
+      native_wasm_function_allow=; native_wasm_function_deny=; native_wasm_module_allowlist=; native_wasm_every_record=0; ${variables}; ${labels}
 printf '%s\\n' "${'${ui_arguments[@]-}'}"`], {encoding:'utf8'});
     assert.equal(result.status, 0, result.stderr);
     return result.stdout.trimEnd().split('\n').filter(Boolean);
@@ -117,6 +132,8 @@ printf '%s\\n' "${'${ui_arguments[@]-}'}"`], {encoding:'utf8'});
       '--session-wasm-samples-per-indirect-site', '16', '--session-wasm-function-allow-count', '3',
       '--session-wasm-function-deny-count', '1', '--session-wasm-module-allowlist']);
   assert.deepEqual(run(`${quiet}; native_wasm_dispatch=1`), ['--session-wasm-dispatch'], 'unnamed allowances are not labeled');
+  assert.deepEqual(run(`${quiet}; native_wasm_dispatch=1; native_wasm_call_indirect=1; native_wasm_every_record=1`),
+    ['--session-wasm-dispatch', '--session-wasm-call-indirect', '--session-wasm-every-record']);
   assert.deepEqual(run(`${quiet}; native_wasm_samples_per_function=64; native_wasm_function_allow=1`), [],
     'a session without a Wasm stream names no sampling policy');
   // No content budget, media switch or store size is read or passed on.

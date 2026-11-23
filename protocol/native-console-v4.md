@@ -121,7 +121,13 @@ does not stretch the rest. WebKit cannot lay out an element taller than about
 33.5 million px, so a transcript taller than 16.7 million px is drawn
 compressed into that extent: a wheel, key or touch scroll moves the content by
 exactly its own distance, a scrollbar drag maps proportionally onto the whole
-transcript, and both ends stay reachable.
+transcript, and both ends stay reachable. The layout never moves a scroll the
+reader is making, which would stop momentum or a keyboard scroll animation
+part way: a row measured during that scroll moves the space above the drawn
+rows, and the scroll offset takes it up at `scrollend`, or after 300 ms
+without a scroll where the engine has no `scrollend`. The end is followed when
+entries arrive or **Latest** is chosen, never against the reader's scroll, and
+a scroll down that ends within 40 px of the end, such as **End**, lands on it.
 Search and level filters run over every entry, including rows that are not in
 the document, and an evaluation link reveals its command wherever it is. A
 command is shown whole in the transcript. History keeps every command, a
@@ -163,7 +169,7 @@ silently loses data.
 - `node tools/check-console-workspace.mjs` and the two Console DOM fixtures
   cover the windowed transcript with 12,000 entries, search over rows that are
   not rendered, a tall row that does not stretch the estimate, a compressed
-  transcript scrolled step by step and by drag to both ends, a command past 64 MiB sent whole, the incremental completion
+  transcript scrolled step by step and by drag to both ends, a reader's scroll that the layout never moves, a command past 64 MiB sent whole, the incremental completion
   lexer against a fresh lex, and the document-start panel's add, remove and
   paged reads.
 

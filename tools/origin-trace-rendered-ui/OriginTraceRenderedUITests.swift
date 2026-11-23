@@ -2416,7 +2416,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
   @MainActor
   func test45ConsoleTranscriptKeepsEveryEntry() async throws {
     // The rows in the document, the largest gap between visible rows, and the
-    // message numbers drawn, in order.
+    // message numbers drawn, in order. Gaps and the end are whole pixels, since
+    // rows lay out at fractions of one.
     let window = """
       (() => {
         const scroll = document.querySelector('#native-console-scroll'), view = scroll.getBoundingClientRect();
@@ -2428,15 +2429,20 @@ final class OriginTraceRenderedUITests: XCTestCase {
         gap = Math.max(gap, bottom - edge);
         const numbers = rows.map(number).filter(value => value >= 0), visible = rows.findIndex((row, index) => boxes[index].bottom > top + 0.5);
         const large = rows.findIndex(row => row.querySelector('pre')?.textContent.length === 1 << 20);
-        return {drawn: rows.length, gap: Math.round(gap * 10) / 10, numbers: numbers.length, first: numbers[0] ?? -1, last: numbers.at(-1) ?? -1,
+        return {drawn: rows.length, gap: Math.floor(gap), numbers: numbers.length, first: numbers[0] ?? -1, last: numbers.at(-1) ?? -1,
           contiguous: numbers.every((value, index) => !index || value === numbers[index - 1] + 1),
           visible: visible < 0 ? -2 : number(rows[visible]), firstDrawn: rows[0]?.textContent.slice(0, 40) ?? '',
-          large: large >= 0, largeHeight: large < 0 ? 0 : Math.round(boxes[large].height), largeEnd: large < 0 ? 0 : Math.round(boxes[large].bottom - bottom),
+          large: large >= 0, largeHeight: large < 0 ? 0 : Math.round(boxes[large].height), largeEnd: large < 0 ? 0 : Math.floor(Math.abs(boxes[large].bottom - bottom)),
           offset: Math.round(scroll.scrollTop), end: Math.round(scroll.scrollHeight - scroll.clientHeight),
           count: document.querySelector('#native-console-output-count').textContent};
       })()
       """
     let frames = "new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => done(true))))"
+    // A wait that says where the transcript was if it times out.
+    func wait(_ ui: Harness, _ condition: String, timeout: TimeInterval = 15, _ message: String) async throws {
+      do { try await ui.waitUntil(condition, timeout: timeout, message) }
+      catch { throw HarnessError("\(error) \((try? await ui.json(window)) ?? [:])") }
+    }
     for size in windowSizes {
       let ui = try await prepare(size)
       _ = try await ui.webView.callAsyncJavaScript(
@@ -2472,11 +2478,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
         return true;
         """, contentWorld: .page)
       try await ui.click("#native-console-toggle")
+      try await ui.waitUntil("!document.querySelector('#native-console-mode').disabled", "\(size.name): the Console did not finish its availability check")
       _ = try await ui.value(
         """
         (() => { const mode = document.querySelector('#native-console-mode'); mode.value = 'live_capture'; mode.dispatchEvent(new Event('change')); return true; })()
         """)
-      try await ui.waitUntil("__rebUiProbe.count('#native-console-target option[value=\"31\"]') === 1",
+      try await ui.waitUntil("document.querySelectorAll('#native-console-target option[value=\"31\"]').length === 1",
         "\(size.name): the live capture document was not listed")
       _ = try await ui.value(
         """
@@ -2484,7 +2491,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
           const consent = document.querySelector('#native-console-live-consent'); consent.checked = true; consent.dispatchEvent(new Event('change'));
           document.querySelector('#native-console-start').click(); return true; })()
         """)
-      try await ui.waitUntil("(() => { const state = \(window); return state.large && state.largeEnd === 0; })()", timeout: 60,
+      try await wait(ui, "(() => { const state = \(window); return state.large && state.largeEnd === 0; })()", timeout: 60,
         "\(size.name): the transcript did not follow to the end of twelve thousand messages and the 1 MiB one")
       _ = try await ui.value(frames)
 
@@ -2533,12 +2540,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
       _ = try await ui.value("(() => { document.querySelector('#native-console-scroll').focus({focusVisible: true}); return true; })()")
       let before = try await ui.json(window)
       try await ui.key(121, "\u{F72D}", modifiers: [.function])
-      try await ui.waitUntil("(\(window)).visible > \(before["visible"] as? Int ?? 0)", "\(size.name): PageDown did not scroll the transcript")
+      try await wait(ui, "(\(window)).visible > \(before["visible"] as? Int ?? 0)", "\(size.name): PageDown did not scroll the transcript")
       _ = try await ui.value(frames)
       let paged = try await ui.json(window)
       XCTAssertEqual(paged["gap"] as? Double, 0, "\(size.name): PageDown leaves the viewport covered: \(paged)")
       try await ui.key(115, "\u{F729}", modifiers: [.function])
-      try await ui.waitUntil("(\(window)).offset === 0", "\(size.name): Home did not reach the start of the transcript")
+      try await wait(ui, "(\(window)).offset === 0", "\(size.name): Home did not reach the start of the transcript")
       _ = try await ui.value(frames)
       let start = try await ui.json(window)
       XCTAssertEqual(start["first"] as? Int, 0, "\(size.name): the first message is drawn at the start: \(start)")
@@ -2546,7 +2553,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertEqual(start["gap"] as? Double, 0, "\(size.name): drawn rows cover the viewport at the start: \(start)")
       try await ui.screenshot("console-transcript-start-\(size.name)")
       try await ui.key(119, "\u{F72B}", modifiers: [.function])
-      try await ui.waitUntil("(() => { const state = \(window); return state.large && state.largeEnd === 0; })()",
+      try await wait(ui, "(() => { const state = \(window); return state.large && state.largeEnd === 0; })()",
         "\(size.name): End did not return to the 1 MiB message")
 
       // Search runs over every entry, drawn or not, and Escape restores them.

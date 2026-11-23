@@ -134,42 +134,49 @@ function nativeConsoleSuggestions(source, caret, explicit = false) {
   const member = ['.', '?.'].includes(tokens[index]?.text);
   if (!member && !prefix && !explicit) return null;
   if (member && tokens[index].end !== start && source.slice(tokens[index].end, start).trim()) return null;
-  const resolve = (position, depth = 0) => {
-    if (depth > 16 || position < 0) return null;
-    const token = tokens[position];
-    if (token.kind === 'literal' && ['"', "'", '`'].includes(token.text[0]) && token.text.at(-1) === token.text[0]) return {type: 'string'};
-    if (token.text === ']') {
-      let nesting = 1;
-      let open = position;
-      while (--open >= 0) {
-        if (tokens[open].text === ']') ++nesting;
-        if (tokens[open].text === '[' && --nesting === 0) break;
+  // Walks left to the start of the chain, then types each call and member
+  // forward from it, so a chain of any length resolves without recursion.
+  const resolve = from => {
+    const steps = [];
+    let value = null;
+    for (let position = from; ;) {
+      if (position < 0) return null;
+      const token = tokens[position];
+      if (token.kind === 'literal' && ['"', "'", '`'].includes(token.text[0]) && token.text.at(-1) === token.text[0]) { value = {type: 'string'}; break; }
+      if (token.text === ']') {
+        let nesting = 1;
+        let open = position;
+        while (--open >= 0) {
+          if (tokens[open].text === ']') ++nesting;
+          if (tokens[open].text === '[' && --nesting === 0) break;
+        }
+        // Recognize array literals, but never guess the type of a computed lookup.
+        if (open >= 0 && (!tokens[open - 1] || ['=', '(', ',', ':', ';', 'return'].includes(tokens[open - 1].text))) { value = {type: 'array'}; break; }
+        return null;
       }
-      // Recognize array literals, but never guess the type of a computed lookup.
-      if (open >= 0 && (!tokens[open - 1] || ['=', '(', ',', ':', ';', 'return'].includes(tokens[open - 1].text))) return {type: 'array'};
-      return null;
-    }
-    if (token.text === ')') {
-      let nesting = 1;
-      let open = position;
-      while (--open >= 0) {
-        if (tokens[open].text === ')') ++nesting;
-        if (tokens[open].text === '(' && --nesting === 0) break;
+      if (token.text === ')') {
+        let nesting = 1;
+        let open = position;
+        while (--open >= 0) {
+          if (tokens[open].text === ')') ++nesting;
+          if (tokens[open].text === '(' && --nesting === 0) break;
+        }
+        if (open < 0) return null;
+        steps.push(null); position = open - 1; continue;
       }
-      if (open < 0) return null;
-      const callable = resolve(open - 1, depth + 1);
-      return callable?.returns ? {type: callable.returns} : null;
+      if (token.kind !== 'word') return null;
+      if (['.', '?.'].includes(tokens[position - 1]?.text)) { steps.push(token.text); position -= 2; continue; }
+      if (tokens[position - 1]?.text === 'new') {
+        const type = nativeConsoleCatalog.get('global').get(token.text)?.type;
+        value = {returns: nativeConsoleCatalog.get(type)?.get('prototype')?.type};
+      } else value = nativeConsoleCatalog.get('global').get(token.text) ?? null;
+      break;
     }
-    if (token.kind !== 'word') return null;
-    if (['.', '?.'].includes(tokens[position - 1]?.text)) {
-      const owner = resolve(position - 2, depth + 1);
-      return nativeConsoleCatalog.get(owner?.type)?.get(token.text) ?? null;
+    // A null step is a call, typed by what its callee returns.
+    for (let step = steps.length - 1; step >= 0 && value; --step) {
+      value = steps[step] === null ? (value.returns ? {type: value.returns} : null) : nativeConsoleCatalog.get(value.type)?.get(steps[step]) ?? null;
     }
-    if (tokens[position - 1]?.text === 'new') {
-      const type = nativeConsoleCatalog.get('global').get(token.text)?.type;
-      return {returns: nativeConsoleCatalog.get(type)?.get('prototype')?.type};
-    }
-    return nativeConsoleCatalog.get('global').get(token.text) ?? null;
+    return value;
   };
   const group = member ? nativeConsoleCatalog.get(resolve(index - 1)?.type) : nativeConsoleCatalog.get('global');
   if (!group) return null;

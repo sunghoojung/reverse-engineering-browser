@@ -460,6 +460,34 @@ export async function checkConsoleDOM(root) {
     scroll.scrollTop=1e9;await scroll.emit('scroll');
     assert(output.children.at(-1).textContent.includes('fixture tall'),'the newest entry is reachable');assert.equal(get('latest').hidden,true);
     api.extent(1<<24);await get('latest').click();await settle();assert.equal(content(),12001*row+tall,'a transcript that fits again is drawn whole');
+    // A scroll the reader makes is never written over. A small scroll up
+    // from the end stays put; rows measured above the viewport while the
+    // reader scrolls move the space above the drawn rows, not the reader; the
+    // scroll offset takes that up once the scroll settles, without moving
+    // what the reader sees; and a scroll to the top reaches the first entry.
+    const firstVisible=()=>{let y=parseFloat(output.style.paddingTop);for(const child of output.children){const height=child.getBoundingClientRect().height;if(y+height>top)return child.textContent;y+=height;}return null;};
+    const covered=()=>{const start=parseFloat(output.style.paddingTop);return start<=top&&start+output.children.reduce((sum,child)=>sum+child.getBoundingClientRect().height,0)>=top+viewport;};
+    const followed=top;scroll.scrollTop=top-10;await scroll.emit('scroll');
+    assert.equal(top,followed-10,'a small scroll up from the end is not pulled back to it');
+    Node.prototype.getBoundingClientRect=function(){const number=Number(this.textContent.match(/fixture message (\d+)/)?.[1]);const height=this.textContent.includes('fixture tall')?tall:number%97===0?2*row:row;return {top:0,bottom:height,left:0,right:600,width:600,height};};
+    scroll.scrollTop=3000*row;await scroll.emit('scroll');
+    let wanted=top;
+    for(let step=0;step<40;step+=1){
+      wanted=top-300;scroll.scrollTop=wanted;await scroll.emit('scroll');
+      assert.equal(top,wanted,`step ${step}: the layout never moves a scroll the reader is making`);
+      assert(covered(),`step ${step}: the drawn rows cover the viewport`);assert(contiguous(numbers()));
+    }
+    const seen=firstVisible();await new Promise(resolve=>setTimeout(resolve,400));
+    assert(top>wanted,'once the scroll settles, the scroll offset takes up the rows measured above');
+    assert.equal(firstVisible(),seen,'settling moves the scroll offset, not what the reader sees');
+    while(top>0){scroll.scrollTop=top-300;await scroll.emit('scroll');assert(covered(),'the drawn rows cover the viewport on the way up');}
+    assert.equal(numbers()[0],0,'a scroll to the top reaches the first entry');assert.equal(parseFloat(output.style.paddingTop),0);
+    const quiet=()=>new Promise(resolve=>setTimeout(resolve,400));
+    scroll.scrollTop=content()-viewport-20;await scroll.emit('scroll');await quiet();
+    assert.equal(top,content()-viewport,'a scroll down that ends within reach of the end lands on it');
+    scroll.scrollTop=top-20;await scroll.emit('scroll');await quiet();
+    assert.equal(top,content()-viewport-20,'a scroll up from the end is never pulled back, even once it settles');
+    await get('latest').click();await settle();
     Node.prototype.getBoundingClientRect=rect;delete scroll.getBoundingClientRect;delete output.getBoundingClientRect;
     Object.defineProperties(scroll,{clientHeight:{value:1e9,writable:true,configurable:true},scrollHeight:{value:100,writable:true,configurable:true},scrollTop:{value:0,writable:true,configurable:true}});
   }

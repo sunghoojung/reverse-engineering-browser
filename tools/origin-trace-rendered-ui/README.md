@@ -90,6 +90,21 @@ what is retained and not be clipped. The Console header chip must read
 `Doc-start: permitted` in full, stay inside the header, overlap no other header
 control, and leave arming disabled. Nothing connects, arms or runs.
 
+`test45ConsoleTranscriptKeepsEveryEntry` connects the Console to a live
+capture document that the test's own page `fetch` stands in for. That document
+logs twelve thousand messages, every 97th of them two lines tall, in pages of
+a thousand, and then one message of 1 MiB. At both window sizes, the
+transcript must follow its end, with the 1 MiB message drawn whole. Fewer than
+250 rows may be in the document at the end, a quarter of the way down, and
+through forty scroll steps there and back, and those rows must be consecutive
+messages that cover the viewport with no gap. PageDown, Home and End must
+scroll the focused transcript through WebKit's own scroll animation, which
+the layout never interrupts: Home must reach the first entry and End the
+last line of the 1 MiB message. Search
+must find `rendered message 4242` among rows that are not drawn and draw only
+that match, and Escape must restore every entry. Screenshots
+`console-transcript-{end,middle,start,search}-*` show each state.
+
 `test18TrackCallsFromSources` opens a synthetic glue script (artifact 330) in
 Sources at both window sizes. **Track calls** at the default position must
 refuse top-level code; `o.dup`, typed with native keys and Return, must be

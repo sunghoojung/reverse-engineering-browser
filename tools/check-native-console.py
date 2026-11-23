@@ -572,9 +572,16 @@ def receive(process, request):
     return fields, payload
 
 
+# More child documents than the 64 a listing once held, for the real browser.
+MANY_FRAMES = 80
+
+
 class Fixture(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         content = b"<!doctype html><title>Native console fixture</title><script>window.fixture=41;window.previewCalls=0;window.previewObject={get value(){window.previewCalls++;return 1},toString(){window.previewCalls++;return 'unsafe'}};</script><h1>Native console fixture</h1>"
+        if self.path == "/many-frames":
+            content = ("<!doctype html><title>Many frames</title>" +
+                       "".join(f'<iframe src="/frame-{index}"></iframe>' for index in range(MANY_FRAMES))).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
         self.send_header("Content-Length", str(len(content)))
@@ -790,6 +797,24 @@ def check(binary, browser):
                 polled = json.loads(data)
                 assert [len(message["text"]) for message in polled["messages"]] == [3 << 20] and polled["more"] is False
             if browser:
+                # Every eligible document is listed and selectable, past the
+                # 64 a listing once held: a top document with eighty frames.
+                header, payload = run()
+                top = next(item for item in read_targets(payload, header[6]) if item["top"])
+                run(2, top["id"], "location.href = '/many-frames'; 1")
+                deadline = time.monotonic() + 30
+                while True:
+                    header, payload = run()
+                    listed = read_targets(payload, header[6])
+                    frames = [item for item in listed if "/frame-" in item["url"]]
+                    if len(frames) == MANY_FRAMES and any(item["top"] and item["url"].endswith("/many-frames") for item in listed):
+                        break
+                    assert time.monotonic() < deadline, f"{len(frames)} of {MANY_FRAMES} frames listed, partial {bool(header[5] & 1)}"
+                    time.sleep(0.2)
+                assert len({item["id"] for item in listed}) == len(listed)
+                for item in (frames[0], frames[-1]):
+                    header, payload = run(2, item["id"], "window.fixture + 1")
+                    assert header[2] == 0 and payload == b"42", (item, header, payload)
                 process.stdin.close()
                 assert process.wait(timeout=5) == 0
                 process.native_browser.wait(timeout=10)
@@ -930,7 +955,7 @@ def check(binary, browser):
             assert process.returncode == 2, "Invalid stdin commands must exit with a usage error"
         print("PASS native console version/usage, authentication, actual C++ pipe/socket handoff, short payloads, stale selection, exception responses, Stop of a running command, input past 64 MiB, a 3 MiB message and a 300-document listing with 1 MiB metadata, whole")
         print("PASS document-start capability advertisement, session-scoped operation 4, add and remove beside an armed set, a thousand scripts and a snippet past 64 MiB, paged non-draining reads of every retained record, 64 MiB retention drops, refusals that preserve the armed set")
-        print("PASS real Blink/V8 execution, Stop of an endless loop and recovery, input past 64 MiB, a 3 MiB result, every typed-array index, a paged 12 MiB log backlog, preview isolation" if browser else "NOT RUN browser overlay compilation and actual Blink/V8 execution; supply --browser after rebuilding Brave")
+        print("PASS real Blink/V8 execution, Stop of an endless loop and recovery, input past 64 MiB, a 3 MiB result, every typed-array index, a paged 12 MiB log backlog, eighty frames listed and selectable, preview isolation" if browser else "NOT RUN browser overlay compilation and actual Blink/V8 execution; supply --browser after rebuilding Brave")
     finally:
         server.shutdown()
         server.server_close()

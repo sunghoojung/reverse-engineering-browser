@@ -24,12 +24,32 @@
     return rect.width > 0 && rect.height > 0;
   };
 
+  // The ancestors whose overflow can clip a node. As CSS paints it, an
+  // absolute box escapes the ancestors short of its positioned containing
+  // block, and a fixed box every ancestor short of one that contains fixed
+  // boxes, so a popover fixed to the window is not cut by a short table.
+  const holdsFixed = style => style.transform !== 'none' || style.perspective !== 'none' || style.filter !== 'none' ||
+    (style.backdropFilter || 'none') !== 'none' || /(paint|layout|strict|content)/.test(style.contain) ||
+    /(transform|perspective|filter)/.test(style.willChange);
+  const clippingAncestors = element => {
+    const ancestors = [];
+    let position = getComputedStyle(element).position;
+    for (let node = element.parentElement; node; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      const holds = position === 'fixed' ? holdsFixed(style)
+        : position === 'absolute' ? style.position !== 'static' || holdsFixed(style) : true;
+      if (!holds) continue;
+      ancestors.push({node, style});
+      position = style.position;
+    }
+    return ancestors;
+  };
+
   // The visible part of a node after every clipping ancestor is applied.
   const visibleRect = element => {
     let rect = element.getBoundingClientRect();
     let {left, top, right, bottom} = rect;
-    for (let node = element.parentElement; node; node = node.parentElement) {
-      const style = getComputedStyle(node);
+    for (const {node, style} of clippingAncestors(element)) {
       if (/(hidden|clip|auto|scroll)/.test(style.overflowX + style.overflowY)) {
         // Overflow clips at the padding box: content never paints over a
         // border or a classic scrollbar. Overflow does not apply to inline boxes.
@@ -50,8 +70,7 @@
   // ancestor that cuts it off.
   const cutBy = element => {
     const rect = element.getBoundingClientRect();
-    for (let node = element.parentElement; node; node = node.parentElement) {
-      const style = getComputedStyle(node);
+    for (const {node, style} of clippingAncestors(element)) {
       const clip = node.getBoundingClientRect();
       const beyondX = rect.left < clip.left - 1 || rect.right > clip.right + 1;
       const beyondY = rect.top < clip.top - 1 || rect.bottom > clip.bottom + 1;

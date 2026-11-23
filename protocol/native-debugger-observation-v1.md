@@ -94,10 +94,10 @@ every valid observation record of the store, newest first. The event index
 (`events.jsonl.events-v1`, layout 5) keeps them as it folds the store, beside
 `threads.workers` (every worker that started a request) and
 `observation_budget_gaps` (every `debugger_observation_budget` gap, above,
-which only earlier builds record), so
-a frame observed early in a long session is still listed. `threads.coverage`
-says what they cover: scope `store` once the index has caught up, else its
-indexed prefix, which the backend's indexer extends every second.
+which only earlier builds write), so a frame observed early in a long session
+is still listed. `threads.coverage` says what they cover: scope `store` once
+the index has caught up, else its indexed prefix, which the backend's indexer
+extends every second.
 
 A filtered or cursor `get_events` read and every `wait_for_events` put
 `debugger_observation` beside the hex payload of each record of types 40 to

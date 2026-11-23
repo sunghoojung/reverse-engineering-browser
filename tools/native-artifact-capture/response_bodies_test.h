@@ -8,8 +8,7 @@ void ConfigureResponses(const reb::NativeResponseBodyPolicy& policy = {.enabled 
                         const std::uint64_t expiry = kResponseExpiry) {
   base::test_now_ns = 100;
   NativeArtifactSocketClient::Get().connected = true;
-  NativeArtifactCaptureSink::Get().SetEmitter(Emit, kSession, kMask, expiry,
-                                              reb::kNativeRequestContentDefaultBudgetBytes, policy);
+  NativeArtifactCaptureSink::Get().SetEmitter(Emit, kSession, kMask, expiry, policy);
   reb::NativeNetworkCaptureSink::Get().SetEmitter(Emit, kSession, kMask, expiry, policy.enabled);
 }
 
@@ -317,16 +316,20 @@ void ResponseBodies(reb::ArtifactReceiver& receiver, const std::filesystem::path
             cancelled_record.header.artifact_id == 0,
         "A body the page stopped reading before any byte is cancelled, not empty");
   expect(cancelled, cancelled_record, url(709), "application/json");
+  // Fonts are kept like any other body.
+  const std::vector<std::uint8_t> woff2{'w', 'O', 'F', '2', 0, 1, 0, 0, 0, 0, 0, 42};
   const auto font = Respond(710, {.mime = "font/woff2", .resource_type = 5});
-  Check(!font.teed && StateOf(ResponseRecord(LastOf(NativeProbeType::kResponseBody))) ==
-                          reb::ResponseBodyState::kNotCapturedType,
-        "Fonts are skipped unless asked for, visibly");
-  expect(font, LastOf(NativeProbeType::kResponseBody), url(710), "font/woff2");
+  const auto font_record = Ended(font, woff2);
+  Check(font.teed && StateOf(ResponseRecord(font_record)) == reb::ResponseBodyState::kCaptured,
+        "A font is captured by default");
+  CheckRetained(font_record, font, woff2, "font");
+  expect(font, font_record, url(710), "font/woff2");
+  receive(font, font_record);
   expected << "\n]\n";
   Check(transfers.empty(), "Every corpus body was received");
   std::cout << "PASS response bodies: JSON, gzip HTML, brotli and service-worker JSON, fetched "
                "PNG, a chunked stream partial then captured, an aborted prefix, 304, redirect, "
-               "cancelled and font records joined to their response_started creators\n";
+               "cancelled and a captured font joined to their response_started creators\n";
 }
 
 // Runs every posted task whose delay has passed on the test clock.
@@ -347,9 +350,9 @@ void RunDueTasks() {
 }
 
 // The contract's sizing table, replayed through the capture itself: one
-// stream per profile opened at the start of a one-hour session with the
-// default budget, its chunks at a fixed rate, each posted timer run at its due
-// time. tools/check-native-artifact-capture.py holds the table to it.
+// stream per profile opened at the start of a one-hour session, its chunks at
+// a fixed rate, each posted timer run at its due time.
+// tools/check-native-artifact-capture.py holds the table to it.
 void ResponseBodyScheduleReplay(const std::filesystem::path& output) {
   struct Profile {
     const char* name;
@@ -375,9 +378,10 @@ void ResponseBodyScheduleReplay(const std::filesystem::path& output) {
     const auto response = Respond(id++, {.mime = "text/event-stream"});
     const std::vector<std::uint8_t> chunk(profile.bytes, 'r');
     std::uint64_t kept = 0, snapshots = 0, copied = 0, last_time = start, last_size = 0, stale = 0;
-    std::optional<std::uint64_t> sealed;
     std::size_t seen = events.size();
     const auto count = [&] {
+      // The writer keeps up, so the stream never waits for the pool.
+      DrainQueued();
       for (; seen < events.size(); ++seen) {
         const auto& event = events[seen];
         if (event.header.type != NativeProbeType::kResponseBody ||
@@ -391,12 +395,7 @@ void ResponseBodyScheduleReplay(const std::filesystem::path& output) {
         ++snapshots;
         last_time = event.header.monotonic_time_ns;
         last_size = record.captured_length;
-        const auto transfer = transfers.find(event.header.artifact_id);
-        if (transfer != transfers.end() && transfer->second->stream_id != 0) {
-          copied += record.captured_length;
-        } else {
-          sealed = last_time - start;
-        }
+        copied += record.captured_length;
       }
       // Snapshot copies are counted, then dropped, so the replay holds one stream.
       std::erase_if(transfers, [](const auto& entry) { return entry.second->stream_id != 0; });
@@ -429,22 +428,24 @@ void ResponseBodyScheduleReplay(const std::filesystem::path& output) {
       base::test_now_ns = next_chunk;
       sample();
       NativeArtifactBodyTee::Deliver(response.pipe, chunk);
-      kept = std::min<std::uint64_t>(kept + chunk.size(), reb::kNativeResponseBodyCaptureBytes);
+      kept += chunk.size();
       count();
     }
-    json << (id == 9101 ? "\n" : ",\n") << "{\"name\":\"" << profile.name
-         << "\",\"snapshots\":" << snapshots << ",\"copied_bytes\":" << copied
-         << ",\"stale_ns\":" << stale
-         << ",\"sealed_ns\":" << (sealed ? std::to_string(*sealed) : std::string("null")) << "}";
-    std::cout << "REPLAY " << profile.name << ": " << snapshots << " snapshots, "
-              << copied / (1024 * 1024) << " MiB copied, newest snapshot at most "
-              << stale / kSecond << " s old"
-              << (sealed ? ", sealed at " + std::to_string(*sealed / kSecond) + " s"
-                         : std::string())
-              << "\n";
     NativeArtifactBodyTee::End(response.pipe, reb::NativeArtifactBodyEnd::kSourceClosed);
     Completed(response);
     base::ThreadPool::RunPending();
+    const auto end = ResponseRecord(LastOf(NativeProbeType::kResponseBody));
+    Check(StateOf(end) == reb::ResponseBodyState::kCaptured && end.captured_length == kept,
+          "The replayed stream ends captured whole");
+    const bool withheld = (end.flags & reb::kResponseBodySnapshotsWithheld) != 0;
+    json << (id == 9101 ? "\n" : ",\n") << "{\"name\":\"" << profile.name
+         << "\",\"snapshots\":" << snapshots << ",\"copied_bytes\":" << copied
+         << ",\"kept_bytes\":" << kept << ",\"stale_ns\":" << stale
+         << ",\"withheld\":" << (withheld ? "true" : "false") << "}";
+    std::cout << "REPLAY " << profile.name << ": " << snapshots << " snapshots, "
+              << copied / (1024 * 1024) << " MiB copied of " << kept / (1024 * 1024)
+              << " MiB kept, newest snapshot at most " << stale / kSecond << " s old"
+              << (withheld ? ", snapshots withheld" : "") << "\n";
     transfers.clear();
     runner.tasks.clear();
   }
@@ -515,9 +516,9 @@ void ResponseBodySchedule(reb::ArtifactReceiver& receiver, const std::filesystem
     copied += payload.captured_length;
     previous = at;
   }
-  Check(copied <= reb::kNativeResponseBodyDefaultBudgetBytes /
-                      reb::kNativeResponseBodySnapshotBodyDivisor,
-        "One body's snapshots copy at most an eighth of the session budget");
+  Check(copied <= reb::kNativeResponseBodySnapshotCopyFactor * sent +
+                      reb::kNativeResponseBodySnapshotSlackBytes,
+        "One body's snapshots copy at most four times its bytes plus 64 MiB");
   Check(now - trickled.back().header.monotonic_time_ns <=
                 spacing(now - started) + static_cast<std::uint64_t>(10 * kSecond) &&
             ResponseRecord(trickled.back()).body_length + 32 * kKiB >= sent,
@@ -532,118 +533,136 @@ void ResponseBodySchedule(reb::ArtifactReceiver& receiver, const std::filesystem
             << " snapshots of a two-hour stream, spaced by age, " << copied / kKiB
             << " KiB copied\n";
 
-  // With a 1 MiB budget a body may copy 128 KiB: a quarter at once, the rest
-  // as the session it opened into passes.
-  ConfigureResponses({.enabled = true, .budget = 1 * kMiB});
+  // A body's snapshots together copy at most four times what it kept, plus
+  // 64 MiB. A 10 MiB body that barely grows takes ten snapshots, then the
+  // bound withholds the eleventh. No timer waits for it, since only more kept
+  // bytes raise the bound, and every later record says one was withheld.
+  auto& runner = *base::SequencedTaskRunner::GetCurrentDefault();
+  const auto drop_copies = [&transfers] {
+    std::erase_if(transfers, [](const auto& entry) { return entry.second->stream_id != 0; });
+  };
+  const auto copied_by = [&](const Response& response) {
+    std::uint64_t total = 0;
+    for (const auto& snapshot : partials(response)) {
+      total += ResponseRecord(snapshot).captured_length;
+    }
+    return total;
+  };
+  const auto bound = [](const std::uint64_t kept) {
+    return reb::kNativeResponseBodySnapshotCopyFactor * kept +
+           reb::kNativeResponseBodySnapshotSlackBytes;
+  };
+  ConfigureResponses();
   transfers.clear();
+  runner.tasks.clear();
   const auto paced = Respond(9002, {.mime = "text/event-stream"});
-  NativeArtifactBodyTee::Deliver(paced.pipe, std::vector<std::uint8_t>(40 * kKiB, 'p'));
+  NativeArtifactBodyTee::Deliver(paced.pipe, std::vector<std::uint8_t>(10 * kMiB, 'p'));
+  for (int tick = 0; tick < 12; ++tick) {
+    base::test_now_ns += 2 * kSecond;
+    RunDueTasks();
+    NativeArtifactBodyTee::Deliver(paced.pipe, Bytes("x"));
+    drop_copies();
+  }
+  Check(partials(paced).size() == 10 && runner.tasks.empty() &&
+            copied_by(paced) <= bound(10 * kMiB + 12),
+        "Ten 10 MiB copies fit the bound; the eleventh is withheld and no timer waits for it");
+  // 100 MiB copied fits 4 * kept + 64 MiB once 12 MiB + 15 bytes are kept,
+  // which the 33rd 64 KiB chunk of the next burst reaches.
   base::test_now_ns += 2 * kSecond;
-  NativeArtifactBodyTee::Deliver(paced.pipe, Bytes("x"));
-  Check(partials(paced).empty(),
-        "A copy past the quarter a body may spend at once waits for its pace");
-  base::test_now_ns += 500 * kSecond;
-  NativeArtifactBodyTee::Deliver(paced.pipe, Bytes("y"));
-  Check(partials(paced).size() == 1, "Half the session later, the copy fits the pace");
-  std::uint64_t paced_copied = ResponseRecord(partials(paced).back()).captured_length;
-  for (int tick = 0; tick < 24; ++tick) {
-    base::test_now_ns += 20 * kSecond;
-    NativeArtifactBodyTee::Deliver(paced.pipe, Bytes("z"));
-  }
-  paced_copied = 0;
-  for (const auto& snapshot : partials(paced)) {
-    paced_copied += ResponseRecord(snapshot).captured_length;
-  }
-  Check(partials(paced).size() >= 2 && paced_copied <= 1 * kMiB / 8,
-        "A body never copies more than its allowance");
+  NativeArtifactBodyTee::Deliver(paced.pipe, std::vector<std::uint8_t>(12 * kMiB, 'q'));
+  drop_copies();
+  const auto grown = partials(paced);
+  Check(grown.size() == 11 &&
+            ResponseRecord(grown.back()).body_length == 12 * kMiB + 64 * kKiB + 12 &&
+            (ResponseRecord(grown.back()).flags & reb::kResponseBodySnapshotsWithheld) != 0 &&
+            copied_by(paced) <= bound(ResponseRecord(grown.back()).body_length),
+        "More kept bytes raise the bound; the next snapshot says one was withheld");
+  const auto paced_end = ResponseRecord(Ended(paced, {}));
+  Check(StateOf(paced_end) == reb::ResponseBodyState::kCaptured &&
+            paced_end.protocol_version == 3 && paced_end.captured_length == 22 * kMiB + 12 &&
+            (paced_end.flags & reb::kResponseBodySnapshotsWithheld) != 0,
+        "The ended body is whole and says a snapshot was withheld");
+  const auto quick = ResponseRecord(Ended(Respond(9003), Bytes("{}")));
+  Check((quick.flags & reb::kResponseBodySnapshotsWithheld) == 0,
+        "A body whose snapshots were never withheld carries no flag");
+  transfers.clear();
+  runner.tasks.clear();
+
+  // The disk reserve refusing a snapshot's copy is a disk_reserve failure
+  // joined to the body's creator, and the stream stays open for later
+  // snapshots. Refusing the stream itself ends the body as
+  // not_captured_disk_reserve, with its length and no artifact.
   ConfigureResponses();
   transfers.clear();
-  NativeArtifactBodyTee::End(paced.pipe, reb::NativeArtifactBodyEnd::kSourceClosed);
-
-  // All of a session's snapshots copy at most a quarter of its budget, and a
-  // refused snapshot gives its share back.
-  ConfigureResponses({.enabled = true, .budget = 1 * kMiB});
-  transfers.clear();
-  std::vector<Response> streams;
-  for (std::uint64_t id = 9010; id < 9013; ++id) {
-    streams.push_back(Respond(id, {.mime = "text/event-stream"}));
-    NativeArtifactBodyTee::Deliver(streams.back().pipe, std::vector<std::uint8_t>(100 * kKiB, 'a'));
-  }
-  base::test_now_ns += 800 * kSecond;
-  for (const auto& stream : streams) {
-    NativeArtifactBodyTee::Deliver(stream.pipe, Bytes("!"));
-  }
-  Check(partials(streams[0]).size() == 1 && partials(streams[1]).size() == 1 &&
-            partials(streams[2]).empty(),
-        "The third 100 KiB snapshot would pass the session's 256 KiB snapshot share");
-  NativeArtifactCaptureSink::TransferCompleted(partials(streams[0]).back().header.artifact_id,
-                                               reb::NativeArtifactReceiveStatus::kIoError);
-  base::test_now_ns += 30 * kSecond;
-  NativeArtifactBodyTee::Deliver(streams[2].pipe, Bytes("!"));
-  Check(partials(streams[2]).size() == 1, "A refused snapshot returns its share");
+  const auto reserved = Respond(9010, {.mime = "text/event-stream"});
+  NativeArtifactBodyTee::Deliver(reserved.pipe, std::vector<std::uint8_t>(100 * kKiB, 'a'));
+  base::test_now_ns += 2 * kSecond;
+  NativeArtifactBodyTee::Deliver(reserved.pipe, Bytes("!"));
+  Check(partials(reserved).size() == 1, "The first snapshot is taken");
+  const auto refused_copy = partials(reserved).back().header.artifact_id;
+  const auto reserved_stream = transfers.at(refused_copy)->stream_id;
+  NativeArtifactCaptureSink::TransferCompleted(refused_copy,
+                                               reb::NativeArtifactReceiveStatus::kDiskReserve);
+  Check(events.back().header.type == NativeProbeType::kArtifactCaptureFailed &&
+            Payload(events.back()) == "disk_reserve" &&
+            events.back().header.artifact_id == refused_copy &&
+            events.back().header.parent_event_id == reserved.creator,
+        "A snapshot the disk reserve refused is a disk_reserve failure joined to the creator");
+  base::test_now_ns += 2 * kSecond;
+  NativeArtifactBodyTee::Deliver(reserved.pipe, Bytes("!"));
+  Check(partials(reserved).size() == 2, "The stream stays open and the next snapshot is taken");
+  const auto records_before_refusal = events.size();
+  NativeArtifactCaptureSink::TransferCompleted(reserved_stream,
+                                               reb::NativeArtifactReceiveStatus::kDiskReserve);
+  Check(events.size() == records_before_refusal, "A refused open body waits for its end");
+  const auto refused_body = Ended(reserved, Bytes("more"));
+  const auto refused_payload = ResponseRecord(refused_body);
+  Check(StateOf(refused_payload) == reb::ResponseBodyState::kNotCapturedDiskReserve &&
+            refused_body.header.artifact_id == 0 && refused_payload.captured_length == 0 &&
+            refused_payload.body_length == 100 * kKiB + 6,
+        "A body whose stream the disk reserve refused ends as not_captured_disk_reserve");
   ConfigureResponses();
   transfers.clear();
-  for (const auto& stream : streams) {
-    NativeArtifactBodyTee::End(stream.pipe, reb::NativeArtifactBodyEnd::kSourceClosed);
-  }
+  runner.tasks.clear();
 
-  // At the 16 MiB limit the kept bytes are final: the stream is published
-  // once, then, and named by every later record; later bytes are counted.
-  std::vector<std::uint8_t> large(17 * kMiB);
+  // A body past 16 MiB and past the whole in-flight pool streams whole while
+  // the writer drains it. Its snapshots are receiver checkpoints like any
+  // other, and its end names every byte.
+  std::vector<std::uint8_t> large(40 * kMiB + 9);
   for (std::size_t offset = 0; offset < large.size(); ++offset) {
     large[offset] = static_cast<std::uint8_t>(offset * 31U + 7U);
   }
-  const auto limit = std::span(large).first(16 * kMiB);
   const auto big = Respond(9020, {.mime = "application/x-ndjson"});
-  NativeArtifactBodyTee::Deliver(big.pipe, limit);
-  const auto sealed = LastOf(NativeProbeType::kResponseBody);
-  const auto sealed_payload = ResponseRecord(sealed);
-  Check(sealed.header.parent_event_id == big.creator &&
-            StateOf(sealed_payload) == reb::ResponseBodyState::kPartial &&
-            sealed_payload.partial_index == 1 && sealed_payload.captured_length == 16 * kMiB &&
-            transfers.at(sealed.header.artifact_id)->ended && checkpoints() == 0,
-        "A body at the 16 MiB limit is sealed: its stream ends and a partial record names it");
-  CheckRetained(sealed, big, limit, "sealed 16 MiB prefix");
-  const auto frames = transfers.at(sealed.header.artifact_id)->frames.size();
-  const auto records_sealed = events.size();
-  base::test_now_ns += 2 * kSecond;
-  NativeArtifactBodyTee::Deliver(big.pipe, std::span(large).subspan(16 * kMiB));
-  Check(events.size() == records_sealed && checkpoints() == 0 &&
-            transfers.at(sealed.header.artifact_id)->frames.size() == frames,
-        "Bytes past a sealed prefix are counted, never sent or snapshotted");
-  const auto cut = Ended(big, {});
-  const auto cut_payload = ResponseRecord(cut);
-  Check(StateOf(cut_payload) == reb::ResponseBodyState::kCapturedTruncated &&
-            cut.header.artifact_id == sealed.header.artifact_id &&
-            cut_payload.body_length == large.size(),
-        "The ended body names the sealed artifact and counts every byte");
-  CheckRetained(cut, big, limit, "truncated body named by its seal");
-  Receive(receiver, cut.header.artifact_id);
-  // Exactly 16 MiB ends captured; a sealed body at capture end, or cancelled,
-  // still names its sealed bytes. Each starts one byte later, so no digest repeats.
-  const auto whole = Respond(9021, {.mime = "application/x-ndjson"});
-  NativeArtifactBodyTee::Deliver(whole.pipe, std::span(large).subspan(1, 16 * kMiB));
-  const auto whole_record = Ended(whole, {});
-  Check(StateOf(ResponseRecord(whole_record)) == reb::ResponseBodyState::kCaptured &&
-            whole_record.header.artifact_id == partials(whole).front().header.artifact_id,
-        "A body of exactly 16 MiB ends captured under its seal");
-  Receive(receiver, whole_record.header.artifact_id);
-  const auto stopped = Respond(9022, {.mime = "application/x-ndjson"});
-  NativeArtifactBodyTee::Deliver(stopped.pipe, std::span(large).subspan(2, 16 * kMiB));
-  const auto stopped_record =
-      Ended(stopped, Bytes("more"), 0, reb::NativeArtifactBodyEnd::kTargetClosed);
-  Check(StateOf(ResponseRecord(stopped_record)) == reb::ResponseBodyState::kCancelled &&
-            ResponseRecord(stopped_record).captured_length == 16 * kMiB &&
-            stopped_record.header.artifact_id == partials(stopped).front().header.artifact_id,
-        "A sealed body the page stopped reading keeps its sealed prefix");
-  Receive(receiver, stopped_record.header.artifact_id);
+  for (std::size_t offset = 0; offset < large.size();) {
+    const std::size_t piece = std::min<std::size_t>(16 * kMiB, large.size() - offset);
+    NativeArtifactBodyTee::Deliver(big.pipe, std::span(large).subspan(offset, piece));
+    offset += piece;
+    Check(NativeArtifactBodyTee::Waiting(big.pipe) == 0, "The writer keeps up with the body");
+    DrainQueued();
+    base::test_now_ns += 2 * kSecond;
+    RunDueTasks();
+    receive_snapshots();
+  }
+  const auto big_partials = partials(big);
+  Check(big_partials.size() == 3 && ResponseRecord(big_partials[0]).captured_length == 16 * kMiB &&
+            ResponseRecord(big_partials[1]).captured_length == 32 * kMiB && checkpoints() == 0,
+        "A large open body is snapshotted by checkpoints of every byte so far");
+  const auto big_end = Ended(big, {});
+  const auto big_payload = ResponseRecord(big_end);
+  Check(StateOf(big_payload) == reb::ResponseBodyState::kCaptured &&
+            big_payload.body_length == large.size() && big_payload.captured_length == large.size(),
+        "A 40 MiB body ends captured whole");
+  CheckRetained(big_end, big, large, "40 MiB body");
+  Receive(receiver, big_end.header.artifact_id);
+  // A large body still open at capture end is one last partial naming all of it.
   const auto open = Respond(9023, {.mime = "application/x-ndjson"});
-  NativeArtifactBodyTee::Deliver(open.pipe, std::span(large).subspan(3, 16 * kMiB));
+  NativeArtifactBodyTee::Deliver(open.pipe, std::span(large).subspan(3, 20 * kMiB));
   ConfigureResponses();
+  runner.tasks.clear();
   const auto flushed = partials(open);
-  Check(flushed.size() == 2 && ResponseRecord(flushed.back()).partial_index == 2 &&
-            flushed.back().header.artifact_id == flushed.front().header.artifact_id,
-        "Capture end names an open sealed body's artifact once more");
+  Check(flushed.size() == 1 && ResponseRecord(flushed.back()).captured_length == 20 * kMiB,
+        "Capture end keeps an open 20 MiB body as one last partial");
+  CheckRetained(flushed.back(), open, std::span(large).subspan(3, 20 * kMiB), "flushed body");
   Receive(receiver, flushed.back().header.artifact_id);
   NativeArtifactBodyTee::End(open.pipe, reb::NativeArtifactBodyEnd::kSourceClosed);
   base::ThreadPool::RunPending();
@@ -652,7 +671,6 @@ void ResponseBodySchedule(reb::ArtifactReceiver& receiver, const std::filesystem
 
   // A burst followed by silence is published once the spacing allows, by one
   // timer per body; an ended body's timer does nothing.
-  auto& runner = *base::SequencedTaskRunner::GetCurrentDefault();
   ConfigureResponses();
   transfers.clear();
   runner.tasks.clear();
@@ -678,72 +696,10 @@ void ResponseBodySchedule(reb::ArtifactReceiver& receiver, const std::filesystem
   transfers.clear();
   runner.tasks.clear();
 
-  // A snapshot the spacing allowed but a byte bound withheld is flagged on
-  // every later record of the body (payload version 2, bit 7).
-  ConfigureResponses({.enabled = true, .budget = 1 * kMiB});
-  transfers.clear();
-  const auto withheld = Respond(9031, {.mime = "text/event-stream"});
-  NativeArtifactBodyTee::Deliver(withheld.pipe, std::vector<std::uint8_t>(40 * kKiB, 'w'));
-  base::test_now_ns += 2 * kSecond;
-  NativeArtifactBodyTee::Deliver(withheld.pipe, Bytes("x"));
-  const auto withheld_end = ResponseRecord(Ended(withheld, {}));
-  Check(partials(withheld).empty() && withheld_end.protocol_version == 2 &&
-            (withheld_end.flags & reb::kResponseBodySnapshotsWithheld) != 0,
-        "A withheld snapshot is said on the body's end");
-  const auto quick = ResponseRecord(Ended(Respond(9032), Bytes("{}")));
-  Check((quick.flags & reb::kResponseBodySnapshotsWithheld) == 0,
-        "A body whose snapshots were never withheld carries no flag");
-  transfers.clear();
-  runner.tasks.clear();
-
-  // A burst only the per-body pace withholds is published through silence
-  // once the pace allows it. With a 1 MiB budget the body's allowance is
-  // 128 KiB, 32 KiB at once, so 40 KiB waits until a twelfth of the 1000 s
-  // session has passed: 83.3 s. One timer per body; an ended body's does nothing.
-  ConfigureResponses({.enabled = true, .budget = 1 * kMiB});
-  transfers.clear();
-  runner.tasks.clear();
-  const auto start = base::test_now_ns;
-  const auto silent = Respond(9033, {.mime = "text/event-stream"});
-  NativeArtifactBodyTee::Deliver(silent.pipe, std::vector<std::uint8_t>(40 * kKiB, 'p'));
-  base::test_now_ns = start + 2 * kSecond;
-  RunDueTasks();
-  NativeArtifactBodyTee::Deliver(silent.pipe, Bytes("q"));
-  Check(runner.tasks.size() == 1 && partials(silent).empty() &&
-            runner.tasks[0].posted + runner.tasks[0].first > start + 83 * kSecond &&
-            runner.tasks[0].posted + runner.tasks[0].first < start + 84 * kSecond,
-        "A burst the pace withholds waits for one timer at the time the pace allows it");
-  base::test_now_ns = start + 83 * kSecond;
-  RunDueTasks();
-  Check(partials(silent).empty(), "Nothing is published before the pace allows it");
-  base::test_now_ns = start + 84 * kSecond;
-  RunDueTasks();
-  const auto paced_snapshots = partials(silent);
-  Check(paced_snapshots.size() == 1 &&
-            ResponseRecord(paced_snapshots[0]).body_length == 40 * kKiB + 1 &&
-            (ResponseRecord(paced_snapshots[0]).flags & reb::kResponseBodySnapshotsWithheld) != 0 &&
-            runner.tasks.empty(),
-        "With no new chunk the pace timer publishes the withheld burst");
-  const auto paced_end = Respond(9034, {.mime = "text/event-stream"});
-  NativeArtifactBodyTee::Deliver(paced_end.pipe, std::vector<std::uint8_t>(40 * kKiB, 'e'));
-  base::test_now_ns += 2 * kSecond;
-  RunDueTasks();
-  Check(runner.tasks.size() == 1, "An ended body's pace timer is pending at its end");
-  Ended(paced_end, {});
-  base::test_now_ns += 100 * kSecond;
-  const auto paced_ended = events.size();
-  RunDueTasks();
-  Check(events.size() == paced_ended && partials(paced_end).empty(),
-        "An ended body's pace timer publishes nothing");
-  NativeArtifactBodyTee::End(silent.pipe, reb::NativeArtifactBodyEnd::kSourceClosed);
-  Completed(silent);
-  base::ThreadPool::RunPending();
-  transfers.clear();
-  runner.tasks.clear();
   Configure();
-  std::cout << "PASS response body schedule: paced per-body allowance, session snapshot "
-               "share and its refund, declared lengths, the 16 MiB seal without a copy, a "
-               "timer that publishes a burst, and the withheld flag\n";
+  std::cout << "PASS response body schedule: the copy bound of four times the kept bytes plus "
+               "64 MiB and its withheld flag, the disk reserve on a snapshot and on its stream, a "
+               "40 MiB body snapshotted and kept whole, a timer that publishes a burst\n";
   ResponseBodyScheduleReplay(output);
 }
 
@@ -761,7 +717,7 @@ void ResponseBodyLimits(reb::ArtifactReceiver& receiver, const std::filesystem::
   };
 
   // Identical bytes are stored once; the repeat names the first artifact.
-  ConfigureResponses({.enabled = true, .budget = 64 * kKiB});
+  ConfigureResponses();
   transfers.clear();
   const std::vector<std::uint8_t> forty(40 * kKiB, 'f');
   const auto original = Ended(Respond(next++), forty);
@@ -771,22 +727,24 @@ void ResponseBodyLimits(reb::ArtifactReceiver& receiver, const std::filesystem::
             (repeat_payload.flags & reb::kResponseBodyShared) != 0 &&
             StateOf(repeat_payload) == reb::ResponseBodyState::kCaptured,
         "A repeated body names the first artifact and is not sent again");
-  // The budget counts unique bytes, and running out is a named state.
-  std::vector<std::uint8_t> other(40 * kKiB, 'o');
-  const auto over = ResponseRecord(Ended(Respond(next++), other));
-  Check(StateOf(over) == reb::ResponseBodyState::kNotCapturedSessionBudget &&
-            over.body_length == other.size() && transfers.size() == 1,
-        "A body past the byte budget is refused visibly with its length");
   drain();
-  const std::vector<std::uint8_t> small(30 * kKiB, 's');
-  Check(ResponseRecord(Ended(Respond(next++), small)).state ==
-            static_cast<std::uint8_t>(reb::ResponseBodyState::kNotCapturedSessionBudget),
-        "Accepted bytes stay charged");
-  // A receiver refusal refunds the bytes and forgets the digest.
-  ConfigureResponses({.enabled = true, .budget = 64 * kKiB});
+
+  // Distinct bodies past what an older session's 512 MiB budget allowed are
+  // still retained: nothing counts what a session already kept.
+  std::vector<std::uint8_t> sixteen(16 * kMiB);
+  for (std::uint8_t fill = 0; fill < 33; ++fill) {
+    std::ranges::fill(sixteen, fill);
+    const auto retained = Ended(Respond(next++), sixteen);
+    Check(StateOf(ResponseRecord(retained)) == reb::ResponseBodyState::kCaptured &&
+              transfers.size() == 1 && retained.header.artifact_id != 0,
+          "A 16 MiB body past 512 MiB of earlier bodies is retained");
+    transfers.clear();
+  }
+
+  // A receiver refusal forgets the digest, so a repeat is sent again.
+  ConfigureResponses();
   transfers.clear();
-  reb::ArtifactReceiver refusing(output / "refusing-response-receiver",
-                                 {.max_artifact_bytes = kMiB, .max_store_bytes = kMiB});
+  reb::ArtifactReceiver refusing(output / "refusing-response-receiver", {});
   const auto refused = Ended(Respond(next++), forty);
   Receive(refusing, refused.header.artifact_id, true,
           reb::ArtifactReceiveStatus::kSensitiveCaptureDisabled);
@@ -797,13 +755,22 @@ void ResponseBodyLimits(reb::ArtifactReceiver& receiver, const std::filesystem::
   const auto resent = Ended(Respond(next++), forty);
   Check(resent.header.artifact_id != refused.header.artifact_id && transfers.size() == 1 &&
             ResponseRecord(resent).flags == ResponseRecord(refused).flags,
-        "A refused digest is sent again within the refunded budget");
-  drain();
-  Ended(Respond(next++), std::vector<std::uint8_t>(24 * kKiB, 'e'));
-  const auto exhausted = Respond(next++);
-  Check(!exhausted.teed && StateOf(ResponseRecord(LastOf(NativeProbeType::kResponseBody))) ==
-                               reb::ResponseBodyState::kNotCapturedSessionBudget,
-        "With the budget used up nothing is teed and each response says so");
+        "A refused digest is sent again");
+  transfers.clear();
+
+  // A body that ended before the disk reserve refused it already has a
+  // record naming its artifact, so the refusal follows as a disk_reserve
+  // failure joined to its creator.
+  reb::ArtifactReceiver full(
+      output / "disk-reserve-response-receiver",
+      {.disk_reserve_bytes = std::numeric_limits<std::uint64_t>::max(), .allow_sensitive = true});
+  const auto reserved = Ended(Respond(next++), std::vector<std::uint8_t>(40 * kKiB, 'd'));
+  Receive(full, reserved.header.artifact_id, true, reb::ArtifactReceiveStatus::kDiskReserve);
+  Check(events.back().header.type == NativeProbeType::kArtifactCaptureFailed &&
+            Payload(events.back()) == "disk_reserve" &&
+            events.back().header.artifact_id == reserved.header.artifact_id &&
+            events.back().header.parent_event_id == reserved.header.parent_event_id,
+        "A body the disk reserve refused after its record is a disk_reserve failure");
   transfers.clear();
 
   // 50 parallel responses all fit: each holds its bytes, not a 16 MiB share.
@@ -813,9 +780,9 @@ void ResponseBodyLimits(reb::ArtifactReceiver& receiver, const std::filesystem::
   for (int index = 0; index < 50; ++index) {
     parallel.push_back(Respond(next++));
   }
-  Check(sink.in_flight_bytes() == 0 &&
+  Check(sink.in_flight_bytes() <= 50 * 256 &&
             std::ranges::all_of(parallel, [](const Response& item) { return item.teed; }),
-        "50 parallel bodies are teed and hold nothing before their bytes arrive");
+        "50 parallel bodies are teed and hold only their metadata before their bytes arrive");
   std::vector<std::vector<std::uint8_t>> parallel_bytes;
   for (std::size_t index = 0; index < parallel.size(); ++index) {
     parallel_bytes.push_back(Bytes("{\"index\":" + std::to_string(index) + ",\"pad\":\"" +
@@ -840,41 +807,48 @@ void ResponseBodyLimits(reb::ArtifactReceiver& receiver, const std::filesystem::
   drain();
   Check(sink.in_flight_bytes() == 0, "Written transfers return their share");
 
-  // Browser memory is bounded by the pool; a full pool is a named refusal.
+  // Browser memory is bounded by the pool. A full pool makes the tee wait,
+  // holding the source pipe, and the body is kept whole once there is room.
+  const std::vector<std::uint8_t> starved_bytes(64 * kKiB, 'z');
+  const auto starved = Respond(next++);
   {
     auto held = reb::NativeArtifactReservation::Acquire(
-        sink.memory_pool(), reb::kNativeArtifactInFlightBytes - 32 * kKiB);
-    const auto starved = Respond(next++);
-    const auto starved_record = Ended(starved, std::vector<std::uint8_t>(64 * kKiB, 'z'));
-    Check(starved.teed &&
-              StateOf(ResponseRecord(starved_record)) ==
-                  reb::ResponseBodyState::kNotCapturedTransferRefused &&
-              starved_record.header.artifact_id == 0 &&
-              sink.in_flight_bytes() == reb::kNativeArtifactInFlightBytes - 32 * kKiB,
-          "A full pool refuses the body visibly and keeps nothing of it");
+        sink.memory_pool(), sink.memory_pool().stream_mark() - 32 * kKiB,
+        reb::NativeArtifactPoolUse::kStream);
+    NativeArtifactBodyTee::Deliver(starved.pipe, starved_bytes);
+    Check(starved.teed && NativeArtifactBodyTee::Waiting(starved.pipe) == starved_bytes.size(),
+          "A body the full pool cannot take waits in its source pipe");
   }
+  base::SequencedTaskRunner::RunPosted();
+  const auto starved_record = Ended(starved, {});
+  Check(StateOf(ResponseRecord(starved_record)) == reb::ResponseBodyState::kCaptured,
+        "The waiting body is captured once the pool has room");
+  CheckRetained(starved_record, starved, starved_bytes, "body that waited for the pool");
+  drain();
   const auto big_a = Respond(next++, {.declared = static_cast<std::int64_t>(16 * kMiB)});
   const auto big_b = Respond(next++, {.declared = static_cast<std::int64_t>(16 * kMiB)});
-  Check(big_a.teed && big_b.teed && sink.in_flight_bytes() == 0,
-        "A declared length reserves nothing");
-  // A body past 16 MiB keeps its first 16 MiB and counts every byte.
+  Check(big_a.teed && big_b.teed && sink.in_flight_bytes() <= 2 * 256,
+        "A declared length reserves nothing beyond the stream's metadata");
+  // A body past 16 MiB is kept whole, like any other.
   std::vector<std::uint8_t> huge(16 * kMiB + 4321);
   for (std::size_t index = 0; index < huge.size(); ++index) {
     huge[index] = static_cast<std::uint8_t>(index * 13U);
   }
-  const auto truncated = Ended(big_a, huge);
-  const auto truncated_payload = ResponseRecord(truncated);
-  Check(StateOf(truncated_payload) == reb::ResponseBodyState::kCapturedTruncated &&
-            truncated_payload.body_length == huge.size(),
-        "A body past the artifact cap is truncated visibly");
-  CheckRetained(truncated, big_a, std::span(huge).first(16 * kMiB), "16 MiB prefix");
+  const auto whole = Ended(big_a, huge);
+  const auto whole_payload = ResponseRecord(whole);
+  Check(StateOf(whole_payload) == reb::ResponseBodyState::kCaptured &&
+            whole_payload.body_length == huge.size() &&
+            whole_payload.captured_length == huge.size(),
+        "A body past 16 MiB is captured whole");
+  CheckRetained(whole, big_a, huge, "16 MiB + 4321 body");
+  const auto before_cancel = sink.in_flight_bytes();
   NativeArtifactBodyTee::End(big_b.pipe, reb::NativeArtifactBodyEnd::kTargetClosed);
   Check(StateOf(ResponseRecord(LastOf(NativeProbeType::kResponseBody))) ==
                 reb::ResponseBodyState::kCancelled &&
-            sink.in_flight_bytes() == 16 * kMiB,
+            sink.in_flight_bytes() < before_cancel && sink.in_flight_bytes() >= huge.size(),
         "A cancelled empty body returns its share");
   drain();
-  Check(sink.in_flight_bytes() == 0, "The truncated body's share returns once written");
+  Check(sink.in_flight_bytes() == 0, "The whole body's share returns once written");
 
   // Without a completion the body is kept after a bounded wait, flagged.
   auto& runner = *base::SequencedTaskRunner::GetCurrentDefault();
@@ -952,13 +926,10 @@ void ResponseBodyLimits(reb::ArtifactReceiver& receiver, const std::filesystem::
   NativeArtifactBodyTee::End(nothing_yet.pipe, reb::NativeArtifactBodyEnd::kSourceClosed);
   base::ThreadPool::RunPending();
 
-  // Images that page elements load are media; asking for media keeps them.
+  // Images that page elements load are media, kept like any other body.
   const std::vector<std::uint8_t> gif{'G', 'I', 'F', '8', '9', 'a', 1, 0, 1, 0};
-  Check(!Respond(next++, {.mime = "image/gif", .resource_type = 4}).teed,
-        "An element-loaded image is skipped by default");
-  ConfigureResponses({.enabled = true, .media = true});
   const auto media = Respond(next++, {.mime = "image/gif", .resource_type = 4});
-  CheckRetained(Ended(media, gif), media, gif, "element image with media");
+  CheckRetained(Ended(media, gif), media, gif, "element image");
   transfers.clear();
 
   // A response the loader gave no body pipe is empty, not missing.
@@ -1001,8 +972,9 @@ void ResponseBodyLimits(reb::ArtifactReceiver& receiver, const std::filesystem::
         "An unavailable tee is refused visibly and returns its share");
   Configure();
   transfers.clear();
-  std::cout << "PASS response body limits: digest dedupe, unique-byte budget and exhaustion, "
-               "receiver refusal refund, 50 parallel bodies, full pool, 16 MiB truncation, "
-               "missing completion, failed and stopped bodies, coding order, capture-end "
-               "partial, media opt-in, metadata-only and tee refusal\n";
+  std::cout << "PASS response body limits: digest dedupe, 528 MiB with no session budget, "
+               "receiver and disk reserve refusals, 50 parallel bodies, a wait for the full pool, "
+               "a body past 16 MiB kept whole, missing completion, failed and stopped bodies, "
+               "coding order, capture-end partial, media by default, metadata-only and tee "
+               "refusal\n";
 }

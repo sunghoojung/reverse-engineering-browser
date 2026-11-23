@@ -153,12 +153,12 @@ sending a request. `start_live_session` takes named capture options (`url`,
 `wasm_samples_per_indirect_site`, `wasm_function_allow`,
 `wasm_function_deny`, `wasm_module_allowlist`, `guest_adapter`, `js_dispatch_sites`,
 `quiet`, `category_mask`, `duration_seconds`, `localhost_only`,
-`document_start`, `request_content`, `request_content_budget_mib`,
-`request_stacks`, `browser_internal`, `extension_traffic`, `fresh_profile`,
-`js_invocation_sites`, `js_invocation_saved_sites`, `js_invocation_digests`
-and others; an option left unset takes the Origin Trace app's default, request
-content and Canvas images included, `false` turns one off, and none is
-inherited from the environment), starts the same launcher as `make live`
+`document_start`, `request_content`, `request_stacks`, `browser_internal`,
+`extension_traffic`, `fresh_profile`, `js_invocation_sites`,
+`js_invocation_saved_sites`, `js_invocation_digests` and others; an option left
+unset takes the Origin Trace app's default, request content and Canvas images
+included, `false` turns one off, and none is inherited from the environment),
+starts the same launcher as `make live`
 with an Origin Trace window, and moves this connection to that exact session.
 `get_session_context` then reports the session's `capture_options`, and
 `get_native_console` lists its documents and frames for the Console

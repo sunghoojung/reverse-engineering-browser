@@ -1390,7 +1390,6 @@ impl App {
                 let indexes = self.indexes.clone();
                 let artifacts = self.options.artifacts.clone();
                 let instance = self.instance_id.clone();
-                let content_limits = session_context::content_limits(&self.options);
                 let mut summary = self
                     .blocking(move || {
                         let mut indexes = indexes
@@ -1406,7 +1405,6 @@ impl App {
                                 capture_stopped: state.2,
                                 artifact_receiver_configured: state.3,
                                 artifact_receiver_connected: state.4,
-                                content_limits,
                             },
                             std::time::Instant::now() + session_summary::FOLD,
                         )?;

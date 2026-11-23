@@ -23,10 +23,7 @@ To receive a browser-process artifact stream directly:
 build/reb-artifact-producer |
   build/reb-artifact-receiver \
     --store build/sessions/artifacts \
-    --max-artifact-bytes 16777216 \
-    --max-store-bytes 268435456 \
-    --max-artifacts 4096 \
-    --max-manifest-bytes 67108864
+    --disk-reserve-bytes 4294967296
 ```
 
 For the authenticated live transport, use a token already created by the event
@@ -43,9 +40,13 @@ build/reb-artifact-receiver \
 Version 2 streams interleave with whole frames on one input: an open header,
 then data, checkpoint, end or abort frames, each acknowledged
 ([wire contract](../../docs/architecture/artifact-transfer-channel.md#streamed-artifacts-version-2)).
-An open stream counts against the artifact and store limits until it publishes.
-At most 128 are open at once; a stream still open when its connection closes,
-or when standard input ends, is discarded and counted as `streams_abandoned`.
+Any number of streams may be open at once; each holds only its metadata and a
+partial file. A stream still open when its connection closes, or when standard
+input ends, is discarded and counted as `streams_abandoned`.
+Every stored byte is hashed on the receiver's one thread, with the ARMv8
+SHA-256 instructions where the processor has them, and a socket connection asks
+for a 1 MiB receive buffer so a whole data frame arrives in one read
+([throughput](../../docs/architecture/artifact-transfer-channel.md#throughput)).
 
 The socket is mode 0600 and accepts only same-user peers that prove possession
 of the 256-bit token. Every frame must also match the authenticated session ID.
@@ -54,16 +55,18 @@ artifact receives a fixed acknowledgment only after its immutable blob,
 manifest entry, and containing directory entries are committed.
 
 A rejected frame keeps the connection when its header is valid and matches the
-authenticated session: those lengths are bounded, so the receiver reads and
-discards the rest of the frame (at most 16 MiB of content, the browser's own
-cap, or the configured artifact limit if larger) and then acknowledges it. The
+authenticated session: the receiver reads and discards the rest of the frame,
+whatever its size, through a fixed 64 KiB buffer and then acknowledges it. The
 browser therefore always reads the real status, even for a body larger than the
-socket buffers. An invalid header, a session mismatch, a truncated stream or a
-larger declared body leaves the stream unsynchronized, so the receiver
-acknowledges and closes that connection. Socket mode then keeps the listener and
+socket buffers. An invalid header, a session mismatch or a truncated stream
+leaves the stream unsynchronized, so the receiver acknowledges and closes that
+connection. Socket mode then keeps the listener and
 accepts a later authenticated connection; the browser reconnects within a
 bounded budget and records an `artifact_channel_lost` gap if it cannot. The live
 launcher stops the listener explicitly when the browser session ends.
+`SIGTERM` or `SIGINT` stops it at once, even while the browser's authenticated
+connection stays open and idle, which has no receive timeout; an artifact still
+arriving is not stored.
 
 Response bodies, request bodies, full request targets and Canvas data URLs are
 rejected by default.
@@ -77,10 +80,41 @@ The store contains immutable SHA-256-named blobs plus `manifest.jsonl`.
 Manifest records preserve execution-context and capture-origin provenance for
 runtime-generated source while remaining readable when those fields are absent
 from older version 1 sessions.
-Content bytes, artifact count, and manifest bytes have independent bounds, so
-empty artifacts cannot grow storage or duplicate checks indefinitely. In
-standard-input mode, the receiver stops on invalid or rejected input: there is
-no acknowledgment, so the exit status is the producer's only signal.
+The store has no artifact size, artifact count or manifest size limit. Its only
+bound is the disk reserve below: every artifact, empty ones included, adds a
+manifest record, and the reserve counts those bytes like any other. The
+receiver's identifier set holds 8 bytes per artifact; readers that index the
+manifest bound their own memory
+([artifact lookup](../../apps/origin-trace-backend/src/artifact_lookup.rs)).
+
+### Disk reserve
+
+The store has no byte budget. Instead the receiver keeps free space on the
+store's volume: it refuses any artifact, stream data frame or checkpoint copy
+that would leave less than the reserve free, 4 GiB unless `--disk-reserve-bytes`
+names another. The refusal is its own acknowledgment status, `disk_reserve`
+(7), so the browser records it as `not_captured_disk_reserve` or as an
+`artifact_capture_failed` record with that reason, never as a generic transfer
+failure ([native network v3](../../protocol/native-network-v3.md#bounds-2)).
+The free space counted is what `fstatvfs` reports available to this user, so
+it excludes space only root may use and purgeable space macOS has not freed.
+Each admission reads it again rather than caching it: a reading costs about
+0.3 µs, a small part of writing one 64 KiB frame, and a fresh reading also sees
+what the browser's cache, the event store and other applications wrote since.
+Once space returns, later artifacts are accepted again.
+
+4 GiB leaves room for what keeps writing to the same volume after artifacts
+stop: the event store, which records every refusal; the capture browser's
+profile and HTTP cache; and macOS itself, which places its swap files (1 GiB
+each) and local snapshots on the boot volume and slows down or fails writes as
+that volume nears full. It is small next to a typical free volume, and large
+against what one admission can add: a data frame is at most 64 KiB, and a
+checkpoint copies at most the stream it names. The live launcher passes
+`REB_ARTIFACT_DISK_RESERVE_MIB`, when set, as `--disk-reserve-bytes`; tests set
+it above the free space to force the refusal.
+
+In standard-input mode, the receiver stops on invalid or rejected input: there
+is no acknowledgment, so the exit status is the producer's only signal.
 
 The receiver's stored-byte and manifest accounting always matches the files on
 disk. A new blob counts from the moment it is linked. Any failure before its
@@ -103,7 +137,8 @@ use atomic no-clobber publication before manifest acknowledgment. An orphaned
 temporary entry or unsupported linked store fails safely rather than overwriting
 existing evidence. Store roots are user-owned and not group/other writable.
 
-The fixed `Artifact store ready` diagnostic follows successful initialization.
+The fixed `Artifact store ready` diagnostic follows successful initialization;
+the next line names the disk reserve in bytes.
 A live idle receiver still owns its writer lease after the broker stops. Stop
 this receiver before artifact package export; never remove or replace its guard.
 See [Evidence Package v1](../../protocol/evidence-package-v1.md#cooperative-leases-and-safe-local-files)

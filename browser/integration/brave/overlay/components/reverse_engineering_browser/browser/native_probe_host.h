@@ -73,7 +73,8 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
                            std::uint32_t js_invocation_id,
                            const std::string& source_url,
                            std::uint64_t module_token,
-                           mojo_base::BigBuffer content) override;
+                           mojo_base::BigBuffer content,
+                           std::uint64_t credit_bytes) override;
   void CaptureWasmIndirect(std::uint64_t capture_epoch,
                            std::uint64_t session_id,
                            std::uint64_t sequence_number,
@@ -95,7 +96,8 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
                            std::uint32_t js_invocation_id,
                            const std::string& source_url,
                            std::uint64_t module_token,
-                           mojo_base::BigBuffer content) override;
+                           mojo_base::BigBuffer content,
+                           std::uint64_t credit_bytes) override;
   void CaptureWasmExecution(std::uint64_t capture_epoch,
                             std::uint64_t session_id,
                             std::uint64_t sequence_number,
@@ -119,7 +121,8 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
                             std::uint32_t js_invocation_id,
                             const std::string& source_url,
                             std::uint64_t module_token,
-                            mojo_base::BigBuffer content) override;
+                            mojo_base::BigBuffer content,
+                            std::uint64_t credit_bytes) override;
   void CaptureNativeGuest(std::uint64_t capture_epoch,
                           const std::vector<std::uint8_t>& invocation_record,
                           const std::vector<std::uint8_t>& dispatch_record,
@@ -129,7 +132,8 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
                           const std::string& source_url,
                           const std::string& adapter_json,
                           mojo_base::BigBuffer wasm_module,
-                          mojo_base::BigBuffer bytecode) override;
+                          mojo_base::BigBuffer bytecode,
+                          std::uint64_t credit_bytes) override;
   void CaptureNativeGuestHost(std::uint64_t capture_epoch,
                               const std::vector<std::uint8_t>& event_record) override;
   void CaptureRendererTarget(const std::vector<std::uint8_t>& event_record,
@@ -145,7 +149,8 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
                                 std::uint64_t allocating_script_id,
                                 bool allocating_script_is_eval,
                                 mojo_base::BigBuffer allocating_script_source,
-                                std::uint64_t allocating_script_session_id) override;
+                                std::uint64_t allocating_script_session_id,
+                                std::uint64_t credit_bytes) override;
 
   void Configure(std::uint64_t session_id,
                  std::uint64_t category_mask,
@@ -177,6 +182,9 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   // Reports the browser verdict for module bytes sent with the guest dispatch
   // whose sequence number is module_token, if that configuration is current.
   void SendNativeStackArtifactRefused(std::uint64_t creator_event_id);
+  // Sends ReleaseArtifactCredit(bytes) when run; null for 0 bytes.
+  base::OnceClosure ArtifactCreditRelease(std::uint64_t bytes);
+  void SendReleaseArtifactCredit(std::uint64_t bytes);
   void SendNativeGuestModuleStatus(std::uint64_t capture_epoch,
                                    std::uint64_t module_token,
                                    bool accepted);

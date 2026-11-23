@@ -20,16 +20,25 @@ inline constexpr std::uint16_t kNativeArtifactProtocolVersion = 1;
 inline constexpr std::size_t kNativeArtifactHeaderSize = 128;
 inline constexpr std::uint32_t kNativeArtifactAckMagic = 0x4b414252U;
 inline constexpr std::size_t kNativeArtifactAckSize = 32;
-inline constexpr std::uint32_t kNativeArtifactMaxUrlBytes = 8'192;
+// url::kMaxURLChars, the longest URL Chromium carries between processes. Only
+// a script's own name (a sourceURL comment) can be longer, and such a name is
+// handled as a script with no name.
+inline constexpr std::uint32_t kNativeArtifactMaxUrlBytes = 2U * 1024U * 1024U;
 inline constexpr std::uint32_t kNativeArtifactMaxMimeTypeBytes = 255;
-inline constexpr std::size_t kNativeArtifactMaxContentBytes = 16U * 1024U * 1024U;
+// Artifact content has no size limit. This is the content a renderer has
+// handed to the browser that the browser has not yet copied out: script
+// sources, Wasm modules, runtime buffers, canvas images and stack scripts. A
+// producing thread cannot wait, so this bounds the shared memory a page that
+// produces faster than the receiver writes can pin. Past it the record is kept
+// and the bytes are not sent. One item larger than the bound goes when nothing
+// else is waiting.
+inline constexpr std::uint64_t kNativeRendererArtifactCreditBytes = 256ULL * 1024ULL * 1024ULL;
 inline constexpr std::uint16_t kNativeArtifactFlagSensitive = 1U << 0U;
 // Version 2 streams teed bodies: an open header, then stream frames.
 inline constexpr std::uint16_t kNativeArtifactStreamProtocolVersion = 2;
 inline constexpr std::uint32_t kNativeArtifactStreamMagic = 0x53424552U;
 inline constexpr std::size_t kNativeArtifactStreamFrameSize = 80;
 inline constexpr std::size_t kNativeArtifactStreamChunkBytes = 64U * 1024U;
-inline constexpr std::size_t kNativeArtifactMaxOpenStreams = 128;
 
 enum class NativeArtifactKind : std::uint16_t {
   kUnknown = 0,
@@ -83,7 +92,8 @@ using NativeGeneratedArtifactEmitter = void (*)(NativeArtifactKind kind,
                                                 std::uint64_t frame_id,
                                                 std::string_view source_url,
                                                 std::span<const std::uint8_t> content,
-                                                const NativeRuntimeScript& script) noexcept;
+                                                const NativeRuntimeScript& script,
+                                                std::uint64_t credit_bytes) noexcept;
 
 enum class NativeArtifactReceiveStatus : std::uint32_t {
   kAccepted = 0,
@@ -93,6 +103,8 @@ enum class NativeArtifactReceiveStatus : std::uint32_t {
   kSensitiveCaptureDisabled = 4,
   kConflict = 5,
   kIoError = 6,
+  // The store's volume would keep less free space than the receiver's reserve.
+  kDiskReserve = 7,
 };
 
 struct NativeArtifactAck final {

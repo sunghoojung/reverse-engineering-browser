@@ -398,7 +398,8 @@ void CaptureRuntimeMetadata(reb::NativeArtifactKind,
                             std::uint64_t,
                             std::string_view url,
                             std::span<const std::uint8_t>,
-                            const reb::NativeRuntimeScript&) noexcept {
+                            const reb::NativeRuntimeScript&,
+                            std::uint64_t) noexcept {
   captured_runtime_url = url;
 }
 reb::NativeProbeEmitStatus AcceptRuntimeEvent(const NativeProbeEvent&, std::uint64_t) noexcept {
@@ -825,7 +826,7 @@ void RuntimeCheckpointQueue() {
   const auto generation = sink.RuntimeCaptureGeneration();
   auto bytes = std::make_shared<std::array<std::uint8_t, 32>>();
   std::weak_ptr<std::array<std::uint8_t, 32>> retained = bytes;
-  assert(pending.Push({generation, 100, bytes}, 32));
+  assert(pending.Push({generation, 100, bytes}));
   // Script A allocated the zero-filled array. Script B writes synchronously;
   // the queued native payload retains A and observes the later byte contents.
   for (std::size_t i = 0; i < bytes->size(); ++i)
@@ -837,8 +838,8 @@ void RuntimeCheckpointQueue() {
     assert((*item.bytes)[1] == (1 ^ 0x5a));
     ++copies;
   });
-  assert(copies == 1 && pending.size() == 0 && pending.bytes() == 0);
-  assert(pending.Push({generation, 100, bytes}, 32));
+  assert(copies == 1 && pending.size() == 0);
+  assert(pending.Push({generation, 100, bytes}));
   transport.Disable();
   pending.Drain([&](Snapshot item) {
     if (item.generation == sink.RuntimeCaptureGeneration())
@@ -847,7 +848,7 @@ void RuntimeCheckpointQueue() {
   assert(copies == 1);
   Configure(events, 98, 200);
   const auto expiring = sink.RuntimeCaptureGeneration();
-  assert(pending.Push({expiring, 100, bytes}, 32));
+  assert(pending.Push({expiring, 100, bytes}));
   base::test_now_ns = 200;
   pending.Drain([&](Snapshot item) {
     if (item.generation == sink.RuntimeCaptureGeneration())
@@ -856,14 +857,14 @@ void RuntimeCheckpointQueue() {
   base::test_now_ns = 100;
   assert(copies == 1);
   Configure(events, 99);
-  assert(pending.Push({generation, 100, bytes}, 32));
+  assert(pending.Push({generation, 100, bytes}));
   pending.Drain([&](Snapshot item) {
     if (item.generation == sink.RuntimeCaptureGeneration())
       ++copies;
   });
   assert(copies == 1);
   const auto current = sink.RuntimeCaptureGeneration();
-  assert(pending.Push({current, 100, bytes, true}, 32));
+  assert(pending.Push({current, 100, bytes, true}));
   pending.Drain([&](Snapshot item) {
     if (item.detached) {
       sink.RecordRuntimeBufferOmission(item.generation, 8, "runtime_buffer_checkpoint_invalid");
@@ -873,20 +874,17 @@ void RuntimeCheckpointQueue() {
   });
   assert(One(events).header.type == reb::NativeProbeType::kArtifactCaptureFailed && copies == 1);
   for (unsigned i = 0; i < 16; ++i)
-    assert(pending.Push({current, 100, bytes}, 32));
-  assert(!pending.Push({current, 100, bytes}, 32));
+    assert(pending.Push({current, 100, bytes}));
+  assert(!pending.Push({current, 100, bytes}));
   // No checkpoint before teardown: omit, release all retained owners, no copy.
   bytes.reset();
   pending.Drain([&](Snapshot item) {
     sink.RecordRuntimeBufferOmission(item.generation, 8, "runtime_buffer_checkpoint_unavailable");
   });
   assert(Drain(events) == 16 && retained.expired() && copies == 1);
-  assert(pending.Push({current, 100, {}}, pending.kMaxBytes));
-  assert(!pending.Push({current, 100, {}}, 1));
-  pending.Drain([](Snapshot) {});
   transport.Disable();
   std::cout << "PASS native checkpoint queue: later writes, allocator identity, disable/session, "
-               "detach, teardown and independent limits\n";
+               "detach, teardown and the sixteen-entry limit\n";
 }
 
 void DisabledExpiredAndMalformed() {
@@ -1383,8 +1381,14 @@ void NativeWasmRuntimeAdmission() {
   input.source_url = "";
   assert(!reb::IsValidNativeWasmDispatchInput(input));
   input.source_url = "https://owned.test/module.wasm";
-  std::vector<std::uint8_t> oversized(reb::kNativeArtifactMaxContentBytes + 1);
-  input.module_bytes = oversized;
+  // A module of any size, with its br_table past the first 16 MiB.
+  std::vector<std::uint8_t> large(16U * 1024U * 1024U + 16U);
+  std::copy(module.begin(), module.begin() + 8, large.begin());
+  std::copy(module.begin() + 8, module.end(), large.end() - 4);
+  input.module_bytes = large;
+  input.module_byte_offset = static_cast<std::uint32_t>(large.size() - 4);
+  assert(reb::IsValidNativeWasmDispatchInput(input));
+  input.module_byte_offset = 8;
   assert(!reb::IsValidNativeWasmDispatchInput(input));
   input.module_bytes = std::span(module).first(9);
   assert(!reb::IsValidNativeWasmDispatchInput(input));
@@ -2392,6 +2396,7 @@ int main() {
   Run<&NativeJsInvocationOpenStarts>();
   Run<&NativeJsInvocationHeldGaps>();
   Run<&NativeRequestStacks>();
+  Run<&NativeStackScriptSourceBacklog>();
   Run<&NativeTaskChainsAndNavigations>();
   Run<&NativeAsyncSegmentNotAdmitted>();
   Run<&NativeAsyncSegmentArtifactRefused>();
@@ -2435,7 +2440,8 @@ int main() {
   Run<&CompiledScriptRetainsOnlyWhatSkippedTheNetwork>();
   Run<&CompiledScriptNeedsContentCapture>();
   Run<&CompiledScriptReportsMissingSource>();
-  Run<&CompiledScriptBudgetIsVisible>();
+  Run<&CompiledScriptBacklogIsVisible>();
+  Run<&CompiledScriptLargerThanTheCredit>();
   Run<&CompiledScriptRefusedRecordKeepsNothing>();
   Run<&CompiledScriptDisabledRecordsNothing>();
   std::cout << "Renderer ring admission only; no full Chromium/Mojo/runtime validation.\n";

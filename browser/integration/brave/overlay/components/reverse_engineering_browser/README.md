@@ -71,10 +71,11 @@ detects that disconnect promptly and disables every renderer host and browser
 capture sink. No page script controls probe activation.
 
 Canvas output is a separate, explicit sensitive-capture mode. When enabled for
-the session, a successful `HTMLCanvasElement.toDataURL()` result of at most 2
-MiB becomes a `canvas_data_url` artifact linked by `creator_event_id` to the
-exact readback operation. Larger or invalid results still produce metadata but
-no artifact. Renderer code passes the output one way to the browser process;
+the session, a successful `HTMLCanvasElement.toDataURL()` result of any size
+becomes a `canvas_data_url` artifact linked by `creator_event_id` to the
+exact readback operation. An invalid result, or one the renderer's artifact
+credit cannot take (`canvas_data_url_backlog`), still produces metadata but no
+artifact. Renderer code passes the output one way to the browser process;
 the browser remains the only owner of the authenticated artifact connection.
 
 Web Audio call sites observe selected graph construction, connection, source
@@ -141,19 +142,26 @@ Payload capture is limited to a bounded metadata prefix. Network request
 prefixes contain only the method and destination host. Fragments and URL
 credentials are never captured. Every admitted request
 also gets a `request_body` child record from `browser/native_network_capture_sink.cc`
-with the body's kind, length, normalized content type and a SHA-256 of
-in-memory bytes up to 4 MiB. Only with `--reb-capture-request-content` does the
-sink also emit `request_target` children (path and query, 116-byte prefix plus
-original length) for starts and redirects and hand longer targets and at most
-16 MiB of in-memory body bytes to `NativeArtifactCaptureSink::CaptureRequestContent`
-as sensitive `request_target` and `request_body` artifacts, copied and hashed
-off the UI sequence within a per-session byte budget. Brave patch
-`0019-tee-native-request-bodies` hands bodies with file, blob or stream parts to
-`browser/native_request_body_reader.cc`, which reads them on a background
-sequence (a stream part through a forwarding tee getter) and records them when
-the read ends. Password form posts keep neither bytes nor a digest. The wire
-and limits are in [Native network v2](../../../../../../protocol/native-network-v2.md)
-and [v3](../../../../../../protocol/native-network-v3.md#request-body-reads).
+with the body's kind, length and normalized content type; a Metadata only
+session hashes an in-memory body whole on a worker and records the digest
+without the bytes. Only with `--reb-capture-request-content` does the sink also
+emit `request_target` children (path and query, 116-byte prefix plus original
+length) for starts and redirects, hand longer targets to
+`NativeArtifactCaptureSink::CaptureRequestContent` as sensitive `request_target`
+artifacts, and read every body whole: Brave patch
+`0019-tee-native-request-bodies` hands it to
+`browser/native_request_body_reader.cc`, which reads it on a background
+sequence (a stream part through a forwarding tee getter), streams it to the
+receiver as a sensitive `request_body` artifact and records it when the read
+ends. No size limit or session byte budget applies; the receiver's disk reserve
+refuses what would fill the store's volume, and that refusal is its own state.
+Brave patch `0027-hold-requests-for-body-reads` holds a request whose body is
+read or hashed apart from it until that ends, so the browser never keeps a body
+past its request. A content session keeps a password form post like any other
+body and marks it `credential_form`; a Metadata only session keeps neither its
+bytes nor a digest. The wire and limits are in
+[Native network v2](../../../../../../protocol/native-network-v2.md) and
+[v3](../../../../../../protocol/native-network-v3.md#request-body-reads).
 Every network body streams to the receiver through
 `browser/native_artifact_stream.cc` in data frames of at most 64 KiB, so the
 in-flight pool bounds bytes in flight rather than bodies
@@ -254,23 +262,27 @@ configuration.
 Large artifact bytes use the separate 128-byte framed contract and 32-byte
 acknowledgment in `common/native_artifact_header.h`. Only the browser-process
 bridge owns that receiver connection. JavaScript and WASM response bodies are
-streamed by an asynchronous Mojo tee with a 16 MiB per-artifact limit. Tees and
-request content share the 32 MiB in-flight pool in
+streamed whole, at any length, by an asynchronous Mojo tee, in frames of at
+most 64 KiB with an incremental SHA-256. Tees, request content and renderer
+content share the 32 MiB in-flight pool in
 `common/native_artifact_memory_pool.h`, charged with each queued data frame and
-returned when the writer drops it. Compiled script source that no response body
-carries and WASM byte-buffer API inputs use a separate one-way Mojo submission
-with the same per-artifact cap; see
-[native compiled scripts](../../../../../../protocol/native-compiled-scripts-v1.md).
+returned when the writer drops it; a stream that finds the pool full waits for
+it to drain. Compiled script source that no response body carries, WASM
+byte-buffer API inputs, the modules Wasm observations and guest captures
+carry, runtime buffers, Canvas images and stack script sources use a separate
+one-way Mojo submission of any size, charged to a 256 MiB renderer credit that
+the browser returns once it no longer holds the buffer; see
+[native compiled scripts](../../../../../../protocol/native-compiled-scripts-v2.md).
 The browser copies renderer-owned shared memory before validation and records
 the stable execution context plus exact capture origin. A dedicated writer
-thread drains a bounded 32 MiB queue to the authenticated artifact socket.
+thread drains the pool's frames to the authenticated artifact socket.
 Successful evidence is emitted only after receiver acknowledgment; every local
 or remote rejection becomes an `artifact_capture_failed` event. Artifact bytes
 do not enter the renderer event ring. Other response bodies need request
 content capture: `browser/native_response_body_capture.cc` takes them from the
 same tee, joins each to its loader completion, retains it as a sensitive
-`response_body` artifact deduplicated by SHA-256 within a per-session byte
-budget, and writes a `response_body` record (type 33) for every outcome, from
+`response_body` artifact deduplicated by SHA-256, and writes a
+`response_body` record (type 33) for every outcome, from
 `common/native_network_response_body.h`. See
 [Native network v3](../../../../../../protocol/native-network-v3.md) and
 [`SAFETY.md`](../../../../../../SAFETY.md).

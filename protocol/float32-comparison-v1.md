@@ -112,9 +112,10 @@ is allowed. A start beyond total is rejected.
 - 2 MiB request body; 256 detail rows; 512 KiB serialized result
 - Artifact manifest: the artifact is found by ID through the backend's
   disk-backed manifest index (`manifest.jsonl.lookup-v1`), however long the
-  manifest is, with the 8,192-byte record limit. A lookup waits at most five
-  seconds for the index to reach the end of the manifest and returns `408`
-  past that, keeping its progress for the next read.
+  manifest is, with records up to the manifest's bound, which fits a 2 MiB
+  URL. A lookup waits at most five seconds for the index to reach the end of
+  the manifest and returns `408` past that, keeping its progress for the next
+  read.
 - Existing four-slot blocking-I/O admission pool; one-second admission deadline.
   A dropped HTTP caller cannot release a running task's permit. Bounded work can
   finish after caller cancellation; there are no mutations to undo.

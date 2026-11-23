@@ -1081,6 +1081,7 @@ fn canonical(value: &Value, nonzero: bool) -> Option<u64> {
 /// Port of `decodeResponseBodyRecord`; the C++ core and the Python validator
 /// share its rules (protocol/native-network-v3.md `response_body`).
 fn decode_response_body(event: &Value) -> Option<BodyRecord> {
+    // Versions 1 and 2 kept at most this much of a body.
     const CAPTURE_BYTES: u64 = 16 * 1024 * 1024;
     let payload = event["payload"].as_str()?;
     let (sequence, parent) = (
@@ -1125,13 +1126,15 @@ fn decode_response_body(event: &Value) -> Option<BodyRecord> {
     let mut halves = content_type.splitn(2, |byte| *byte == b'/');
     let well_typed = !typed
         || matches!((halves.next(), halves.next()), (Some(kind), Some(sub)) if token(kind) && token(sub));
-    // Version 2 adds bit 7, snapshots withheld by a byte bound.
+    // Version 2 adds bit 7, snapshots withheld by a byte bound. Version 3
+    // keeps every body whole and every media type.
     let version = u16_at(0);
-    if !(version == 1 || version == 2)
+    let limited = version < 3;
+    if !(1..=3).contains(&version)
         || u16_at(2) != 128
         || u16_at(30) != 0
-        || !(1..=12).contains(&state)
-        || flags & !(if version == 2 { 0xff } else { 0x7f }) != 0
+        || !(1..=13).contains(&state)
+        || flags & !(if version == 1 { 0x7f } else { 0xff }) != 0
         || type_length > 64
         || typed != (type_length != 0)
         || bytes[64 + usize::from(type_length.min(64))..]
@@ -1151,7 +1154,11 @@ fn decode_response_body(event: &Value) -> Option<BodyRecord> {
         return None;
     }
     let retained = captured != 0;
-    let whole = body.min(CAPTURE_BYTES);
+    let whole = if limited {
+        body.min(CAPTURE_BYTES)
+    } else {
+        body
+    };
     if captured > body
         || (artifact != 0) != retained
         || digest.iter().any(|byte| *byte != 0) != retained
@@ -1163,10 +1170,13 @@ fn decode_response_body(event: &Value) -> Option<BodyRecord> {
     }
     let valid = match state {
         1 => body != 0 && captured == body,
-        2 => body > CAPTURE_BYTES && captured == CAPTURE_BYTES,
+        2 => limited && body > CAPTURE_BYTES && captured == CAPTURE_BYTES,
         3 => body != 0 && captured == whole,
         4 | 5 => !retained || captured == whole,
-        6..=9 => body == 0,
+        6..=8 => body == 0,
+        9 => limited && body == 0,
+        12 => limited && !retained,
+        13 => !limited && !retained,
         _ => !retained,
     };
     valid.then(|| BodyRecord {
@@ -1179,7 +1189,7 @@ fn decode_response_body(event: &Value) -> Option<BodyRecord> {
         sha256: retained.then(|| hex::encode(digest)),
     })
 }
-const BODY_STATES: [&str; 12] = [
+const BODY_STATES: [&str; 13] = [
     "captured",
     "captured_truncated",
     "partial",
@@ -1192,6 +1202,7 @@ const BODY_STATES: [&str; 12] = [
     "not_captured_artifact_unavailable",
     "not_captured_transfer_refused",
     "not_captured_session_budget",
+    "not_captured_disk_reserve",
 ];
 /// Why a row's response body is or is not retained: its final response's
 /// newest `response_body` record, else why there is none. Port of
@@ -2725,8 +2736,8 @@ impl RequestIndex {
                 Position {
                     epoch: self.empty_epoch.clone(),
                     indexed_to: 0,
-                    file_end: 0,
                     scanned_to: 0,
+                    file_end: 0,
                     reopened: false,
                 }
             }
@@ -3076,7 +3087,7 @@ impl RequestIndex {
     pub fn is_caught_up(&self) -> bool {
         self.position
             .as_ref()
-            .is_some_and(|position| position.caught_up())
+            .is_some_and(|position| position.caught_up(RECORD_BYTES as u64))
     }
 
     /// The store epoch the index rows belong to and the byte offset folded
@@ -4291,32 +4302,23 @@ mod tests {
     fn write(path: &Path, store: &Store) {
         fs::write(path, store.bytes()).unwrap();
     }
-    /// A read folds for READ_FOLD and answers what is indexed. These tests
-    /// have no background indexer, so on a loaded machine one read can stop
-    /// short of even a small store's end; they read until it is covered.
-    fn page(index: &mut RequestIndex, raw: &str) -> Value {
-        let query = RequestQuery::parse(&Query::new(raw), raw).unwrap();
-        for _ in 0..600 {
-            match index.respond(&query, None).unwrap() {
-                Answer::Document(document, _) if document["index"]["complete"] == true => {
-                    return document;
-                }
-                Answer::Document(..) => {}
-                Answer::Unchanged(_) => panic!("unexpected 304"),
-            }
-        }
-        panic!("the request index never reached the store's end");
+    /// Indexes the store to its end. A read folds new records for at most
+    /// `READ_FOLD` and answers from what is indexed, so a test that expects
+    /// an answer over the whole store catches up first instead of racing that
+    /// slice on a loaded machine.
+    fn catch_up(index: &mut RequestIndex) {
+        index
+            .refresh(Instant::now() + Duration::from_secs(120))
+            .unwrap();
+        assert!(index.is_caught_up());
     }
-    /// Folds to the store's end, as `page` reads, for a test that asks
-    /// another question of the index.
-    fn fold(index: &mut RequestIndex) {
-        for _ in 0..600 {
-            index.refresh(Instant::now() + READ_FOLD).unwrap();
-            if index.is_caught_up() {
-                return;
-            }
+    fn page(index: &mut RequestIndex, raw: &str) -> Value {
+        catch_up(index);
+        let query = RequestQuery::parse(&Query::new(raw), raw).unwrap();
+        match index.respond(&query, None).unwrap() {
+            Answer::Document(document, _) => document,
+            Answer::Unchanged(_) => panic!("unexpected 304"),
         }
-        panic!("the request index never reached the store's end");
     }
     fn ids(document: &Value) -> Vec<String> {
         document["requests"]
@@ -5154,7 +5156,7 @@ mod tests {
         );
         write(&path, &store);
         let mut index = RequestIndex::new(&path);
-        fold(&mut index);
+        catch_up(&mut index);
         let range = index.member_range(Some("1"), None, "5").unwrap().unwrap();
         assert!(
             range.first >= renderer_end,
@@ -5303,6 +5305,7 @@ mod tests {
         let path = root.path().join("events.jsonl");
         write(&path, &fixture());
         let mut index = RequestIndex::new(&path);
+        catch_up(&mut index);
         let query = RequestQuery::parse(&Query::new(""), "").unwrap();
         let Answer::Document(_, tag) = index.respond(&query, None).unwrap() else {
             panic!("document")
@@ -5333,6 +5336,7 @@ mod tests {
             .unwrap()
             .write_all(&late.bytes())
             .unwrap();
+        catch_up(&mut index);
         let Answer::Document(document, _) = index.respond(&query, Some(&tag)).unwrap() else {
             panic!("a grown store answers again")
         };
@@ -5350,7 +5354,7 @@ mod tests {
         response_bodies(&mut store);
         write(&path, &store);
         let mut index = RequestIndex::new(&path);
-        fold(&mut index);
+        catch_up(&mut index);
         let counts = index.response_bodies().unwrap();
         assert_eq!(counts["complete"], true);
         let cases = counts["cases"].as_object().unwrap();

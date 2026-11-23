@@ -270,7 +270,7 @@ gapsButton.dispatchEvent(new window.Event('click'));
 assert.equal(gapsButton.getAttribute('aria-expanded'), 'true');
 assert.equal(gapsDetail.hidden, false);
 assert.deepEqual([...gapsDetail.querySelectorAll('li')].map(item => item.textContent),
-  ['1 header block not retained (session budget)', '1 late header record on no row', '1 request without final headers (HTTP cache)']);
+  ['1 header block not retained (older header budget)', '1 late header record on no row', '1 request without final headers (HTTP cache)']);
 {
   let focused = null;
   const focus = window.HTMLElement.prototype.focus;
@@ -334,15 +334,15 @@ const shell = (mode, requestContent, canvasImages) => runInContext(`state.sessio
 shell('live', true, true);
 assert.equal(contentLabel.hidden, false);
 assert.equal(contentLabel.textContent, 'Content capture');
-assert.match(contentLabel.getAttribute('title'), /request paths, queries and bodies, and response bodies, up to 16 MiB each, request and response headers, cookies and Canvas images/);
-assert.doesNotMatch(contentLabel.getAttribute('title'), /Budgets:/, 'a session context that names no limits names no budget');
-// The stacked footer's budget sentence closes when focus leaves it, on a press
+assert.match(contentLabel.getAttribute('title'), /request paths, queries and bodies, every response body whole with media and fonts, request and response headers, cookies and Canvas images/);
+assert.doesNotMatch(contentLabel.getAttribute('title'), /Budget|16 MiB/, 'a content session names no size limit');
+// The stacked footer's not-kept sentence closes when focus leaves it, on a press
 // anywhere else and when the request detail closes or changes, so it never
 // stays over the ledger's rows unasked.
 {
-  const notice = document.getElementById('request-budget');
-  const toggle = document.getElementById('request-budget-toggle');
-  const open = () => { runInContext('toggleTrafficBudget(true)', context); assert.equal(notice.dataset.expanded, 'true'); };
+  const notice = document.getElementById('request-not-kept');
+  const toggle = document.getElementById('request-not-kept-toggle');
+  const open = () => { runInContext('toggleTrafficNotKept(true)', context); assert.equal(notice.dataset.expanded, 'true'); };
   open();
   const leave = new window.Event('focusout');
   leave.relatedTarget = document.getElementById('request-order');
@@ -351,13 +351,13 @@ assert.doesNotMatch(contentLabel.getAttribute('title'), /Budgets:/, 'a session c
   assert.equal(toggle.getAttribute('aria-expanded'), 'false');
   open();
   const inside = new window.Event('focusout');
-  inside.relatedTarget = document.getElementById('request-budget-text');
+  inside.relatedTarget = document.getElementById('request-not-kept-text');
   notice.dispatchEvent(inside);
   assert.equal(notice.dataset.expanded, 'true', 'focus moving inside the notice keeps it open');
   document.getElementById('request-rows').dispatchEvent(new window.Event('pointerdown', {bubbles: true}));
   assert.equal(notice.dataset.expanded, 'false', 'a press elsewhere closes the sentence');
   open();
-  document.getElementById('request-budget-text').dispatchEvent(new window.Event('pointerdown', {bubbles: true}));
+  document.getElementById('request-not-kept-text').dispatchEvent(new window.Event('pointerdown', {bubbles: true}));
   assert.equal(notice.dataset.expanded, 'true', 'a press on the sentence keeps it open');
   runInContext(`state.trafficDetailOpen = true; renderInspector();`, context);
   open();
@@ -373,34 +373,24 @@ assert.doesNotMatch(contentLabel.getAttribute('title'), /Budgets:/, 'a session c
   runInContext(`setTrafficHeaderGapsOpen(document.getElementById('request-header-gaps'), document.getElementById('request-header-gaps-detail'), true)`, context);
   open();
   escape(toggle);
-  assert.equal(notice.dataset.expanded, 'false', 'Escape on the budget button closes the sentence');
+  assert.equal(notice.dataset.expanded, 'false', 'Escape on the not-kept button closes the sentence');
   assert.equal(gapsOpen(), true, 'and leaves the header gaps breakdown open');
   open();
   escape(gaps);
   assert.equal(gapsOpen(), false, 'Escape on the header gaps button closes its breakdown');
-  assert.equal(notice.dataset.expanded, 'true', 'and leaves the budget sentence open');
+  assert.equal(notice.dataset.expanded, 'true', 'and leaves the not-kept sentence open');
   runInContext(`setTrafficHeaderGapsOpen(document.getElementById('request-header-gaps'), document.getElementById('request-header-gaps-detail'), true)`, context);
   escape(gapsDetail);
   assert.equal(gapsOpen(), false, 'Escape inside the breakdown closes it');
-  assert.equal(notice.dataset.expanded, 'true', 'and not the budget sentence');
+  assert.equal(notice.dataset.expanded, 'true', 'and not the not-kept sentence');
   gaps.dispatchEvent(new window.Event('pointerdown', {bubbles: true}));
-  assert.equal(notice.dataset.expanded, 'false', 'pressing the header gaps button closes the budget sentence');
+  assert.equal(notice.dataset.expanded, 'false', 'pressing the header gaps button closes the not-kept sentence');
 }
-// The session context is the only source of a budget's size; the workspace
-// address carries none, and nothing says it does.
+// No content limit remains to read or name: the session context carries none.
 for (const [file, source] of sources.filter(([file]) => ['app.js', 'app_state.js', 'traffic_view.js'].includes(file))) {
-  assert.doesNotMatch(source, /budget_mib=|address\b[^\n]*(?:budget|limit)|(?:budget|limit)[^\n]*\baddress\b/i, `${file} takes no budget from the address`);
+  assert.doesNotMatch(source, /budget_mib|content_limits|sessionContentLimits|response_media/, `${file} reads no content limit`);
 }
-runInContext(`state.sessionContentLimits = {request_content_budget_mib: 1024, response_body_budget_mib: 2048, response_media: true}`, context);
-shell('live', true, true);
-assert.match(contentLabel.getAttribute('title'), /kept locally\. Budgets: 1,024 MiB of request content and 2,048 MiB of response bodies; media and fonts kept\. Each Traffic row/);
-runInContext(`state.sessionContentLimits = {request_content_budget_mib: 64, response_body_budget_mib: 128, response_media: null}`, context);
-shell('live', true, true);
-assert.match(contentLabel.getAttribute('title'), /Budgets: 64 MiB of request content and 128 MiB of response bodies\. Each Traffic row/,
-  'an unreported media choice is not guessed');
 shell('live', false, true);
-assert.doesNotMatch(contentLabel.getAttribute('title'), /Budgets:/, 'a session without request content names no budget');
-runInContext('state.sessionContentLimits = null', context);
 assert.equal(contentLabel.hidden, false);
 assert.match(contentLabel.getAttribute('aria-label'), /^Content capture: Canvas images$/);
 shell('live', false, false);

@@ -36,21 +36,22 @@ pub struct Position {
     pub epoch: String,
     /// The record boundary the index covers up to.
     pub indexed_to: u64,
+    /// How far the last fold read the file. Between `indexed_to` and here
+    /// there is no newline: a record still being written.
+    pub scanned_to: u64,
     /// The file's length at the last check.
     pub file_end: u64,
-    /// How far the last fold read: the bytes from `indexed_to` to here are
-    /// one line without its newline yet.
-    pub scanned_to: u64,
     /// The index was found on disk rather than built in this process.
     pub reopened: bool,
 }
 impl Position {
-    /// Every complete record of the file is indexed: a fold read to the end,
-    /// and what remains is at most one record still being written. A fold
-    /// that stopped at its deadline or budget is not caught up, however
-    /// little it left.
-    pub fn caught_up(&self) -> bool {
-        self.scanned_to.max(self.indexed_to) >= self.file_end
+    /// Every complete record of the file is indexed: the last fold read to
+    /// the end, and what remains is at most one record still being written.
+    /// A fold its deadline stopped leaves complete records unread however few
+    /// bytes they span, so the remainder's length alone does not say so.
+    pub fn caught_up(&self, record_bytes: u64) -> bool {
+        self.indexed_to >= self.file_end
+            || (self.scanned_to >= self.file_end && self.file_end - self.indexed_to <= record_bytes)
     }
 }
 
@@ -356,8 +357,8 @@ impl Sidecar {
         Ok(Position {
             epoch,
             indexed_to,
-            file_end: end,
             scanned_to: indexed_to,
+            file_end: end,
             reopened: self.reopened,
         })
     }
@@ -372,8 +373,8 @@ impl Sidecar {
         Ok(Position {
             epoch,
             indexed_to: 0,
-            file_end: 0,
             scanned_to: 0,
+            file_end: 0,
             reopened: self.reopened,
         })
     }
@@ -591,6 +592,13 @@ mod tests {
         "CREATE TABLE IF NOT EXISTS lines(start INTEGER PRIMARY KEY, end INTEGER NOT NULL)";
 
     fn fold_all(sidecar: &mut Sidecar, path: &Path) -> Position {
+        fold_until(
+            sidecar,
+            path,
+            Instant::now() + std::time::Duration::from_secs(5),
+        )
+    }
+    fn fold_until(sidecar: &mut Sidecar, path: &Path, deadline: Instant) -> Position {
         let mut file = File::open(path).unwrap();
         let position = sidecar.check(&mut file).unwrap();
         sidecar
@@ -598,7 +606,7 @@ mod tests {
                 &mut file,
                 &position,
                 u64::MAX,
-                Instant::now() + std::time::Duration::from_secs(5),
+                deadline,
                 64,
                 "oversized",
                 &mut |tx: &Transaction<'_>, _: &[u8], start: u64, end: u64| {
@@ -619,6 +627,39 @@ mod tests {
             .unwrap()
     }
 
+    /// A fold its deadline stopped has not read what remains, however few
+    /// bytes it spans, so the position is behind until a fold reads it; a
+    /// remainder a fold did read without a newline is a record being written.
+    #[test]
+    fn only_a_fold_that_read_to_the_end_is_caught_up() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("store.jsonl");
+        std::fs::write(&path, b"a\nbb\n").unwrap();
+        let mut sidecar = Sidecar::open(&path, ".test-v1", "test-v1", SCHEMA).unwrap();
+        let stopped = fold_until(&mut sidecar, &path, Instant::now());
+        assert_eq!(
+            (stopped.indexed_to, stopped.scanned_to, count(&sidecar)),
+            (0, 0, 0)
+        );
+        assert!(
+            !stopped.caught_up(64),
+            "two unread records are not a record being written"
+        );
+        let read = fold_all(&mut sidecar, &path);
+        assert_eq!((read.indexed_to, count(&sidecar)), (5, 2));
+        assert!(read.caught_up(0));
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"partial")
+            .unwrap();
+        assert!(!fold_until(&mut sidecar, &path, Instant::now()).caught_up(64));
+        let partial = fold_all(&mut sidecar, &path);
+        assert_eq!((partial.indexed_to, partial.scanned_to), (5, 12));
+        assert!(partial.caught_up(64) && !partial.caught_up(0));
+    }
+
     #[test]
     fn folds_appends_reopens_and_rebuilds_a_replaced_file() {
         let root = tempfile::tempdir().unwrap();
@@ -628,7 +669,7 @@ mod tests {
         assert!(sidecar.temporary_reason().is_none());
         let first = fold_all(&mut sidecar, &path);
         assert_eq!((first.indexed_to, count(&sidecar)), (5, 2));
-        assert!(first.caught_up(), "what remains is a record being written");
+        assert!(!first.caught_up(0) && first.caught_up(64));
         std::fs::OpenOptions::new()
             .append(true)
             .open(&path)
@@ -663,32 +704,6 @@ mod tests {
         drop(sidecar);
         remove(&path, ".test-v1").unwrap();
         assert!(!sidecar_path(&path, ".test-v1").exists());
-    }
-
-    /// A fold that stopped before the end left complete records unread,
-    /// however few: the index is not caught up until one reads to the end.
-    #[test]
-    fn a_fold_cut_by_its_deadline_is_not_caught_up() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("store.jsonl");
-        std::fs::write(&path, b"a\nbb\n").unwrap();
-        let mut sidecar = Sidecar::open(&path, ".test-v1", "test-v1", SCHEMA).unwrap();
-        let mut file = File::open(&path).unwrap();
-        let position = sidecar.check(&mut file).unwrap();
-        let cut = sidecar
-            .fold(
-                &mut file,
-                &position,
-                u64::MAX,
-                Instant::now(),
-                64,
-                "oversized",
-                &mut |_: &Transaction<'_>, _: &[u8], _: u64, _: u64| Ok(()),
-            )
-            .unwrap();
-        assert_eq!(cut.indexed_to, 0);
-        assert!(!cut.caught_up());
-        assert!(fold_all(&mut sidecar, &path).caught_up());
     }
 
     #[cfg(unix)]

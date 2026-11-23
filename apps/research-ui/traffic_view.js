@@ -58,14 +58,9 @@ function trafficByteCount(value) {
   return `${count.toLocaleString('en-US')} ${count === 1n ? 'byte' : 'bytes'}`;
 }
 
-// A budget a refusal met: its size when the session context names it
-// (state.sessionContentLimits, app.js), and the start panel control that sets
-// it for the next session.
-function trafficBudgetUsed(name, key, control) {
-  const budget = typeof state === 'undefined' ? null : state?.sessionContentLimits?.[key] ?? null;
-  return `this session had used its ${budget ? `${budget.toLocaleString('en-US')} MiB ` : ''}${name}. `
-    + `Raise ${control} in New Live Session… for the next session.`;
-}
+// Why a request body or full target recorded by an older browser was not
+// kept: that browser's session budget. Current capture has none.
+const TRAFFIC_OLDER_BUDGET = 'the request content budget was used, a limit of the browser that recorded this session. Current capture keeps every body and target whole';
 
 // What happened to the bytes, in the record's own terms.
 function trafficBodyCapture(body) {
@@ -79,14 +74,15 @@ function trafficBodyCapture(body) {
     empty: 'Empty body (0 bytes).',
     metadata_only: 'Not retained: content capture was off for this session. Length, type and digest are recorded.',
     captured: 'Retained in full.',
-    captured_truncated: `Retained prefix: ${trafficByteCount(body.capturedLength)} of ${trafficByteCount(body.bodyLength)}, truncated at the capture limit.`,
+    captured_truncated: `Retained prefix: ${trafficByteCount(body.capturedLength)} of ${trafficByteCount(body.bodyLength)}, truncated at a limit of the browser that recorded this session. Current capture keeps every body whole.`,
     not_captured_body_kind: `Not captured: the ${kind.toLowerCase()} parts were described, not read.`,
     not_captured_artifact_unavailable: 'Not captured: the artifact channel was unavailable.',
     not_captured_transfer_refused: 'Not captured: the bounded in-flight memory or artifact transfer queue refused it.',
     not_captured_url: 'Not captured: the URL is not HTTP(S), or in older captures longer than 8 KiB.',
-    not_captured_session_budget: `Not captured: ${trafficBudgetUsed('request content budget', 'request_content_budget_mib', 'Request content budget')}`,
+    not_captured_session_budget: `Not captured: ${TRAFFIC_OLDER_BUDGET}.`,
     not_captured_credential_form: 'Not captured: password form submission. Bytes and digest are withheld.',
-    not_captured_read_incomplete: 'Not captured: a file, blob or stream part was not read whole. It changed or failed, the upload was cancelled, or capture ended first.'
+    not_captured_read_incomplete: 'Not captured: a file, blob or stream part was not read whole. It changed or failed, the upload was cancelled, or capture ended first.',
+    not_captured_disk_reserve: 'Not captured: storing it would have left less free disk than the artifact receiver\'s reserve. Free disk space to keep later bodies.'
   }[body.state] ?? 'Unknown capture state.';
 }
 
@@ -96,8 +92,9 @@ function trafficBodyRows(body, artifact = null) {
   const stored = body.sha256 ? null : artifact?.sha256 ?? null;
   const digest = body.sha256 ?? stored ?? (body.state === 'no_body' ? 'No body'
     : body.state === 'not_captured_credential_form' ? 'Withheld for a password form'
-      : body.digestSizeLimit ? `Not computed: the body exceeds the ${body.read ? '16' : '4'} MiB digest bound`
-        : body.read ? 'Not computed: the read did not finish'
+      : body.digestSizeLimit ? `Not computed: the body exceeds the ${body.read ? '16' : '4'} MiB digest bound of the browser that recorded this session`
+        : body.state === 'not_captured_disk_reserve' ? 'Not computed: the receiver refused the body to keep its disk reserve free'
+          : body.read ? 'Not computed: the read did not finish'
           : 'Not computed: file, blob or stream parts were not read');
   return [
     ['Content type', body.contentType ?? (body.contentTypeOmitted ? 'Sent, but not a bounded media type; not recorded' : 'Not sent'),
@@ -239,7 +236,7 @@ function trafficRequestUrl(request, view) {
           : view.status === 'error' ? `the full target could not be read: ${view.error}` : 'the full target is not readable here'})`;
   }
   if (retention === 'not_retained_session_budget') {
-    return `${prefix}; the full target was not retained: ${trafficBudgetUsed('request content budget', 'request_content_budget_mib', 'Request content budget').replace(/\.$/, '')})`;
+    return `${prefix}; the full target was not retained: ${TRAFFIC_OLDER_BUDGET})`;
   }
   return TRAFFIC_TARGET_RETENTION[retention] ? `${prefix}; the full target was not retained: ${TRAFFIC_TARGET_RETENTION[retention]})` : `${prefix})`;
 }
@@ -309,7 +306,7 @@ const TRAFFIC_INITIATOR_TITLES = Object.freeze({
   worker: 'A service worker started this request.',
   worker_script: 'JavaScript or WebAssembly was running in a dedicated, shared or service worker when it started this request. The Initiator tab shows its call stack.',
   worker_loader: 'A dedicated, shared or service worker started this request with no script on its stack: its script or module loader, or a deferred start.',
-  worker_unwalked: 'A dedicated, shared or service worker started this request, but the renderer\'s 32 worker stack tables were in use, so no stack was walked.',
+  worker_unwalked: 'A dedicated, shared or service worker started this request, but no stack was walked: the browser that recorded this capture gave stack tables to at most 32 workers per renderer. Current builds walk every worker.',
   browser: 'The browser process started this request, such as a navigation; no renderer record names it.'});
 function trafficInitiatorLabel(request) {
   return Object.hasOwn(TRAFFIC_INITIATOR_LABELS, request?.initiator ?? '') ? TRAFFIC_INITIATOR_LABELS[request.initiator] : null;
@@ -1069,7 +1066,7 @@ function trafficHeaderCoverage(requests, events = typeof state === 'object' ? st
 
 const TRAFFIC_NOT_RETAINED_LABELS = Object.freeze({not_captured_block_limit: 'size limit',
   not_captured_artifact_unavailable: 'no artifact channel', not_captured_transfer_refused: 'queue refused',
-  not_captured_session_budget: 'session budget', not_captured_url: 'no HTTP(S) URL or hop'});
+  not_captured_session_budget: 'older header budget', not_captured_url: 'no HTTP(S) URL or hop'});
 
 // "(reason)" for one reason, else "(n reason, m reason)": the footer stays short.
 function trafficReasonList(reasons, labels) {

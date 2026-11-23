@@ -41,11 +41,11 @@ const trafficCookieSameSite = [null, 'Unspecified', 'None', 'Lax', 'Strict'];
 const trafficCookiePriority = [null, 'Low', 'Medium', 'High'];
 const trafficCookieStateNotes = {
   empty: 'No cookies.',
-  not_captured_block_limit: 'Longer than the 2 MiB list limit, so only its counts and size were recorded.',
+  not_captured_block_limit: 'Longer than its record can describe (4 GiB), or than the 2 MiB list limit of the browser that recorded this session, so only its counts and size were recorded.',
   not_captured_artifact_unavailable: 'Not retained: the artifact channel was unavailable.',
   not_captured_transfer_refused: 'Not retained: the bounded artifact queue refused it.',
-  not_captured_session_budget: 'Not retained: this session already retained 64 MiB of header blocks and cookie lists.',
-  not_captured_url: 'Not retained: not an HTTP(S) URL, longer than 8 KiB, or its hop was not tracked.'
+  not_captured_session_budget: 'Not retained: it arrived after 64 MiB of header blocks and cookie lists were retained, a limit of the browser that recorded this session.',
+  not_captured_url: 'Not retained: not an HTTP(S) URL, or its hop was not tracked. Older captures also used this for URLs longer than 8 KiB.'
 };
 
 function trafficCookieReasons(bits, names) {

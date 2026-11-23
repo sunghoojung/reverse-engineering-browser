@@ -700,7 +700,7 @@ impl StoreIndex {
         let Some((mut file, mut position)) = self.index.open()? else {
             return Ok(None);
         };
-        while !position.caught_up() && Instant::now() < deadline {
+        while !position.caught_up(0) && Instant::now() < deadline {
             let before = position.indexed_to;
             position = self.index.sidecar().fold(
                 &mut file,
@@ -775,7 +775,7 @@ fn indexing(position: &Position) -> Error {
 /// appends the newline last, so a line that parses as one object is complete;
 /// anything shorter is a write in progress and is not read yet.
 fn tail(file: &mut File, position: &Position) -> Result<Option<Vec<u8>>> {
-    if position.indexed_to >= position.file_end || !position.caught_up() {
+    if position.indexed_to >= position.file_end || !position.caught_up(RECORD_BYTES as u64) {
         return Ok(None);
     }
     let bytes = index_db::read_range(file, position.indexed_to, position.file_end)?;
@@ -973,7 +973,7 @@ impl Indexes {
             .optional()
             .sql()?;
         let Some((start, end)) = range else {
-            if !position.caught_up() {
+            if !position.caught_up(PROFILE_BYTES as u64) {
                 return Err(Error::new(
                     503,
                     format!(
@@ -999,7 +999,7 @@ impl Indexes {
         let Some((_, position)) = self.events.refresh(deadline)? else {
             return Ok(None);
         };
-        if !position.caught_up() {
+        if !position.caught_up(RECORD_BYTES as u64) {
             return Ok(None);
         }
         totals(self.events.index.sidecar().connection(), &position).map(Some)
@@ -1056,7 +1056,7 @@ impl Indexes {
             range,
             indexed_to: position.indexed_to,
             store_end: position.file_end,
-            caught_up: !stopped && position.caught_up(),
+            caught_up: !stopped && position.caught_up(RECORD_BYTES as u64),
         }))
     }
 
@@ -1147,7 +1147,7 @@ impl Indexes {
                 opened.push(None);
                 continue;
             };
-            if !position.caught_up() {
+            if !position.caught_up(RECORD_BYTES as u64) {
                 return Err(indexing(&position));
             }
             if let Some(error) = index.damage()? {
@@ -1309,6 +1309,7 @@ mod tests {
     use super::*;
     use crate::origin_trace::{RequestBodies, Retained, RetainedBody, check_selectors, trace};
     use serde_json::json;
+    use std::sync::atomic::AtomicBool;
 
     fn write(path: &Path, rows: &[Value], terminated: bool) {
         let mut text = rows
@@ -1362,7 +1363,7 @@ mod tests {
             session.as_deref(),
             *process,
             sequence.as_deref(),
-            &std::sync::atomic::AtomicBool::new(false),
+            &AtomicBool::new(false),
         )
     }
 
@@ -1448,7 +1449,6 @@ mod tests {
 
     fn steps(indexes: &mut Indexes, root: &Path, request: u64) -> Vec<String> {
         let mut evidence = indexes.trace(root, far()).unwrap();
-        let cancelled = std::sync::atomic::AtomicBool::new(false);
         let document = origin_trace::build(
             &mut evidence,
             &request.to_string(),
@@ -1456,7 +1456,7 @@ mod tests {
             None,
             None,
             root,
-            &cancelled,
+            &AtomicBool::new(false),
         )
         .unwrap();
         document["steps"]

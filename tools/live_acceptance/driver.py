@@ -13,20 +13,23 @@ import tempfile
 import time
 import traceback
 from types import ModuleType
+from typing import Callable
 import urllib.error
 import urllib.request
 
-from live_acceptance import (baseline, bodies, budget, cookies, debugger, headers, limits, metadata, nostacks,
-                             stacks, tabs, wasm)
+from live_acceptance import (baseline, bodies, cookies, debugger, headers, limits, metadata, nostacks, reserve,
+                             stacks, tabs, volume, wasm)
 from live_acceptance.evidence import Session, StartError, start_session
 from live_acceptance.fixture import Fixture
 from live_acceptance.pages import document
 from live_acceptance.report import Report
 from live_acceptance.run import Options, Run, brotli_encoder
 
-# The step 7 start command of docs/development/paired-release.md. A fresh profile keeps each run
-# from reading an earlier run's HTTP cache and cookies, and from waiting on a Brave that holds the
-# agent sessions' research profile.
+# The step 7 start command of docs/development/paired-release.md. Agent sessions
+# otherwise share one research profile, so each kind takes a fresh one: no
+# cookie, cache or service worker carries from one fixture session to the next,
+# no run waits on a Brave that holds the shared profile, and the volume check
+# finds its browser by the session's own profile.
 CONTENT_FLAGS = ["--localhost-only", "--fresh-profile", "--request-content", "--confirm-sensitive-capture",
                  "--canvas-images", "--request-stacks", "--promise-stacks", "--document-start", "--wasm-dispatch",
                  "--wasm-call-indirect"]
@@ -45,14 +48,16 @@ class Kind:
     flags: list[str]
     areas: list[ModuleType]
     duration: int
+    # More environment, from the directory that will hold the session.
+    prepare: Callable[[Path], dict[str, str]] | None = None
 
 
 KINDS = {
     "content": Kind(CONTENT_FLAGS, [baseline, stacks, headers, cookies, bodies, limits, debugger, tabs, wasm], 3600),
-    "budget": Kind([*CONTENT_FLAGS, "--request-content-budget-mib", str(budget.BUDGET_MIB),
-                    "--response-body-budget-mib", str(budget.BUDGET_MIB)], [budget], 1800),
+    "volume": Kind(CONTENT_FLAGS, [volume], 1800),
+    "reserve": Kind(CONTENT_FLAGS, [reserve], 900, reserve.environment),
     "metadata": Kind([flag for flag in CONTENT_FLAGS if flag not in METADATA_DROPS], [metadata], 900),
-    # Request stacks are on unless named off, and Promise stacks ride on them.
+    # Request stacks are on unless a start turns them off, and Promise stacks ride on them.
     "no-stacks": Kind([*(flag for flag in CONTENT_FLAGS if flag not in ("--request-stacks", "--promise-stacks")),
                        "--request-stacks=false"], [nostacks], 900),
 }
@@ -80,13 +85,9 @@ def check_context(run: Run) -> None:
             "request_stacks": run.kind != "no-stacks", "document_start": "permitted"}
     problems = [f"capture_options.{key} {options.get(key)!r}, expected {value!r}"
                 for key, value in want.items() if options.get(key) != value]
-    limits = options.get("content_limits")
-    if run.kind == "metadata" and limits is not None:
-        problems.append(f"content_limits {limits}, expected null")
-    if run.kind == "budget":
-        for key in ("request_content_budget_mib", "response_body_budget_mib"):
-            if (limits or {}).get(key) != budget.BUDGET_MIB:
-                problems.append(f"content_limits.{key} {(limits or {}).get(key)}, expected {budget.BUDGET_MIB}")
+    # Content capture has no limits to report; a backend that names them is stale.
+    if "content_limits" in options:
+        problems.append(f"capture_options.content_limits {options['content_limits']}, expected none")
     log = run.session.log_text
     promise = "promise_stacks=1" in log
     if run.kind != "no-stacks" and not promise:
@@ -135,8 +136,9 @@ def run_kind(name: str, args: argparse.Namespace, options: Options) -> Report:
         Path(root).mkdir(parents=True, exist_ok=True)
         arguments = ["--url", fixture.origin + "/", *kind.flags, "--brave-binary", str(args.brave),
                      "--sessions-root", str(Path(root).absolute()), "--duration-seconds", str(kind.duration)]
+        environment = kind.prepare(Path(root)) if kind.prepare else {}
         try:
-            session = start_session(args.reb_api, arguments, {})
+            session = start_session(args.reb_api, arguments, environment)
         except (StartError, subprocess.TimeoutExpired, ValueError, KeyError) as error:
             report.failed("setup", "session start", str(error))
             fixture.stop()
@@ -215,6 +217,7 @@ def main(argv: list[str] | None = None) -> int:
     if not (args.brave.is_file() and os.access(args.brave, os.X_OK)):
         print(f"UNAVAILABLE: no Brave executable at {args.brave}", file=sys.stderr)
         return 2
+    options.brave = args.brave
     if not args.reb_api.is_file():
         print(f"UNAVAILABLE: no reb-api at {args.reb_api}; run make origin-trace-backend", file=sys.stderr)
         return 2

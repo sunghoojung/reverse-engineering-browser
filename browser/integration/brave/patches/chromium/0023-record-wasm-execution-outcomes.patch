@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-index 025dbb8..5c93376 100644
+index 72930b5b28fd4eb01b7691f620924f49459323b4..bb2d6c4dfe431a01fdaf1e28c5125079ec4815f4 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 @@ -39,12 +39,14 @@
@@ -17,7 +17,7 @@ index 025dbb8..5c93376 100644
  #include "base/time/time.h"
  #include "brave/components/reverse_engineering_browser/common/native_runtime_snapshot_queue.h"
  #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
-@@ -784,6 +786,147 @@ reb::NativeJsInvocationContext CurrentJsInvocation() noexcept {
+@@ -781,6 +783,146 @@ reb::NativeJsInvocationContext CurrentJsInvocation() noexcept {
    return result;
  }
  
@@ -119,8 +119,7 @@ index 025dbb8..5c93376 100644
 +    mapped_bounds = static_cast<reb::NativeWasmExecutionBounds>(bounds);
 +  }
 +  std::span<const std::uint8_t> bytes;
-+  if (module_bytes != nullptr && module_size >= 8 &&
-+      module_size <= reb::kNativeArtifactMaxContentBytes) {
++  if (module_bytes != nullptr && module_size >= 8) {
 +    // V8 hands over the module's pointer and length; every read goes through
 +    // the span that pairs them.
 +    const base::span<const std::uint8_t> module_span =
@@ -165,7 +164,7 @@ index 025dbb8..5c93376 100644
  void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
                              const v8::WasmModuleBytesOrigin origin,
                              const std::uint8_t* bytes,
-@@ -1782,9 +1925,16 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+@@ -1759,9 +1901,16 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
        NativeWasmGuestDispatcherFunction);
    reb::NativeProbeSink::Get().SetNativeWasmGuestRuntime(CurrentNativeWasmGuest,
                                                          ResetNativeWasmGuest);

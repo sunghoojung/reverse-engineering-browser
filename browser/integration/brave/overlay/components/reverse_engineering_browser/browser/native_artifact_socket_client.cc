@@ -4,7 +4,6 @@
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_socket_client.h"
-#include "brave/components/reverse_engineering_browser/common/native_artifact_queue_limits.h"
 
 #include "build/build_config.h"
 
@@ -17,7 +16,6 @@
 #include <array>
 #include <cerrno>
 #include <cstddef>
-#include <limits>
 #include <span>
 #include <utility>
 
@@ -37,8 +35,14 @@ namespace {
 constexpr char kArtifactSocketSwitch[] = "reb-artifact-socket";
 constexpr char kBrokerTokenFileSwitch[] = "reb-broker-token-file";
 constexpr int kTransferTimeoutSeconds = 30;
+// macOS starts a local stream socket with 8 KiB buffers, so a 64 KiB data
+// frame would cross in eight pieces, each waking the writer and the receiver.
+// With room for a whole frame it crosses in one write. The bytes stay charged
+// to the in-flight pool until their acknowledgment, so this adds no memory
+// the pool does not already bound.
+constexpr int kSocketBufferBytes = 1024 * 1024;
 // A local receiver that refuses every connection for about three seconds is
-// gone for the session; transfers wait in the bounded queue meanwhile.
+// gone for the session; transfers wait in the queue meanwhile.
 constexpr std::array<int, 5> kReconnectDelaysMs = {100, 200, 400, 800, 1600};
 
 using State = NativeArtifactChannelState;
@@ -108,7 +112,7 @@ bool IsValidAck(const NativeArtifactAck& ack,
          std::ranges::all_of(ack.reserved1,
                              [](const std::byte value) { return value == std::byte{0}; }) &&
          ack.status >= NativeArtifactReceiveStatus::kAccepted &&
-         ack.status <= NativeArtifactReceiveStatus::kIoError;
+         ack.status <= NativeArtifactReceiveStatus::kDiskReserve;
 }
 
 // The receiver never writes unprompted, so a readable idle connection means it
@@ -166,13 +170,6 @@ TransferOutcome SendTransfer(const int descriptor,
   // so it leaves the connection usable.
   status = ack.status;
   return TransferOutcome::kAcknowledged;
-}
-
-std::size_t TransferSize(const NativeArtifactTransfer& transfer) noexcept {
-  const std::size_t metadata_size = transfer.url.size() + transfer.mime_type.size();
-  return metadata_size > std::numeric_limits<std::size_t>::max() - transfer.content.size()
-             ? std::numeric_limits<std::size_t>::max()
-             : metadata_size + transfer.content.size();
 }
 
 }  // namespace
@@ -238,23 +235,13 @@ bool NativeArtifactSocketClient::Enqueue(
   if (!transfer || !AcceptsTransfers(state_.load(std::memory_order_acquire))) {
     return false;
   }
-  const std::size_t transfer_size = TransferSize(*transfer);
-  const bool stream_frame = IsStreamFrame(*transfer);
-  const bool data = stream_frame && transfer->frame.op == NativeArtifactStreamOp::kData;
+  // The queue has no limit of its own: every queued byte holds an in-flight
+  // pool share, which is the bound. Control frames carry none, so an admitted
+  // stream can always be closed.
   base::AutoLock lock(lock_);
   if (!AcceptsTransfers(state_.load(std::memory_order_relaxed))) {
     return false;
   }
-  // End, abort and checkpoint frames always fit, so an admitted stream can
-  // always be closed.
-  if (data ? queued_stream_frames_ >= kNativeArtifactMaxQueuedStreamFrames ||
-                 !CanQueueNativeArtifact(0, queued_bytes_, transfer_size)
-           : !stream_frame && !CanQueueNativeArtifact(queue_.size() - queued_stream_frames_,
-                                                      queued_bytes_, transfer_size)) {
-    return false;
-  }
-  queued_bytes_ += transfer_size;
-  queued_stream_frames_ += stream_frame ? 1U : 0U;
   queue_.push_back(std::move(transfer));
   wakeup_.Signal();
   return true;
@@ -285,6 +272,9 @@ int NativeArtifactSocketClient::Connect() const {
     close(descriptor);
     return -1;
   }
+  // Only throughput depends on it, so a refusal keeps the default buffer.
+  static_cast<void>(setsockopt(descriptor, SOL_SOCKET, SO_SNDBUF, &kSocketBufferBytes,
+                               sizeof(kSocketBufferBytes)));
   return descriptor;
 }
 
@@ -361,8 +351,6 @@ void NativeArtifactSocketClient::Run() {
       }
       transfer = std::move(queue_.front());
       queue_.pop_front();
-      queued_bytes_ -= TransferSize(*transfer);
-      queued_stream_frames_ -= IsStreamFrame(*transfer) ? 1U : 0U;
       descriptor = socket_descriptor_;
     }
 
@@ -456,8 +444,6 @@ void NativeArtifactSocketClient::DisconnectPending(const NativeArtifactReceiveSt
   {
     base::AutoLock lock(lock_);
     pending.swap(queue_);
-    queued_bytes_ = 0;
-    queued_stream_frames_ = 0;
   }
   LoseOpenStreams(status);
   for (const auto& transfer : pending) {

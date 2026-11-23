@@ -298,6 +298,9 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   [[nodiscard]] bool CompiledScriptNeedsRecord(std::uint64_t execution_context_id,
                                                std::uint32_t script_id) const noexcept;
   void RecordCompiledScript(const NativeCompiledScript& script) noexcept;
+  // The browser copied out bytes this renderer charged against
+  // kNativeRendererArtifactCreditBytes. Any thread.
+  void ReleaseArtifactCredit(std::uint64_t bytes) noexcept;
   void ConfigureNativeWasmGuest(std::shared_ptr<const NativeWasmGuestAdapter> adapter,
                                 NativeGuestCaptureEmitter capture,
                                 NativeGuestHostEmitter host) noexcept;
@@ -710,7 +713,33 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                        std::string_view reason,
                        std::uint64_t generation) noexcept;
 
-  [[nodiscard]] bool ReserveCompiledScriptSource(std::uint64_t bytes) noexcept;
+  [[nodiscard]] bool TryChargeArtifactCredit(std::uint64_t bytes) noexcept;
+  // CaptureGeneratedArtifact for content whose credit the caller already
+  // charged: the content is sent, or its credit is returned.
+  void CaptureChargedArtifact(NativeArtifactKind kind,
+                              NativeArtifactCaptureOrigin capture_origin,
+                              std::uint64_t creator_event_id,
+                              std::uint64_t execution_context_id,
+                              std::uint64_t frame_id,
+                              std::string_view source_url,
+                              std::span<const std::uint8_t> content) noexcept;
+  void SendGeneratedArtifact(NativeArtifactKind kind,
+                             NativeArtifactCaptureOrigin capture_origin,
+                             std::uint64_t creator_event_id,
+                             std::uint64_t execution_context_id,
+                             std::uint64_t frame_id,
+                             std::string_view source_url,
+                             std::span<const std::uint8_t> content,
+                             bool charged) noexcept;
+  // Sends one Wasm observation or guest capture with the module copy it
+  // carries, of any size, charged to the artifact credit; the browser releases
+  // it once it has copied the bytes out. Returns the reason for the gap the
+  // caller fills when nothing was sent, or empty.
+  template <typename Emitter, typename Observation>
+  std::string_view SendWasmObservation(Emitter emitter,
+                                       const Observation& observation,
+                                       std::uint64_t generation,
+                                       std::string_view unavailable) noexcept;
   std::uint64_t RecordRuntimeBufferEvent(
       NativeProbeType type,
       std::uint64_t frame_id,
@@ -992,8 +1021,9 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<bool> capture_browser_internal_{false};
   std::atomic<NativeProbeExclusionCounter> exclusion_counter_{nullptr};
   std::atomic<NativeRendererTargetEmitter> target_emitter_{nullptr};
-  // Source bytes queued in this configuration, across every thread.
-  std::atomic<std::uint64_t> compiled_script_source_bytes_{0};
+  // Bytes sent to the browser and not yet released, across every thread and
+  // configuration: a buffer of a replaced configuration still pins memory.
+  std::atomic<std::uint64_t> artifact_credit_used_{0};
   // Monotonic generation claims are never reset: an old capture cannot spend
   // or release a replacement configuration's snapshot quota.
   std::array<std::atomic<std::uint64_t>, kRuntimeTypedArrayMaxSnapshots>

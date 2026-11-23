@@ -62,6 +62,7 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
   void SetDebuggerWatchScope(mojom::NativeWatchScopePtr scope) override;
   void Disable() override;
   void NativeStackArtifactRefused(std::uint64_t creator_event_id) override;
+  void ReleaseArtifactCredit(std::uint64_t bytes) override;
   void NativeGuestModuleStatus(std::uint64_t wasm_capture_epoch,
                                std::uint64_t module_token,
                                bool accepted) override;
@@ -99,7 +100,8 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                            std::uint64_t frame_id,
                            std::string_view source_url,
                            std::span<const std::uint8_t> content,
-                           const NativeRuntimeScript& script) noexcept;
+                           const NativeRuntimeScript& script,
+                           std::uint64_t credit_bytes) noexcept;
   void EmitGeneratedArtifact(NativeArtifactKind kind,
                              NativeArtifactCaptureOrigin capture_origin,
                              std::uint64_t creator_event_id,
@@ -107,7 +109,8 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                              std::uint64_t frame_id,
                              std::string_view source_url,
                              std::span<const std::uint8_t> content,
-                             const NativeRuntimeScript& script) noexcept;
+                             const NativeRuntimeScript& script,
+                             std::uint64_t credit_bytes) noexcept;
   mojo::SharedRemote<mojom::NativeProbeHost>* HostForCurrentSequence();
 
   mojo::SharedRemote<mojom::NativeProbeHost> host_;

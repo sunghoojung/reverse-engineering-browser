@@ -9,6 +9,9 @@
       // A named gap limits only the surface that shows its own category.
       const networkGapCategories = new Set(['network']);
       const vmGapCategories = new Set(['vm', 'wasm']);
+      // V8's largest Wasm module (kV8MaxWasmModuleSize) bounds a byte offset in
+      // one; include/reb/wasm_dispatch.hpp kWasmModuleByteOffsetLimit.
+      const WASM_MODULE_OFFSET_LIMIT = 2 ** 30;
 
       function fingerprintEventsFromEvents(events) {
         return events.filter(event => fingerprintSignalCategories.has(event.category));
@@ -506,7 +509,7 @@
         const row = {function_index:view.getUint32(4,true),module_byte_offset:view.getUint32(8,true),
           selector:view.getUint32(12,true),table_count:view.getUint32(16,true),sample_index:view.getUint32(20,true),
           ...nativeInvocationRow(context), ...(directCaller ? {direct_caller: directCaller} : {})};
-        return row.function_index < 16777216 && row.module_byte_offset >= 8 && row.module_byte_offset < 16777216 &&
+        return row.function_index < 16777216 && row.module_byte_offset >= 8 && row.module_byte_offset < WASM_MODULE_OFFSET_LIMIT &&
           row.table_count < 16777216 && row.sample_index < 0xffffffff ? row : null;
       }
 
@@ -527,7 +530,7 @@
         const row = {function_index:view.getUint32(4,true),module_byte_offset:view.getUint32(8,true),
           table_index:view.getUint32(12,true),slot:view.getUint32(16,true),callee_function_index:view.getUint32(20,true),
           resolution:view.getUint32(24,true),sample_index:view.getUint32(28,true),...nativeInvocationRow(context)};
-        return row.function_index < 16777216 && row.module_byte_offset >= 8 && row.module_byte_offset < 16777216 &&
+        return row.function_index < 16777216 && row.module_byte_offset >= 8 && row.module_byte_offset < WASM_MODULE_OFFSET_LIMIT &&
           row.table_index < 16777216 && row.callee_function_index < 16777216 && row.resolution < 5 &&
           (row.resolution === 0 || row.callee_function_index === 0) && row.sample_index < 0xffffffff ? row : null;
       }
@@ -555,7 +558,7 @@
         const offsetKnown = (row.known & 2) !== 0;
         if ((row.known & ~3) !== 0 || row.kind > 1 || row.related_stream > 2 || row.invocation_id === 0) return null;
         if (functionKnown ? row.function_index >= 16777216 : row.function_index !== 0) return null;
-        if (offsetKnown ? row.module_byte_offset < 8 || row.module_byte_offset >= 16777216 : row.module_byte_offset !== 0) return null;
+        if (offsetKnown ? row.module_byte_offset < 8 || row.module_byte_offset >= WASM_MODULE_OFFSET_LIMIT : row.module_byte_offset !== 0) return null;
         if (row.kind === 1 ? row.reason !== 0 || row.bounds !== 0 : row.reason >= 6) return null;
         if (row.reason === 3 ? row.bounds >= 7 : row.bounds !== 0) return null;
         if ((row.related_sample_index === 0xffffffff) !== (row.related_stream === 0)) return null;
@@ -640,8 +643,78 @@
       const requestBodyStates = [null, 'no_body', 'empty', 'metadata_only', 'captured', 'captured_truncated',
         'not_captured_body_kind', 'not_captured_artifact_unavailable', 'not_captured_transfer_refused',
         'not_captured_url', 'not_captured_session_budget', 'not_captured_credential_form',
-        'not_captured_read_incomplete'];
+        'not_captured_read_incomplete', 'not_captured_disk_reserve'];
       const requestTokenCharacters = /^[a-z0-9!#$%&'*+.^_`|~-]+\/[a-z0-9!#$%&'*+.^_`|~-]+$/;
+      // Version 1 only: in-memory bodies past this were not hashed, and a read
+      // kept at most the second as a prefix.
+      const requestBodyDigestBytes = 4n * 1024n * 1024n;
+      const requestBodyReadBytes = 16n * 1024n * 1024n;
+
+      // Version 1 rules (protocol/native-network-v2.md), kept for older sessions.
+      function validRequestBodyV1({kind, state, flags, bodyLength, captured, elements, hasArtifact, zeroDigest}) {
+        const [content, digest, sizeLimit, partial, read] = [1, 2, 4, 8, 64].map(bit => (flags & bit) !== 0);
+        const isBytes = kind === 1, isNone = kind === 0, readable = kind >= 2 && kind <= 5;
+        if ((flags & 0x80) !== 0) return false;
+        if (read) {
+          // File, blob or stream parts the browser read.
+          const exact = [2, 4, 5].includes(state), retained = state === 4 || state === 5;
+          if (!content || !readable || partial === exact || hasArtifact !== retained ||
+              (!retained && captured !== 0n) || digest === zeroDigest ||
+              (kind === 5 && elements < 2) || (kind === 4 && elements !== 1)) return false;
+          return {
+            2: digest && !sizeLimit && bodyLength === 0n,
+            4: digest && !sizeLimit && bodyLength !== 0n && bodyLength <= requestBodyReadBytes && captured === bodyLength,
+            5: !digest && sizeLimit && bodyLength > requestBodyReadBytes && captured === requestBodyReadBytes,
+            8: !digest && !sizeLimit, 10: !digest && !sizeLimit, 12: !digest && !sizeLimit
+          }[state] ?? false;
+        }
+        if (state === 12 || state === 13 ||
+            (digest && (!isBytes || sizeLimit || bodyLength > requestBodyDigestBytes)) || (!digest && !zeroDigest) ||
+            (sizeLimit && (!isBytes || bodyLength <= requestBodyDigestBytes)) ||
+            (isBytes && state !== 11 && digest === sizeLimit) || (state === 11 && (digest || sizeLimit)) ||
+            partial !== (!isNone && !isBytes) || isNone !== (state === 1) ||
+            (isNone && (elements !== 0 || bodyLength !== 0n)) || (!isNone && elements === 0)) return false;
+        const retained = state === 4 || state === 5;
+        if (hasArtifact !== retained || (!retained && captured !== 0n)) return false;
+        return {
+          1: true, 11: true,
+          2: isBytes && bodyLength === 0n,
+          3: !content && (!isBytes || bodyLength !== 0n),
+          4: content && isBytes && bodyLength !== 0n && captured === bodyLength,
+          5: content && isBytes && captured !== 0n && captured < bodyLength,
+          6: content && !isNone && !isBytes
+        }[state] ?? (content && ((isBytes && bodyLength !== 0n) || readable));
+      }
+
+      // Version 2 rules (protocol/native-network-v3.md): every body is read and
+      // hashed whole, and bit 7 marks a credential form.
+      function validRequestBodyV2({kind, state, flags, bodyLength, captured, elements, hasArtifact, zeroDigest}) {
+        const [content, digest, sizeLimit, partial, read, credential] =
+          [1, 2, 4, 8, 64, 128].map(bit => (flags & bit) !== 0);
+        const isBytes = kind === 1, isNone = kind === 0, unknown = kind === 6, retained = state === 4;
+        // Retired: nothing is truncated, budgeted or too large to hash.
+        if (sizeLimit || state === 5 || state === 10 || digest === zeroDigest || hasArtifact !== retained ||
+            (!retained && captured !== 0n) || isNone !== (state === 1) ||
+            (isNone && (credential || elements !== 0 || bodyLength !== 0n)) || (!isNone && elements === 0) ||
+            (kind === 4 && elements !== 1)) return false;
+        if (read) {
+          const exact = [2, 3, 4].includes(state);
+          if (unknown || isNone || digest !== exact || partial !== (!exact && !isBytes)) return false;
+          // A Metadata only session hashes in-memory bodies and keeps no bytes.
+          if (!content) return state === 3 && isBytes && !credential && bodyLength !== 0n;
+          return {2: bodyLength === 0n, 4: bodyLength !== 0n && captured === bodyLength, 8: true, 12: true, 13: true}[state] ??
+            false;
+        }
+        // Without a read only an empty in-memory body has a digest, and only a
+        // read learns of these.
+        if (digest !== (state === 2) || partial !== (!isNone && !isBytes) || [4, 12, 13].includes(state) ||
+            (!content && credential !== (state === 11))) return false;
+        const refused = content && !unknown && (!isBytes || bodyLength !== 0n);
+        return {
+          1: true, 2: isBytes && bodyLength === 0n, 3: !content && (!isBytes || bodyLength !== 0n),
+          6: content && !isBytes, 7: refused, 8: refused, 9: refused, 11: !content
+        }[state] ?? false;
+      }
 
       // Every rule of the request_body payload, shared with the C++ core and the
       // Python evidence validator through tools/check-network-request-wire.mjs.
@@ -651,6 +724,7 @@
         const bytes = bytesFromHex(event.payload);
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
         const [kindCode, stateCode, flags, typeLength] = [bytes[4], bytes[5], bytes[6], bytes[7]];
+        const version = view.getUint16(0, true);
         const bodyLength = view.getBigUint64(8, true);
         const captured = view.getBigUint64(16, true);
         const elements = view.getUint32(24, true);
@@ -658,67 +732,33 @@
         const typeBytes = bytes.slice(64, 128);
         const contentType = String.fromCharCode(...typeBytes.slice(0, Math.min(typeLength, 64)));
         const has = bit => (flags & bit) !== 0;
-        const [content, hasDigest, sizeLimit, partial, typePresent, typeOmitted, read] =
-          [1, 2, 4, 8, 16, 32, 64].map(has);
-        const digestLimit = 4n * 1024n * 1024n;
-        const readLimit = 16n * 1024n * 1024n;
-        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || view.getUint32(28, true) !== 0 ||
-            kindCode > 6 || stateCode < 1 || stateCode > 12 || (flags & ~0x7f) !== 0 || typeLength > 64 ||
-            (typePresent && typeOmitted) || typePresent !== (typeLength !== 0) ||
-            typeBytes.slice(typeLength).some(byte => byte !== 0) ||
-            (typePresent && !requestTokenCharacters.test(contentType)) || captured > bodyLength) return null;
-        const isBytes = kindCode === 1, isNone = kindCode === 0, state = requestBodyStates[stateCode];
-        const readable = kindCode >= 2 && kindCode <= 5;
-        const decoded = () => ({
-          kind: requestBodyKinds[kindCode], state, contentCapture: content, lengthPartial: partial, read,
+        const [content, hasDigest, sizeLimit, partial, typePresent, typeOmitted, read, credentialForm] =
+          [1, 2, 4, 8, 16, 32, 64, 128].map(has);
+        if (![1, 2].includes(version) || view.getUint16(2, true) !== 128 || view.getUint32(28, true) !== 0 ||
+            kindCode > 6 || stateCode < 1 || stateCode > 13 || typeLength > 64 || (typePresent && typeOmitted) ||
+            typePresent !== (typeLength !== 0) || typeBytes.slice(typeLength).some(byte => byte !== 0) ||
+            (typePresent && !requestTokenCharacters.test(contentType)) || captured > bodyLength ||
+            (kindCode === 5 && elements < 2)) return null;
+        const record = {kind: kindCode, state: stateCode, flags, bodyLength, captured, elements,
+          hasArtifact: event.artifact_id !== '0', zeroDigest: digest.every(byte => byte === 0)};
+        if (!(version === 1 ? validRequestBodyV1(record) : validRequestBodyV2(record))) return null;
+        return {
+          version, kind: requestBodyKinds[kindCode], state: requestBodyStates[stateCode], contentCapture: content,
+          lengthPartial: partial, read, credentialForm,
           contentType: typePresent ? contentType : null, contentTypeOmitted: typeOmitted,
           bodyLength: String(bodyLength), capturedLength: String(captured), elementCount: elements,
           sha256: hasDigest ? Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('') : null,
           digestSizeLimit: sizeLimit, artifactId: event.artifact_id,
           sequenceNumber: event.sequence_number, sessionId: event.session_id, processId: event.process_id
-        });
-        if (read) {
-          // File, blob or stream parts the browser read (native-network-v3.md).
-          const exact = [2, 4, 5].includes(stateCode), kept = stateCode === 4 || stateCode === 5;
-          if (!content || !readable || partial === exact || (event.artifact_id !== '0') !== kept ||
-              (!kept && captured !== 0n) || hasDigest !== digest.some(byte => byte !== 0) ||
-              (kindCode === 5 && elements < 2) || (kindCode === 4 && elements !== 1)) return null;
-          const readValid = {
-            2: hasDigest && !sizeLimit && bodyLength === 0n,
-            4: hasDigest && !sizeLimit && bodyLength !== 0n && bodyLength <= readLimit && captured === bodyLength,
-            5: !hasDigest && sizeLimit && bodyLength > readLimit && captured === readLimit,
-            8: !hasDigest && !sizeLimit, 10: !hasDigest && !sizeLimit, 12: !hasDigest && !sizeLimit
-          }[stateCode];
-          return readValid ? decoded() : null;
-        }
-        if (stateCode === 12) return null;
-        if ((hasDigest && (!isBytes || sizeLimit || bodyLength > digestLimit)) ||
-            (!hasDigest && digest.some(byte => byte !== 0)) ||
-            (sizeLimit && (!isBytes || bodyLength <= digestLimit)) ||
-            (isBytes && stateCode !== 11 && hasDigest === sizeLimit) ||
-            (stateCode === 11 && (hasDigest || sizeLimit)) ||
-            partial !== (!isNone && !isBytes) || isNone !== (stateCode === 1) ||
-            (isNone && (elements !== 0 || bodyLength !== 0n)) || (!isNone && elements === 0) ||
-            (kindCode === 5 && elements < 2)) return null;
-        const retained = stateCode === 4 || stateCode === 5;
-        if ((event.artifact_id !== '0') !== retained || (!retained && captured !== 0n)) return null;
-        const stateValid = {
-          no_body: true, not_captured_credential_form: true,
-          empty: isBytes && bodyLength === 0n,
-          metadata_only: !content && (!isBytes || bodyLength !== 0n),
-          captured: content && isBytes && bodyLength !== 0n && captured === bodyLength,
-          captured_truncated: content && isBytes && captured !== 0n && captured < bodyLength,
-          not_captured_body_kind: content && !isNone && !isBytes
-        }[state] ?? (content && ((isBytes && bodyLength !== 0n) || readable));
-        if (!stateValid) return null;
-        return decoded();
+        };
       }
 
       const responseBodyStates = [null, 'captured', 'captured_truncated', 'partial', 'aborted', 'cancelled', 'empty',
         'not_modified', 'redirected', 'not_captured_type', 'not_captured_artifact_unavailable',
-        'not_captured_transfer_refused', 'not_captured_session_budget'];
+        'not_captured_transfer_refused', 'not_captured_session_budget', 'not_captured_disk_reserve'];
       const responseCodings = new Map([[1, 'gzip'], [2, 'deflate'], [3, 'br'], [4, 'zstd'], [5, 'dcb'], [6, 'dcz'],
         [7, 'compress'], [15, 'other']]);
+      // Versions 1 and 2 only: a body kept at most this prefix.
       const responseCaptureBytes = 16n * 1024n * 1024n;
 
       // Every rule of the response_body payload (protocol/native-network-v3.md),
@@ -739,26 +779,32 @@
         const contentType = String.fromCharCode(...typeBytes.slice(0, Math.min(typeLength, 64)));
         const has = bit => (flags & bit) !== 0;
         const typePresent = has(0x40);
-        // Version 2 adds bit 7, snapshots withheld by a byte bound.
+        // Version 2 adds bit 7, snapshots withheld by a byte bound. Version 3
+        // keeps every body whole and every media type.
         const version = view.getUint16(0, true);
-        if (![1, 2].includes(version) || view.getUint16(2, true) !== 128 || view.getUint16(30, true) !== 0 ||
-            stateCode < 1 || stateCode > 12 || (flags & ~(version === 2 ? 0xff : 0x7f)) !== 0 || typeLength > 64 ||
+        const limited = version < 3;
+        if (![1, 2, 3].includes(version) || view.getUint16(2, true) !== 128 || view.getUint16(30, true) !== 0 ||
+            stateCode < 1 || stateCode > 13 || (flags & ~(version === 1 ? 0x7f : 0xff)) !== 0 || typeLength > 64 ||
             typePresent !== (typeLength !== 0) || typeBytes.slice(typeLength).some(byte => byte !== 0) ||
             (typePresent && !requestTokenCharacters.test(contentType)) || codingCount > 4 ||
             (has(0x10) && codingCount !== 4) ||
             codings.some((coding, index) => index < codingCount ? !responseCodings.has(coding) : coding !== 0)) return null;
         const retained = captured !== 0n;
-        const whole = bodyLength < responseCaptureBytes ? bodyLength : responseCaptureBytes;
+        const whole = limited && bodyLength > responseCaptureBytes ? responseCaptureBytes : bodyLength;
         if (captured > bodyLength || (event.artifact_id !== '0') !== retained || digest.some(byte => byte !== 0) !== retained ||
             (has(1) && !retained) || (partialIndex !== 0) !== (stateCode === 3) ||
             (has(0x20) && ![1, 2, 6].includes(stateCode))) return null;
-        const valid = stateCode === 1 ? bodyLength !== 0n && captured === bodyLength
-          : stateCode === 2 ? bodyLength > responseCaptureBytes && captured === responseCaptureBytes
-            : stateCode === 3 ? bodyLength !== 0n && captured === whole
-              : stateCode <= 5 ? !retained || captured === whole
-                : stateCode <= 9 ? bodyLength === 0n : !retained;
+        const valid = {
+          1: bodyLength !== 0n && captured === bodyLength,
+          2: limited && bodyLength > responseCaptureBytes && captured === responseCaptureBytes,
+          3: bodyLength !== 0n && captured === whole,
+          4: !retained || captured === whole, 5: !retained || captured === whole,
+          6: bodyLength === 0n, 7: bodyLength === 0n, 8: bodyLength === 0n, 9: limited && bodyLength === 0n,
+          10: !retained, 11: !retained, 12: limited && !retained, 13: !limited && !retained
+        }[stateCode];
         if (!valid) return null;
         return {
+          version,
           state: responseBodyStates[stateCode], shared: has(1), fromCache: has(2), serviceWorker: has(4),
           stillEncoded: has(8), codingsOmitted: has(0x10), completionUnobserved: has(0x20), snapshotsWithheld: has(0x80),
           contentType: typePresent ? contentType : null,
@@ -777,7 +823,11 @@
       // net::ReferrerPolicy + 1, as the Fetch policy names DevTools shows.
       const referrerPolicies = [null, 'no-referrer-when-downgrade', 'strict-origin-when-cross-origin',
         'origin-when-cross-origin', 'unsafe-url', 'origin', 'same-origin', 'strict-origin', 'no-referrer'];
-      const HEADER_BLOCK_LIMIT = 320 * 1024;
+      // Version 2 retains a block or cookie list of any length, so its
+      // not_captured_block_limit is only a length past the 32-bit field;
+      // version 1 had a 320 KiB block and 2 MiB list limit.
+      const HEADER_BLOCK_LIMIT_V1 = 320 * 1024;
+      const LENGTH_UNREPRESENTABLE = 0xffffffff;
 
       // Every rule of the request_headers and response_headers payload
       // (protocol/native-network-v3.md), shared with the C++ core and the
@@ -794,7 +844,8 @@
         const address = bytes.slice(24, 40), digest = bytes.slice(48, 80);
         const zero = list => list.every(byte => byte === 0);
         const addressed = family !== 0;
-        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || state < 1 || state > 8 ||
+        const version = view.getUint16(0, true);
+        if ((version !== 1 && version !== 2) || view.getUint16(2, true) !== 128 || state < 1 || state > 8 ||
             !zero(bytes.slice(44, 48)) || !zero(bytes.slice(80))) return null;
         const httpStatus = status === 0 || (status >= 100 && status <= 999);
         if (response ? policy !== 0 || (source === 1 ? !httpStatus : source === 2 ? !httpStatus || addressed
@@ -804,7 +855,8 @@
             (family === 4 && !zero(address.slice(4)))) return null;
         const empty = state === 3, limited = state === 4;
         if ((count === 0) !== empty || (length === 0) !== empty || length < 5 * count ||
-            limited !== (length > HEADER_BLOCK_LIMIT) || zero(digest) !== limited) return null;
+            limited !== (version === 1 ? length > HEADER_BLOCK_LIMIT_V1 : length === LENGTH_UNREPRESENTABLE) ||
+            zero(digest) !== limited) return null;
         if ((event.artifact_id !== '0') !== (state === 1 || state === 2)) return null;
         const hex = list => Array.from(list, byte => byte.toString(16).padStart(2, '0')).join('');
         let remoteAddress = null;
@@ -823,7 +875,7 @@
         };
       }
 
-      const COOKIE_LIST_LIMIT = 2 * 1024 * 1024;
+      const COOKIE_LIST_LIMIT_V1 = 2 * 1024 * 1024;
 
       // The cookie_list record ("Cookies" in protocol/native-network-v3.md),
       // shared with the C++ core and the Python validator through
@@ -836,12 +888,14 @@
         const count = view.getUint32(8, true), blocked = view.getUint32(12, true), length = view.getUint32(16, true);
         const digest = bytes.slice(32, 64);
         const zero = list => list.every(byte => byte === 0);
-        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || ![1, 2].includes(direction) ||
+        const version = view.getUint16(0, true);
+        if ((version !== 1 && version !== 2) || view.getUint16(2, true) !== 128 || ![1, 2].includes(direction) ||
             state < 1 || state > 8 || !zero(bytes.slice(6, 8)) || !zero(bytes.slice(28, 32)) || !zero(bytes.slice(64)) ||
             blocked > count) return null;
         const empty = state === 3, limited = state === 4;
         if ((count === 0) !== empty || (length === 0) !== empty || (!empty && length < 16 + 64 * count) ||
-            limited !== (length > COOKIE_LIST_LIMIT) || zero(digest) !== limited) return null;
+            limited !== (version === 1 ? length > COOKIE_LIST_LIMIT_V1 : length === LENGTH_UNREPRESENTABLE) ||
+            zero(digest) !== limited) return null;
         if ((event.artifact_id !== '0') !== (state === 1 || state === 2)) return null;
         return {
           direction: direction === 1 ? 'sent' : 'received', state: headerStates[state], cookieCount: count,
@@ -1131,7 +1185,7 @@
         }
         const length = view.getUint32(72,true);
         return isCanonicalInteger(event.parent_event_id,1n,uint64Max) && BigInt(event.parent_event_id) < BigInt(event.sequence_number) &&
-          view.getUint32(8,true) >= 8 && view.getUint32(8,true) < 16777216 && view.getUint32(16,true) < 16777216 &&
+          view.getUint32(8,true) >= 8 && view.getUint32(8,true) < WASM_MODULE_OFFSET_LIMIT && view.getUint32(16,true) < 16777216 &&
           view.getUint32(20,true) < 256 && u64(24) > 0n && u64(32) > 0n &&
           u64(56) > 0n && u64(56) !== BigInt(event.artifact_id) && length > 0 && length <= 65536 &&
           u64(40) < BigInt(length) && u64(64) + BigInt(length) <= uint64Max && bytes.slice(96).some(b => b !== 0) ? {} : null;
@@ -2733,7 +2787,7 @@
         if (!vmWorkspaceExact(row, vmNativeRowKeys(row, keys)) ||
           !vmSampleEvent(row.event) || !vmNativeRowTimeValid(row) || !vmNativeInvocationValid(row) ||
           !vmNativeDirectCallerValid(row) || !isSafeIntegerInRange(row.function_index,0,16777215) ||
-          !isSafeIntegerInRange(row.module_byte_offset,8,16777215) || !isSafeIntegerInRange(row.selector,0,0xffffffff) ||
+          !isSafeIntegerInRange(row.module_byte_offset,8,WASM_MODULE_OFFSET_LIMIT - 1) || !isSafeIntegerInRange(row.selector,0,0xffffffff) ||
           !isSafeIntegerInRange(row.table_count,0,16777215) || !isSafeIntegerInRange(row.sample_index,0,0xfffffffe) ||
           row.selected_arm !== Math.min(row.selector,row.table_count) || row.is_default !== (row.selector >= row.table_count)) return false;
         const site = workspace.dispatch_inventory?.candidates.find(site => site.byte_offset === row.module_byte_offset);
@@ -2747,7 +2801,7 @@
         if (!vmWorkspaceExact(row, vmNativeRowKeys(row, ['event','function_index','module_byte_offset','instruction','table_index',
           'slot','resolution','callee_function_index','sample_index'])) ||
           !vmSampleEvent(row.event) || !vmNativeRowTimeValid(row) || !isSafeIntegerInRange(row.function_index,0,16777215) ||
-          !isSafeIntegerInRange(row.module_byte_offset,8,16777215) || !['call_indirect','return_call_indirect'].includes(row.instruction) ||
+          !isSafeIntegerInRange(row.module_byte_offset,8,WASM_MODULE_OFFSET_LIMIT - 1) || !['call_indirect','return_call_indirect'].includes(row.instruction) ||
           !isSafeIntegerInRange(row.table_index,0,16777215) || !isSafeIntegerInRange(row.slot,0,0xffffffff) ||
           !vmIndirectResolutions.includes(row.resolution) || !isSafeIntegerInRange(row.sample_index,0,0xfffffffe) ||
           (row.resolution === 'resolved' ? !isSafeIntegerInRange(row.callee_function_index,0,16777215) : row.callee_function_index !== null)) return false;
@@ -2855,7 +2909,7 @@
           !isCanonicalInteger(row.pc_adjustment,int64Min,int64Max,true) ||
           !['i32','i64'].includes(row.pc_value_type) || typeof row.pc_subtract_memory_base !== 'boolean' ||
           !['pc_local_index','memory_index','selector','opcode'].every(k => isSafeIntegerInRange(row[k],0,0xffffffff)) ||
-          !isSafeIntegerInRange(row.function_index,0,16777215) || !isSafeIntegerInRange(row.module_byte_offset,8,16777215) ||
+          !isSafeIntegerInRange(row.function_index,0,16777215) || !isSafeIntegerInRange(row.module_byte_offset,8,WASM_MODULE_OFFSET_LIMIT - 1) ||
           !isSafeIntegerInRange(row.table_count,0,16777215) || !isSafeIntegerInRange(row.sample_index,0,255) ||
           row.selected_arm !== Math.min(row.selector,row.table_count) || row.is_default !== (row.selector >= row.table_count) ||
           !isSafeIntegerInRange(row.memory_length,1,65536) || !isSafeIntegerInRange(row.instruction_pointer,0,65535) ||
@@ -2865,7 +2919,7 @@
           !['explicit-adapter','verified-dataflow'].includes(row.interpretation) ||
           new Set([row.adapter_artifact_id,row.bytecode_artifact_id,workspace.interpreter_artifact_id]).size !== 3 ||
           !Array.isArray(row.host_import_call_offsets) || row.host_import_call_offsets.length > 64 ||
-          !row.host_import_call_offsets.every(n => isSafeIntegerInRange(n,8,16777215)) ||
+          !row.host_import_call_offsets.every(n => isSafeIntegerInRange(n,8,WASM_MODULE_OFFSET_LIMIT - 1)) ||
           new Set(row.host_import_call_offsets).size !== row.host_import_call_offsets.length) return false;
         const raw = BigInt(row.raw_pc_bits), base = BigInt(row.memory_base), adjusted = raw + BigInt(row.pc_adjustment);
         if ((row.pc_value_type === 'i32' && raw > 0xffffffffn) || adjusted < 0n || adjusted > uint64Max ||
@@ -3045,7 +3099,7 @@
             if (workspace.runtime !== 'webassembly' || claim.site_attribution !== 'exact' ||
               !vmWorkspaceExact(claim.site, ['function_index', 'byte_offset', 'line', 'column']) || claim.site.line !== null ||
               claim.site.column !== null || !isSafeIntegerInRange(claim.site.function_index, 0, 16777215) ||
-              !isSafeIntegerInRange(claim.site.byte_offset, 8, 16777215) || !vmObservedInterpreterSite(workspace, claim.site.byte_offset) ||
+              !isSafeIntegerInRange(claim.site.byte_offset, 8, WASM_MODULE_OFFSET_LIMIT - 1) || !vmObservedInterpreterSite(workspace, claim.site.byte_offset) ||
               !vmWorkspaceExact(claim.handler, ['kind', 'table_index', 'callee_function_index']) || claim.handler.kind !== 'table-entry' ||
               !isSafeIntegerInRange(claim.handler.table_index, 0, 16777215) ||
               !isSafeIntegerInRange(claim.handler.callee_function_index, 0, 16777215) ||
@@ -3068,7 +3122,7 @@
             if (workspace.runtime !== 'webassembly' || claim.site_attribution !== 'exact' ||
               !vmWorkspaceExact(claim.site, ['function_index', 'byte_offset', 'line', 'column']) || claim.site.line !== null ||
               claim.site.column !== null || !isSafeIntegerInRange(claim.site.function_index, 0, 16777215) ||
-              !isSafeIntegerInRange(claim.site.byte_offset, 8, 16777215) || !vmObservedInterpreterSite(workspace, claim.site.byte_offset) ||
+              !isSafeIntegerInRange(claim.site.byte_offset, 8, WASM_MODULE_OFFSET_LIMIT - 1) || !vmObservedInterpreterSite(workspace, claim.site.byte_offset) ||
               !vmWorkspaceExact(claim.handler, ['kind', 'arm', 'is_default']) || claim.handler.kind !== 'br-table-arm' ||
               typeof claim.handler.is_default !== 'boolean' || !isSafeIntegerInRange(claim.handler.arm, 0, 16777215) ||
               !isSafeIntegerInRange(claim.selector, 0, 0xffffffff) ||

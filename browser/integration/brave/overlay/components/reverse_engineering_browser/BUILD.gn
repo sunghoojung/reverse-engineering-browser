@@ -272,7 +272,6 @@ source_set("browser") {
     "browser/native_worker_transfer_gate.h",
     "common/native_artifact_header.h",
     "common/native_artifact_memory_pool.h",
-    "common/native_artifact_queue_limits.h",
     "common/native_console_io.cc",
     "common/native_console_io.h",
     "common/native_js_dispatch.h",

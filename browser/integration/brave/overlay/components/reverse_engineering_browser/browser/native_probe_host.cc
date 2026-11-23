@@ -15,6 +15,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <utility>
+#include "base/functional/callback_helpers.h"
 #include "base/process/process_handle.h"
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
@@ -167,8 +168,6 @@ std::optional<NativeWasmModuleTransfer> NativeProbeHost::ResolveWasmModule(
   if (!module_token) {
     if (content.size() == 0)
       return module;
-    if (content.size() > kNativeArtifactMaxContentBytes)
-      return std::nullopt;
     // Renderer shared memory remains writable: every check reads this copy.
     module.bytes.assign(content.begin(), content.end());
     module.known = true;
@@ -226,7 +225,11 @@ void NativeProbeHost::CaptureWasmDispatch(const std::uint64_t capture_epoch,
                                           const std::uint32_t js_invocation_id,
                                           const std::string& source_url,
                                           const std::uint64_t module_token,
-                                          mojo_base::BigBuffer content) {
+                                          mojo_base::BigBuffer content,
+                                          const std::uint64_t credit_bytes) {
+  // The renderer gets its credit back once the browser no longer holds the
+  // buffer: every path below copies the bytes out before returning.
+  base::ScopedClosureRunner content_released(ArtifactCreditRelease(credit_bytes));
   constexpr auto mask = NativeProbeCategoryMask(NativeProbeCategory::kVm) |
                         NativeProbeCategoryMask(NativeProbeCategory::kArtifact);
   const auto now =
@@ -261,7 +264,6 @@ void NativeProbeHost::CaptureWasmDispatch(const std::uint64_t capture_epoch,
   const bool caller_ok = caller_observed ? (caller_clear || caller_named) : caller_clear;
   if (!monotonic_time_ns || monotonic_time_ns > now || !thread_id || !frame_id ||
       !execution_context_id || sample_index > kNativeWasmLastSampleIndex || !caller_ok ||
-      content.size() > kNativeArtifactMaxContentBytes ||
       function_index >= kNativeWasmFunctionIndexLimit ||
       table_count >= kNativeWasmFunctionIndexLimit) {
     refuse("native_wasm_dispatch_limit_or_invalid");
@@ -352,7 +354,11 @@ void NativeProbeHost::CaptureWasmIndirect(const std::uint64_t capture_epoch,
                                           const std::uint32_t js_invocation_id,
                                           const std::string& source_url,
                                           const std::uint64_t module_token,
-                                          mojo_base::BigBuffer content) {
+                                          mojo_base::BigBuffer content,
+                                          const std::uint64_t credit_bytes) {
+  // The renderer gets its credit back once the browser no longer holds the
+  // buffer: every path below copies the bytes out before returning.
+  base::ScopedClosureRunner content_released(ArtifactCreditRelease(credit_bytes));
   constexpr auto mask = NativeProbeCategoryMask(NativeProbeCategory::kVm) |
                         NativeProbeCategoryMask(NativeProbeCategory::kArtifact);
   const auto now =
@@ -382,7 +388,6 @@ void NativeProbeHost::CaptureWasmIndirect(const std::uint64_t capture_epoch,
   if (!monotonic_time_ns || monotonic_time_ns > now || !thread_id || !frame_id ||
       !execution_context_id || sample_index > kNativeWasmLastSampleIndex ||
       resolution >= kNativeWasmIndirectResolutionCount ||
-      content.size() > kNativeArtifactMaxContentBytes ||
       function_index >= kNativeWasmFunctionIndexLimit ||
       table_index >= kNativeWasmFunctionIndexLimit || slot >= kNativeWasmFunctionIndexLimit ||
       callee_function_index >= kNativeWasmFunctionIndexLimit) {
@@ -474,7 +479,11 @@ void NativeProbeHost::CaptureWasmExecution(const std::uint64_t capture_epoch,
                                            const std::uint32_t js_invocation_id,
                                            const std::string& source_url,
                                            const std::uint64_t module_token,
-                                           mojo_base::BigBuffer content) {
+                                           mojo_base::BigBuffer content,
+                                           const std::uint64_t credit_bytes) {
+  // The renderer gets its credit back once the browser no longer holds the
+  // buffer: every path below copies the bytes out before returning.
+  base::ScopedClosureRunner content_released(ArtifactCreditRelease(credit_bytes));
   constexpr auto mask = NativeProbeCategoryMask(NativeProbeCategory::kVm) |
                         NativeProbeCategoryMask(NativeProbeCategory::kArtifact);
   const auto now =
@@ -501,8 +510,7 @@ void NativeProbeHost::CaptureWasmExecution(const std::uint64_t capture_epoch,
   };
   if (!monotonic_time_ns || monotonic_time_ns > now || !thread_id || !frame_id ||
       !execution_context_id || !invocation_id || kind > 1 ||
-      reason >= kNativeWasmExecutionReasonCount ||
-      content.size() > kNativeArtifactMaxContentBytes) {
+      reason >= kNativeWasmExecutionReasonCount) {
     refuse("native_wasm_execution_limit_or_invalid");
     return;
   }
@@ -566,7 +574,11 @@ void NativeProbeHost::CaptureNativeGuest(const std::uint64_t capture_epoch,
                                          const std::string& source_url,
                                          const std::string& adapter_json,
                                          mojo_base::BigBuffer wasm_module,
-                                         mojo_base::BigBuffer bytecode) {
+                                         mojo_base::BigBuffer bytecode,
+                                         const std::uint64_t credit_bytes) {
+  // The renderer gets its credit back once the browser no longer holds the
+  // module: it is copied out below or dropped.
+  base::ScopedClosureRunner module_released(ArtifactCreditRelease(credit_bytes));
   const auto mask = NativeProbeCategoryMask(NativeProbeCategory::kVm) |
                     NativeProbeCategoryMask(NativeProbeCategory::kArtifact);
   // A retired configuration's records are discarded like its queue records.
@@ -602,8 +614,7 @@ void NativeProbeHost::CaptureNativeGuest(const std::uint64_t capture_epoch,
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
   if (!own_identity || !h.monotonic_time_ns || h.monotonic_time_ns > now ||
       capture.invocation.header.monotonic_time_ns > h.monotonic_time_ns ||
-      (carries_module && wasm_module.size() < 8) ||
-      wasm_module.size() > kNativeArtifactMaxContentBytes || bytecode.size() == 0 ||
+      (carries_module && wasm_module.size() < 8) || bytecode.size() == 0 ||
       bytecode.size() > kNativeGuestSnapshotLimit) {
     refuse("native_guest_capture_invalid");
     return;
@@ -853,7 +864,16 @@ void NativeProbeHost::CaptureGeneratedArtifact(const std::uint16_t kind,
                                                std::uint64_t allocating_script_id,
                                                bool allocating_script_is_eval,
                                                mojo_base::BigBuffer allocating_script_source,
-                                               std::uint64_t allocating_script_session_id) {
+                                               std::uint64_t allocating_script_session_id,
+                                               const std::uint64_t credit_bytes) {
+  // Whatever happens to the content, the renderer gets its credit back once
+  // the browser no longer holds the buffer. A runtime typed array's charge
+  // covers its allocating script source too; each part is released with the
+  // buffer that holds it.
+  const std::uint64_t source_credit =
+      std::min<std::uint64_t>(credit_bytes, allocating_script_source.size());
+  base::ScopedClosureRunner source_released(ArtifactCreditRelease(source_credit));
+  base::ScopedClosureRunner content_released(ArtifactCreditRelease(credit_bytes - source_credit));
   // Content does not pass through Drain, which refuses a renderer that became
   // browser-internal after admission (a spare given a WebUI page).
   if (browser_internal_ || IsBrowserInternal()) {
@@ -865,7 +885,8 @@ void NativeProbeHost::CaptureGeneratedArtifact(const std::uint16_t kind,
     NativeArtifactCaptureSink::Get().CaptureRuntimeTypedArray(
         renderer_process_id_, allocating_script_session_id, allocating_script_id,
         allocating_script_is_eval, creator_event_id, execution_context_id, frame_id, source_url,
-        std::move(allocating_script_source), std::move(content));
+        std::move(allocating_script_source), std::move(source_released), std::move(content),
+        std::move(content_released));
     return;
   }
   const bool stack_artifact =
@@ -882,12 +903,25 @@ void NativeProbeHost::CaptureGeneratedArtifact(const std::uint16_t kind,
   NativeArtifactCaptureSink::Get().CaptureGeneratedArtifact(
       static_cast<NativeArtifactKind>(kind),
       static_cast<NativeArtifactCaptureOrigin>(capture_origin), creator_event_id,
-      execution_context_id, frame_id, source_url, std::move(content), 0, std::move(on_refused));
+      execution_context_id, frame_id, source_url, std::move(content), 0, std::move(on_refused),
+      std::move(content_released));
 }
 
 void NativeProbeHost::SendNativeStackArtifactRefused(const std::uint64_t creator_event_id) {
   if (client_.is_bound()) {
     client_->NativeStackArtifactRefused(creator_event_id);
+  }
+}
+
+base::OnceClosure NativeProbeHost::ArtifactCreditRelease(const std::uint64_t bytes) {
+  return bytes != 0 ? base::BindOnce(&NativeProbeHost::SendReleaseArtifactCredit,
+                                     weak_factory_.GetWeakPtr(), bytes)
+                    : base::OnceClosure();
+}
+
+void NativeProbeHost::SendReleaseArtifactCredit(const std::uint64_t bytes) {
+  if (client_.is_bound()) {
+    client_->ReleaseArtifactCredit(bytes);
   }
 }
 

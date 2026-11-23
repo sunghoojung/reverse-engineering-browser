@@ -460,6 +460,27 @@ def check_receiver_stop(receiver: str) -> None:
     still end that wait: a handler that only set a flag lost it, and the
     receiver waited for a next frame that an idle browser never sends.
     """
+    # On a loaded machine this process can be descheduled between writing the
+    # frame and signalling for as long as the receiver takes to answer it.
+    # The stop then lands in a read, which is not the case under test, so
+    # that attempt says nothing and the check runs it again.
+    attempts = 5
+    for attempt in range(1, attempts + 1):
+        raced, stopped = receiver_stop_attempt(receiver)
+        if raced:
+            print(
+                "PASS artifact receiver stop: SIGTERM while it consumes an artifact ends it in "
+                f"{stopped * 1000:.0f} ms with the browser's connection open and idle"
+                + (f" (attempt {attempt})" if attempt > 1 else "")
+            )
+            return
+    raise AssertionError(
+        f"the artifact was answered before the stop in all {attempts} attempts, so nothing raced"
+    )
+
+
+def receiver_stop_attempt(receiver: str) -> tuple[bool, float]:
+    """One stop while an artifact is consumed: whether it raced, and how long the stop took."""
     with tempfile.TemporaryDirectory(prefix="reb-stop-", dir="/tmp") as temporary:
         root = Path(temporary)
         token = root / "token"
@@ -515,13 +536,10 @@ def check_receiver_stop(receiver: str) -> None:
             if child.poll() is None:
                 child.kill()
                 child.communicate()
-        assert unanswered, "the artifact was answered before the stop, so nothing raced"
+        # A stop that landed in a read must end the receiver just the same.
         assert child.returncode == 0, errors.decode()
         assert "Artifact receiver stopped:" in errors.decode(), errors.decode()
-    print(
-        "PASS artifact receiver stop: SIGTERM while it consumes an artifact ends it in "
-        f"{stopped * 1000:.0f} ms with the browser's connection open and idle"
-    )
+    return unanswered, stopped
 
 
 def check_broker_stop(broker: str) -> None:

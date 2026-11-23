@@ -727,7 +727,8 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 70, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 71, "Review route coverage when the API changes");
+    assert!(ids.contains("get_wasm_run_memory"));
     assert!(ids.contains("export_requests_har"));
     assert!(ids.contains("get_wasm_pseudocode"));
     assert!(ids.contains("search_wasm_inspection"));
@@ -820,7 +821,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 70);
+    assert_eq!(operation_count, 71);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -7526,7 +7527,7 @@ async fn analysis_catalog_resolves_every_generated_rule_and_preserves_profile_id
     assert_eq!(catalog["current_producer"], document["producer"]);
     assert_eq!(
         catalog["current_producer"],
-        json!({"id":"origin-trace-vm-detector","version":"1.11.0"})
+        json!({"id":"origin-trace-vm-detector","version":"1.12.0"})
     );
     assert_eq!(catalog["compatibility"]["build_identity"], "not-recorded");
     assert_eq!(catalog["current_profile"], document["profile"]);

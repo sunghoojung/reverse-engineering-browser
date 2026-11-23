@@ -2031,7 +2031,8 @@ mod tests {
         assert_eq!(operation.1, "/api/evidence/packages/validate");
         let detail = describe(&spec, operation, None).unwrap();
         assert_self_contained(&detail);
-        assert_eq!(detail["x-max-body-bytes"], 4 * 1024 * 1024);
+        // A package of any size is read; 2^53 - 1 is the unbounded marker.
+        assert_eq!(detail["x-max-body-bytes"], 9007199254740991u64);
         assert_eq!(detail["x-reb-execution"]["effects"], json!(["analysis"]));
         assert_eq!(detail["x-reb-execution-policy"]["automatic_retry"], "never");
         assert!(detail.get("actions").is_none());

@@ -485,7 +485,12 @@ assert.equal(text('.traffic-payload-tree .is-current'), 'needle: "deep-match"');
 assert(panel.querySelectorAll('*').length < 2500, `the DOM stays bounded: ${panel.querySelectorAll('*').length} elements`);
 started = cpuMs();
 click(button('Source'));
-await settle();
+// The source view reveals the match once its layout arrives, which takes
+// more than one task on a loaded machine; wait for it on the wall clock,
+// and charge only the CPU it used.
+for (const deadline = Date.now() + 10_000; !panel.querySelector('.traffic-payload-lines mark.is-current') && Date.now() < deadline;) {
+  await settle();
+}
 const source = cpuMs() - started;
 assert(all('.traffic-payload-lines .traffic-payload-line').length <= 400, 'source renders its rows in blocks');
 assert(all('.traffic-payload-lines mark.is-current').length === 1, 'the source match is revealed');

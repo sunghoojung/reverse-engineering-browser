@@ -305,8 +305,12 @@ console.log('PASS native JS invocation sites opt-in, VM-category gate, sensitive
     const run = async (kind, hold) => {
       const profile = join(profiles, `${kind}-${hold}`);
       await mkdir(profile);
+      // The launcher reads the holder's command line, which names the profile
+      // only once the forked shell has exec'd perl; on a loaded Linux runner
+      // the launcher could look first and see no browser.
       const holder = hold === 'none' ? 'holder=""' :
-        `perl -e 'sleep shift' ${hold === 'closing' ? 1 : 30} "--user-data-dir=$1" & holder=$!; ln -s "test-host-$holder" "$1/SingletonLock"`;
+        `perl -e 'sleep shift' ${hold === 'closing' ? 1 : 30} "--user-data-dir=$1" & holder=$!; ln -s "test-host-$holder" "$1/SingletonLock"
+for _ in {1..500}; do /bin/ps -ww -o command= -p "$holder" | grep -q -F -e "--user-data-dir=$1" && break; sleep 0.01; done`;
       return spawnSync(shell, ['-c', `set -eu; fail_live_session() { shift; printf '%s' "$*"; exit 2; }
 trap '[[ -z "$holder" ]] || kill "$holder" 2>/dev/null || true' EXIT
 profile_kind=${kind}; profile_path="$1"; ${holder}

@@ -19,9 +19,12 @@ struct RecordingProbeClient final : reb::mojom::NativeProbeClient {
     configured_epoch = epoch;
     region = std::move(queue_region);
     js_sites = js_dispatch_sites;
-    invocation_sites.reset();
+    // A flag and a plain vector, not an optional: GCC 15 reports the
+    // optional's reassignment from a BigBuffer as maybe-uninitialized.
+    has_invocation_sites = js_invocation_sites.has_value();
+    invocation_sites.clear();
     if (js_invocation_sites)
-      invocation_sites.emplace(js_invocation_sites->begin(), js_invocation_sites->end());
+      invocation_sites.assign(js_invocation_sites->begin(), js_invocation_sites->end());
     invocation_digests = js_invocation_digests;
   }
   void SetWasmSampleBudget(const std::vector<std::uint8_t>&) override {}
@@ -50,7 +53,8 @@ struct RecordingProbeClient final : reb::mojom::NativeProbeClient {
   std::vector<Verdict> verdicts;
   base::UnsafeSharedMemoryRegion region;
   std::vector<std::uint8_t> js_sites;
-  std::optional<std::vector<std::uint8_t>> invocation_sites;
+  bool has_invocation_sites = false;
+  std::vector<std::uint8_t> invocation_sites;
   std::vector<std::vector<std::uint8_t>> invocation_revisions;
   bool invocation_digests = false;
 };
@@ -507,7 +511,8 @@ void NativeProbeHostJsDispatchForwarding() {
   host.BindClient({&client});
   Check(client.js_sites == session.js_sites && client.region.IsValid(),
         "Renderer configuration carries the session's JS dispatch site records");
-  Check(client.invocation_sites == session.invocation_sites && client.invocation_digests,
+  Check(client.has_invocation_sites && session.invocation_sites &&
+            client.invocation_sites == *session.invocation_sites && client.invocation_digests,
         "Renderer configuration carries the invocation sites and the digest opt-in");
   // A revision reaches the configured renderer as its own message.
   invocation_site.armed = false;

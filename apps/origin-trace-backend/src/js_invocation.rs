@@ -620,7 +620,11 @@ pub(crate) mod tests {
         wide[28..32].copy_from_slice(&u32::MAX.to_le_bytes());
         let decoded = start(&event("js_invocation_start", 1, 0, &wide)).unwrap();
         assert_eq!(
-            (decoded.site_slot, decoded.site_sample_index, decoded.sample_index),
+            (
+                decoded.site_slot,
+                decoded.site_sample_index,
+                decoded.sample_index
+            ),
             (u32::MAX, u32::MAX, None)
         );
         let mut narrow = wide;

@@ -951,7 +951,10 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(v2["properties"]["sites"]["maxItems"], MAX_SITES);
-        assert_eq!(v2["properties"]["sample_limit"]["maximum"], SAMPLE_LIMIT_MAX);
+        assert_eq!(
+            v2["properties"]["sample_limit"]["maximum"],
+            SAMPLE_LIMIT_MAX
+        );
         assert!(
             v2["$defs"]["site"]["properties"]
                 .get("sample_limit")

@@ -1396,9 +1396,14 @@ mod tests {
         assert_eq!(effective["wasm_function_deny"], json!([4]));
         assert_eq!(effective["wasm_module_allowlist"][0], digest);
         assert_eq!(effective["wasm_every_record"], false);
-        let every = StartOptions::from_json(&json!({"wasm_dispatch": true, "wasm_every_record": true,
+        let every =
+            StartOptions::from_json(&json!({"wasm_dispatch": true, "wasm_every_record": true,
             "wasm_function_deny": [4]}));
-        assert!(every.validate().is_ok(), "{}", every.validate().unwrap_err());
+        assert!(
+            every.validate().is_ok(),
+            "{}",
+            every.validate().unwrap_err()
+        );
         assert_eq!(every.effective()["wasm_every_record"], true);
     }
 

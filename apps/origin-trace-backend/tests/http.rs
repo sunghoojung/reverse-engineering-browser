@@ -11518,10 +11518,12 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
         json!({"action":"add","session_id":"11","artifact_id":"7","byte_offset":anchors[256]}),
     )
     .await;
-    let past = set(
-        assert_contract_response(past, "post", "/api/js-invocation-sites/actions", 200).await,
+    let past =
+        set(assert_contract_response(past, "post", "/api/js-invocation-sites/actions", 200).await);
+    assert_eq!(
+        (past["added"].clone(), past["set"]["count"].clone()),
+        (json!(true), json!(257))
     );
-    assert_eq!((past["added"].clone(), past["set"]["count"].clone()), (json!(true), json!(257)));
     // A refused resolution saves nothing and returns its reason.
     std::fs::write(
         directory.path().join("reply-1.json"),

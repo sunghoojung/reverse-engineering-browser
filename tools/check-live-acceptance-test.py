@@ -31,8 +31,8 @@ import unittest
 from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
-from live_acceptance import (baseline, bodies, cookies, debugger, driver, headers, limits, metadata,
-                             nostacks, reserve, stacks, tabs, volume, wasm, wasm_every)
+from live_acceptance import (baseline, bodies, console_tables, cookies, debugger, driver, guest_tables, headers,
+                             limits, metadata, nostacks, reserve, stacks, tabs, tracked, volume, wasm, wasm_every)
 from live_acceptance.evidence import Api, ApiError, Session, decode_request_body, decode_request_target, parse_header_block
 from live_acceptance.fixture import POLL_SECONDS, payload, sha256
 from live_acceptance.pages import line_of, locate
@@ -107,7 +107,7 @@ class FixtureRoutes(unittest.TestCase):
         status, _, body = self.get("/")
         self.assertEqual(status, 200)
         for name in ("baseline", "stacks", "headers", "cookies", "bodies", "limits", "debugger", "tabs", "volume",
-                     "reserve", "wasm", "wasm-every"):
+                     "reserve", "wasm", "wasm-every", "tracked", "console-tables", "guest-tables"):
             self.assertIn(f"/{name}/index.html".encode(), body)
 
     def test_header_hops_redirect_twice_with_repeated_headers(self):
@@ -358,6 +358,55 @@ class WasmEveryRecordStore(unittest.TestCase):
         self.assertEqual(kind.areas, [wasm_every])
         self.assertNotIn("--wasm-every-record", driver.KINDS["content"].flags, "the paced area keeps its windows")
 
+class TablesKind(unittest.TestCase):
+    """The tables session arms 300 sites and a guest limit past 256 from files it writes before launch."""
+
+    def test_arguments_write_the_site_file_and_the_adapter(self):
+        tool = tracked.site_tool()
+        with tempfile.TemporaryDirectory() as root:
+            arguments = driver.KINDS["tables"].arguments(Path(root))
+            self.assertEqual(arguments[0::2], ["--js-invocation-sites", "--guest-adapter"])
+            sites_text = Path(arguments[1]).read_text(encoding="utf-8")
+            adapter_text = Path(arguments[3]).read_text(encoding="utf-8")
+        sites = json.loads(sites_text)["sites"]
+        self.assertEqual(len(sites), tracked.SITES)
+        self.assertGreater(tracked.SITES, 256)
+        self.assertEqual(sites_text, tool.sites_text(tracked.sites()), "the file is the tool's canonical text")
+        raw = tracked.SCRIPT.encode()
+        for index, site in enumerate(sites):
+            self.assertEqual(raw[site["byte_offset"]:site["byte_offset"] + 6], b"(value", index)
+            self.assertTrue(raw[:site["byte_offset"]].endswith(tracked.function_name(index).encode()), index)
+        recipe = json.loads(adapter_text)
+        original = json.loads((guest_tables.FIXTURE / "adapter.json").read_text(encoding="utf-8"))
+        self.assertEqual(recipe.pop("sample_limit"), guest_tables.SAMPLE_LIMIT)
+        original.pop("sample_limit")
+        self.assertEqual(recipe, original, "only the sample limit changes")
+        self.assertEqual(adapter_text, json.dumps(json.loads(adapter_text), sort_keys=True, separators=(",", ":")))
+        self.assertEqual(driver.KINDS["tables"].areas, [tracked, console_tables, guest_tables])
+
+    def test_reports_map_each_frame_to_its_document(self):
+        found = [{"record": "injected", "text": "", "document_id": "9"},
+                 {"record": "report", "text": "start ?0", "document_id": "9"},
+                 {"record": "report", "text": "start ?12", "document_id": "21"},
+                 {"record": "report", "text": "again ?0", "document_id": "9"},
+                 {"record": "refused", "text": "start ?5", "document_id": "4"}]
+        self.assertEqual(console_tables.reports(found, "start"), {0: "9", 12: "21"})
+        self.assertEqual(console_tables.reports(found, "again"), {0: "9"})
+
+    def test_guest_packages_serve_only_installed_files(self):
+        fixture = driver.build_fixture([guest_tables], OPTIONS).start()
+        try:
+            for path in ("/guest-tables/node_modules/../adapter.json", "/guest-tables/node_modules/%2e%2e/adapter.json",
+                         "/guest-tables/node_modules/missing.mjs"):
+                status, _, _ = request(fixture.port, path)
+                self.assertEqual(status, 404, path)
+            status, _, body = request(fixture.port, "/guest-tables/index.html")
+            self.assertEqual(status, 200)
+            self.assertIn(json.dumps(guest_tables.SOURCE).encode(), body)
+        finally:
+            fixture.stop()
+
+
 SCRIPT = re.compile(r"<script(?P<attributes>[^>]*)>(?P<body>[\s\S]*?)</script>")
 # Pages served only with a query, beside every exact .html route.
 QUERY_PAGES = ("/", "/tabs/sw/last.html?r=popup", "/tabs/sw/last.html?r=nav", "/tabs/many.html?i=1",
@@ -382,8 +431,8 @@ class PageScripts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             files = []
 
-            def keep(name: str, text: bytes) -> None:
-                path = Path(directory) / (re.sub(r"[^A-Za-z0-9]+", "_", name) + ".js")
+            def keep(name: str, text: bytes, suffix: str = ".js") -> None:
+                path = Path(directory) / (re.sub(r"[^A-Za-z0-9]+", "_", name) + suffix)
                 path.write_bytes(text)
                 files.append(path)
 
@@ -393,10 +442,11 @@ class PageScripts(unittest.TestCase):
                 for index, match in enumerate(SCRIPT.finditer(body.decode())):
                     if "src=" in match["attributes"]:
                         continue
-                    if "speculationrules" in match["attributes"]:
+                    if "speculationrules" in match["attributes"] or "importmap" in match["attributes"]:
                         json.loads(match["body"])
                         continue
-                    keep(f"{page}_{index}", match["body"].encode())
+                    module = 'type="module"' in match["attributes"]
+                    keep(f"{page}_{index}", match["body"].encode(), ".mjs" if module else ".js")
             for path in served:
                 status, _, body = request(self.fx.port, path)
                 self.assertEqual(status, 200, path)
@@ -1134,7 +1184,8 @@ class Evidence(unittest.TestCase):
         site = {"debugger_observation": {"site": {"resolution": {"status": "resolved", "line": 7}}}}
         self.assertEqual(debugger.listener_site(site), {"status": "resolved", "line": 7})
 
-    WASM_SAMPLING = {"version": 1, "streams": ["br_table", "call_indirect"], "window_ms": 1000,
+    # What session_context.rs reports for a paced session.
+    WASM_SAMPLING = {"version": 1, "streams": ["br_table", "call_indirect"], "window_ms": 1000, "every_record": False,
                      "records_per_window": 1024, "samples_per_function": None, "samples_per_indirect_site": None,
                      "function_allow_count": 0, "function_deny_count": 0, "module_allowlist": False,
                      "reset": "available"}

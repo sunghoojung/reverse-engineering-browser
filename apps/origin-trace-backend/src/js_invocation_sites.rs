@@ -190,7 +190,10 @@ pub fn sites_file(sites: &[Site]) -> std::result::Result<String, SiteError> {
         return Err(SiteError::Duplicate);
     }
     let entries = sites.iter().map(Site::canonical).collect::<Vec<_>>();
-    Ok(format!(r#"{{"sites":[{}],"version":1}}"#, entries.join(",")))
+    Ok(format!(
+        r#"{{"sites":[{}],"version":1}}"#,
+        entries.join(",")
+    ))
 }
 
 /// The exact version 2 slot table for 0 to `SITE_LIMIT` distinct sites, each
@@ -208,7 +211,10 @@ pub fn slot_table_file(slots: &[(Site, bool)]) -> std::result::Result<String, Si
         .iter()
         .map(|(site, armed)| site.canonical_slot(*armed))
         .collect::<Vec<_>>();
-    Ok(format!(r#"{{"sites":[{}],"version":2}}"#, entries.join(",")))
+    Ok(format!(
+        r#"{{"sites":[{}],"version":2}}"#,
+        entries.join(",")
+    ))
 }
 
 fn keys(object: &Map<String, Value>, expected: &[&str]) -> bool {
@@ -410,7 +416,9 @@ impl Store {
         for entry in &labels {
             if let (Some(sha), Some(anchor)) = (
                 entry["source_sha256"].as_str(),
-                entry["anchor_offset"].as_u64().and_then(|n| u32::try_from(n).ok()),
+                entry["anchor_offset"]
+                    .as_u64()
+                    .and_then(|n| u32::try_from(n).ok()),
             ) {
                 by_key.entry((sha, anchor)).or_insert(entry);
             }
@@ -1384,7 +1392,10 @@ mod tests {
         assert_eq!(sites.len(), 300);
         assert!(text.len() > 64 * 1024);
         let loaded = store.load().unwrap();
-        assert_eq!((loaded[3].clone(), loaded[299].clone()), (saved(3), saved(299)));
+        assert_eq!(
+            (loaded[3].clone(), loaded[299].clone()),
+            (saved(3), saved(299))
+        );
         assert_eq!(store.remove(&"b".repeat(64), 3).unwrap().len(), 299);
         assert_eq!(store.remove(&"b".repeat(64), 3).unwrap_err().status, 404);
         // A lost sidecar never loses a site, only its label.

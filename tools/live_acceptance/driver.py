@@ -17,8 +17,8 @@ from typing import Callable
 import urllib.error
 import urllib.request
 
-from live_acceptance import (baseline, bodies, cookies, debugger, headers, limits, metadata, nostacks, reserve,
-                             stacks, tabs, volume, wasm, wasm_every)
+from live_acceptance import (baseline, bodies, console_tables, cookies, debugger, guest_tables, headers, limits,
+                             metadata, nostacks, reserve, stacks, tabs, tracked, volume, wasm, wasm_every)
 from live_acceptance.evidence import Session, StartError, start_session
 from live_acceptance.fixture import Fixture
 from live_acceptance.pages import document
@@ -50,6 +50,12 @@ class Kind:
     duration: int
     # More environment, from the directory that will hold the session.
     prepare: Callable[[Path], dict[str, str]] | None = None
+    # More start arguments, from the same directory: files the launch reads.
+    arguments: Callable[[Path], list[str]] | None = None
+
+
+def tables_arguments(root: Path) -> list[str]:
+    return [*tracked.arguments(root), *guest_tables.arguments(root)]
 
 
 KINDS = {
@@ -58,6 +64,9 @@ KINDS = {
     # Every Wasm record is session-wide, so the paced `wasm` area keeps its own session.
     "wasm-every": Kind([*CONTENT_FLAGS, "--wasm-every-record"], [wasm_every], 1800),
     "reserve": Kind(CONTENT_FLAGS, [reserve], 900, reserve.environment),
+    # The renderer and browser tables that dropped or refused past 64 or 256:
+    # sites armed from a launch file, and the guest adapter its own launch file.
+    "tables": Kind(CONTENT_FLAGS, [tracked, console_tables, guest_tables], 1800, arguments=tables_arguments),
     "metadata": Kind([flag for flag in CONTENT_FLAGS if flag not in METADATA_DROPS], [metadata], 900),
     # Request stacks are on unless a start turns them off, and Promise stacks ride on them.
     "no-stacks": Kind([*(flag for flag in CONTENT_FLAGS if flag not in ("--request-stacks", "--promise-stacks")),
@@ -138,6 +147,8 @@ def run_kind(name: str, args: argparse.Namespace, options: Options) -> Report:
         Path(root).mkdir(parents=True, exist_ok=True)
         arguments = ["--url", fixture.origin + "/", *kind.flags, "--brave-binary", str(args.brave),
                      "--sessions-root", str(Path(root).absolute()), "--duration-seconds", str(kind.duration)]
+        if kind.arguments:
+            arguments += kind.arguments(Path(root).absolute())
         environment = kind.prepare(Path(root)) if kind.prepare else {}
         try:
             session = start_session(args.reb_api, arguments, environment)

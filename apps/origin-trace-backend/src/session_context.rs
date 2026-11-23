@@ -320,8 +320,16 @@ mod tests {
             &["--session-wasm-samples-per-indirect-site", "1025"],
             &["--session-wasm-function-allow-count", "0"],
             &["--session-wasm-function-deny-count", "33"],
-            &["--session-wasm-every-record", "--session-wasm-samples-per-function", "2"],
-            &["--session-wasm-every-record", "--session-wasm-samples-per-indirect-site", "2"],
+            &[
+                "--session-wasm-every-record",
+                "--session-wasm-samples-per-function",
+                "2",
+            ],
+            &[
+                "--session-wasm-every-record",
+                "--session-wasm-samples-per-indirect-site",
+                "2",
+            ],
         ] {
             assert!(parse(arguments).is_err(), "{arguments:?}");
         }

@@ -466,15 +466,19 @@ per-session budgets and media choice; no backend reports it now.
 
 `wasm_sampling` is a second versioned addition: for a session that records
 Wasm `br_table` or `call_indirect` it is `{"version": 1, "streams",
-"window_ms", "records_per_window", "samples_per_function",
+"window_ms", "every_record", "records_per_window", "samples_per_function",
 "samples_per_indirect_site", "function_allow_count", "function_deny_count",
 "module_allowlist", "reset"}`. Each renderer keeps at most
 `records_per_window` (1024) full records per stream in each `window_ms`
 (1000) window, and the next window records again. An allowance the launcher
 did not name is null, and the browser's default then applies (64 per
-function). `reset` is `available` when `reset_wasm_sample_budgets` has a reset
-file to write. The launcher passes `--session-wasm-dispatch`,
-`--session-wasm-call-indirect`, `--session-wasm-samples-per-function`,
+function). `every_record` true means the session keeps every record the
+filters admit, with no window budget, browser ceiling or allowance, so
+`records_per_window` and both allowances are null; a backend from before
+v0.6.0 omits it, which means false. `reset` is `available` when
+`reset_wasm_sample_budgets` has a reset file to write. The launcher passes
+`--session-wasm-dispatch`, `--session-wasm-call-indirect`,
+`--session-wasm-every-record`, `--session-wasm-samples-per-function`,
 `--session-wasm-samples-per-indirect-site`,
 `--session-wasm-function-allow-count`, `--session-wasm-function-deny-count`
 and `--session-wasm-module-allowlist`; they are labels only. Otherwise it is
@@ -568,11 +572,14 @@ returns 409 `dependency_unavailable` for these actions.
 `extension_traffic`, `fresh_profile`, `js_invocation_sites`, `js_invocation_saved_sites`,
 `js_invocation_digests`, `confirm_sensitive_capture`,
 `publish_canonical_endpoint`, `brave_binary`, `timeout_seconds`,
-`wasm_samples_per_function`, `wasm_samples_per_indirect_site`,
-`wasm_function_allow`, `wasm_function_deny` and `wasm_module_allowlist`.
+`wasm_every_record`, `wasm_samples_per_function`,
+`wasm_samples_per_indirect_site`, `wasm_function_allow`, `wasm_function_deny`
+and `wasm_module_allowlist`.
 The Wasm budget options require `wasm_dispatch` or `wasm_call_indirect`. They
 pace within the one-second window, which keeps at most 1024 full records per
-stream; without them a function keeps 64 per window. A switch left unset takes
+stream; without them a function keeps 64 per window. `wasm_every_record`
+keeps every record the filters admit instead, and takes neither per-function
+nor per-site count. A switch left unset takes
 the Origin Trace app's default, and `false` turns it off: `wasm_dispatch` and
 `wasm_call_indirect` (mask bits 512 and 1024), `quiet`, `request_stacks`
 (bits 256 and 1024, and only where the browser has `--reb-request-stacks`) and
@@ -606,6 +613,7 @@ agent session.
 | `js_invocation_saved_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Arms the agent sessions' own saved set, `~/.config/origin-trace/agent-sessions/js-invocation-sites-v1.json`, which `js_invocation_site_action` edits in an agent session, and follows it while the session runs: an empty set starts with nothing armed. Never the app's set. Not with `js_invocation_sites`. |
 | `js_invocation_digests` | `REB_NATIVE_JS_INVOCATION_DIGESTS=1` | Sensitive: needs named sites and the consent; on by default with both and request content. |
 | `canvas_images` | `REB_CAPTURE_CANVAS_IMAGES=1` | Sensitive: on by default with the consent and category bits 1 and 1024. |
+| `wasm_every_record` | `REB_NATIVE_WASM_EVERY_RECORD=1` | Every `br_table`, `call_indirect` and execution record the filters admit, with no one-second window, browser ceiling or per-function count. Needs `wasm_dispatch` or `wasm_call_indirect`; not with either count below. A hot loop can write millions of records. |
 | `wasm_samples_per_function` | `REB_NATIVE_WASM_SAMPLES_PER_FUNCTION` | 1..1024 retained samples of each function on each Wasm stream per one-second window (default 64). Needs `wasm_dispatch` or `wasm_call_indirect`. |
 | `wasm_samples_per_indirect_site` | `REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE` | 1..1024 retained `call_indirect` samples of each caller and module offset per window. |
 | `wasm_function_allow` | `REB_NATIVE_WASM_FUNCTION_ALLOW` | Up to 32 function indexes. Other functions do not consume either sample index. Deny wins. |

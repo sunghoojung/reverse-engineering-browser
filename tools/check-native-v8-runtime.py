@@ -91,7 +91,7 @@ TEST_NAMES = [
     "test-api/RebNativeJsInvocationPreservesEmbedderData",
     "test-api/RebNativeJsInvocationLeavesUnhandledRejectionVisible",
     "test-api/RebNativeJsInvocationAdmissionAndUnsupportedKinds",
-    "test-api/RebNativeJsInvocationArmsEverySiteUpToTheLimit",
+    "test-api/RebNativeJsInvocationArmsEverySite",
 ]
 
 

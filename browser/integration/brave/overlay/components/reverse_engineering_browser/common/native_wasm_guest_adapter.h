@@ -160,8 +160,8 @@ inline std::shared_ptr<const NativeWasmGuestAdapter> ParseNativeWasmGuestAdapter
   } else {
     return {};
   }
-  if (!U32(dict, "sample_limit", result->sample_limit) || !result->sample_limit ||
-      result->sample_limit > kNativeGuestSampleLimit)
+  // Any positive count the JSON reader keeps as an integer, up to 2^31 - 1.
+  if (!U32(dict, "sample_limit", result->sample_limit) || !result->sample_limit)
     return {};
   const auto* digest = dict.FindString("module_sha256");
   if (!digest || digest->size() != 64)

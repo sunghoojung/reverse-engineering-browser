@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string_view>
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest.h"
@@ -474,9 +475,11 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   [[nodiscard]] std::uint64_t NativeJsInvocationEpoch() const noexcept;
   // Changes with every accepted revision of the epoch's sites.
   [[nodiscard]] std::uint64_t NativeJsInvocationRevision(std::uint64_t epoch) const noexcept;
-  // Every slot, a disarmed one with source length 0, which V8 never arms.
+  // Copies slots [first, first + out.size()) that exist, a disarmed one with
+  // source length 0, which V8 never arms, and returns the slot count.
   [[nodiscard]] std::size_t CopyNativeJsInvocationSites(
       std::uint64_t epoch,
+      std::size_t first,
       std::span<NativeJsInvocationSite> out) const noexcept;
   // True for every armed slot while the configuration is active: every call
   // is wrapped and recorded.
@@ -856,52 +859,80 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::array<std::atomic<std::uint64_t>,
              kNativeJsCompiledBeforeArmingGap + kNativeJsDispatchSiteLimit>
       native_js_gap_generations_{};
-  // Coalesced invocation gaps: transport, input, settle unavailable, IDs
-  // exhausted, then compiled-before-arming and unsupported-function reasons
-  // per site slot.
+  // Coalesced invocation gaps: transport, input, settle unavailable and IDs
+  // exhausted, then a compiled-before-arming and an unsupported-function
+  // reason per site slot, gap kInvocationSlotGap + 2 * slot + reason.
   static constexpr std::size_t kInvocationTransportGap = 0, kInvocationInputGap = 1,
                                kInvocationSettleGap = 2, kInvocationIdsGap = 3,
-                               kInvocationCompiledGap = 4,
-                               kInvocationUnsupportedGap =
-                                   kInvocationCompiledGap + kNativeJsInvocationSiteLimit,
-                               kInvocationGapCount =
-                                   kInvocationUnsupportedGap + kNativeJsInvocationSiteLimit;
+                               kInvocationSlotGap = 4, kInvocationCompiledReason = 0,
+                               kInvocationUnsupportedReason = 1;
+  // One coalesced gap. retained is the generation whose record was written,
+  // generation - 1 while a writer holds the claim. wanted is the latest
+  // generation whose record the full ring refused; it is nonzero exactly
+  // while the gap is on the held stack, where next_held links the next held
+  // gap's index plus one.
+  struct NativeJsInvocationGapState final {
+    std::atomic<std::uint64_t> retained{0};
+    std::atomic<std::uint64_t> wanted{0};
+    std::atomic<std::uint64_t> next_held{0};
+  };
+  struct NativeJsInvocationSlot final {
+    // Written once before native_invocation_site_count_ is release-published
+    // and never rewritten, as for dispatch sites. Only armed changes, and
+    // each change advances the revision.
+    NativeJsInvocationSite site;
+    std::atomic<bool> armed{false};
+    // The next start ordinal, zeroed before a configuration is published.
+    std::atomic<std::uint32_t> ordinal{0};
+    std::array<NativeJsInvocationGapState, 2> gaps{};
+  };
+  // Segment k holds kInvocationFirstSegment << k slots, so 18 segments hold
+  // the longest site list and a slot's segment is computed, not searched. A
+  // segment is allocated on the main thread before the count that reaches it
+  // is published, and is never moved or freed, so a reader on any thread
+  // needs no lock. Doubling keeps the table within twice the list.
+  static constexpr std::size_t kInvocationFirstSegment = 256, kInvocationSegments = 18;
+  static_assert(kInvocationFirstSegment * ((std::size_t{1} << kInvocationSegments) - 1) >=
+                kNativeJsInvocationSiteListLimit);
+  // slot is below the published count.
+  [[nodiscard]] NativeJsInvocationSlot& InvocationSlot(std::size_t slot) const noexcept;
+  // A fixed gap, or the gap of a slot below the published count.
+  [[nodiscard]] NativeJsInvocationGapState& InvocationGap(std::size_t gap) noexcept;
+  // Allocates the segments that slots below count need. False when memory
+  // is unavailable or count passes the list limit; nothing is published.
+  [[nodiscard]] bool ReserveNativeJsInvocationSlots(std::size_t count) noexcept;
+  // Puts a gap the full ring refused on the held stack, once per hold.
+  void HoldNativeJsInvocationGap(std::size_t gap, std::uint64_t generation) noexcept;
   [[nodiscard]] bool NativeJsInvocationActive(std::uint64_t generation) const noexcept;
   // Returns whether the gap is retained. One the ring cannot take is held
-  // until PublishNativeJsInvocationGaps retains it.
+  // until PublishNativeJsInvocationGaps retains it. A slot gap names a slot
+  // below the published count.
   bool NoteNativeJsInvocationOmission(std::uint64_t generation,
                                       std::uint64_t frame_id,
                                       std::size_t gap) noexcept;
-  // Writes the held gaps of generation. Called before an invocation record
-  // takes its sequence and before the configuration changes; one load while
-  // nothing is held.
+  // Writes the held gaps of generation and forgets those of earlier ones.
+  // Called before an invocation record takes its sequence and before the
+  // configuration changes; one load while nothing is held, and otherwise
+  // work in the held gaps only.
   void PublishNativeJsInvocationGaps(std::uint64_t generation) noexcept;
   // One recorded start of generation settled or can no longer settle.
   void CloseNativeJsInvocation(std::uint64_t generation) noexcept;
   // Applies the slot rule; false changes nothing.
   [[nodiscard]] bool MergeNativeJsInvocationSites(
       std::span<const NativeJsInvocationSite> sites) noexcept;
-  // Each slot's site, written once before native_invocation_site_count_ is
-  // release-published and never rewritten, as for dispatch sites. Only the
-  // armed flags change, and each change advances the revision. Configuration
-  // and revisions arrive on the renderer main thread.
-  std::array<NativeJsInvocationSite, kNativeJsInvocationSiteLimit> native_invocation_sites_{};
-  std::array<std::atomic<bool>, kNativeJsInvocationSiteLimit> native_invocation_armed_{};
+  // The site table. Configuration and revisions arrive on the renderer main
+  // thread; slots only grow, for the renderer's lifetime.
+  std::array<std::atomic<NativeJsInvocationSlot*>, kInvocationSegments>
+      native_invocation_segments_{};
   std::atomic<std::size_t> native_invocation_site_count_{0};
   std::atomic<std::uint64_t> native_invocation_revision_{0};
   std::atomic<std::uint64_t> native_invocation_generation_{0};
   std::atomic<std::uint64_t> native_invocation_digest_generation_{0};
-  // Each site's next start ordinal and the next request ordinal, zeroed
-  // before a configuration is published.
-  std::array<std::atomic<std::uint32_t>, kNativeJsInvocationSiteLimit>
-      native_invocation_site_ordinals_{};
+  // The next request ordinal, zeroed before a configuration is published.
   std::atomic<std::uint32_t> native_invocation_request_ordinal_{0};
-  std::array<std::atomic<std::uint64_t>, kInvocationGapCount> native_invocation_gap_generations_{};
-  // A gap the full ring refused is held: the latest generation that needs
-  // each gap, and the generation with at least one held gap (generation - 1
-  // once published).
-  std::array<std::atomic<std::uint64_t>, kInvocationGapCount> native_invocation_gap_wanted_{};
-  std::atomic<std::uint64_t> native_invocation_gap_held_{0};
+  std::array<NativeJsInvocationGapState, kInvocationSlotGap> native_invocation_gaps_{};
+  // The held stack's top gap index plus one, or 0 when nothing is held.
+  std::atomic<std::uint64_t> native_invocation_held_{0};
   // The recorded starts of the current configuration that have not settled,
   // so an unattributable loader start is reported only while one may be
   // open. V8 settles each recorded start at most once.
@@ -936,6 +967,10 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<std::uint64_t> native_wasm_budget_epoch_{2};
   NativeWasmSampleBudgetPolicy native_wasm_budget_policy_{};
   NativeWasmSampleBudgetPolicy native_wasm_budget_policy_pending_{};
+  // native_wasm_budget_policy_.every_record, published with it by
+  // SetEmitters: no stream window is claimed or counted, so every execution
+  // the filters admit takes the next sample index.
+  std::atomic<bool> native_wasm_every_record_{false};
   std::array<NativeWasmBudgetKeySlot, kNativeWasmBudgetKeySlots> native_wasm_function_keys_{};
   std::array<std::atomic<std::uint64_t>, kNativeWasmOverflowRingLimit>
       native_wasm_overflow_slots_{};
@@ -1078,27 +1113,30 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<NativeWasmGuestContextProvider> native_guest_context_{nullptr};
   std::atomic<NativeWasmGuestReset> native_guest_reset_{nullptr};
   std::atomic<NativeWasmLimitProbe> native_wasm_limit_probe_{nullptr};
-  std::array<std::atomic<std::uint64_t>, kNativeGuestSampleLimit> native_guest_slots_{};
+  // The sample budget: the low 32 bits of the configuration generation that
+  // owns it, then the count of indexes it has claimed. A claim moves it only
+  // forward, so stale in-flight work never consumes a replacement's budget;
+  // configurations in flight together differ by far less than 2^31.
+  std::atomic<std::uint64_t> native_guest_samples_{0};
   std::atomic<std::uint64_t> native_guest_capped_generation_{0};
+  [[nodiscard]] std::optional<std::uint32_t> ClaimNativeGuestSample(std::uint64_t generation,
+                                                                    std::uint32_t limit) noexcept;
+  void ReleaseNativeGuestSample(std::uint64_t generation, std::uint32_t index) noexcept;
   // Coalesced guest gaps, at most one of each per configuration.
   // A refused capture emit is not coalesced: it fills its own slots.
   static constexpr std::size_t kGuestSampleLimitGap = 0, kGuestInvocationLimitGap = 1,
                                kGuestSnapshotGap = 2, kGuestHostTransportGap = 3,
                                kGuestAdapterRestartGap = 4, kGuestRuntimeIdentityGap = 5,
-                               kGuestModuleUnavailableGap = 6, kGuestHostParentBudgetGap = 7,
-                               kGuestParentUnresolvedGap = 8, kGuestGapCount = 9;
+                               kGuestModuleUnavailableGap = 6, kGuestParentUnresolvedGap = 7,
+                               kGuestGapCount = 8;
   std::array<std::atomic<std::uint64_t>, kGuestGapCount> native_guest_gap_generations_{};
-  // Parent-binding host routes claimed per configuration (see
-  // kNativeGuestHostParentLimit). Same generation-tag scheme as samples.
-  std::array<std::atomic<std::uint64_t>, kNativeGuestHostParentLimit> native_guest_host_slots_{};
-  std::atomic<std::uint64_t> native_guest_host_capped_generation_{0};
   // Recent module verdicts, (token << 1) | accepted. Tokens are process-unique
   // renderer sequence numbers, so a stale verdict can never match a new send.
-  // Each verdict answers one delivered capture and a configuration delivers
-  // at most kNativeGuestSampleLimit, so its own verdicts all fit. next_ counts
-  // writes: a binding that finds no verdict after a full ring of writes since
-  // its send reads kLost, because its verdict may have been overwritten.
-  std::array<std::atomic<std::uint64_t>, kNativeGuestSampleLimit> native_guest_module_status_{};
+  // next_ counts writes: a binding that finds no verdict after a full ring of
+  // writes since its send reads kLost, because its verdict may have been
+  // overwritten (see kNativeGuestModuleVerdictRing).
+  std::array<std::atomic<std::uint64_t>, kNativeGuestModuleVerdictRing>
+      native_guest_module_status_{};
   std::atomic<std::uint64_t> native_guest_module_status_next_{0};
   enum class GuestModuleVerdict : std::uint8_t { kPending, kAccepted, kRejected, kLost };
   // writes_before_send is native_guest_module_status_next_ read before the
@@ -1106,7 +1144,6 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   [[nodiscard]] GuestModuleVerdict NativeGuestModuleVerdict(
       std::uint64_t token,
       std::uint64_t writes_before_send) const noexcept;
-  [[nodiscard]] bool ClaimNativeGuestHostRoute(std::uint64_t generation) noexcept;
   void NoteNativeGuestOmission(std::uint64_t generation,
                                std::uint64_t frame,
                                std::size_t kind,

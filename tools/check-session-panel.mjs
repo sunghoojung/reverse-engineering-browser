@@ -213,7 +213,7 @@ assert(!/limit|budget/i.test(text()), 'a failed session names no limit');
 // profile and Advanced options, a dependency kept in step, and every option
 // sent with Start. The profile folder is native text.
 const optionValues = {fresh_profile: false, invocation_digests: true, request_stacks: true, promise_stacks: false,
-  wasm_dispatch: true, ignore_debugger_statements: true, document_start: true, canvas_images: true,
+  wasm_dispatch: true, wasm_every_record: false, ignore_debugger_statements: true, document_start: true, canvas_images: true,
   browser_internal: false, extension_traffic: false};
 const options = (changes = {}) => Object.fromEntries(Object.entries(optionValues)
   .map(([key, value]) => [key, {value: changes[key] ?? value, default: value}]));
@@ -243,7 +243,8 @@ assert(panel.querySelector('#session-panel-advanced-options'));
 assert(!/REB_/.test(text()), 'the options name no environment variable');
 assert.deepEqual([...panel.querySelectorAll('#session-panel-advanced-options input')].map(box => [box.id, box.checked]), [
   ['session-panel-option-request-stacks', true], ['session-panel-option-promise-stacks', false],
-  ['session-panel-option-wasm-dispatch', true], ['session-panel-option-ignore-debugger-statements', true],
+  ['session-panel-option-wasm-dispatch', true], ['session-panel-option-wasm-every-record', false],
+  ['session-panel-option-ignore-debugger-statements', true],
   ['session-panel-option-document-start', true], ['session-panel-option-canvas-images', true],
   ['session-panel-option-browser-internal', true], ['session-panel-option-extension-traffic', false]],
   'native’s values, a saved choice included, in a fixed order');
@@ -257,6 +258,13 @@ toggle('promise_stacks');
 assert.equal(option('request_stacks').checked, true, 'promise stacks turn request stacks back on');
 toggle('promise_stacks');
 toggle('request_stacks');
+// Every Wasm record needs Wasm dispatch sampling in the same way.
+toggle('wasm_dispatch');
+toggle('wasm_every_record');
+assert.equal(option('wasm_dispatch').checked, true, 'every record turns Wasm dispatch sampling back on');
+toggle('wasm_dispatch');
+assert.equal(option('wasm_every_record').checked, false, 'Wasm dispatch off takes every record with it');
+toggle('wasm_dispatch');
 toggle('extension_traffic');
 assert(text().includes('3 changed'), text());
 toggle('fresh_profile');

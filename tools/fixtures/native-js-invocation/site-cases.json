@@ -396,8 +396,8 @@
       "file": "{\"sites\":[{\"anchor_offset\":11,\"artifact_id\":\"100\",\"artifact_sha256\":\"f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3\",\"byte_offset\":11,\"shape\":\"function-entry\",\"source_length\":153,\"source_sha256\":\"f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab\"},{\"anchor_offset\":28,\"artifact_id\":\"101\",\"artifact_sha256\":\"f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3\",\"byte_offset\":28,\"shape\":\"function-entry\",\"source_length\":153,\"source_sha256\":\"f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab\"},{\"anchor_offset\":45,\"artifact_id\":\"102\",\"artifact_sha256\":\"f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3\",\"byte_offset\":45,\"shape\":\"function-entry\",\"source_length\":153,\"source_sha256\":\"f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab\"},{\"anchor_offset\":62,\"artifact_id\":\"103\",\"artifact_sha256\":\"f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3\",\"byte_offset\":62,\"shape\":\"function-entry\",\"source_length\":153,\"source_sha256\":\"f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab\"},{\"anchor_offset\":79,\"artifact_id\":\"104\",\"artifact_sha256\":\"f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3\",\"byte_offset\":79,\"shape\":\"function-entry\",\"source_length\":153,\"source_sha256\":\"f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab\"},{\"anchor_offset\":96,\"artifact_id\":\"105\",\"artifact_sha256\":\"f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3\",\"byte_offset\":96,\"shape\":\"function-entry\",\"source_length\":153,\"source_sha256\":\"f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab\"},{\"anchor_offset\":113,\"artifact_id\":\"106\",\"artifact_sha256\":\"f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3\",\"byte_offset\":113,\"shape\":\"function-entry\",\"source_length\":153,\"source_sha256\":\"f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab\"},{\"anchor_offset\":130,\"artifact_id\":\"107\",\"artifact_sha256\":\"f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3\",\"byte_offset\":130,\"shape\":\"function-entry\",\"source_length\":153,\"source_sha256\":\"f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab\"},{\"anchor_offset\":147,\"artifact_id\":\"108\",\"artifact_sha256\":\"f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3\",\"byte_offset\":147,\"shape\":\"function-entry\",\"source_length\":153,\"source_sha256\":\"f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab\"}],\"version\":1}"
     },
     {
-      "name": "past-the-site-limit",
-      "note": "257 entries are refused for their count before any other rule.",
+      "name": "past-the-old-site-limit",
+      "note": "257 entries of one function. No count limit applies, so the repeat refuses them.",
       "cases": [
         "many-0",
         "many-0",
@@ -657,7 +657,7 @@
         "many-0",
         "many-0"
       ],
-      "error": "count"
+      "error": "duplicate"
     },
     {
       "name": "duplicate-function",

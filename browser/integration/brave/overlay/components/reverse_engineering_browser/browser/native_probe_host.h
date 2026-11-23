@@ -17,6 +17,7 @@
 
 #include "brave/components/reverse_engineering_browser/common/native_wasm_sample_budget.h"
 
+#include "base/containers/span.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/raw_ref.h"
 #include "base/memory/shared_memory_mapping.h"
@@ -51,78 +52,9 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
 
   // mojom::NativeProbeHost:
   void EventsAvailable() override;
-  void CaptureWasmDispatch(std::uint64_t capture_epoch,
-                           std::uint64_t session_id,
-                           std::uint64_t sequence_number,
-                           std::uint64_t monotonic_time_ns,
-                           std::uint32_t process_id,
-                           std::uint32_t thread_id,
-                           std::uint64_t frame_id,
-                           std::uint64_t execution_context_id,
-                           std::uint64_t document_token_high,
-                           std::uint64_t document_token_low,
-                           std::uint32_t function_index,
-                           std::uint32_t module_byte_offset,
-                           std::uint32_t selector,
-                           std::uint32_t table_count,
-                           bool caller_observed,
-                           std::uint8_t caller_kind,
-                           std::uint32_t caller_function_index,
-                           std::uint32_t sample_index,
-                           std::uint8_t js_invocation_state,
-                           std::uint32_t js_invocation_id,
-                           const std::string& source_url,
-                           std::uint64_t module_token,
-                           mojo_base::BigBuffer content,
-                           std::uint64_t credit_bytes) override;
-  void CaptureWasmIndirect(std::uint64_t capture_epoch,
-                           std::uint64_t session_id,
-                           std::uint64_t sequence_number,
-                           std::uint64_t monotonic_time_ns,
-                           std::uint32_t process_id,
-                           std::uint32_t thread_id,
-                           std::uint64_t frame_id,
-                           std::uint64_t execution_context_id,
-                           std::uint64_t document_token_high,
-                           std::uint64_t document_token_low,
-                           std::uint32_t function_index,
-                           std::uint32_t module_byte_offset,
-                           std::uint32_t table_index,
-                           std::uint32_t slot,
-                           std::uint32_t callee_function_index,
-                           std::uint32_t resolution,
-                           std::uint32_t sample_index,
-                           std::uint8_t js_invocation_state,
-                           std::uint32_t js_invocation_id,
-                           const std::string& source_url,
-                           std::uint64_t module_token,
-                           mojo_base::BigBuffer content,
-                           std::uint64_t credit_bytes) override;
-  void CaptureWasmExecution(std::uint64_t capture_epoch,
-                            std::uint64_t session_id,
-                            std::uint64_t sequence_number,
-                            std::uint64_t monotonic_time_ns,
-                            std::uint32_t process_id,
-                            std::uint32_t thread_id,
-                            std::uint64_t frame_id,
-                            std::uint64_t execution_context_id,
-                            std::uint64_t document_token_high,
-                            std::uint64_t document_token_low,
-                            std::uint32_t invocation_id,
-                            std::uint32_t function_index,
-                            std::uint32_t module_byte_offset,
-                            std::uint32_t related_sample_index,
-                            std::uint8_t kind,
-                            std::uint8_t reason,
-                            std::uint8_t bounds,
-                            std::uint8_t known,
-                            std::uint8_t related_stream,
-                            std::uint8_t js_invocation_state,
-                            std::uint32_t js_invocation_id,
-                            const std::string& source_url,
-                            std::uint64_t module_token,
-                            mojo_base::BigBuffer content,
-                            std::uint64_t credit_bytes) override;
+  // Each record in order, through the one-record entry below that matches it.
+  void CaptureWasmRecords(std::uint64_t capture_epoch,
+                          std::vector<mojom::NativeWasmRecordPtr> records) override;
   void CaptureNativeGuest(std::uint64_t capture_epoch,
                           const std::vector<std::uint8_t>& invocation_record,
                           const std::vector<std::uint8_t>& dispatch_record,
@@ -152,6 +84,80 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
                                 std::uint64_t allocating_script_session_id,
                                 std::uint64_t credit_bytes) override;
 
+  // One record of a CaptureWasmRecords batch.
+  void CaptureWasmDispatch(std::uint64_t capture_epoch,
+                           std::uint64_t session_id,
+                           std::uint64_t sequence_number,
+                           std::uint64_t monotonic_time_ns,
+                           std::uint32_t process_id,
+                           std::uint32_t thread_id,
+                           std::uint64_t frame_id,
+                           std::uint64_t execution_context_id,
+                           std::uint64_t document_token_high,
+                           std::uint64_t document_token_low,
+                           std::uint32_t function_index,
+                           std::uint32_t module_byte_offset,
+                           std::uint32_t selector,
+                           std::uint32_t table_count,
+                           bool caller_observed,
+                           std::uint8_t caller_kind,
+                           std::uint32_t caller_function_index,
+                           std::uint32_t sample_index,
+                           std::uint8_t js_invocation_state,
+                           std::uint32_t js_invocation_id,
+                           const std::string& source_url,
+                           std::uint64_t module_token,
+                           mojo_base::BigBuffer content,
+                           std::uint64_t credit_bytes);
+  void CaptureWasmIndirect(std::uint64_t capture_epoch,
+                           std::uint64_t session_id,
+                           std::uint64_t sequence_number,
+                           std::uint64_t monotonic_time_ns,
+                           std::uint32_t process_id,
+                           std::uint32_t thread_id,
+                           std::uint64_t frame_id,
+                           std::uint64_t execution_context_id,
+                           std::uint64_t document_token_high,
+                           std::uint64_t document_token_low,
+                           std::uint32_t function_index,
+                           std::uint32_t module_byte_offset,
+                           std::uint32_t table_index,
+                           std::uint32_t slot,
+                           std::uint32_t callee_function_index,
+                           std::uint32_t resolution,
+                           std::uint32_t sample_index,
+                           std::uint8_t js_invocation_state,
+                           std::uint32_t js_invocation_id,
+                           const std::string& source_url,
+                           std::uint64_t module_token,
+                           mojo_base::BigBuffer content,
+                           std::uint64_t credit_bytes);
+  void CaptureWasmExecution(std::uint64_t capture_epoch,
+                            std::uint64_t session_id,
+                            std::uint64_t sequence_number,
+                            std::uint64_t monotonic_time_ns,
+                            std::uint32_t process_id,
+                            std::uint32_t thread_id,
+                            std::uint64_t frame_id,
+                            std::uint64_t execution_context_id,
+                            std::uint64_t document_token_high,
+                            std::uint64_t document_token_low,
+                            std::uint32_t invocation_id,
+                            std::uint32_t function_index,
+                            std::uint32_t module_byte_offset,
+                            std::uint32_t related_sample_index,
+                            std::uint8_t kind,
+                            std::uint8_t reason,
+                            std::uint8_t bounds,
+                            std::uint8_t known,
+                            std::uint8_t related_stream,
+                            std::uint8_t js_invocation_state,
+                            std::uint32_t js_invocation_id,
+                            const std::string& source_url,
+                            std::uint64_t module_token,
+                            mojo_base::BigBuffer content,
+                            std::uint64_t credit_bytes);
+
   void Configure(std::uint64_t session_id,
                  std::uint64_t category_mask,
                  std::uint64_t expires_at_monotonic_ns,
@@ -163,7 +169,7 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   void ResetWasmSampleBudgets();
   // A revision of the session's invocation site records, for a configured
   // renderer; one configured later receives it in Configure.
-  void UpdateJsInvocationSites(const std::vector<std::uint8_t>& records);
+  void UpdateJsInvocationSites(base::span<const std::uint8_t> records);
   // Sends the session's kept debugger watch scope, or its absence.
   void SendDebuggerWatchScope();
 
@@ -232,7 +238,8 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   // Records of each Wasm stream this renderer delivered in the host's current
   // window. The renderer paces itself; this bound only stops one that does
   // not. Host windows are not the renderer's, so one overlaps at most two of
-  // them, and the limit is twice the renderer's budget.
+  // them, and the limit is twice the renderer's budget. A session that keeps
+  // every record has no window, and no limit here.
   static constexpr std::uint32_t kWasmBrowserWindowLimit = 2 * kNativeWasmDispatchSampleBudget;
   static_assert(kNativeWasmIndirectSampleBudget == kNativeWasmDispatchSampleBudget &&
                 kNativeWasmExecutionBudget == kNativeWasmDispatchSampleBudget);
@@ -254,7 +261,8 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   };
   static constexpr std::size_t kWasmModuleBindingLimit = 256;
   std::map<std::uint64_t, WasmModuleBinding> wasm_modules_;
-  std::uint32_t guest_capture_count_ = 0;
+  std::uint64_t guest_capture_count_ = 0;
+  std::shared_ptr<const NativeWasmGuestAdapter> guest_adapter_;
   // One marker for host records naming another identity, whose sequence
   // slots are not this renderer's to fill. Every other refusal fills its own.
   bool guest_host_malformed_gap_emitted_ = false;

@@ -123,7 +123,7 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
   // that thread, so the browser still sees each thread's messages in the
   // order they were made, and when the thread exits.
   struct WasmRecordBatch final {
-    WasmRecordBatch() = default;
+    WasmRecordBatch();
     WasmRecordBatch(const WasmRecordBatch&) = delete;
     WasmRecordBatch& operator=(const WasmRecordBatch&) = delete;
     ~WasmRecordBatch();

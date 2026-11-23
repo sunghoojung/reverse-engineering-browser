@@ -472,6 +472,8 @@ void NativeProbeTransport::EmitGeneratedArtifact(const NativeArtifactKind kind,
           mojo_base::BigBuffer(script.source), script.session_id, credit_bytes);
 }
 
+NativeProbeTransport::WasmRecordBatch::WasmRecordBatch() = default;
+
 NativeProbeTransport::WasmRecordBatch::~WasmRecordBatch() {
   Send();
 }

@@ -36,7 +36,7 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
     time::Duration,
 };
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 const UI_ASSETS: [&str; 84] = [
     "index.html",
@@ -2910,31 +2910,22 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                 .and_then(|v| v.parse::<usize>().ok())
                 .filter(|n| *n > 0 && *n <= maximum)
                 .ok_or_else(|| Error::bad("The request body size is invalid"))?;
-            // Comparison bodies can contain two 4 MiB originals. Reserve the
-            // existing package permit before ingesting them, with no body queue.
-            // Keep this permit through blocking work; body timeout/disconnect or
-            // dispatch admission failure releases it without starting comparison.
+            // A comparison holds two packages of any size, and a pack request
+            // its whole document, so at most two such bodies are read at a
+            // time: a later one waits for a package permit before its body is
+            // read, with no admission deadline. The permit is kept through the
+            // blocking work; a body timeout or disconnect releases it without
+            // starting any. Earlier revisions refused a third with HTTP 503.
             let comparison_permit = if matches!(
                 path,
                 "/api/evidence/packages/compare"
                     | "/api/analysis/vm/packs/apply"
                     | "/api/analysis/vm/packs/compare"
             ) {
-                Some(
-                    app.package_io
-                        .clone()
-                        .try_acquire_owned()
-                        .map_err(|error| match error {
-                            TryAcquireError::NoPermits => {
-                                Error::new(503, "Comparison capacity is full; retry explicitly")
-                                    .with_code(Code::ResourceLimit)
-                            }
-                            TryAcquireError::Closed => {
-                                Error::new(503, "Package operations are unavailable")
-                                    .with_code(Code::DependencyUnavailable)
-                            }
-                        })?,
-                )
+                Some(app.package_io.clone().acquire_owned().await.map_err(|_| {
+                    Error::new(503, "Package operations are unavailable")
+                        .with_code(Code::DependencyUnavailable)
+                })?)
             } else {
                 None
             };
@@ -3622,7 +3613,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn comparison_prebody_admission_rejects_saturation_and_releases_cancelled_bodies() {
+    async fn comparison_prebody_admission_waits_for_a_permit_and_releases_cancelled_bodies() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let root = tempfile::tempdir().unwrap();
         let mut options = Options::parse_from(["origin-trace-backend"]);
@@ -3652,9 +3643,10 @@ mod tests {
                 .unwrap();
             }
         };
+        // A declared 8 MiB keeps the body deadline at its five-second floor.
+        let declared = 8 << 20;
         let header = format!(
-            "POST /api/evidence/packages/compare HTTP/1.1\r\nHost: {address}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{{",
-            evidence_comparison::MAX_REQUEST_BYTES
+            "POST /api/evidence/packages/compare HTTP/1.1\r\nHost: {address}\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n{{"
         );
         let mut first = tokio::net::TcpStream::connect(address).await.unwrap();
         first.write_all(header.as_bytes()).await.unwrap();
@@ -3664,23 +3656,8 @@ mod tests {
         wait_permits(0).await;
         // The asserted permits are an admission barrier, not a timing sleep.
         // These stalled requests have supplied one byte, not two large bodies.
-        let request = Request::builder()
-            .method("POST")
-            .uri("/api/evidence/packages/compare")
-            .header("host", address.to_string())
-            .header("content-length", evidence_comparison::MAX_REQUEST_BYTES)
-            .body(Body::empty())
-            .unwrap();
-        let rejected = handle(State(app.clone()), request).await;
-        assert_eq!(rejected.status(), 503);
-        let value: Value =
-            serde_json::from_slice(&to_bytes(rejected.into_body(), 4096).await.unwrap()).unwrap();
-        assert_eq!(value["code"], "resource_limit");
-        assert_eq!(app.package_io.available_permits(), 0);
-        // Cancellation releases a pre-body lease, allowing an explicit new call.
-        first.shutdown().await.unwrap();
-        drop(first);
-        wait_permits(1).await;
+        // A third comparison waits for a permit, with no admission deadline,
+        // instead of the 503 that saturation once returned.
         let p: Value =
             serde_json::from_slice(include_bytes!("../assets/evidence-packages/golden-v1.json"))
                 .unwrap();
@@ -3692,7 +3669,14 @@ mod tests {
             .header("content-length", body.len())
             .body(Body::from(body))
             .unwrap();
-        assert_eq!(handle(State(app.clone()), request).await.status(), 200);
+        let waiting = tokio::spawn(handle(State(app.clone()), request));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!waiting.is_finished());
+        assert_eq!(app.package_io.available_permits(), 0);
+        // Cancellation releases a pre-body lease, and the waiting comparison runs.
+        first.shutdown().await.unwrap();
+        drop(first);
+        assert_eq!(waiting.await.unwrap().status(), 200);
         assert_eq!(app.package_io.available_permits(), 1);
         // The second stalled body reaches its real body deadline and releases
         // the lease, without blocking or launching any comparison worker.

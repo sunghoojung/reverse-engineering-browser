@@ -8109,13 +8109,13 @@
       "post": {
         "operationId": "validate_evidence_package",
         "summary": "Validate an inert supplied evidence package",
-        "description": "Checks a caller-supplied metadata package without resolving references or treating it as backend evidence. Any JSON object is accepted for bounded validation; the expected valid document is EvidencePackage. Structurally parseable package failures return HTTP 200 with status invalid or unsupported. Duplicate object members return invalid/duplicate_json_key before materialization. Malformed JSON or a nonobject outer body returns HTTP 400. Unknown member names and raw input are never echoed. There is no export, import, installation, package persistence, source access, or authenticity claim.",
+        "description": "Checks a caller-supplied metadata package of any size without resolving references or treating it as backend evidence. Any JSON object is accepted for validation; the expected valid document is EvidencePackage. Structurally parseable package failures return HTTP 200 with status invalid or unsupported. Duplicate object members return invalid/duplicate_json_key before materialization. Malformed JSON or a nonobject outer body returns HTTP 400. Unknown member names and raw input are never echoed. There is no export, import, installation, package persistence, source access, or authenticity claim.",
         "tags": [
           "evidence"
         ],
         "requestBody": {
           "required": true,
-          "description": "The package document itself, never a path or URL. One decimal Content-Length is required; 1..4194304 bytes. No Transfer-Encoding. The runtime accepts JSON objects outside the expected schema in order to report invalid or unsupported packages.",
+          "description": "The package document itself, of any size, never a path or URL. One decimal Content-Length is required. No Transfer-Encoding. The runtime accepts JSON objects outside the expected schema in order to report invalid or unsupported packages.",
           "content": {
             "application/json": {
               "schema": {
@@ -8126,7 +8126,7 @@
         },
         "responses": {
           "200": {
-            "description": "Bounded validity result. Inspect status and checks; HTTP success does not imply package validity. Parsed shape/node/depth/count limits or the cooperative CPU budget can produce invalid/resource_limit.",
+            "description": "Validity result. Inspect status and checks; HTTP success does not imply package validity. Nesting deeper than 32 levels produces invalid/resource_limit; a package of any size, string length or record count is read whole. The issues list names the first 64 reasons, and issues_truncated says more were found.",
             "content": {
               "application/json": {
                 "schema": {
@@ -8150,7 +8150,7 @@
             }
           },
           "400": {
-            "description": "Invalid request framing, malformed JSON, nonobject body, or transport body-size limit exceeded.",
+            "description": "Invalid request framing, malformed JSON or a nonobject body.",
             "content": {
               "application/json": {
                 "schema": {
@@ -8256,7 +8256,7 @@
             }
           },
           "503": {
-            "description": "Bounded validation admission infrastructure is unavailable.",
+            "description": "Validation admission infrastructure is unavailable.",
             "content": {
               "application/json": {
                 "schema": {
@@ -8281,7 +8281,7 @@
           }
         },
         "x-source": "apps/origin-trace-backend/src/evidence_package.rs",
-        "x-max-body-bytes": 4194304,
+        "x-max-body-bytes": 9007199254740991,
         "x-reb-execution": {
           "kind": "operation",
           "effects": [
@@ -8300,7 +8300,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Inert bounded analysis of supplied untrusted metadata only. Does not read configured stores or blobs, resolve references or URLs, fetch schemas, write evidence or files, access external networks, control a browser, or launch helpers. A matching digest is content integrity, not provenance or authenticity.",
+          "notes": "Inert analysis of supplied untrusted metadata only. Does not read configured stores or blobs, resolve references or URLs, fetch schemas, write evidence or files, access external networks, control a browser, or launch helpers. A matching digest is content integrity, not provenance or authenticity.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/evidence_package.rs",
@@ -8317,7 +8317,7 @@
       "post": {
         "operationId": "export_evidence_package",
         "summary": "Export selected metadata from cooperatively stopped evidence stores",
-        "description": "Reads only explicitly selected configured source sections, under shared nonblocking lifetime guards. Updated broker and artifact receiver writers must have exited. A missing legacy guard is unsupported; socket absence or a stop request is not a snapshot. Full bounded source scans establish exact selections, reference coverage and duplicates; full selected artifact byte hashes are verified. The response omits raw payloads, URLs, paths, headers, bodies and artifact bytes. Advisory leases do not protect against malicious same-user or privileged writers. No source execution, capture control, persistence, network access or retries.",
+        "description": "Reads only explicitly selected configured source sections, under shared nonblocking lifetime guards. Updated broker and artifact receiver writers must have exited. A missing legacy guard is unsupported; socket absence or a stop request is not a snapshot. Full source scans to EOF, of stores of any length, establish exact selections, reference coverage and duplicates; full selected artifact byte hashes are verified. A selection names any number of events and artifacts. The response omits raw payloads, URLs, paths, headers, bodies and artifact bytes. Advisory leases do not protect against malicious same-user or privileged writers. No source execution, capture control, persistence, network access or retries.",
         "tags": [
           "evidence"
         ],
@@ -8536,7 +8536,7 @@
             }
           },
           "413": {
-            "description": "A source, row, record, retained-memory, blob, reference, gap or package resource limit was exceeded.",
+            "description": "A retained source row nests deeper than the 32 levels the package reader parses.",
             "content": {
               "application/json": {
                 "schema": {
@@ -8585,7 +8585,7 @@
           }
         },
         "x-source": "apps/origin-trace-backend/src/evidence_package.rs",
-        "x-max-body-bytes": 262144,
+        "x-max-body-bytes": 9007199254740991,
         "x-reb-execution": {
           "kind": "operation",
           "effects": [
@@ -8608,7 +8608,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Read-only selected-source scan, full selected-blob SHA-256 verification and closed metadata projection under bounded shared advisory leases. Empty selection performs no source read. No target/capture mutation, data write, helper/process launch, outbound network or automatic retry. Guard metadata proves cooperative consistency only; historical builds, capture configuration, origin scope and authorization remain unknown or not attested.",
+          "notes": "Read-only selected-source scan, full selected-blob SHA-256 verification and closed metadata projection under shared advisory leases. Every identity a scan sees is checked for duplicates in a private temporary database that is deleted when the export ends. Empty selection performs no source read. No target/capture mutation, data write, helper/process launch, outbound network or automatic retry. Guard metadata proves cooperative consistency only; historical builds, capture configuration, origin scope and authorization remain unknown or not attested.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/evidence_package.rs",
@@ -9734,13 +9734,13 @@
       "post": {
         "operationId": "compare_evidence_packages",
         "summary": "Compare two supplied evidence metadata packages",
-        "description": "Read-only bounded comparison after strict validation of both original package byte tokens. Rejects malformed, duplicate, unsupported, contradictory or oversized input; unsupported observer/profile data cannot be coerced into comparable evidence. Explicit facets and normalization are part of deterministic identity. Exact declared session/process keys may align metadata; coincident IDs across sessions remain unmatched or ambiguous. No raw artifact-byte verification, capture-completeness, behavioral, causal or timing-equivalence claim. Results page deterministic rows and preserve unknown capture settings. No evidence store reads, helpers, browser actions, persistence, automatic export or network access. A shared package permit is reserved with nonblocking admission before comparison-body ingestion and transferred through blocking work, limiting simultaneously retained comparison bodies/work to two. Busy requests receive 503/resource_limit before their bodies are read.",
+        "description": "Read-only comparison after strict validation of both original package byte tokens, of any size. Rejects malformed, duplicate, unsupported or contradictory input; unsupported observer/profile data cannot be coerced into comparable evidence. Explicit facets and normalization are part of deterministic identity. Exact declared session/process keys may align metadata; coincident IDs across sessions remain unmatched or ambiguous. No raw artifact-byte verification, capture-completeness, behavioral, causal or timing-equivalence claim. Results page deterministic rows by offset and preserve unknown capture settings. No evidence store reads, helpers, browser actions, persistence, automatic export or network access. A shared package permit is acquired before the comparison body is read and transferred through blocking work, so at most two comparison bodies are held at a time; a later request waits for one, with no admission deadline.",
         "tags": [
           "evidence"
         ],
         "requestBody": {
           "required": true,
-          "description": "One Content-Length, no Transfer-Encoding, at most 8392704 request bytes; each original nested package token at most 4194304 bytes. Required explicit profile and 1..7 unique facets; offset 0..2181 and limit 1..100.",
+          "description": "One Content-Length, no Transfer-Encoding; the request and each original nested package token are of any size. Required explicit profile and 1..7 unique facets; offset any nonnegative integer and limit 1..100.",
           "content": {
             "application/json": {
               "schema": {
@@ -9751,7 +9751,7 @@
         },
         "responses": {
           "200": {
-            "description": "At most 524288 bytes; full bounded summary plus one deterministic page, at most 100 rows. Unknown observer regimes and missing records never establish unchanged capture or behavior.",
+            "description": "Full summary plus one deterministic page of at most 100 rows. Unknown observer regimes and missing records never establish unchanged capture or behavior.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9775,7 +9775,7 @@
             }
           },
           "400": {
-            "description": "Invalid framing or comparison options, rejected original package (including duplicate keys, digest/reference/profile errors), or resource limits. No input or unrecognized fields are echoed.",
+            "description": "Invalid framing or comparison options, a rejected original package (including duplicate keys, digest/reference/profile errors), or nesting deeper than the package reader parses. No input or unrecognized fields are echoed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9881,7 +9881,7 @@
             }
           },
           "503": {
-            "description": "Comparison capacity is full (resource_limit) before request body ingestion, or package admission infrastructure is closed (dependency_unavailable). At most two package operations may reserve comparison bodies/work; rejection does not read/retain the large body and is not an automatic retry instruction. An HTTP client still uploading after early rejection may instead observe a transport error.",
+            "description": "Package admission infrastructure is closed (dependency_unavailable). A request that finds both package permits in use waits for one instead.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9906,7 +9906,7 @@
           }
         },
         "x-source": "apps/origin-trace-backend/src/evidence_comparison.rs",
-        "x-max-body-bytes": 8392704,
+        "x-max-body-bytes": 9007199254740991,
         "x-reb-execution": {
           "kind": "operation",
           "effects": [
@@ -9925,7 +9925,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Inert bounded local analysis of two supplied untrusted metadata packages only. Reads no configured stores or artifact bytes, writes no files, controls no browser, starts no helper and accesses no external network. Identical profile labels do not establish equivalent observer regimes; matching declared hashes do not reverify absent artifact bytes.",
+          "notes": "Inert local analysis of two supplied untrusted metadata packages only. Reads no configured stores or artifact bytes, writes no files, controls no browser, starts no helper and accesses no external network. Identical profile labels do not establish equivalent observer regimes; matching declared hashes do not reverify absent artifact bytes.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/evidence_comparison.rs",
@@ -10945,7 +10945,7 @@
             }
           },
           "503": {
-            "description": "Bounded pack-analysis capacity unavailable; retry explicitly.",
+            "description": "Pack-analysis admission infrastructure is closed. A request that finds both package permits in use waits for one instead.",
             "content": {
               "application/json": {
                 "schema": {
@@ -11087,7 +11087,7 @@
             }
           },
           "503": {
-            "description": "Bounded pack-analysis capacity unavailable; retry explicitly.",
+            "description": "Pack-analysis admission infrastructure is closed. A request that finds both package permits in use waits for one instead.",
             "content": {
               "application/json": {
                 "schema": {
@@ -35687,24 +35687,19 @@
           },
           "relationships": {
             "type": "array",
-            "maxItems": 4096,
             "items": {
               "$ref": "#/components/schemas/EvidencePackageRelationship"
             }
           },
           "gaps": {
             "type": "array",
-            "maxItems": 4096,
             "items": {
               "$ref": "#/components/schemas/EvidencePackageGap"
             }
           }
         },
         "description": "Version 1 closed metadata-only evidence package. Validity establishes internal consistency of supplied untrusted metadata, not producer authenticity, capture completeness, source availability, or artifact-byte verification. Semantic checks and canonical digest rules are defined in evidence-package-v1.md.",
-        "x-max-body-bytes": 4194304,
-        "x-max-parsed-nodes": 200000,
-        "x-max-depth": 32,
-        "x-max-string-utf8-bytes": 4096
+        "x-max-depth": 32
       },
       "EvidencePackageUint64String": {
         "type": "string",
@@ -35786,14 +35781,12 @@
         "properties": {
           "events": {
             "type": "array",
-            "maxItems": 1024,
             "items": {
               "$ref": "#/components/schemas/EvidencePackageEventKey"
             }
           },
           "artifacts": {
             "type": "array",
-            "maxItems": 64,
             "items": {
               "$ref": "#/components/schemas/EvidencePackageArtifactKey"
             }
@@ -35881,8 +35874,7 @@
           },
           "selected_count": {
             "type": "integer",
-            "minimum": 0,
-            "maximum": 1024
+            "minimum": 0
           },
           "source_scan": {
             "type": "string",
@@ -35929,8 +35921,7 @@
           },
           "selected_count": {
             "type": "integer",
-            "minimum": 0,
-            "maximum": 64
+            "minimum": 0
           },
           "source_scan": {
             "type": "string",
@@ -36486,14 +36477,12 @@
         "properties": {
           "events": {
             "type": "array",
-            "maxItems": 1024,
             "items": {
               "$ref": "#/components/schemas/EvidencePackageEventMetadata"
             }
           },
           "artifacts": {
             "type": "array",
-            "maxItems": 64,
             "items": {
               "$ref": "#/components/schemas/EvidencePackageArtifactMetadata"
             }
@@ -36743,8 +36732,7 @@
           },
           "occurrences": {
             "type": "integer",
-            "minimum": 1,
-            "maximum": 100000
+            "minimum": 1
           }
         },
         "allOf": [
@@ -37010,8 +36998,7 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 4095
+                "minimum": 0
               },
               {
                 "type": "null"
@@ -39730,7 +39717,6 @@
           "offset": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 2181,
             "default": 0
           },
           "limit": {
@@ -39740,7 +39726,7 @@
             "default": 50
           }
         },
-        "description": "Original nested package JSON tokens, each at most 4194304 bytes, are independently duplicate-rejecting validated before canonicalization. Only exact declared metadata comparison is supported. Facets select full retained sections; no heuristic or URL matching. Outer keys must be unique and supported."
+        "description": "Original nested package JSON tokens, of any size, are independently duplicate-rejecting validated before canonicalization. Only exact declared metadata comparison is supported. Facets select full retained sections; no heuristic or URL matching. Outer keys must be unique and supported."
       },
       "EvidenceComparisonReference": {
         "type": "object",
@@ -39801,8 +39787,7 @@
                   "integer",
                   "boolean",
                   "null"
-                ],
-                "maxLength": 4096
+                ]
               }
             }
           },
@@ -39823,8 +39808,7 @@
               },
               "count": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 4096
+                "minimum": 0
               }
             }
           }
@@ -39925,12 +39909,10 @@
           },
           "cross_scope_candidates": {
             "type": "integer",
-            "minimum": 0,
-            "maximum": 1024
+            "minimum": 0
           },
           "differences": {
             "type": "array",
-            "maxItems": 12,
             "items": {
               "$ref": "#/components/schemas/EvidenceComparisonDifference"
             }
@@ -39938,7 +39920,8 @@
           "differences_omitted": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 64
+            "maximum": 0,
+            "description": "Always 0: every changed field is listed. Revisions before this one listed 12 and counted the rest here."
           },
           "declared_content_hash_match": {
             "type": [
@@ -40091,28 +40074,23 @@
             "properties": {
               "equal_declared_metadata": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 2181
+                "minimum": 0
               },
               "changed_declared_metadata": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 2181
+                "minimum": 0
               },
               "left_only": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 2181
+                "minimum": 0
               },
               "right_only": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 2181
+                "minimum": 0
               },
               "ambiguous_cross_scope": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 2181
+                "minimum": 0
               }
             }
           },
@@ -40128,8 +40106,7 @@
             "properties": {
               "offset": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 2181
+                "minimum": 0
               },
               "limit": {
                 "type": "integer",
@@ -40138,16 +40115,14 @@
               },
               "total": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 2181
+                "minimum": 0
               },
               "next_offset": {
                 "type": [
                   "integer",
                   "null"
                 ],
-                "minimum": 0,
-                "maximum": 2181
+                "minimum": 0
               }
             }
           },

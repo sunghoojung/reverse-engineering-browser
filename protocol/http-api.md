@@ -1139,19 +1139,19 @@ schema to claim an endpoint or authorization mechanism that is not implemented.
 ## Inert evidence package validation
 
 `POST /api/evidence/packages/validate` (`validate_evidence_package`) accepts a
-bounded supplied package directly. It returns `valid`, `invalid`, or
+supplied package of any size directly. It returns `valid`, `invalid`, or
 `unsupported` validation data with `origin: untrusted_input` and
 `authenticity: not_established`; HTTP 200 alone does not imply validity.
 Duplicate JSON keys are rejected before HTTP or CLI materialization. See
 [Evidence Package v1](evidence-package-v1.md) for the closed metadata schema,
-canonical serialization/digest, limits, safe issues, and provenance boundaries.
+canonical serialization/digest, nesting depth, safe issues, and provenance boundaries.
 No source store or artifact content is accessed, and no export is implied.
 
 
 ## Guarded evidence package export
 
 `POST /api/evidence/packages/export` (`export_evidence_package`) reads an exact
-bounded event/artifact selection from the configured local stores. It requires
+event/artifact selection of any size from the configured local stores. It requires
 updated producer guard files and stopped relevant writers, fully scans requested
 sources, verifies complete selected blobs, and emits closed metadata with honest
 coverage and unknown historical provenance. Empty selection reads no sources.
@@ -1161,7 +1161,7 @@ included. Source/guard aliases and unsafe store permissions fail closed.
 Use `reb-api call export_evidence_package --body-file selection.json --output
 selected.reb-evidence.json` with the usual endpoint option. See
 [Evidence Package v1](evidence-package-v1.md#selected-stopped-store-export) for
-request shape, safe persistence, exact limits, lease compatibility and stable
+request shape, safe persistence, resources, lease compatibility and stable
 error reasons. Backend event clear now also requires matching exclusive guards
 for all existing configured outputs; legacy unguarded clear returns 503.
 

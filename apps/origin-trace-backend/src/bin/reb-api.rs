@@ -1100,10 +1100,10 @@ async fn exchange(
         });
     }
     let mut bytes = Vec::new();
-    let response_limit = if export_package && status.is_success() {
-        origin_trace_backend::evidence_package::MAX_BYTES
-    } else if compare && status.is_success() {
-        origin_trace_backend::evidence_comparison::MAX_RESULT_BYTES
+    // An exported package is validated whole before it is written, and a
+    // comparison page is parsed whole, so both are read at any size.
+    let response_limit = if (export_package || compare) && status.is_success() {
+        usize::MAX
     } else {
         MEMORY_RESPONSE_BYTES
     };
@@ -1134,11 +1134,7 @@ async fn exchange(
                     unreadable: true,
                 });
             }
-            return Err(if export_package {
-                "Evidence package response exceeds its byte limit"
-            } else if compare {
-                "Evidence comparison response exceeds its byte limit"
-            } else if status.is_success() {
+            return Err(if status.is_success() {
                 "API response exceeds the 64 MiB a result is read into memory to omit content and summarize. Narrow the read with the operation's view, filter, limit or paging parameters"
             } else {
                 "API response exceeds 64 MiB"

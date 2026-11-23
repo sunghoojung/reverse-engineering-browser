@@ -7605,6 +7605,7 @@ async fn validate_package_http(server: &Server, bytes: &[u8], status: u16) -> Va
         .post(format!("{}{}", server.url, EVIDENCE_PACKAGE_ROUTE))
         .header("content-type", "application/json")
         .body(bytes.to_vec())
+        .timeout(PACKAGE_WAIT)
         .send()
         .await
         .unwrap();
@@ -7683,7 +7684,7 @@ fn evidence_package_standalone_schema_and_openapi_components_are_identical() {
     );
     let operation = &spec["paths"][EVIDENCE_PACKAGE_ROUTE]["post"];
     assert_eq!(operation["operationId"], "validate_evidence_package");
-    assert_eq!(operation["x-max-body-bytes"], 4 * 1024 * 1024);
+    assert_eq!(operation["x-max-body-bytes"], 9007199254740991u64);
     assert_eq!(operation["x-reb-execution"]["effects"], json!(["analysis"]));
     assert_eq!(
         operation["x-reb-execution"]["state_dependent_effects"],
@@ -7832,7 +7833,7 @@ fn evidence_package_cli_lists_and_describes_the_contract_without_a_server() {
         if command[0] == "describe" {
             assert_eq!(document["method"], "POST");
             assert_eq!(document["path"], EVIDENCE_PACKAGE_ROUTE);
-            assert_eq!(document["x-max-body-bytes"], 4 * 1024 * 1024);
+            assert_eq!(document["x-max-body-bytes"], 9007199254740991u64);
         } else {
             assert_eq!(document, specification());
         }
@@ -8153,7 +8154,7 @@ async fn evidence_package_closed_projection_rejects_rehashed_private_fields_with
 }
 
 #[tokio::test]
-async fn evidence_package_raw_body_bounds_and_local_trust_are_enforced() {
+async fn evidence_package_bodies_of_any_size_validate_and_local_trust_is_enforced() {
     let server = Server::start().await;
     for raw in [
         b"{".as_slice(),
@@ -8170,27 +8171,12 @@ async fn evidence_package_raw_body_bounds_and_local_trust_are_enforced() {
     }
     let invalid = validate_package_http(&server, b"{}", 200).await;
     assert_untrusted_package_result(&invalid, "invalid");
-    let mut maximum = GOLDEN_EVIDENCE_PACKAGE.to_vec();
-    maximum.resize(4 * 1024 * 1024, b' ');
-    assert_untrusted_package_result(
-        &validate_package_http(&server, &maximum, 200).await,
-        "valid",
-    );
-    // Advertise an oversized body without uploading it, to exercise framing
-    // rejection without depending on connection reset timing during an upload.
-    // Close this incomplete exchange instead of reusing its connection for
-    // subsequent validator assertions.
-    let response = server
-        .client
-        .post(format!("{}{}", server.url, EVIDENCE_PACKAGE_ROUTE))
-        .header("content-length", (4 * 1024 * 1024 + 1).to_string())
-        .header("connection", "close")
-        .send()
-        .await
-        .unwrap();
-    assert_contract_response(response, "post", EVIDENCE_PACKAGE_ROUTE, 400).await;
-    maximum.push(b' ');
-    server.file("too-large.json", &maximum);
+    // A body was refused past 4 MiB and a string past 4,096 bytes. Bodies
+    // and strings of any size are read, over HTTP and through the CLI.
+    let mut large = GOLDEN_EVIDENCE_PACKAGE.to_vec();
+    large.resize(5 << 20, b' ');
+    assert_untrusted_package_result(&validate_package_http(&server, &large, 200).await, "valid");
+    server.file("large.json", &large);
     let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
         .args([
             "call",
@@ -8199,19 +8185,26 @@ async fn evidence_package_raw_body_bounds_and_local_trust_are_enforced() {
             &server.url,
         ])
         .arg("--body-file")
-        .arg(server.root.path().join("too-large.json"))
+        .arg(server.root.path().join("large.json"))
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    assert_eq!(
-        String::from_utf8(output.stderr).unwrap(),
-        "reb-api: Request body exceeds its byte limit\n"
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    let oversized_string = serde_json::to_vec(&json!({"unknown":"x".repeat(4097)})).unwrap();
-    let limited = validate_package_http(&server, &oversized_string, 200).await;
-    assert_untrusted_package_result(&limited, "invalid");
-    assert_eq!(limited["issues"][0]["code"], "resource_limit");
+    assert_untrusted_package_result(&serde_json::from_slice(&output.stdout).unwrap(), "valid");
+    let long_string = serde_json::to_vec(&json!({"unknown":"x".repeat(1 << 20)})).unwrap();
+    let invalid = validate_package_http(&server, &long_string, 200).await;
+    assert_untrusted_package_result(&invalid, "invalid");
+    assert!(
+        invalid["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|issue| issue["code"] != "resource_limit"),
+        "{invalid}"
+    );
     for (header, value) in [
         ("Host", "example.test:7319"),
         ("Origin", "https://example.test"),
@@ -8435,6 +8428,176 @@ async fn guarded_export_round_trips_canonical_private_cli_bytes_without_secrets_
             .join("unexpected-helper.sh.invoked")
             .exists()
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn guarded_export_reads_stores_of_any_size_and_packages_past_the_old_counts() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    // An export scanned at most 64 MiB and 100,000 rows of events and 16 MiB
+    // and 10,000 rows of manifest, and a package held at most 1,024 events and
+    // 64 artifacts in 4 MiB. A comparison held two such packages and paged at
+    // most 2,181 rows. This store is past every one of those bounds; it is
+    // generated here and removed with the server's directory.
+    let server = Server::start().await;
+    // The hole is no selected event's: every 12th event is selected.
+    let (rows, hole, artifacts) = (120_000u64, 100_501u64, 12_000u64);
+    let payload = hex::encode("Date.now");
+    let mut events = std::io::BufWriter::new(
+        std::fs::File::create(server.root.path().join("events.jsonl")).unwrap(),
+    );
+    for n in (1..=rows).filter(|n| *n != hole) {
+        writeln!(events, r#"{{"protocol_version":3,"session_id":"7","process_id":42,"sequence_number":"{n}","monotonic_time_ns":"{}","navigation_id":"100","frame_id":"200","thread_id":5,"tab_id":1,"artifact_id":"0","parent_event_id":"0","request_id":"0","browser_context_id_high":"11","browser_context_id_low":"12","initiator_request_id":0,"initiator_process_id":0,"category":"runtime","type":"api_call","status_code":0,"error_code":0,"resource_type":0,"flags":0,"encoded_data_length":"0","decoded_body_length":"0","payload_size":8,"payload_truncated":false,"payload_encoding":"hex","payload":"{payload}","unknown_extension":{{"padding":"{}"}}}}"#, n * 100, "p".repeat(120)).unwrap();
+    }
+    events.into_inner().unwrap().sync_all().unwrap();
+    let store = std::fs::metadata(server.root.path().join("events.jsonl"))
+        .unwrap()
+        .len();
+    assert!(store > 64 << 20, "{store}");
+    let blob = include_bytes!("../assets/evidence-packages/source-v1/javascript.bin");
+    let hash = hex::encode(sha2::Sha256::digest(blob));
+    server.file(&format!("artifacts/blobs/{hash}.bin"), blob);
+    std::fs::set_permissions(
+        server
+            .root
+            .path()
+            .join(format!("artifacts/blobs/{hash}.bin")),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let mut manifest = Vec::new();
+    for n in 1..=artifacts {
+        writeln!(manifest, r#"{{"protocol_version":1,"session_id":"7","artifact_id":"{n}","navigation_id":"100","frame_id":"200","parent_artifact_id":"0","creator_event_id":"0","kind":"javascript","url":"https://example.test/{n}.js","mime_type":"text/javascript","byte_size":{},"sha256":"{hash}","sensitive":false,"content_path":"blobs/{hash}.bin","execution_context_id":"7","capture_origin":"dynamic_javascript"}}"#, blob.len()).unwrap();
+    }
+    server.file("artifacts/manifest.jsonl", &manifest);
+    for name in ["events.jsonl.reb-lock-v1", "artifacts/evidence.reb-lock-v1"] {
+        server.file(name, b"REB_EVIDENCE_GUARD_V1\n");
+        std::fs::set_permissions(
+            server.root.path().join(name),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
+    // Every 12th event, the last of them past the first 64 MiB, and every
+    // 120th artifact, the last of them past the first 10,000 rows.
+    let selected_events: Vec<u64> = (1..=rows).filter(|n| n % 12 == 0).collect();
+    let selected_artifacts: Vec<u64> = (1..=artifacts).filter(|n| n % 120 == 0).collect();
+    let selection = json!({"protocol_version": 1, "selection": {
+        "events": selected_events.iter().map(|n| json!({"session_id": "7", "process_id": 42, "sequence_number": n.to_string()})).collect::<Vec<_>>(),
+        "artifacts": selected_artifacts.iter().map(|n| json!({"session_id": "7", "artifact_id": n.to_string()})).collect::<Vec<_>>()}});
+    assert!(serde_json::to_vec(&selection).unwrap().len() > 256 << 10);
+    let response = server
+        .client
+        .post(format!("{}{EXPORT_PACKAGE_ROUTE}", server.url))
+        .json(&selection)
+        .timeout(PACKAGE_WAIT)
+        .send()
+        .await
+        .unwrap();
+    let bytes = assert_contract_response(response, "post", EXPORT_PACKAGE_ROUTE, 200).await;
+    assert!(bytes.len() > 4 << 20, "{}", bytes.len());
+    let package: Value = serde_json::from_slice(&bytes).unwrap();
+    let records = |section: &str| package["records"][section].as_array().unwrap().len();
+    assert_eq!(records("events"), selected_events.len());
+    assert_eq!(records("artifacts"), selected_artifacts.len());
+    assert_eq!(
+        package["coverage"]["events"]["selected_count"],
+        selected_events.len()
+    );
+    assert_eq!(package["coverage"]["events"]["source_scan"], "complete");
+    assert_eq!(
+        package["records"]["events"][selected_events.len() - 1]["key"]["sequence_number"],
+        rows.to_string()
+    );
+    // The one absent row inside the selected window is named, and no other.
+    assert_eq!(
+        package["gaps"],
+        json!([{"kind": "sequence_discontinuity", "session_id": "7", "process_id": 42,
+            "first_missing_sequence": hole.to_string(), "last_missing_sequence": hole.to_string()}])
+    );
+    assert_eq!(package["coverage"]["events"]["capture_state"], "partial");
+    assert_untrusted_package_result(&validate_package_http(&server, &bytes, 200).await, "valid");
+    // The CLI writes and validates the same bytes.
+    server.file("selection.json", &serde_json::to_vec(&selection).unwrap());
+    let output_path = server.root.path().join("large.reb-evidence.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "export_evidence_package",
+            "--base-url",
+            &server.url,
+            "--timeout",
+            "600",
+        ])
+        .arg("--body-file")
+        .arg(server.root.path().join("selection.json"))
+        .arg("--output")
+        .arg(&output_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read(&output_path).unwrap(), bytes);
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "validate_evidence_package",
+            "--base-url",
+            &server.url,
+            "--timeout",
+            "600",
+        ])
+        .arg("--body-file")
+        .arg(&output_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_untrusted_package_result(&serde_json::from_slice(&output.stdout).unwrap(), "valid");
+    // Two such packages compare, and their last row pages past 2,181.
+    let mut changed = package.clone();
+    changed["records"]["events"][9000]["monotonic_time_ns"] = json!("1");
+    changed["package_id"] =
+        json!(origin_trace_backend::evidence_package::package_id(&changed).unwrap());
+    let mut body = comparison_body(&package, &changed);
+    body["offset"] = json!(9000);
+    body["limit"] = json!(100);
+    let body = serde_json::to_vec(&body).unwrap();
+    assert!(body.len() > (8 << 20) + 4096, "{}", body.len());
+    let result = compare_package_http(&server, &body, 200).await;
+    let total = selected_events.len() + selected_artifacts.len() + 5;
+    assert_eq!(result["page"]["total"], total);
+    assert_eq!(result["counts"]["changed_declared_metadata"], 1);
+    assert_eq!(result["rows"].as_array().unwrap().len(), 100);
+    assert_eq!(result["page"]["next_offset"], 9100);
+    server.file("comparison.json", &body);
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "compare_evidence_packages",
+            "--base-url",
+            &server.url,
+            "--timeout",
+            "600",
+        ])
+        .arg("--body-file")
+        .arg(server.root.path().join("comparison.json"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cli: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(cli["rows"], result["rows"]);
 }
 
 #[cfg(unix)]
@@ -10588,6 +10751,9 @@ async fn float32_compares_artifacts_of_any_size_in_one_pass() {
 }
 
 const EVIDENCE_COMPARISON_ROUTE: &str = "/api/evidence/packages/compare";
+/// Package validation, export and comparison have no deadline, so a test of a
+/// large case waits longer than the client's 30 seconds on a loaded machine.
+const PACKAGE_WAIT: Duration = Duration::from_secs(600);
 fn comparison_body(left: &Value, right: &Value) -> Value {
     json!({"left":left,"right":right,"normalization_profile":"reb-declared-metadata-v1","facets":["events","artifacts","coverage","gaps","relationships","provenance","selection"]})
 }
@@ -10597,6 +10763,7 @@ async fn compare_package_http(server: &Server, bytes: &[u8], status: u16) -> Val
         .post(format!("{}{}", server.url, EVIDENCE_COMPARISON_ROUTE))
         .header("content-type", "application/json")
         .body(bytes.to_vec())
+        .timeout(PACKAGE_WAIT)
         .send()
         .await
         .unwrap();
@@ -10725,7 +10892,7 @@ async fn evidence_comparison_rejects_original_duplicate_profile_and_private_fiel
     );
     for (field, value) in [
         ("facets", json!(["events", "events"])),
-        ("offset", json!(2182)),
+        ("offset", json!(-1)),
         ("limit", json!(101)),
         ("limit", Value::Null),
         ("offset", Value::Null),
@@ -10754,43 +10921,35 @@ fn evidence_comparison_cli_offline_discovery_includes_closed_contract_and_effect
     assert!(output.status.success());
     let operation: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(operation["operationId"], "compare_evidence_packages");
-    assert_eq!(
-        operation["x-max-body-bytes"],
-        origin_trace_backend::evidence_comparison::MAX_REQUEST_BYTES
-    );
+    assert_eq!(operation["x-max-body-bytes"], 9007199254740991u64);
     assert_eq!(operation["x-reb-execution"]["effects"], json!(["analysis"]));
     assert!(operation["components"]["schemas"]["EvidenceComparisonResult"].is_object());
 }
 
 #[tokio::test]
-async fn evidence_comparison_outer_and_original_byte_bounds_are_independent() {
+async fn evidence_comparison_originals_of_any_size_compare_and_escapes_stay_strict() {
     let server = Server::start().await;
     let package = serde_json::to_vec(&golden_evidence_package()).unwrap();
-    let padded = |maximum: usize| {
-        let mut p = Vec::with_capacity(maximum);
+    // Each original was refused past 4 MiB and the request past 8 MiB and
+    // 4 KiB. Whitespace inside an original is part of its bytes.
+    let padded = |size: usize| {
+        let mut p = Vec::with_capacity(size);
         p.push(b'{');
-        p.resize(maximum - package.len() + 1, b' ');
+        p.resize(size - package.len() + 1, b' ');
         p.extend_from_slice(&package[1..]);
-        assert_eq!(p.len(), maximum);
         p
     };
-    let max = origin_trace_backend::evidence_package::MAX_BYTES;
     let mut bytes = b"{\"left\":".to_vec();
-    bytes.extend(padded(max));
+    bytes.extend(padded(5 << 20));
     bytes.extend_from_slice(b",\"right\":");
-    bytes.extend(padded(max));
+    bytes.extend(padded(5 << 20));
     bytes.extend_from_slice(
         b",\"normalization_profile\":\"reb-declared-metadata-v1\",\"facets\":[\"events\"]}",
     );
-    assert!(bytes.len() <= origin_trace_backend::evidence_comparison::MAX_REQUEST_BYTES);
     assert_eq!(
         compare_package_http(&server, &bytes, 200).await["selected_metadata_equal"],
         true
     );
-    // One-over original token cannot be rescued by normalized or compact JSON.
-    bytes.insert(10, b' ');
-    let response = compare_package_http(&server, &bytes, 400).await;
-    assert_eq!(response["code"], "resource_limit");
     let raw = serde_json::to_string(&comparison_body(
         &golden_evidence_package(),
         &golden_evidence_package(),
@@ -10807,20 +10966,6 @@ async fn evidence_comparison_outer_and_original_byte_bounds_are_independent() {
     let mut invalid = raw.as_bytes().to_vec();
     invalid[20] = 255;
     compare_package_http(&server, &invalid, 400).await;
-    // Reject framing before uploading the impossible body; avoid depending on
-    // TCP reset timing when the server refuses an oversized Content-Length.
-    let response = server
-        .client
-        .post(format!("{}{}", server.url, EVIDENCE_COMPARISON_ROUTE))
-        .header(
-            "content-length",
-            (origin_trace_backend::evidence_comparison::MAX_REQUEST_BYTES + 1).to_string(),
-        )
-        .header("connection", "close")
-        .send()
-        .await
-        .unwrap();
-    assert_contract_response(response, "post", EVIDENCE_COMPARISON_ROUTE, 400).await;
 }
 
 #[tokio::test]

@@ -3382,15 +3382,16 @@ mode retires pending package ownership, just as leaving Evidence does.
 Choose individual native event identities
 (session, process and sequence) or artifact identities (session and artifact).
 The selected-request view uses only that request's attached native records;
-synthetic gap rows are not export identities. The other
-views expose the current retained windows, at most 5,000 events or 500 artifacts,
-with 50 candidates per page. They are not an exhaustive store inventory. The
-pager stays above the viewport-bounded list. **Limits & privacy** holds the
+synthetic gap rows are not export identities. **Retained events** lists the
+stored range the investigation view shows: the newest records, or the older
+range **Earlier** and **Oldest** read by cursor. **Retained artifacts** lists
+every descriptor of the loaded artifact catalog. Each view shows 50 candidates
+per page. The pager stays above the viewport-bounded list. **Limits & privacy** holds the
 longer coverage and disclosure explanation without crowding the selection view.
 
-Nothing is selected automatically. Selection spans pages and views, with limits
-of 1,024 events and 64 artifacts. **Selected identities** keeps the exact keys
-inspectable if their rows leave the window. **Clear selection** removes all keys;
+Nothing is selected automatically. Selection spans pages, ranges and views, and
+holds any number of events and artifacts. **Selected identities** keeps the
+exact keys inspectable if their rows leave the view. **Clear selection** removes all keys;
 changing the selected request also clears the selection and any prior result.
 Refresh does not silently choose a replacement. A missing selected identity
 fails export rather than substituting a neighboring record.
@@ -3398,20 +3399,22 @@ fails export rather than substituting a neighboring record.
 **Export selected metadata** explicitly calls the local guarded exporter and
 then validates the returned original bytes. It never stops a writer, changes
 capture settings, creates a guard for a legacy store, or retries automatically.
-An active writer, changed source, unsupported store, failed integrity check or
-bounded-scan limit has a visible error. Supported stores must be quiescent under
+An active writer, changed source, unsupported store or failed integrity check
+has a visible error. The export reads the whole of both stores, however large;
+it shows its elapsed seconds and stops when **Cancel** is clicked. Supported stores must be quiescent under
 the existing cooperative leases; see the [package contract](../../protocol/evidence-package-v1.md).
 
-Alternatively, choose a metadata JSON file up to 4 MiB and click **Validate
+Alternatively, choose a metadata JSON file of any size and click **Validate
 original bytes**. Duplicate members, invalid UTF-8, BOMs and whitespace reach the
 Rust validator unchanged. The UI parses only an accepted document for display.
 Validation neither imports evidence nor runs code, fetches references or uploads
-data outside the local service. The 15-second UI deadline includes body and file
-reads. Response reads retain one buffer (at most 4 MiB for a package, 64 KiB
-for a validation result) and reject more than 65,536 transport chunks. Reads yield
-every 256 chunks so cancellation/deadline tasks run; cancellation does not wait
-for an underlying producer's cleanup. Cancel, Escape, a changed selection/request or leaving Evidence retires
-the pending result. An already started bounded server operation may finish.
+data outside the local service. An operation has no deadline. A package
+response is read whole; a validation result is read into one 64 KiB buffer,
+which its 64-issue list fits, and more than 65,536 transport chunks are
+refused. Reads yield every 256 chunks so cancellation tasks run; cancellation
+does not wait for an underlying producer's cleanup. Cancel, Escape, a changed
+selection/request or leaving Evidence retires the pending result and stops the
+local service's work.
 
 A valid package is internally consistent, untrusted metadata, not authenticated
 evidence. A supplied file's provenance and export-time verification remain

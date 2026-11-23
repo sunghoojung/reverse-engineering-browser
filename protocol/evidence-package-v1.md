@@ -13,14 +13,14 @@ copies artifact bytes, fetches references, or executes source or analysis helper
 ## Selected stopped-store export
 
 `POST /api/evidence/packages/export` (`export_evidence_package`) takes this closed
-request, at most 256 KiB:
+request, of any size:
 
 ```json
 {"protocol_version":1,"profile":"reb-metadata-only-v1","selection":{"events":[{"session_id":"7","process_id":42,"sequence_number":"1"}],"artifacts":[{"session_id":"7","artifact_id":"9"}]}}
 ```
 
 Only `profile` is optional, with the default shown. Both selector arrays are
-required; maximum counts are 1024 events and 64 artifacts. Duplicate keys,
+required and name any number of events and artifacts. Duplicate keys,
 unknown members, unsupported profiles and ambiguous/bare identities are rejected.
 There are no paths, URLs, wildcards, latest aliases or caller-supplied evidence.
 The normal local-origin checks, no-store and nosniff response headers apply.
@@ -34,7 +34,7 @@ reb-api call validate_evidence_package --endpoint-file backend.endpoint \
 ```
 
 Export scans each requested source to exact EOF. Every row, including unselected
-rows, must pass its native contract and bounded duplicate-rejecting parser.
+rows, must pass its native contract and duplicate-rejecting parser.
 Duplicate ordinary scoped keys fail even when the full source records agree;
 conflicts in an omitted payload or extension still fail. No neighboring record
 substitutes for a missing selection. Only selected records are projected through
@@ -99,26 +99,37 @@ malicious same-user/privileged writer restoring metadata. Only ordinary local
 regular filesystems are supported. A kernel read can still block: cooperative
 cancellation and bounded work are not a hard cancellation guarantee.
 
-### Export limits and errors
+### Export resources and errors
 
-- Events: 64 MiB complete scan, 100000 nonempty rows, 4096 bytes per row including
-  its separator. Manifest: 16 MiB, 10000 rows, 8192 bytes per row.
+- Each source is scanned to EOF, at any length and row count. A row is at
+  most 4096 bytes in the event store and 8192 in the manifest, including its
+  separator: those are the stores' record contracts, not scan bounds.
+- Every identity a scan sees is recorded with the SHA-256 of its row in a
+  private temporary SQLite database that SQLite deletes when the export ends,
+  so duplicate and conflicting identities, missing selections and sequence
+  discontinuities are found across a store of any length without one memory
+  entry per row.
 - Each selected blob is hashed whole, whatever its size or the sum of them, in
   a fixed 64 KiB read buffer. Zero-byte artifacts still require their
   empty-content hash.
-- Retained source indexes/projections: 32 MiB with conservative preallocation
-  accounting. Relationships and gaps: 4096 each. Package bytes: 4 MiB.
-- The same parsed-node, depth, string and cardinality bounds apply to source
-  rows and output. The export has no deadline. A request that goes away stops
-  it between reads, including parse, scans, hashes, projection, canonicalization
-  and final validation, and its permits return. Two package operations share the
-  existing bounded I/O pool and wait for it without a deadline. Earlier revisions
-  stopped an export at ten seconds and a permit wait at one second.
+- A package holds every selected record and every relationship and gap they
+  produce, at any size. Source rows and output nest at most 32 levels, the
+  depth the recursive reader parses; no valid row or package nests deeper.
+- The export has no deadline. A request that goes away stops it between reads,
+  including parse, scans, hashes, projection, canonicalization and final
+  validation, and its permits return. Two package operations share the
+  existing I/O pool and wait for it without a deadline. Earlier revisions
+  stopped an export at ten seconds and a permit wait at one second, and
+  refused a request past 256 KiB, a selection past 1024 events or 64
+  artifacts, an event store past 64 MiB or 100000 rows, a manifest past 16 MiB
+  or 10000 rows, 32 MiB of retained indexes, 4096 relationships or gaps, and a
+  package past 4 MiB.
 
 Errors use fixed messages and empty details, with explicit shared reason codes:
 400 `invalid_request`; 404 `target_unavailable` for missing selected identities;
 409 `state_conflict` for active leases, changed sources or duplicate/conflicting
-identities; 413 `resource_limit`; 408 `timeout` for a stalled request body; 499
+identities; 413 `resource_limit` for a source row nested deeper than 32 levels;
+408 `timeout` for a stalled request body; 499
 `cancelled` when the request goes away; 422 `protocol_error` for malformed
 source, hash/length mismatch or inconsistent references; and 503
 `dependency_unavailable` for missing guards/sources, unsafe files or unsupported
@@ -146,7 +157,7 @@ reb-api call validate_evidence_package --endpoint-file backend.endpoint \
 ```
 
 The OpenAPI request schema describes the expected valid v1 document; the
-endpoint also accepts out-of-schema JSON objects to report bounded validation
+endpoint also accepts out-of-schema JSON objects to report validation
 data. Malformed JSON and nonobject outer bodies are HTTP 400. Duplicate JSON
 members are rejected before materialization and produce an HTTP 200 `invalid`
 result with `duplicate_json_key`. The CLI rejects duplicate keys locally with a
@@ -319,16 +330,21 @@ identity. Omitted source payload bytes do not; artifact original-byte SHA-256
 remains separate. No timestamp, path, inode, file offset, or random store ID is
 added to this semantic document.
 
-Validation is bounded to a 4 MiB body, 200000 parsed nodes, depth 32, and 4096
-UTF-8 bytes per string. There are at most 1024 events, 64 artifacts, 4096
-relationships, and 4096 gaps, with the same selector bounds. Results contain at
-most 64 issues and 64 KiB. Runtime also enforces its bounded concurrency.
-There is no CPU budget or deadline: a valid package is bounded by the limits
-above, so validation, comparison and export run until done, and a request that
-goes away stops them with HTTP 499 `cancelled`. Earlier revisions shared a
-two-second budget across parsing, validation and canonicalization. The fixed
+Validation reads a body of any size, with any number of parsed nodes, strings
+of any length, and any number of events, artifacts, relationships, gaps and
+selectors. Nesting is bounded to depth 32, since the reader recurses once per
+level and no valid package nests deeper. Results name the first 64 issues,
+set `issues_truncated` when more were found, and stay within 64 KiB; the
+verdict covers the whole package. Runtime also enforces its bounded
+concurrency. There is no CPU budget or deadline: validation, comparison and
+export run until done, and a request that goes away stops them with HTTP 499
+`cancelled`. Earlier revisions shared a two-second budget across parsing,
+validation and canonicalization, and refused a body past 4 MiB, 200000 parsed
+nodes, a string past 4096 UTF-8 bytes, and more than 1024 events, 64
+artifacts, 4096 relationships or 4096 gaps; an issue index past 4095 was
+dropped. The fixed
 embedded validation schema is initialized before any supplied package is read.
-Parsed resource-limit exhaustion produces safe `invalid` result data with
+Nesting past depth 32 produces safe `invalid` result data with
 `resource_limit`; a stalled request body remains HTTP 408. Large object-array uniqueness is checked semantically rather than through
 quadratic JSON Schema `uniqueItems`. Body framing limits retain the existing
 HTTP transport error behavior. All application errors reuse the existing

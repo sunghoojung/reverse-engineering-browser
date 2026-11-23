@@ -61,7 +61,8 @@ std::string Site(int function, int offset, std::string_view imports = "") {
          R"(,"import_call_offsets":[)" + std::string(imports) +
          R"(],"opcode":{"endian":"little","width":1},"pc":{"adjustment":"0","local_index":2,"subtract_memory_base":false,"value_type":"i32"}})";
 }
-std::string Recipe(const std::vector<std::string>& sites, std::string_view limit = "256") {
+// The default budget is past the 256 samples a recipe was once capped at.
+std::string Recipe(const std::vector<std::string>& sites, std::string_view limit = "65536") {
   std::string list;
   for (const auto& site : sites)
     list += (list.empty() ? "" : ",") + site;
@@ -83,20 +84,28 @@ TEST(NativeWasmGuestAdapter, VersionTwoSitesShareOneBudget) {
   std::vector<std::string> eight;
   for (int n = 0; n < 8; ++n)
     eight.push_back(Site(n, 8 + n));
-  EXPECT_TRUE(ParseNativeWasmGuestAdapter(Recipe(eight)));
+  const auto eight_sites = ParseNativeWasmGuestAdapter(Recipe(eight));
+  ASSERT_TRUE(eight_sites);
+  EXPECT_EQ(eight_sites->sample_limit, 65536U);
+  // No ceiling short of the JSON reader's integer range.
+  const auto widest = ParseNativeWasmGuestAdapter(Recipe({Site(20, 40)}, "2147483647"));
+  ASSERT_TRUE(widest);
+  EXPECT_EQ(widest->sample_limit, 2147483647U);
 }
 TEST(NativeWasmGuestAdapter, RejectsMalformedVersionTwo) {
   std::vector<std::string> nine;
   for (int n = 0; n < 9; ++n)
     nine.push_back(Site(n, 8 + n));
   for (const auto& text : {
-           Recipe({}),                                          // No site.
-           Recipe(nine),                                        // More than eight sites.
-           Recipe({Site(20, 40), Site(20, 40)}),                // Duplicate site.
-           Recipe({Site(20, 40), Site(20, 90)}),                // Two sites of one dispatcher.
-           Recipe({Site(30, 90), Site(20, 40)}),                // Not in canonical order.
-           Recipe({Site(20, 40)}, "257"),                       // Budget over the limit.
-           Recipe({Site(20, 40)}, "0"), Recipe({Site(20, 4)}),  // Not a module code offset.
+           Recipe({}),                            // No site.
+           Recipe(nine),                          // More than eight sites.
+           Recipe({Site(20, 40), Site(20, 40)}),  // Duplicate site.
+           Recipe({Site(20, 40), Site(20, 90)}),  // Two sites of one dispatcher.
+           Recipe({Site(30, 90), Site(20, 40)}),  // Not in canonical order.
+           Recipe({Site(20, 40)}, "2147483648"),  // Past the JSON reader's integers.
+           Recipe({Site(20, 40)}, "-1"),          // A negative budget.
+           Recipe({Site(20, 40)}, "0"),           // No budget.
+           Recipe({Site(20, 4)}),                 // Not a module code offset.
        })
     EXPECT_FALSE(ParseNativeWasmGuestAdapter(text)) << text;
   // A per-site budget would multiply the shared one.

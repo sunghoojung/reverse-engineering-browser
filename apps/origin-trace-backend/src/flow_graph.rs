@@ -329,7 +329,9 @@ impl State {
             }
             if rows.rows.len() < BATCH_ROWS {
                 self.covered_to = rows.position.indexed_to;
-                self.caught_up = rows.position.caught_up(crate::event_index::RECORD_BYTES as u64);
+                self.caught_up = rows
+                    .position
+                    .caught_up(crate::event_index::RECORD_BYTES as u64);
                 break;
             }
             if started.elapsed() >= PROGRESS {

@@ -321,7 +321,10 @@ pub fn threads(indexes: &Mutex<Indexes>) -> Result<Threads> {
             )
         },
     )?;
-    let caught_up = index.stopped.is_none() && index.position.caught_up(crate::event_index::RECORD_BYTES as u64);
+    let caught_up = index.stopped.is_none()
+        && index
+            .position
+            .caught_up(crate::event_index::RECORD_BYTES as u64);
     let coverage = event_query::Coverage::located(
         index.position.indexed_to,
         index.position.file_end,

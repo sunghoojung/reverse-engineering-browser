@@ -234,6 +234,20 @@ final class Harness {
     try await settle()
   }
 
+  // Moves the pointer to the window's top-left corner, clear of every
+  // control. WebKit replays the last pointer position after a relayout, so a
+  // pointer left over a chip would show its hover tooltip in a screenshot.
+  func park() async throws {
+    try await activate()
+    let location = NSPoint(x: 2, y: webView.isFlipped ? 2 : webView.bounds.height - 2)
+    guard let event = NSEvent.mouseEvent(
+      with: .mouseMoved, location: webView.convert(location, to: nil), modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+      windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0)
+    else { throw HarnessError("Could not create a mouse event") }
+    window.sendEvent(event)
+    try await settle()
+  }
+
   // A native secondary click: WebKit turns it into the page's contextmenu event.
   func rightClick(_ selector: String, containing text: String? = nil) async throws {
     try await activate()
@@ -1336,6 +1350,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
         "\(size.name): one row per class, loss before limits")
       try await assertFullyVisible(ui, "#gap-status .ev-panel", "\(size.name) status gap breakdown")
       try await assertInert(ui, "\(size.name) status gap breakdown")
+      try await ui.park()
+      try await ui.waitUntil("document.querySelector('.ev-tip')?.hidden ?? true", "\(size.name): a hover tooltip stayed over the gap breakdown")
       try await ui.screenshot("status-gap-breakdown-\(size.name)")
       try await lightScreenshot(ui, "status-gap-breakdown", size.name, scope: "#gap-status .ev-panel")
       try await ui.tab()

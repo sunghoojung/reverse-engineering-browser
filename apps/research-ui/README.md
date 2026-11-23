@@ -344,8 +344,11 @@ read" and dims it, and the status line says why.
 
 The sections scroll as one pane. An open section's title stays at the top of
 the pane while its content scrolls under it, so a list is never seen without
-its title, and a list fades the edge that more rows lie past. Each section is
-a collapsible pane:
+its title. A list is as tall as its rows up to a cap that follows the
+window's height, and it ends on a whole row: the row edge nearest the cap, or
+its last row when the cap would cut only a few pixels. A thin shade marks the
+edge that more rows lie past, within the rows' padding, never over their
+text. Each section is a collapsible pane:
 
 - **Threads**, the Threads view, one line per thread in three groups: Console
   documents (top, child and out-of-process frames, as the Console listing
@@ -355,7 +358,8 @@ a collapsible pane:
   exact frame when there is one) and workers that started requests. A row
   gives the thread's origin or name, its identifiers (`F` frame, `P` renderer
   process, `ctx` execution context, `doc` Console document) and its activity:
-  its record count, its request count, or **armed** or **Console**. Its
+  its record count, its request count, or **armed** or **Console**. A long
+  origin is cut before the identifiers are. Its
   tooltip, and the fields below the list for the selected thread, give its
   kind, origin, frame, process and state in full. One line below says the
   Console's state and, while the event index catches up, how much of the store

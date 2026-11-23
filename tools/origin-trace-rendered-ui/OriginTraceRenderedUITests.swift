@@ -513,13 +513,15 @@ final class OriginTraceRenderedUITests: XCTestCase {
   }
 
   // The same state in the light theme, set the way the theme toggle sets it,
-  // without a click that could close an overlaid sidebar.
+  // without a click that could close an overlaid sidebar. Frames can stop
+  // (a covered window, a starved machine), so this wait, like settle() and
+  // every in-page wait for two frames here, also ends on a timer.
   @MainActor
   private func lightScreenshot(_ ui: Harness, _ name: String, _ size: String, scope: String = "#debugger-sidebar") async throws {
     _ = try await ui.value("""
       (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null;
         document.documentElement.dataset.theme = 'light';
-        await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
+        await new Promise(done => { requestAnimationFrame(() => requestAnimationFrame(done)); setTimeout(done, 500); }); return true; })()
       """)
     try await assertLayout(ui, scope, "\(size) \(name) light")
     try await ui.screenshot("\(name)-light-\(size)")
@@ -1691,8 +1693,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
 
       // Threads reads as whole one-line rows at either size: several show
       // before the list scrolls, none is cut by its top, and each row's name,
-      // identifiers and count sit side by side inside it. Scrolling the pane
-      // keeps the section's title over the list, never a headless list.
+      // identifiers and count sit side by side inside it, with a long name cut
+      // before its identifiers are. Both lists end on a
+      // whole row, never a sliced one. Scrolling the pane keeps the section's
+      // title over the list, never a headless list.
       let layout = try await ui.json("""
         (() => { const parts = row => [...row.querySelectorAll(':scope > *, :scope > * > *')].filter(part => part.getBoundingClientRect().width > 0 && !part.children.length);
           const fits = row => { const box = row.getBoundingClientRect(), all = parts(row);
@@ -1700,6 +1704,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
               return at.left >= box.left - 0.5 && at.right <= box.right + 0.5 && at.top >= box.top - 0.5 && at.bottom <= box.bottom + 0.5; }); };
           const apart = row => [...row.children].filter(part => part.getBoundingClientRect().width > 0)
             .every((part, index, all) => !index || all[index - 1].getBoundingClientRect().right <= part.getBoundingClientRect().left + 0.5);
+          const ends = list => Math.abs(list.clientHeight - list.querySelector('.debugger-list-space').offsetHeight) <= 0.5 ? 'whole'
+            : [...list.querySelectorAll('.debugger-list-row')].some(row => Math.abs(row.offsetTop + row.offsetHeight - list.scrollTop - list.clientHeight) <= 0.5) ? 'row' : 'cut';
           const list = document.querySelector('#debugger-threads'), box = list.getBoundingClientRect();
           const rows = [...list.querySelectorAll('.debugger-list-row')];
           const whole = rows.filter(row => { const at = row.getBoundingClientRect(); return at.top >= box.top - 0.5 && at.bottom <= box.bottom + 0.5; });
@@ -1712,17 +1718,22 @@ final class OriginTraceRenderedUITests: XCTestCase {
           const over = document.elementFromPoint(stuck.left + 40, stuck.top + stuck.height / 2)?.closest('summary') === summary;
           const scrolled = pane.scrollTop;
           pane.scrollTop = 0;
-          return {height: list.clientHeight, whole: whole.length, rows: rows.length, threadsFit: rows.every(fits), threadsApart: rows.every(apart),
+          const idsWhole = rows.every(row => { const ids = row.querySelector('.debugger-thread-ids'); return !ids || ids.scrollWidth <= ids.clientWidth + 0.5; });
+          return {height: list.clientHeight, whole: whole.length, rows: rows.length, threadsFit: rows.every(fits), threadsApart: rows.every(apart), idsWhole,
             recordsFit: records.every(fits), headsApart: records.every(row => apart(row.querySelector('.debugger-row-head'))),
             metaApart: records.every(row => apart(row.querySelector('.debugger-row-meta'))),
             times: meta.every(item => /^[+-]\\d+:\\d\\d\\.\\d{3}$/.test(item.time)), ids: meta.every(item => /^P\\d+ F\\d+ #\\d+( R\\d+)?$/.test(item.ids)),
             menu: [...document.querySelectorAll('#debugger-sidebar .debugger-kind-select option')].map(option => option.textContent),
+            threadsEnd: ends(list), recordsEnd: ends(document.querySelector('#debugger-observations')),
             scrolled, stuck: Math.abs(stuck.top - sides.top) <= 0.5, over}; })()
         """)
       print("RENDERED_UI_DEBUGGER_LAYOUT \(size.name) \(layout)")
       XCTAssertGreaterThanOrEqual(layout["whole"] as? Int ?? 0, 6, "\(size.name): the Threads list shows at least six whole rows: \(layout)")
-      for key in ["threadsFit", "threadsApart", "recordsFit", "headsApart", "metaApart", "times", "ids", "stuck", "over"] {
+      for key in ["threadsFit", "threadsApart", "idsWhole", "recordsFit", "headsApart", "metaApart", "times", "ids", "stuck", "over"] {
         XCTAssertEqual(layout[key] as? Bool, true, "\(size.name): \(key): \(layout)")
+      }
+      for key in ["threadsEnd", "recordsEnd"] {
+        XCTAssertNotEqual(layout[key] as? String ?? "cut", "cut", "\(size.name): \(key) is a whole row: \(layout)")
       }
       XCTAssertGreaterThan(layout["scrolled"] as? Double ?? 0, 0, "\(size.name): the pane scrolled for the sticky-title check: \(layout)")
       let menu = layout["menu"] as? [String] ?? []
@@ -1872,6 +1883,32 @@ final class OriginTraceRenderedUITests: XCTestCase {
 
       // Escape returns to the toggle, or to More while the toggle sits in its
       // menu (a docked sidebar narrows the toolbar); closing stops every read.
+      // Each debugger read from here records when it starts and settles and
+      // its abort signal, and the close time is taken as the sidebar hides.
+      // A read is held until it is aborted, as a loaded backend holds it, so
+      // the thread click's read is always under way when the sidebar closes;
+      // a read nothing aborts goes out after 30 seconds and stays unsettled
+      // here.
+      _ = try await ui.value("""
+        (() => { const sidebar = document.querySelector('#debugger-sidebar'), reads = [];
+          window.__rebDebuggerReads = {reads, fetch: window.fetch, closed: null};
+          window.__rebDebuggerReads.watch = new MutationObserver(() => {
+            if (sidebar.hidden && window.__rebDebuggerReads.closed === null) window.__rebDebuggerReads.closed = performance.now(); });
+          window.__rebDebuggerReads.watch.observe(sidebar, {attributes: true, attributeFilter: ['hidden']});
+          window.fetch = (input, init) => { const send = () => window.__rebDebuggerReads.fetch.call(window, input, init);
+            if (!String(input).startsWith('/api/native-debugger')) return send();
+            const signal = init?.signal ?? null, read = {start: performance.now(), settled: null, signal};
+            reads.push(read);
+            const answer = new Promise((resolve, reject) => {
+              const stop = () => { clearTimeout(timer); reject(signal.reason ?? new DOMException('aborted', 'AbortError')); };
+              const timer = setTimeout(() => { signal?.removeEventListener('abort', stop); send().then(resolve, reject); }, 30000);
+              if (signal?.aborted) stop(); else signal?.addEventListener('abort', stop, {once: true});
+            });
+            const settle = () => { read.settled = performance.now(); };
+            answer.then(settle, settle);
+            return answer; };
+          return true; })()
+        """)
       try await ui.click("#debugger-threads .debugger-list-row[data-key$='\(frameKey)']")
       try await ui.key(53, "\u{1B}")
       try await ui.waitUntil("""
@@ -1882,20 +1919,29 @@ final class OriginTraceRenderedUITests: XCTestCase {
         try await ui.click("#debugger-sidebar .debugger-sidebar-close")
       }
       // Closing aborts the read in flight and starts none. A resource entry
-      // is added when its fetch ends, so one begun before the close (the
-      // thread click's, say) can land after it under load: only reads that
-      // start after the sidebar closed break the contract, so only those count.
+      // is added when its fetch ends, so a read begun before the close and
+      // aborted by it lands after it, and under load that once failed a
+      // count of all entries. Only a read that starts after the close breaks
+      // the contract; one in flight at the close must end aborted.
       try await ui.waitUntil("document.querySelector('#debugger-sidebar').hidden", "\(size.name): the sidebar did not close")
-      _ = try await ui.value("(() => { window.__rebDebuggerClosedAt = performance.now(); return true; })()")
       try await Task.sleep(nanoseconds: 4_500_000_000)
       let reads = try await ui.json("""
-        (() => { const reads = performance.getEntriesByType('resource').filter(entry => entry.name.includes('/api/native-debugger'));
-          const closed = window.__rebDebuggerClosedAt; delete window.__rebDebuggerClosedAt;
-          return {started: reads.filter(entry => entry.startTime >= closed).length,
-            endedAfter: reads.filter(entry => entry.startTime < closed && entry.responseEnd >= closed).length}; })()
+        (() => { const {reads, fetch, watch, closed} = window.__rebDebuggerReads;
+          window.fetch = fetch; watch.disconnect(); delete window.__rebDebuggerReads;
+          const flight = reads.filter(read => read.start < closed && (read.settled === null || read.settled >= closed));
+          const entries = performance.getEntriesByType('resource').filter(entry => entry.name.includes('/api/native-debugger'));
+          return {seen: reads.length, started: reads.filter(read => read.start >= closed).length,
+            entriesStarted: entries.filter(entry => entry.startTime >= closed).length,
+            inFlight: flight.length, aborted: flight.filter(read => read.signal?.aborted === true).length,
+            unsettled: flight.filter(read => read.settled === null).length,
+            entriesEndedAfter: entries.filter(entry => entry.startTime < closed && entry.responseEnd >= closed).length}; })()
         """)
       print("RENDERED_UI_DEBUGGER_CLOSED \(size.name) \(reads)")
+      XCTAssertGreaterThan(reads["inFlight"] as? Int ?? 0, 0, "\(size.name): the thread click's read was under way at the close: \(reads)")
       XCTAssertEqual(reads["started"] as? Int, 0, "\(size.name): a closed sidebar must not read: \(reads)")
+      XCTAssertEqual(reads["entriesStarted"] as? Int, 0, "\(size.name): a closed sidebar must not read: \(reads)")
+      XCTAssertEqual(reads["aborted"] as? Int, reads["inFlight"] as? Int, "\(size.name): closing aborts the read in flight: \(reads)")
+      XCTAssertEqual(reads["unsettled"] as? Int, 0, "\(size.name): an aborted read settles: \(reads)")
       let closed = try await ui.value("(document.querySelector('#source-tree')?.innerText ?? '').includes('selected in Debugger Threads')") as? Bool
       XCTAssertEqual(closed, false, "\(size.name): closing the sidebar lifts the tree scope")
     }
@@ -3335,7 +3381,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     _ = try await ui.value("""
       (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null;
         document.documentElement.dataset.theme = 'light';
-        await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
+        await new Promise(done => { requestAnimationFrame(() => requestAnimationFrame(done)); setTimeout(done, 500); }); return true; })()
       """)
     try await ui.screenshot(name)
     _ = try await ui.value("""
@@ -4734,7 +4780,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     let theme = { (light: Bool) in
       _ = try await ui.value(light ? """
         (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null; document.documentElement.dataset.theme = 'light';
-          await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
+          await new Promise(done => { requestAnimationFrame(() => requestAnimationFrame(done)); setTimeout(done, 500); }); return true; })()
         """ : """
         (() => { if (window.__rebDarkTheme === null) delete document.documentElement.dataset.theme;
           else document.documentElement.dataset.theme = window.__rebDarkTheme; delete window.__rebDarkTheme; return true; })()
@@ -4963,7 +5009,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       }
       _ = try await traffic.value("""
         (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null; document.documentElement.dataset.theme = 'light';
-          await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
+          await new Promise(done => { requestAnimationFrame(() => requestAnimationFrame(done)); setTimeout(done, 500); }); return true; })()
         """)
       try await assertLayout(traffic, "#screen-traffic .request-window", "\(size.name) not-kept footer light")
       try await traffic.screenshot("traffic-not-kept-light-\(size.name)")
@@ -5344,7 +5390,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
           (async () => {
             const root = document.documentElement, before = root.dataset.theme ?? null;
             root.dataset.theme = '\(theme)';
-            await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
+            await new Promise(done => { requestAnimationFrame(() => requestAnimationFrame(done)); setTimeout(done, 500); });
             const color = token => { const probe = document.createElement('span'); probe.style.color = `var(${token})`;
               document.body.append(probe); const value = getComputedStyle(probe).color; probe.remove(); return value; };
             const chip = [...document.querySelectorAll('#screen-traffic .request-row')].find(node => node.innerText.includes('\(host)'))
@@ -5359,7 +5405,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       _ = try await ui.value("""
         (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null;
           document.documentElement.dataset.theme = 'light';
-          await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
+          await new Promise(done => { requestAnimationFrame(() => requestAnimationFrame(done)); setTimeout(done, 500); }); return true; })()
         """)
       try await assertLayout(ui, "#screen-traffic", "\(size.name) watched row light")
       try await ui.screenshot("traffic-watched-row-light-\(size.name)")
@@ -5404,7 +5450,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
             const root = document.documentElement;
             window.__rebRevealTheme = root.dataset.theme ?? null;
             root.dataset.theme = '\(theme)';
-            await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
+            await new Promise(done => { requestAnimationFrame(() => requestAnimationFrame(done)); setTimeout(done, 500); });
             const pane = document.querySelector('#debugger-sidebar .debugger-sidebar-sections').getBoundingClientRect();
             const list = document.querySelector('#debugger-observations').getBoundingClientRect();
             const row = document.querySelector('#debugger-observations .debugger-list-row[aria-selected="true"]')?.getBoundingClientRect();

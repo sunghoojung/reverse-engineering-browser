@@ -938,7 +938,7 @@ export async function debuggerObservations(template, artifactsRoot, {records = N
     }
   }
   // Observations a page's handlers make milliseconds apart, so the sidebar's
-  // times differ; 120 of them stay inside the rest of the capture's span.
+  // times differ; this renderer's records end its session.
   for (let index = 0; index < records; index += 1) {
     const kind = kinds[index % kinds.length];
     time += 15000000n;
@@ -954,15 +954,14 @@ export async function debuggerObservations(template, artifactsRoot, {records = N
 }
 
 // Like the browser, each gap takes its renderer's own sequence slot, so the
-// stream has no hole, and a time after every retained record, on the capture's
-// one clock. The payload is the reason text, as the producers write it.
+// stream has no hole, and a time after its session's last record: each
+// session has its own clock, and the golden stores' sessions reach 2^64 - 1.
+// The payload is the reason text, as the producers write it.
 function namedBudgetGaps(template, events) {
   const processId = 4242;
-  assert(!events.some(event => event.session_id === template.session_id && event.process_id === processId), 'budget gap stream must be its own');
-  // Only the template's session: the Wasm golden store holds a uint64-max
-  // boundary record in its own session, and a time past it is malformed.
-  const time = events.filter(event => event.session_id === template.session_id)
-    .reduce((latest, event) => BigInt(event.monotonic_time_ns) > latest ? BigInt(event.monotonic_time_ns) : latest, 0n);
+  const session = events.filter(event => event.session_id === template.session_id);
+  assert(!session.some(event => event.process_id === processId), 'budget gap stream must be its own');
+  const time = session.reduce((latest, event) => BigInt(event.monotonic_time_ns) > latest ? BigInt(event.monotonic_time_ns) : latest, 0n);
   return NAMED_GAP_REASONS.map((reason, index) => ({...template, process_id: processId, thread_id: processId,
     sequence_number: String(index + 1), monotonic_time_ns: String(time + BigInt(index + 1)), artifact_id: '0',
     parent_event_id: '0', request_id: '0', type: 'gap', payload_size: Buffer.byteLength(reason), payload: hex(reason)}));
@@ -1079,7 +1078,7 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const vm = demoEvents.find(event => event.category === 'vm');
   assert(vm, 'demo store must contain a native vm event');
   // The debugger renderer's records come first, so its requests list last in Traffic.
-  const events = [...debuggerRecords.events, ...retained, ...namedBudgetGaps(vm, retained)];
+  const events = [...debuggerRecords.events, ...retained, ...namedBudgetGaps(vm, [...debuggerRecords.events, ...retained])];
   await writeFile(join(artifacts, 'manifest.jsonl'), manifest.map(record => JSON.stringify(record) + '\n').join(''));
   await writeFile(join(root, 'events.jsonl'), events.map(event => JSON.stringify(event) + '\n').join(''));
   return {

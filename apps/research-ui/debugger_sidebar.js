@@ -188,8 +188,11 @@ function debuggerDocumentProblem(answer) {
 /* A fixed-row listbox that mounts only the rows in view. Items are
  * {key, height, header?, ...}; headers are not options. The list keeps focus
  * itself and names the active row with aria-activedescendant, so a row
- * scrolled away never takes focus with it. Its frame fades the edge that has
- * more rows past it, so a row cut by that edge reads as more to scroll. */
+ * scrolled away never takes focus with it. Its frame shades the edge that
+ * has more rows past it. It stops on a whole row, not wherever its CSS cap
+ * lands: the row edge nearest the cap, or its end, so no row shows sliced and
+ * a list the cap would cut by a few pixels shows whole. A group heading is
+ * never its last row. */
 function createDebuggerList({id, label, onActive = null, onChoose, render}) {
   const box = debuggerNode('div', 'debugger-list-frame');
   const element = debuggerNode('div', 'debugger-list');
@@ -200,12 +203,29 @@ function createDebuggerList({id, label, onActive = null, onChoose, render}) {
   element.setAttribute('aria-label', label);
   const space = debuggerNode('div', 'debugger-list-space');
   element.append(space);
-  let items = [], tops = [0], options = [], active = null, selected = null, signature = '', frame = 0;
+  let items = [], tops = [0], options = [], active = null, selected = null, signature = '', frame = 0, unfit = true;
   const rowId = key => `${id}-row-${String(key).replace(/[^A-Za-z0-9_-]/g, '-')}`;
   const indexOf = key => items.findIndex(item => item.key === key);
 
+  function fit() {
+    unfit = false;
+    element.style.maxHeight = '';
+    const cap = typeof getComputedStyle === 'function' ? Number.parseFloat(getComputedStyle(element).maxHeight) : Number.NaN;
+    const total = tops.at(-1);
+    if (!Number.isFinite(cap) || total <= cap) return;
+    let stop = total;
+    items.forEach((item, index) => {
+      if (!item.header && Math.abs(tops[index + 1] - cap) < Math.abs(stop - cap)) stop = tops[index + 1];
+    });
+    element.style.maxHeight = `${stop}px`;
+  }
+  // The cap follows the window's height.
+  const refit = () => { unfit = true; schedule(); };
+  if (typeof addEventListener === 'function') addEventListener('resize', refit);
+
   function paint() {
     frame = 0;
+    if (unfit && element.isConnected) fit();
     const height = element.clientHeight || DEBUGGER_SIDEBAR.listHeight;
     const top = element.scrollTop;
     let first = 0;
@@ -315,6 +335,7 @@ function createDebuggerList({id, label, onActive = null, onChoose, render}) {
         tops = [0];
         for (const item of items) tops.push(tops.at(-1) + item.height);
         space.style.height = `${tops.at(-1)}px`;
+        unfit = true;
         if (active !== null && indexOf(active) < 0) active = null;
         if (kept) {
           const at = indexOf(kept.key);
@@ -328,7 +349,11 @@ function createDebuggerList({id, label, onActive = null, onChoose, render}) {
     scrollTo(key) { reveal(key); paint(); },
     // The painted row of `key`, or null while it is outside the window.
     row(key) { return [...space.children].find(row => row.dataset.key === key) ?? null; },
-    release() { if (frame > 0 && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(frame); frame = 0; space.replaceChildren(); items = []; options = []; tops = [0]; signature = ''; active = null; }
+    release() {
+      if (frame > 0 && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(frame);
+      if (typeof removeEventListener === 'function') removeEventListener('resize', refit);
+      frame = 0; space.replaceChildren(); items = []; options = []; tops = [0]; signature = ''; active = null;
+    }
   };
 }
 

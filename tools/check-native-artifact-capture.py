@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import signal
 import socket
 import struct
@@ -444,103 +445,92 @@ def check_receiver_stop(receiver: str) -> None:
 
     The browser holds one authenticated connection for the whole session, and
     the receiver waits on it with no timeout. A stop that lands while the
-    receiver is consuming artifacts, rather than blocked in a read, must
+    receiver is consuming an artifact, rather than blocked in a read, must
     still end that wait: a handler that only set a flag lost it, and the
     receiver waited for a next frame that an idle browser never sends.
 
-    The browser queues every frame at once, small enough that all of them and
-    their answers fit the sockets' buffers, so nothing blocks and the receiver
-    has tens of milliseconds of files to write. The signal goes out as soon as
-    the first answer arrives, so the receiver has begun consuming. Answers only
-    grow, so fewer answers after it exits than frames sent proves the signal
-    landed before it finished. A machine slow enough to answer every frame
-    before the signal gets another attempt.
+    That window runs from the frame's last byte to the answer, a few
+    milliseconds, and a loaded machine often answers before the check can stop
+    it. An attempt that missed the window stops a receiver blocked in a read,
+    which a flag alone also does, so the check repeats until one lands in it.
     """
-    frames = 200
-    attempts = 5
-    for attempt in range(1, attempts + 1):
-        with tempfile.TemporaryDirectory(prefix="reb-stop-", dir="/tmp") as temporary:
-            root = Path(temporary)
-            token = root / "token"
-            token.write_text("a" * 64)
-            token.chmod(0o600)
-            socket_path = root / "artifact.sock"
-            # 2 KiB each: 443 KB of frames, which a 1 MiB send buffer takes
-            # at once, and 6,400 bytes of answers inside the receiver's 8 KiB
-            # send buffer, so neither side ever blocks on the other.
-            queued = b"".join(
-                artifact_frame(artifact_id, b"stop(%04d);" % artifact_id * 186)
-                for artifact_id in range(1, frames + 1)
-            )
-            child = subprocess.Popen(
-                [
-                    receiver,
-                    "--store",
-                    str(root / "artifacts"),
-                    "--socket",
-                    str(socket_path),
-                    "--token-file",
-                    str(token),
-                    "--session-id",
-                    "7",
-                    # The reserve is not under test here; keep the check
-                    # independent of the volume's free space.
-                    "--disk-reserve-bytes",
-                    "1",
-                ],
-                stderr=subprocess.PIPE,
-            )
-            try:
-                deadline = time.monotonic() + 10
-                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-                    connection.settimeout(30)
-                    connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
-                    # The socket file exists from bind(), before the receiver listens.
-                    while connection.connect_ex(str(socket_path)) != 0:
-                        assert child.poll() is None and time.monotonic() < deadline, (
-                            "receiver socket"
-                        )
-                        time.sleep(0.01)
-                    connection.sendall(
-                        struct.pack("<IHHQ32s16s", HELLO_MAGIC, 1, 64, 7, TEST_TOKEN, bytes(16))
-                    )
-                    # The browser then sends nothing more.
-                    connection.sendall(queued)
-                    assert read_ack(connection) == (STATUS_ACCEPTED, 1), "first artifact"
-                    started = time.monotonic()
-                    child.send_signal(signal.SIGTERM)
-                    try:
-                        _, errors = child.communicate(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        raise AssertionError(
-                            "SIGTERM while the receiver consumed artifacts did not stop it; it "
-                            "waits for a frame the idle browser never sends"
-                        ) from None
-                    stopped = time.monotonic() - started
-                    answered = 1
-                    try:
-                        while read_ack(connection) is not None:
-                            answered += 1
-                    except ConnectionResetError:
-                        # Linux resets a connection whose peer closed with
-                        # frames it never read, after the answers it sent.
-                        pass
-            finally:
-                if child.poll() is None:
-                    child.kill()
-                    child.communicate()
-            assert child.returncode == 0, errors.decode()
-            assert "Artifact receiver stopped:" in errors.decode(), errors.decode()
-            if answered < frames:
-                break
-    assert answered < frames, (
-        f"every artifact was answered before the stop in {attempts} attempts, so nothing raced"
-    )
+    frame = artifact_frame(1, b"stop();" * (5 * 1024 * 1024))
+    for attempt in range(1, 21):
+        stopped = receiver_stop_attempt(receiver, frame)
+        if stopped is not None:
+            break
+    else:
+        raise AssertionError("the receiver answered before each of 20 stops, so nothing raced")
     print(
-        "PASS artifact receiver stop: SIGTERM while it consumes artifacts ends it in "
-        f"{stopped * 1000:.0f} ms with {frames - answered} of {frames} unanswered and the "
-        f"browser's connection open and idle (attempt {attempt})"
+        "PASS artifact receiver stop: SIGTERM while it consumes an artifact ends it in "
+        f"{stopped * 1000:.0f} ms with the browser's connection open and idle (attempt {attempt})"
     )
+
+
+def receiver_stop_attempt(receiver: str, frame: bytes) -> float | None:
+    """Seconds a stop delivered before the answer took to end the receiver, or None."""
+    with tempfile.TemporaryDirectory(prefix="reb-stop-", dir="/tmp") as temporary:
+        root = Path(temporary)
+        token = root / "token"
+        token.write_text("a" * 64)
+        token.chmod(0o600)
+        socket_path = root / "artifact.sock"
+        child = subprocess.Popen(
+            [
+                receiver,
+                "--store",
+                str(root / "artifacts"),
+                "--socket",
+                str(socket_path),
+                "--token-file",
+                str(token),
+                "--session-id",
+                "7",
+                # The reserve is not under test here; keep the check
+                # independent of the volume's free space.
+                "--disk-reserve-bytes",
+                "1",
+            ],
+            stderr=subprocess.PIPE,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                connection.settimeout(30)
+                # The socket file exists from bind(), before the receiver listens.
+                while connection.connect_ex(str(socket_path)) != 0:
+                    assert child.poll() is None and time.monotonic() < deadline, "receiver socket"
+                    time.sleep(0.01)
+                connection.sendall(
+                    struct.pack("<IHHQ32s16s", HELLO_MAGIC, 1, 64, 7, TEST_TOKEN, bytes(16))
+                )
+                # Once the whole frame is written the receiver never blocks
+                # in a read until it has answered. Freeze it at once: with no
+                # answer written yet, the stop is delivered on continue where
+                # it froze, while it works. The browser then sends nothing more.
+                connection.sendall(frame)
+                child.send_signal(signal.SIGSTOP)
+                _, status = os.waitpid(child.pid, os.WUNTRACED)
+                assert os.WIFSTOPPED(status), f"the receiver ended before the stop: status {status}"
+                raced = not select.select([connection], [], [], 0)[0]
+                started = time.monotonic()
+                child.send_signal(signal.SIGTERM)
+                child.send_signal(signal.SIGCONT)
+                try:
+                    _, errors = child.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    raise AssertionError(
+                        "SIGTERM while the receiver consumed an artifact did not stop it; it "
+                        "waits for a frame the idle browser never sends"
+                    ) from None
+                stopped = time.monotonic() - started
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.communicate()
+        assert child.returncode == 0, errors.decode()
+        assert "Artifact receiver stopped:" in errors.decode(), errors.decode()
+    return stopped if raced else None
 
 
 def check_broker_stop(broker: str) -> None:

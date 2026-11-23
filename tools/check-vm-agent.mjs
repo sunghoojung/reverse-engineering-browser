@@ -285,9 +285,10 @@ try {
   ]) {
     handler = setup; const count = calls.length; await bad(actionArgs(), 3, 'command_outcome_unknown'); assert.equal(calls.length, count + 1, 'Invalid action response must never retry or redirect');
   }
+  // The fake server records a call only after reading its whole body, so the timeout must outlast that read on a loaded machine.
   handler = (_, response) => { response.write('{'); }; const beforeTimeout = calls.length;
-  await bad([...actionArgs(), '--timeout-ms', '50'], 3, 'command_outcome_unknown'); assert.equal(calls.length, beforeTimeout + 1);
-  await bad([...statusArgs, '--timeout-ms', '50'], 2, 'timeout');
+  await bad([...actionArgs(), '--timeout-ms', '2000'], 3, 'command_outcome_unknown'); assert.equal(calls.length, beforeTimeout + 1);
+  await bad([...statusArgs, '--timeout-ms', '2000'], 2, 'timeout');
   const bytes = JSON.stringify(view()); reply(bytes + ' '.repeat(1048576 - Buffer.byteLength(bytes))); assert.deepEqual(await good(...statusArgs), view());
   assert.equal(calls.some(call => call.path.includes('must-not-follow')), false);
   assert((await readFile(stateFile, 'utf8')) === JSON.stringify(view()), 'Saved state must remain unchanged');

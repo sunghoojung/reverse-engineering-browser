@@ -2108,8 +2108,11 @@ async fn filtered_artifacts_select_by_kind_frame_host_and_digest() {
     ] {
         assert_eq!(read(bad).await.0, 400, "{bad}");
     }
+    // An unfiltered read is a cursor page as well.
     let (_, unfiltered) = read("/api/artifacts?limit=1").await;
-    assert!(unfiltered.get("query").is_none());
+    assert_eq!(ids(&unfiltered), vec!["6"]);
+    assert_eq!(unfiltered["query"]["filters"], json!({}));
+    assert!(unfiltered["query"]["next_before"].is_string());
 }
 
 #[tokio::test]
@@ -2679,8 +2682,20 @@ async fn capped_event_window_keeps_network_events_and_capture_totals() {
 #[tokio::test]
 async fn artifact_polling_preserves_public_fields_and_validation() {
     let server = Server::start().await;
-    let response = |artifacts: &[Value]| json!({"count":artifacts.len(),"artifacts":artifacts,"artifact_receiver_configured":false,"artifact_receiver_connected":false});
-    assert_poll_response(&server, "/api/artifacts", response(&[])).await;
+    // Records in [start, end) of a store `store_end` bytes long, read backward.
+    let response = |artifacts: &[Value],
+                    limit: usize,
+                    start: usize,
+                    end: usize,
+                    store_end: usize| {
+        json!({"count":artifacts.len(),"artifacts":artifacts,"artifact_receiver_configured":false,"artifact_receiver_connected":false,
+            "query":{"direction":"backward","limit":limit,"returned":artifacts.len(),"store_end":store_end.to_string(),
+                "next_after":end.to_string(),"next_before":(start > 0).then(|| start.to_string()),
+                "limited":artifacts.len() == limit,"budget_exhausted":false,"filters":{},
+                "scope":if start == 0 && end == store_end {"store"} else {"bounded_range"},
+                "scan_start":start.to_string(),"scan_end":end.to_string()}})
+    };
+    assert_poll_response(&server, "/api/artifacts", response(&[], 500, 0, 0, 0)).await;
     let hash = "a".repeat(64);
     let records: Vec<_> = (1..=5001).map(|id| {
         let mut record = json!({"protocol_version":1,"artifact_id":id.to_string(),"session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"javascript","url":format!("http://fixture.local/script-{id}.js"),"mime_type":"text/javascript","byte_size":1024,"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin"),"fixture_private_field":"must-not-be-disclosed"});
@@ -2703,33 +2718,72 @@ async fn artifact_polling_preserves_public_fields_and_validation() {
         })
         .collect();
     server.file("artifacts/manifest.jsonl", &jsonl(&records));
+    let offset = |count: usize| jsonl(&records[..count]).len();
+    let end = offset(records.len());
     assert_poll_response(
         &server,
         "/api/artifacts?limit=2",
-        response(&expected[4999..]),
+        response(&expected[4999..], 2, offset(4999), end, end),
     )
     .await;
     assert_poll_response(
         &server,
         "/api/artifacts?limit=9999",
-        response(&expected[1..]),
+        response(&expected[1..], 5000, offset(1), end, end),
     )
     .await;
+    // The unfiltered read was a window: the newest 500 by default and 5,000
+    // at most, with no cursor to the rest. Its next_before now pages the
+    // whole manifest, oldest record included.
+    let mut path = "/api/artifacts".to_owned();
+    let mut pages = Vec::new();
+    loop {
+        let response = server.get(&path).await;
+        let bytes = assert_contract_response(response, "get", "/api/artifacts", 200).await;
+        let page: Value = serde_json::from_slice(&bytes).unwrap();
+        pages.push(page["artifacts"].as_array().unwrap().clone());
+        match page["query"]["next_before"].as_str() {
+            Some(before) => path = format!("/api/artifacts?before={before}"),
+            None => break,
+        }
+    }
+    assert_eq!(pages.len(), 11);
+    assert!(pages[..10].iter().all(|page| page.len() == 500));
+    assert_eq!(
+        pages.into_iter().rev().flatten().collect::<Vec<_>>(),
+        expected
+    );
     server.file(
         "artifacts/manifest.jsonl",
         &jsonl(&[records[0].clone(), records[0].clone()]),
     );
     assert_eq!(server.get("/api/artifacts").await.status(), 500);
-    for bad in [b"not-json\n".to_vec(), b"[]\n".to_vec(), vec![b'x'; 8193]] {
+    for bad in [
+        b"not-json\n".to_vec(),
+        b"[]\n".to_vec(),
+        [vec![b'x'; 8193], b"\n".to_vec()].concat(),
+    ] {
         server.file("artifacts/manifest.jsonl", &bad);
         assert_eq!(server.get("/api/artifacts").await.status(), 500);
     }
+    // A last record without its newline is still being written and is left
+    // for a later read, as every cursor read of the manifest leaves it.
+    let mut pending = jsonl(&records[..1]);
+    pending.extend_from_slice(&jsonl(&records[1..2])[..100]);
+    server.file("artifacts/manifest.jsonl", &pending);
+    let first = offset(1);
+    assert_poll_response(
+        &server,
+        "/api/artifacts",
+        response(&expected[..1], 500, 0, first, pending.len()),
+    )
+    .await;
     let mut invalid = records[0].clone();
     invalid["sensitive"] = json!(true);
     server.file("artifacts/manifest.jsonl", &jsonl(&[invalid]));
     assert_eq!(server.get("/api/artifacts").await.status(), 500);
     server.file("artifacts/manifest.jsonl", b"");
-    assert_poll_response(&server, "/api/artifacts", response(&[])).await;
+    assert_poll_response(&server, "/api/artifacts", response(&[], 500, 0, 0, 0)).await;
 }
 #[tokio::test]
 async fn locality_static_allowlist_and_malformed_actions() {

@@ -57,18 +57,14 @@ final class StoredEvidenceBackend {
   }
 
   // Every event read goes to Rust, whose event index counts gaps and drops over
-  // the whole store. The bare artifact list stays with the scheme handler;
-  // filtered and cursor-paged reads of it go to Rust, which pages the manifest
-  // by record boundary off the main thread.
+  // the whole store. Every artifact list read goes to Rust too, which pages the
+  // manifest by record boundary off the main thread; the bare list was once the
+  // scheme handler's newest 500 records, with no cursor to the rest.
   static func serves(_ request: URLRequest) -> Bool {
     guard let url = request.url else { return false }
     switch request.httpMethod ?? "GET" {
     case "GET":
-      if url.path == "/api/events" { return true }
-      if url.path == "/api/artifacts" {
-        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        return items.contains { $0.name != "limit" }
-      }
+      if url.path == "/api/events" || url.path == "/api/artifacts" { return true }
       return getRoutes.contains(url.path)
     case "POST":
       return postRoutes.contains(url.path)

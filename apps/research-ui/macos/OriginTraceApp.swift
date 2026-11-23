@@ -321,8 +321,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           profileResponse.1,
           profileResponse.2
         )
-      case "/api/artifacts":
-        response = (try artifactsResponse(for: requestURL), "application/json; charset=utf-8", 200, [:])
       case "/api/analysis/vm":
         response = (try vmAnalysisResponse(for: requestURL), "application/json; charset=utf-8", 200, [:])
       default:
@@ -1872,23 +1870,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       domain: "OriginTrace",
       code: 3,
       userInfo: [NSLocalizedDescriptionKey: message]
-    )
-  }
-
-  private func artifactsResponse(for requestURL: URL) throws -> Data {
-    let requestedLimit = URLComponents(url: requestURL, resolvingAgainstBaseURL: false)?
-      .queryItems?
-      .first(where: { $0.name == "limit" })?
-      .value
-      .flatMap(Int.init) ?? 500
-    let limit = min(max(requestedLimit, 1), 5000)
-    let privateFields = Set(["content_path"])
-    let artifacts = try artifactEntries().suffix(limit).map { artifact in
-      artifact.filter { !privateFields.contains($0.key) }
-    }
-    return try JSONSerialization.data(
-      withJSONObject: ["count": artifacts.count, "artifacts": artifacts],
-      options: []
     )
   }
 

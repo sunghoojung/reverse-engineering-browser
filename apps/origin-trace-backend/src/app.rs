@@ -1335,37 +1335,23 @@ impl App {
                 if matches_etag(headers, etag.as_deref()) {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
-                if filtered {
-                    let filter = artifact_query::ArtifactFilter::parse(&q)?;
-                    let cursor = event_query::cursor(&q)?;
-                    let root = self.options.artifacts.clone();
-                    let (page, filter) = self
-                        .blocking(move || {
-                            artifact_query::read(&root, &filter, cursor, limit)
-                                .map(|page| (page, filter))
-                        })
-                        .await?;
-                    let mut result = json!({"count":page.records.len(),"artifact_receiver_configured":configured,"artifact_receiver_connected":connected});
-                    result["query"] = artifact_query::query_document(&page, &filter, cursor, limit);
-                    result["artifacts"] = Value::Array(page.records);
-                    result
-                } else {
-                    let root = self.options.artifacts.clone();
-                    let mut artifacts = self
-                        .blocking(move || evidence::artifacts(&root, limit))
-                        .await?;
-                    for artifact in &mut artifacts {
-                        artifact
-                            .as_object_mut()
-                            .expect("Validated artifact object")
-                            .retain(|key, _| {
-                                evidence::PUBLIC_ARTIFACT_FIELDS.contains(&key.as_str())
-                            });
-                    }
-                    let mut result = json!({"count":artifacts.len(),"artifact_receiver_configured":configured,"artifact_receiver_connected":connected});
-                    result["artifacts"] = Value::Array(artifacts);
-                    result
-                }
+                // Every read, filtered or not, is one cursor page of the
+                // manifest, so the newest records lead to older ones through
+                // query.next_before. Earlier revisions answered an unfiltered
+                // read with the newest 500 (at most 5,000) and no cursor.
+                let filter = artifact_query::ArtifactFilter::parse(&q)?;
+                let cursor = event_query::cursor(&q)?;
+                let root = self.options.artifacts.clone();
+                let (page, filter) = self
+                    .blocking(move || {
+                        artifact_query::read(&root, &filter, cursor, limit)
+                            .map(|page| (page, filter))
+                    })
+                    .await?;
+                let mut result = json!({"count":page.records.len(),"artifact_receiver_configured":configured,"artifact_receiver_connected":connected});
+                result["query"] = artifact_query::query_document(&page, &filter, cursor, limit);
+                result["artifacts"] = Value::Array(page.records);
+                result
             }
             "/api/events/wait" => {
                 q.only(&event_query::EVENT_QUERY_KEYS, &["limit", "timeout_ms"])?;

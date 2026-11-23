@@ -3322,7 +3322,7 @@
       "get": {
         "operationId": "get_artifacts",
         "summary": "List stored artifacts, optionally filtered and paged",
-        "description": "Lists retained script, Wasm and other artifact records with their sha256, size, frame and session. Without filters it returns the newest records. With any filter or cursor it scans the manifest from the cursor and adds a query object with next_before and next_after cursors. Filters combine with AND. Bytes come from get_artifact_content, which the MCP projection does not inline; inspect_wasm describes a Wasm module, and resolve_js_invocation_site names a function in a javascript artifact. request_body and response_body artifacts are sensitive and exist only when the session retains request content; a response_body record names the artifact for its response. Unknown parameters are rejected.",
+        "description": "Lists retained script, Wasm and other artifact records with their sha256, size, frame and session. Every read is one page of the manifest: without a cursor the newest matches, oldest first, with a query object whose next_before reads older records and next_after later ones. Without filters every record matches; filters combine with AND. Bytes come from get_artifact_content, which the MCP projection does not inline; inspect_wasm describes a Wasm module, and resolve_js_invocation_site names a function in a javascript artifact. request_body and response_body artifacts are sensitive and exist only when the session retains request content; a response_body record names the artifact for its response. Unknown parameters are rejected.",
         "tags": [
           "artifacts"
         ],
@@ -22497,7 +22497,8 @@
           "count",
           "artifacts",
           "artifact_receiver_configured",
-          "artifact_receiver_connected"
+          "artifact_receiver_connected",
+          "query"
         ]
       },
       "Deobfuscation": {
@@ -43091,7 +43092,7 @@
             "$ref": "#/components/schemas/Uint64String"
           }
         },
-        "description": "Present only on filtered or cursor-paged reads. Offsets are in the artifact manifest."
+        "description": "Every read carries it, filtered or not. Offsets are in the artifact manifest."
       },
       "EventWait": {
         "allOf": [

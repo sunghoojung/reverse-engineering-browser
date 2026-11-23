@@ -21,14 +21,16 @@ enum StoredEvidenceBackendChecks {
     for route in StoredEvidenceBackend.getRoutes { precondition(StoredEvidenceBackend.serves(request(route)), route) }
     precondition(StoredEvidenceBackend.serves(request("/api/events?request_id=1&limit=5")))
     precondition(StoredEvidenceBackend.serves(request("/api/native-debugger/actions", method: "POST")))
-    // The workspace pages the whole catalog; a read the scheme handler answered would hold only its newest record.
-    precondition(StoredEvidenceBackend.serves(request("/api/artifacts?after=0&limit=1")))
-    precondition(StoredEvidenceBackend.serves(request("/api/artifacts?artifact_id=1&limit=1")))
+    // The workspace pages the whole catalog, and a bare list is a page of it too; the scheme handler
+    // once answered the bare list with its newest records and no cursor to the rest.
+    for path in ["/api/artifacts?after=0&limit=1", "/api/artifacts?artifact_id=1&limit=1", "/api/artifacts?limit=500", "/api/artifacts"] {
+      precondition(StoredEvidenceBackend.serves(request(path)), path)
+    }
     for path in ["/api/events", "/api/events?limit=5000"] {
       precondition(StoredEvidenceBackend.serves(request(path)) && StoredEvidenceBackend.isEventPoll(request(path)), path)
     }
     precondition(!StoredEvidenceBackend.isEventPoll(request("/api/events?request_id=1&limit=5")))
-    for path in ["/api/artifacts?limit=500", "/api/artifacts/1/content", "/api/health",
+    for path in ["/api/artifacts/1/content", "/api/health",
       "/api/native-debugger/actions", "/api/session/summary"] {
       precondition(!StoredEvidenceBackend.serves(request(path)), "\(path) stays native")
     }
@@ -69,6 +71,10 @@ enum StoredEvidenceBackendChecks {
     let catalogQuery = catalog.json["query"] as? [String: Any]
     precondition(catalog.status == 200 && catalogQuery?["next_after"] != nil, "the probe answers with a paged query: \(catalog)")
     precondition((catalog.json["artifacts"] as? [[String: Any]])?.first?["content_path"] == nil, "manifest paths stay private: \(catalog.json)")
+    let bare = call(request("/api/artifacts"))
+    let bareQuery = bare.json["query"] as? [String: Any]
+    precondition(bare.status == 200 && (bare.json["artifacts"] as? [[String: Any]])?.count == 1
+      && bareQuery?["next_after"] != nil && bareQuery?["next_before"] is NSNull, "the bare list is a page of the whole manifest: \(bare)")
 
     let index = call(request("/api/requests?limit=10"))
     precondition(index.status == 200 && index.json["format"] as? String == "reb-request-index-v2", "\(index)")

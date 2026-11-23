@@ -1578,7 +1578,9 @@ compiled-before-arming, capacity and parent-link reasons and any reason this
 build does not know, reads as reported lost evidence with its raw reason as text.
 Stored-evidence native mode forwards the event poll to the bundled Rust
 backend, so its windows and whole-store counts are the same answer; the app
-adds only its own broker state and capture mode.
+adds only its own broker state and capture mode. Every artifact list read goes
+there too, so a bare list is a cursor page of the whole manifest, as it is in a
+live workspace.
 A response that omits those fields is still labeled visible-window-only, and
 no whole-capture count is inferred for it. Filtering
 and sorting cover the whole session through the index. Rows and capture-tab controls are

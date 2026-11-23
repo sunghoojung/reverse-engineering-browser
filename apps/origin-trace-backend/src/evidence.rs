@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     fs::{File, OpenOptions},
-    io::{Read, Seek, SeekFrom},
+    io::Read,
     path::Path,
     sync::atomic::AtomicBool,
 };
@@ -29,100 +29,8 @@ pub const PUBLIC_ARTIFACT_FIELDS: [&str; 15] = [
     "sha256",
     "sensitive",
 ];
-pub fn recent(path: &Path, limit: usize, maximum: usize, label: &str) -> Result<Vec<Value>> {
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
-    let mut file = match regular_file(path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e.into()),
-    };
-    if !file.metadata()?.is_file() {
-        return Err(Error::new(500, "Evidence store must be a regular file"));
-    }
-    let mut position = file.seek(SeekFrom::End(0))?;
-    let mut suffix = Vec::new();
-    let mut lines = Vec::new();
-    while position > 0 && lines.len() < limit {
-        let size = position.min(64 * 1024) as usize;
-        position -= size as u64;
-        file.seek(SeekFrom::Start(position))?;
-        let mut chunk = vec![0; size];
-        file.read_exact(&mut chunk)?;
-        chunk.extend_from_slice(&suffix);
-        let mut parts = chunk.rsplit(|b| *b == b'\n').collect::<Vec<_>>();
-        let first = parts.pop().unwrap_or(&[]);
-        for line in parts {
-            if line.iter().all(u8::is_ascii_whitespace) {
-                continue;
-            }
-            if line.len() > maximum {
-                return Err(Error::new(
-                    500,
-                    format!("The evidence store contains an oversized {label}"),
-                ));
-            }
-            let value: Value = serde_json::from_slice(line).map_err(|_| {
-                Error::new(
-                    500,
-                    format!("The evidence store contains a malformed {label}"),
-                )
-            })?;
-            if !value.is_object() {
-                return Err(Error::new(
-                    500,
-                    format!("The evidence store contains a malformed {label}"),
-                ));
-            }
-            lines.push(value);
-            if lines.len() == limit {
-                break;
-            }
-        }
-        suffix = first.to_vec();
-        if suffix.len() > maximum {
-            return Err(Error::new(
-                500,
-                format!("The evidence store contains an oversized {label}"),
-            ));
-        }
-    }
-    if position == 0 && lines.len() < limit && !suffix.iter().all(u8::is_ascii_whitespace) {
-        let value: Value = serde_json::from_slice(&suffix).map_err(|_| {
-            Error::new(
-                500,
-                format!("The evidence store contains a malformed {label}"),
-            )
-        })?;
-        if !value.is_object() {
-            return Err(Error::new(
-                500,
-                format!("The evidence store contains a malformed {label}"),
-            ));
-        }
-        lines.push(value);
-    }
-    lines.reverse();
-    Ok(lines)
-}
-
 pub fn canonical(value: &Value, bits: u32, nonzero: bool) -> bool {
     validation::canonical(value, bits, nonzero, "Identifier").is_ok()
-}
-pub fn artifacts(root: &Path, limit: usize) -> Result<Vec<Value>> {
-    let mut records = recent(&root.join("manifest.jsonl"), limit, 8192, "artifact")?;
-    let mut seen = BTreeSet::new();
-    for artifact in &mut records {
-        validate_artifact(artifact)?;
-        if !seen.insert(artifact["artifact_id"].as_str().unwrap().to_owned()) {
-            return Err(Error::new(
-                500,
-                "The artifact manifest contains a duplicate artifact ID",
-            ));
-        }
-    }
-    Ok(records)
 }
 pub fn public_artifact(artifact: &Value) -> Value {
     json!(

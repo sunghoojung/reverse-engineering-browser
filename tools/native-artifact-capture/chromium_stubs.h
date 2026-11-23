@@ -843,7 +843,8 @@ class NativeProbeHost {
                                    std::uint32_t,
                                    const std::string&,
                                    std::uint64_t,
-                                   mojo_base::BigBuffer) = 0;
+                                   mojo_base::BigBuffer,
+                                   std::uint64_t) = 0;
   virtual void CaptureWasmIndirect(std::uint64_t,
                                    std::uint64_t,
                                    std::uint64_t,
@@ -865,7 +866,8 @@ class NativeProbeHost {
                                    std::uint32_t,
                                    const std::string&,
                                    std::uint64_t,
-                                   mojo_base::BigBuffer) = 0;
+                                   mojo_base::BigBuffer,
+                                   std::uint64_t) = 0;
   virtual void CaptureWasmExecution(std::uint64_t,
                                     std::uint64_t,
                                     std::uint64_t,
@@ -889,7 +891,8 @@ class NativeProbeHost {
                                     std::uint32_t,
                                     const std::string&,
                                     std::uint64_t,
-                                    mojo_base::BigBuffer) = 0;
+                                    mojo_base::BigBuffer,
+                                    std::uint64_t) = 0;
   virtual void CaptureNativeGuest(std::uint64_t,
                                   const std::vector<std::uint8_t>&,
                                   const std::vector<std::uint8_t>&,
@@ -899,7 +902,8 @@ class NativeProbeHost {
                                   const std::string&,
                                   const std::string&,
                                   mojo_base::BigBuffer,
-                                  mojo_base::BigBuffer) = 0;
+                                  mojo_base::BigBuffer,
+                                  std::uint64_t) = 0;
   virtual void CaptureNativeGuestHost(std::uint64_t, const std::vector<std::uint8_t>&) = 0;
   virtual void CaptureRendererTarget(const std::vector<std::uint8_t>&,
                                      const std::string&,

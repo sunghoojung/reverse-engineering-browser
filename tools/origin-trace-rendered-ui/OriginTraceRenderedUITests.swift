@@ -3448,6 +3448,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#source-graph")
       // The largest function in this module is one block: "1 block".
       try await ui.waitUntil("/\\d+ blocks?\\b/.test(document.querySelector('#source-graph-host .block-graph-stats')?.textContent ?? '')", timeout: 30, "the block graph did not finish laying out")
+      // The stage's resize observer fits the canvas to the stage in the next
+      // frame, so a layout read in between finds the canvas cut off.
+      try await ui.settle()
       let hidden = try await ui.value("getComputedStyle(document.querySelector('#wasm-identification')).display") as? String
       XCTAssertEqual(hidden, "none", "\(size.name): the graph keeps the height")
       try await assertLayout(ui, "#screen-sources", "\(size.name) wasm identification graph")

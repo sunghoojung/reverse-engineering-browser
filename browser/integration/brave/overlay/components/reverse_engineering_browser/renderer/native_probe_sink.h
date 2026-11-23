@@ -714,6 +714,32 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                        std::uint64_t generation) noexcept;
 
   [[nodiscard]] bool TryChargeArtifactCredit(std::uint64_t bytes) noexcept;
+  // CaptureGeneratedArtifact for content whose credit the caller already
+  // charged: the content is sent, or its credit is returned.
+  void CaptureChargedArtifact(NativeArtifactKind kind,
+                              NativeArtifactCaptureOrigin capture_origin,
+                              std::uint64_t creator_event_id,
+                              std::uint64_t execution_context_id,
+                              std::uint64_t frame_id,
+                              std::string_view source_url,
+                              std::span<const std::uint8_t> content) noexcept;
+  void SendGeneratedArtifact(NativeArtifactKind kind,
+                             NativeArtifactCaptureOrigin capture_origin,
+                             std::uint64_t creator_event_id,
+                             std::uint64_t execution_context_id,
+                             std::uint64_t frame_id,
+                             std::string_view source_url,
+                             std::span<const std::uint8_t> content,
+                             bool charged) noexcept;
+  // Sends one Wasm observation or guest capture with the module copy it
+  // carries, of any size, charged to the artifact credit; the browser releases
+  // it once it has copied the bytes out. Returns the reason for the gap the
+  // caller fills when nothing was sent, or empty.
+  template <typename Emitter, typename Observation>
+  std::string_view SendWasmObservation(Emitter emitter,
+                                       const Observation& observation,
+                                       std::uint64_t generation,
+                                       std::string_view unavailable) noexcept;
   std::uint64_t RecordRuntimeBufferEvent(
       NativeProbeType type,
       std::uint64_t frame_id,

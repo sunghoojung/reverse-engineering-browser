@@ -28,6 +28,9 @@ const SEGMENT: usize = 48;
 pub(crate) const MAX_ARTIFACT: usize =
     SCOPED_HEADER + FRAME * (SYNC_LIMIT + ASYNC_LIMIT) as usize + SEGMENT * TASK_LIMIT as usize;
 pub(crate) const MAX_SOURCE: usize = 16 * 1024 * 1024;
+/// `script_identity` versions 1 and 2 digest only a source of at most this
+/// length; version 3 digests one of any length.
+const IDENTITY_V2_SOURCE_LIMIT: u64 = 16 * 1024 * 1024;
 const IDENTITY_SCAN: usize = 4096;
 /// Version 1 records captured no task-attributed callers.
 const ASYNC_NOT_SHOWN_V1: [&str; 4] = [
@@ -529,6 +532,9 @@ pub struct Identity {
     pub(crate) wasm: bool,
     pub(crate) eval: bool,
     pub(crate) retained: bool,
+    /// The source was to be retained, but the renderer's artifact transfer
+    /// was backlogged, so its text was not sent.
+    pub(crate) backlog: bool,
     pub(crate) start_line: u32,
     pub(crate) start_column: u32,
     /// The execution context ID of the script's realm: one per document,
@@ -561,6 +567,8 @@ pub(crate) fn find_source<'a, T>(
     let sha = identity.sha256.as_ref().ok_or("source_unavailable")?;
     let found = find(identity, sha).ok_or(if identity.wasm || identity.retained {
         "source_artifact_missing"
+    } else if identity.backlog {
+        "source_backlog"
     } else {
         "source_not_retained"
     })?;
@@ -568,16 +576,19 @@ pub(crate) fn find_source<'a, T>(
 }
 
 /// A script identity's isolate key (zero on the document main thread), its
-/// script ID and what it says about the source. Version 2 names the isolate.
+/// script ID and what it says about the source. Version 2 names the isolate;
+/// version 3 digests a source of any length, so it never sets
+/// source_too_large (0x04), and adds source_backlog (0x20).
 pub fn decode_identity(payload: &[u8]) -> Option<(u64, u32, Identity)> {
     if payload.len() != 128
-        || !matches!(payload[..4], [1 | 2, 0, 128, 0])
+        || !matches!(payload[..4], [1..=3, 0, 128, 0])
         || payload[6..8] != [0, 0]
         || payload[20..24] != [0; 4]
     {
         return None;
     }
-    let scope = if payload[0] == 2 {
+    let any_length = payload[0] == 3;
+    let scope = if payload[0] >= 2 {
         if payload[88..].iter().any(|b| *b != 0) {
             return None;
         }
@@ -592,18 +603,23 @@ pub fn decode_identity(payload: &[u8]) -> Option<(u64, u32, Identity)> {
     let script = u32_at(payload, 8);
     let length = u64_at(payload, 32);
     let digest = &payload[40..72];
-    let retention = flags & 0x1e;
+    let retention = flags & 0x3e;
     let shape = script != 0
         && u64_at(payload, 24) != 0
-        && flags & !0x1f == 0
+        && flags & !0x3f == 0
+        && flags & if any_length { 0x04 } else { 0x20 } == 0
         && retention & retention.wrapping_sub(1) == 0
         && matches!(kind, 1 | 2)
         && (kind != 2 || flags & !0x0c == 0)
         && (kind != 1 || retention != 0);
     let digested = match retention {
         0x08 => length == 0 && digest.iter().all(|b| *b == 0),
-        0x04 => length > MAX_SOURCE as u64 && digest.iter().all(|b| *b == 0),
-        _ => length != 0 && length <= MAX_SOURCE as u64 && digest.iter().any(|b| *b != 0),
+        0x04 => length > IDENTITY_V2_SOURCE_LIMIT && digest.iter().all(|b| *b == 0),
+        _ => {
+            length != 0
+                && (any_length || length <= IDENTITY_V2_SOURCE_LIMIT)
+                && digest.iter().any(|b| *b != 0)
+        }
     };
     (shape && digested).then(|| {
         (
@@ -613,10 +629,12 @@ pub fn decode_identity(payload: &[u8]) -> Option<(u64, u32, Identity)> {
                 wasm: kind == 2,
                 eval: flags & 0x01 != 0,
                 retained: flags & 0x02 != 0,
+                backlog: flags & 0x20 != 0,
                 start_line: u32_at(payload, 12),
                 start_column: u32_at(payload, 16),
                 realm: u64_at(payload, 24),
-                sha256: matches!(retention, 0x00 | 0x02 | 0x10).then(|| digest.try_into().unwrap()),
+                sha256: matches!(retention, 0x00 | 0x02 | 0x10 | 0x20)
+                    .then(|| digest.try_into().unwrap()),
             },
         )
     })
@@ -4190,6 +4208,52 @@ pub(crate) mod tests {
             let at = text.rfind(anchor).unwrap();
             assert_eq!(function_name(text, at).as_deref(), expected, "{text}");
         }
+    }
+
+    #[test]
+    fn version_3_identity_digests_any_length_and_names_its_backlog() {
+        let source = b"function f(){}";
+        let version_3 = |flags: u8, length: u64| {
+            let mut payload = identity_bytes(1, flags, 7, (0, 0), 99, source);
+            payload[0] = 3;
+            payload[72] = 1;
+            payload[32..40].copy_from_slice(&length.to_le_bytes());
+            payload
+        };
+        let long = IDENTITY_V2_SOURCE_LIMIT + 1;
+        let (_, _, queued) = decode_identity(&version_3(0x02, long)).expect("past 16 MiB");
+        assert!(queued.retained && queued.sha256.is_some());
+        let mut version_1 = version_3(0x02, long);
+        version_1[0] = 1;
+        version_1[72] = 0;
+        assert!(
+            decode_identity(&version_1).is_none(),
+            "version 1 digests at most 16 MiB"
+        );
+        let (_, _, backlog) = decode_identity(&version_3(0x20, 14)).expect("backlog");
+        assert!(backlog.backlog && !backlog.retained && backlog.sha256.is_some());
+        assert_eq!(
+            find_source(Some(&backlog), |_, _| None::<()>).unwrap_err(),
+            "source_backlog"
+        );
+        let mut version_2 = version_3(0x20, 14);
+        version_2[0] = 2;
+        assert!(
+            decode_identity(&version_2).is_none(),
+            "version 2 names no backlog"
+        );
+        let mut too_large = version_3(0x04, long);
+        too_large[40..72].fill(0);
+        assert!(
+            decode_identity(&too_large).is_none(),
+            "version 3 never sets source_too_large"
+        );
+        let mut wasm = version_3(0x20, 14);
+        wasm[4] = 2;
+        assert!(
+            decode_identity(&wasm).is_none(),
+            "a Wasm identity names no backlog"
+        );
     }
 
     #[test]

@@ -485,7 +485,7 @@ assert.equal(text('.traffic-payload-tree .is-current'), 'needle: "deep-match"');
 assert(panel.querySelectorAll('*').length < 2500, `the DOM stays bounded: ${panel.querySelectorAll('*').length} elements`);
 started = cpuMs();
 click(button('Source'));
-// Find searches in wall-clock slices, so a loaded host takes more tasks to reach the match.
+// The source count scans in time slices, and the match is near the end.
 for (let i = 0; i < 400 && all('.traffic-payload-lines mark.is-current').length !== 1; i++) await settle();
 const source = cpuMs() - started;
 assert(all('.traffic-payload-lines .traffic-payload-line').length <= 400, 'source renders its rows in blocks');

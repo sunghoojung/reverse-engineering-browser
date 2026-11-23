@@ -1414,10 +1414,9 @@ full targets.
 
 Canvas image capture is on in Content sessions and `make live`, and off in
 Metadata sessions, because rendered output can contain page content. Retained
-output stays in the local session artifact store, is
-limited to 2 MiB per image, and is joined to its exact `toDataURL` event. The UI
-continues to show operation names when image capture is off or an image exceeds
-the limit.
+output stays in the local session artifact store, is kept whole at any size,
+and is joined to its exact `toDataURL` event. The UI continues to show
+operation names when image capture is off or an image was not kept.
 
 The packaged app and `make live` ignore page `debugger;` statements by
 default. To let pages pause a development live capture:

@@ -5,8 +5,12 @@
  * armed at once and a removed one disarmed. Otherwise the next capture
  * Origin Trace starts arms it. Nothing here changes the open page. Captured
  * context lines and labels are inserted as text only. */
-// The backend's set document names its limit; this is every one-byte site slot.
-const INVOCATION_SITE_LIMIT = 256;
+// The set document's limit: the sites one capture can carry to a renderer,
+// millions, so the pane names it only when a capture has used them all.
+function invocationSiteSlots(set) {
+  return Number.isSafeInteger(set?.limit) && set.limit > 0
+    ? `all ${set.limit.toLocaleString('en-US')} of its site slots` : 'all of its site slots';
+}
 const INVOCATION_SITE_NEXT_CAPTURE = 'Tracking starts with the next capture Origin Trace starts, not the open page: a function the page already compiled cannot gain tracking.';
 const INVOCATION_SITE_THIS_CAPTURE = 'This capture tracks a saved function at once and stops tracking a removed one. A page that compiled the function before it was saved records its calls after a reload.';
 
@@ -69,7 +73,7 @@ function invocationSiteHeader(set) {
   if (waiting && session.count > 0) {
     kind = 'warning';
     text += ` · ${waiting} waiting`;
-    title += ` ${invocationSitePlural(waiting, 'saved function')} wait for the next capture: this one has used all ${INVOCATION_SITE_LIMIT} of its site slots.`;
+    title += ` ${invocationSitePlural(waiting, 'saved function')} wait for the next capture: this one has used ${invocationSiteSlots(set)}.`;
   }
   if (stale) {
     kind = 'warning';
@@ -289,9 +293,8 @@ function createInvocationSitesPanel({root, chip, trackButton, getSource, positio
 
   function renderList() {
     const sites = model.set?.sites ?? [];
-    const limit = Number.isSafeInteger(model.set?.limit) && model.set.limit > 0 ? model.set.limit : INVOCATION_SITE_LIMIT;
     const follows = invocationSiteFollows(model.set);
-    heading.textContent = `${follows ? 'Saved functions' : 'Saved for the next capture'} (${sites.length} of ${limit})`;
+    heading.textContent = `${follows ? 'Saved functions' : 'Saved for the next capture'} (${sites.length})`;
     list.replaceChildren(...sites.map(site => {
       const item = node('li', '', 'invocation-site');
       item.dataset.retained = site.retained?.state ?? 'not_retained';
@@ -310,7 +313,7 @@ function createInvocationSitesPanel({root, chip, trackButton, getSource, positio
         item.append(node('span', `This session retained the saved version (artifact ${retained.matching_artifact_id}).`, 'invocation-site-meta'));
       }
       if (follows && site.armed_in_capture === false) {
-        const waiting = node('span', `Waits for the next capture: this one has used all ${limit} of its site slots.`, 'invocation-site-stale');
+        const waiting = node('span', `Waits for the next capture: this one has used ${invocationSiteSlots(model.set)}.`, 'invocation-site-stale');
         waiting.setAttribute('role', 'note');
         item.append(waiting);
       }

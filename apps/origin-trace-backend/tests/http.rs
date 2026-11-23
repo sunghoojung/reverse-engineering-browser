@@ -11802,7 +11802,7 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
     .await);
     assert_eq!(
         (list["count"].as_u64(), list["limit"].as_u64()),
-        (Some(0), Some(256))
+        (Some(0), Some(48_806_446))
     );
     assert_eq!(list["session"]["state"], "not_armed");
     assert!(
@@ -11938,13 +11938,17 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
             true
         );
     }
-    let over = action(
+    // Past the old one-byte slot range: the set has no fixed count.
+    let past = action(
         json!({"action":"add","session_id":"11","artifact_id":"7","byte_offset":anchors[256]}),
     )
     .await;
-    let bytes =
-        assert_contract_response(over, "post", "/api/js-invocation-sites/actions", 409).await;
-    assert!(String::from_utf8_lossy(&bytes).contains("256 functions"));
+    let past =
+        set(assert_contract_response(past, "post", "/api/js-invocation-sites/actions", 200).await);
+    assert_eq!(
+        (past["added"].clone(), past["set"]["count"].clone()),
+        (json!(true), json!(257))
+    );
     // A refused resolution saves nothing and returns its reason.
     std::fs::write(
         directory.path().join("reply-1.json"),
@@ -11965,7 +11969,7 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
         ),
         (Some(false), Some("no_function"))
     );
-    assert_eq!(refused["set"]["count"], 256);
+    assert_eq!(refused["set"]["count"], 257);
 
     let sha = entry["site"]["source_sha256"].clone();
     let removed =
@@ -11975,7 +11979,7 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
             assert_contract_response(removed, "post", "/api/js-invocation-sites/actions", 200)
                 .await
         )["set"]["count"],
-        255
+        256
     );
     let missing =
         action(json!({"action":"remove","source_sha256":sha,"anchor_offset":anchors[0]})).await;
@@ -11994,7 +11998,7 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
             cleared["cleared"].as_u64(),
             cleared["set"]["count"].as_u64()
         ),
-        (Some(255), Some(0))
+        (Some(256), Some(0))
     );
     assert!(!store.exists());
 }

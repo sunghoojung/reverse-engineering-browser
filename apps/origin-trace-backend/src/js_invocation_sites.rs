@@ -14,19 +14,18 @@ use crate::{
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Mutex,
 };
 
-/// Every one-byte record slot; the browser and V8 arm this many.
-pub const SITE_LIMIT: usize = 256;
-/// The browser's `kNativeJsInvocationSitesFileLimit`, which holds 256 sites.
-pub const FILE_LIMIT: usize = 128 * 1024;
+/// The browser's `kNativeJsInvocationSiteListLimit`. Records name a site by
+/// a u32 slot, but each renderer receives the whole table in one shared
+/// memory region, which Chromium maps only up to `i32::MAX` bytes of 44-byte
+/// records. It is the only bound on a site set; the files have no size limit.
+pub const SITE_LIMIT: usize = i32::MAX as usize / 44;
 const LABEL_CHARS: usize = 128;
 const URL_BYTES: usize = 8192;
-/// A sidecar entry for every site, each URL escaped at worst to twice its
-/// bytes.
-const LABELS_LIMIT: usize = SITE_LIMIT * (2 * URL_BYTES + 4096);
 const CONTEXT_CHARS: usize = 60;
 const CANDIDATE_LIMIT: usize = 32;
 const NEXT_CAPTURE: &str = "Tracking starts with the next capture Origin Trace starts, not the open page: a function compiled before its site is armed cannot gain tracking.";
@@ -67,8 +66,19 @@ impl Site {
         serde_json::from_str(&self.canonical()).expect("canonical site JSON")
     }
     fn same_function(&self, other: &Site) -> bool {
-        self.source_sha256 == other.source_sha256 && self.anchor_offset == other.anchor_offset
+        self.key() == other.key()
     }
+    /// What names the function: its source digest and anchor offset.
+    fn key(&self) -> (&str, u32) {
+        (&self.source_sha256, self.anchor_offset)
+    }
+}
+
+/// Whether two sites name the same function; one pass, so a long set costs
+/// no quadratic scan.
+fn repeats<'a>(sites: impl IntoIterator<Item = &'a Site>) -> bool {
+    let mut seen = HashSet::new();
+    sites.into_iter().any(|site| !seen.insert(site.key()))
 }
 
 /// Why a byte offset names no site. `kind` matches the shared case fixture.
@@ -81,7 +91,6 @@ pub enum SiteError {
     NotParen,
     Count,
     Duplicate,
-    FileSize,
 }
 
 impl SiteError {
@@ -95,7 +104,6 @@ impl SiteError {
             Self::NotParen => "not_paren",
             Self::Count => "count",
             Self::Duplicate => "duplicate",
-            Self::FileSize => "file_size",
         }
     }
 }
@@ -172,56 +180,49 @@ pub fn site(
     })
 }
 
-/// The exact `native-js-invocation-sites-v1` file for 1 to 256 distinct sites.
+/// The exact `native-js-invocation-sites-v1` file for 1 to `SITE_LIMIT`
+/// distinct sites.
 pub fn sites_file(sites: &[Site]) -> std::result::Result<String, SiteError> {
     if !(1..=SITE_LIMIT).contains(&sites.len()) {
         return Err(SiteError::Count);
     }
-    for (index, site) in sites.iter().enumerate() {
-        if sites[..index].iter().any(|prior| prior.same_function(site)) {
-            return Err(SiteError::Duplicate);
-        }
+    if repeats(sites) {
+        return Err(SiteError::Duplicate);
     }
     let entries = sites.iter().map(Site::canonical).collect::<Vec<_>>();
-    let text = format!(r#"{{"sites":[{}],"version":1}}"#, entries.join(","));
-    if text.len() > FILE_LIMIT {
-        return Err(SiteError::FileSize);
-    }
-    Ok(text)
+    Ok(format!(
+        r#"{{"sites":[{}],"version":1}}"#,
+        entries.join(",")
+    ))
 }
 
-/// The exact version 2 slot table for 0 to 256 distinct sites, each with
-/// whether it is armed. A slot keeps its site for the browser's lifetime, so
-/// a revision disarms a removed site instead of renumbering the others.
+/// The exact version 2 slot table for 0 to `SITE_LIMIT` distinct sites, each
+/// with whether it is armed. A slot keeps its site for the browser's
+/// lifetime, so a revision disarms a removed site instead of renumbering the
+/// others.
 pub fn slot_table_file(slots: &[(Site, bool)]) -> std::result::Result<String, SiteError> {
     if slots.len() > SITE_LIMIT {
         return Err(SiteError::Count);
     }
-    for (index, (site, _)) in slots.iter().enumerate() {
-        if slots[..index]
-            .iter()
-            .any(|(prior, _)| prior.same_function(site))
-        {
-            return Err(SiteError::Duplicate);
-        }
+    if repeats(slots.iter().map(|(site, _)| site)) {
+        return Err(SiteError::Duplicate);
     }
     let entries = slots
         .iter()
         .map(|(site, armed)| site.canonical_slot(*armed))
         .collect::<Vec<_>>();
-    let text = format!(r#"{{"sites":[{}],"version":2}}"#, entries.join(","));
-    if text.len() > FILE_LIMIT {
-        return Err(SiteError::FileSize);
-    }
-    Ok(text)
+    Ok(format!(
+        r#"{{"sites":[{}],"version":2}}"#,
+        entries.join(",")
+    ))
 }
 
 fn keys(object: &Map<String, Value>, expected: &[&str]) -> bool {
     object.len() == expected.len() && expected.iter().all(|key| object.contains_key(*key))
 }
 
-/// Accepts exactly what the browser accepts: canonical text, 1 to 256
-/// distinct valid `function-entry` sites.
+/// Accepts exactly what the browser accepts: canonical text, 1 to
+/// `SITE_LIMIT` distinct valid `function-entry` sites.
 pub fn parse_sites_file(text: &str) -> Option<Vec<Site>> {
     let (version, slots) = parse_entries(text)?;
     (version == 1).then(|| slots.into_iter().map(|(site, _)| site).collect())
@@ -234,7 +235,7 @@ pub fn parse_slot_table(text: &str) -> Option<Vec<(Site, bool)>> {
 }
 
 fn parse_entries(text: &str) -> Option<(u64, Vec<(Site, bool)>)> {
-    if text.is_empty() || text.len() > FILE_LIMIT {
+    if text.is_empty() {
         return None;
     }
     let value: Value = serde_json::from_str(text).ok()?;
@@ -390,7 +391,8 @@ impl Store {
     }
 
     fn read(&self) -> Result<Vec<Saved>> {
-        let Some(bytes) = durable::read_private(&self.path, FILE_LIMIT)? else {
+        // Neither file has a size limit: the set has none but SITE_LIMIT.
+        let Some(bytes) = durable::read_private(&self.path, usize::MAX)? else {
             return Ok(Vec::new());
         };
         let sites = std::str::from_utf8(&bytes)
@@ -402,20 +404,29 @@ impl Store {
                     "The saved invocation site file is not a valid native-js-invocation-sites-v1 file. Clear the saved sites to start again.",
                 )
             })?;
-        let labels = durable::read_private(&self.labels, LABELS_LIMIT)
+        let labels = durable::read_private(&self.labels, usize::MAX)
             .ok()
             .flatten()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
             .filter(|value| value["version"] == 1)
             .and_then(|value| value["sites"].as_array().cloned())
             .unwrap_or_default();
+        // The first entry of each key, as a scan would find it.
+        let mut by_key = HashMap::new();
+        for entry in &labels {
+            if let (Some(sha), Some(anchor)) = (
+                entry["source_sha256"].as_str(),
+                entry["anchor_offset"]
+                    .as_u64()
+                    .and_then(|n| u32::try_from(n).ok()),
+            ) {
+                by_key.entry((sha, anchor)).or_insert(entry);
+            }
+        }
         Ok(sites
             .into_iter()
             .map(|site| {
-                let entry = labels.iter().find(|entry| {
-                    entry["source_sha256"] == site.source_sha256.as_str()
-                        && entry["anchor_offset"] == site.anchor_offset
-                });
+                let entry = by_key.get(&site.key()).copied();
                 let text = |key: &str, limit: usize| {
                     entry
                         .and_then(|entry| entry[key].as_str())
@@ -436,8 +447,8 @@ impl Store {
 
     /// Labels first, then the site file, each replaced atomically with
     /// user-only permissions, so the site file never names a site whose label
-    /// was lost. An empty set has no site file: the format needs 1 to 256
-    /// sites.
+    /// was lost. An empty set has no site file: the format needs at least one
+    /// site.
     fn write(&self, saved: &[Saved]) -> Result<()> {
         if saved.is_empty() {
             for path in [&self.path, &self.labels] {
@@ -487,7 +498,7 @@ impl Store {
         }
         if current.len() >= SITE_LIMIT {
             return Err(Error::conflict(format!(
-                "The saved set already tracks {SITE_LIMIT} functions, the most one capture can arm. Remove one first."
+                "The saved set already tracks {SITE_LIMIT} functions, the most one browser shared memory region carries to a renderer. Remove one first."
             ))
             .with_code(Code::ResourceLimit));
         }
@@ -572,7 +583,7 @@ impl Session {
         let Some(path) = path else {
             return empty("not_armed");
         };
-        let slots = durable::read_private(path, FILE_LIMIT)
+        let slots = durable::read_private(path, usize::MAX)
             .ok()
             .flatten()
             .and_then(|bytes| String::from_utf8(bytes).ok())
@@ -581,6 +592,11 @@ impl Session {
             return empty("unreadable");
         };
         let saved = store.load().unwrap_or_default();
+        let by_key = saved
+            .iter()
+            .rev()
+            .map(|prior| (prior.site.key(), prior))
+            .collect::<HashMap<_, _>>();
         let browser_unsupported = state == Some("browser_unsupported");
         let session = Self {
             state: if browser_unsupported {
@@ -599,10 +615,9 @@ impl Session {
                 table: slots
                     .into_iter()
                     .map(|(site, armed)| Slot {
-                        saved: saved
-                            .iter()
-                            .find(|prior| prior.site.same_function(&site))
-                            .cloned()
+                        saved: by_key
+                            .get(&site.key())
+                            .map(|prior| (*prior).clone())
                             .unwrap_or(Saved {
                                 site,
                                 label: "Unlabeled function".into(),
@@ -630,8 +645,8 @@ impl Session {
 
     /// Makes a live session's slot table follow the saved set: a removed site
     /// disarms its slot, a saved site arms its slot again, and a new one takes
-    /// the next free slot. Once all 256 slots are used, a new site waits for
-    /// the next capture. The site file is replaced before the generation
+    /// the next free slot. Once `SITE_LIMIT` slots are used, a new site waits
+    /// for the next capture. The site file is replaced before the generation
     /// advances, so Brave never applies a generation without its table. A
     /// failed write keeps the table Brave has and is reported in `value`.
     pub fn follow(&self, saved: &[Saved]) {
@@ -640,10 +655,13 @@ impl Session {
         };
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let mut table = slots.table.clone();
+        let by_key = saved
+            .iter()
+            .rev()
+            .map(|prior| (prior.site.key(), prior))
+            .collect::<HashMap<_, _>>();
         for slot in &mut table {
-            let current = saved
-                .iter()
-                .find(|prior| prior.site.same_function(&slot.saved.site));
+            let current = by_key.get(&slot.saved.site.key()).copied();
             slot.armed = current.is_some();
             if let Some(current) = current {
                 // The slot keeps the site Brave has; only its labels follow.
@@ -653,18 +671,21 @@ impl Session {
                 };
             }
         }
+        let mut slotted = table
+            .iter()
+            .map(|slot| slot.saved.site.key())
+            .collect::<HashSet<_>>();
+        let mut appended = Vec::new();
         for current in saved {
-            if table.len() < SITE_LIMIT
-                && !table
-                    .iter()
-                    .any(|slot| slot.saved.site.same_function(&current.site))
-            {
-                table.push(Slot {
+            if table.len() + appended.len() < SITE_LIMIT && slotted.insert(current.site.key()) {
+                appended.push(Slot {
                     saved: current.clone(),
                     armed: true,
                 });
             }
         }
+        drop(slotted);
+        table.extend(appended);
         let browser = |table: &[Slot]| {
             table
                 .iter()
@@ -1342,18 +1363,18 @@ mod tests {
     }
 
     #[test]
-    fn the_saved_set_is_bounded_unique_private_and_exact() {
+    fn the_saved_set_is_unique_private_and_exact_past_the_old_256() {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("app/js-invocation-sites-v1.json");
         let store = Store::new(path.clone());
         assert!(store.load().unwrap().is_empty());
-        for index in 0..256 {
+        // No fixed count: the only bound is the browser's shared memory
+        // region, millions of sites.
+        assert_eq!(SITE_LIMIT, 48_806_446);
+        for index in 0..300 {
             store.add(saved(index)).unwrap();
         }
-        let past = store.add(saved(256)).unwrap_err();
-        assert_eq!(past.status, 409);
-        assert!(past.message.contains("256 functions"));
         let duplicate = store.add(saved(3)).unwrap_err();
         assert_eq!(
             (
@@ -1368,16 +1389,19 @@ mod tests {
         assert_eq!(mode(path.parent().unwrap()), 0o700);
         let text = std::fs::read_to_string(&path).unwrap();
         let sites = parse_sites_file(&text).expect("the browser's exact format");
-        assert_eq!(sites.len(), 256);
-        assert!(text.len() <= FILE_LIMIT);
+        assert_eq!(sites.len(), 300);
+        assert!(text.len() > 64 * 1024);
         let loaded = store.load().unwrap();
-        assert_eq!(loaded[3], saved(3));
-        assert_eq!(store.remove(&"b".repeat(64), 3).unwrap().len(), 255);
+        assert_eq!(
+            (loaded[3].clone(), loaded[299].clone()),
+            (saved(3), saved(299))
+        );
+        assert_eq!(store.remove(&"b".repeat(64), 3).unwrap().len(), 299);
         assert_eq!(store.remove(&"b".repeat(64), 3).unwrap_err().status, 404);
         // A lost sidecar never loses a site, only its label.
         std::fs::remove_file(labels_path(&path)).unwrap();
         assert_eq!(store.load().unwrap()[0].label, "Unlabeled function");
-        assert_eq!(store.clear().unwrap(), 255);
+        assert_eq!(store.clear().unwrap(), 299);
         assert!(!path.exists() && !labels_path(&path).exists());
         assert!(store.load().unwrap().is_empty());
         // An invalid site file is reported, and clearing repairs it.

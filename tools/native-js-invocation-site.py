@@ -29,8 +29,9 @@ import json
 import sys
 from pathlib import Path
 
-SITE_LIMIT = 256
-FILE_LIMIT = 128 * 1024
+# The browser's kNativeJsInvocationSiteListLimit: one shared memory region of
+# 44-byte records per renderer. The only bound; the file has no size limit.
+SITE_LIMIT = (2**31 - 1) // 44
 U64_MAX = 2**64 - 1
 CASES = Path(__file__).resolve().parent / "fixtures/native-js-invocation/site-cases.json"
 
@@ -95,10 +96,7 @@ def sites_text(sites: list[dict]) -> str:
     keys = {(entry["source_sha256"], entry["anchor_offset"]) for entry in sites}
     if len(keys) != len(sites):
         raise SiteError("duplicate", "two sites name the same function")
-    text = json.dumps({"sites": sites, "version": 1}, sort_keys=True, separators=(",", ":"))
-    if len(text.encode()) > FILE_LIMIT:
-        raise SiteError("file_size", f"the site file exceeds {FILE_LIMIT} bytes")
-    return text
+    return json.dumps({"sites": sites, "version": 1}, sort_keys=True, separators=(",", ":"))
 
 
 def sites_file(specs: list[str]) -> str:

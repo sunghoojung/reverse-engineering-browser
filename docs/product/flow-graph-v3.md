@@ -186,7 +186,7 @@ hsw#13  ▶ start ── sync ── promise job ── wasm run ▸ br_table ×
 - Overlapping calls stay separate, which time windows cannot do.
 
 **Weaknesses.**
-- It covers only armed functions, up to 256 sites with every call recorded.
+- It covers only armed functions, with every call recorded.
 - It depends on invocation capture, which no rebuilt Brave has run yet.
 - It is not a picture of the session.
 

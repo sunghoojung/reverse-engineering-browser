@@ -448,8 +448,17 @@
     const summary = document.createElement('summary'); summary.textContent = value.value?.truncated ? 'Truncated' : '⋯'; summary.setAttribute('aria-label', `Result details: ${value.status}`);
     const label = document.createElement('div'); label.className = 'native-console-result-type'; label.textContent = `${value.status} · session ${scope.session} · document ${scope.target} · ${scope.live ? 'live capture' : 'disposable experiment'}`;
     label.append(button('Copy result', () => value.value ? copyValue(value.value, scope) : copy(value.text || '')), button('Save snippet', () => saveSnippet(source)), button('Experiment activity', async () => {
-      const reply = await runtime({operation: 'traffic'}, scope.target, false, scope.session, scope.generation);
-      if (reply?.status === 'ok') document.dispatchEvent(new CustomEvent('reb-console-traffic', {detail: {session: scope.session, target: scope.target, request: value.request_id, events: reply.events || [], dropped: reply.dropped || 0}}));
+      // The browser keeps every event until it is read and pages them by
+      // reply size; read on while it says more remain. A page that keeps
+      // loading stops this read after 64 replies, and the rest wait for the
+      // next one.
+      const events = []; let dropped = 0, more = true, read = false;
+      for (let page = 0; more && page < 64; page += 1) {
+        const reply = await runtime({operation: 'traffic'}, scope.target, false, scope.session, scope.generation);
+        if (reply?.status !== 'ok') break;
+        read = true; events.push(...(reply.events || [])); dropped += reply.dropped || 0; more = reply.more === true;
+      }
+      if (read) document.dispatchEvent(new CustomEvent('reb-console-traffic', {detail: {session: scope.session, target: scope.target, request: value.request_id, events, dropped, more}}));
     })); details.append(summary, label); row.append(details); appendRow(row);
     if (value.value?.type === 'promise' && /^\s*await\b/.test(source)) awaitValue(output, value.value, scope, true);
     return row;

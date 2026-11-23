@@ -100,7 +100,11 @@ through forty scroll steps there and back, and those rows must be consecutive
 messages that cover the viewport with no gap. PageDown, Home and End must
 scroll the focused transcript through WebKit's own scroll animation, which
 the layout never interrupts: Home must reach the first entry and End the
-last line of the 1 MiB message. Search
+last line of the 1 MiB message. Each key waits for the previous scroll to
+stop, because WebKit before bug 330293 aims Home and End by a distance from
+the position it last knew, so on any page one pressed while PageDown still
+moves lands short by what PageDown had left. A timed-out wait prints each
+scroll, `scrollend`, key, layout write and changed frame that led to it. Search
 must find `rendered message 4242` among rows that are not drawn and draw only
 that match, and Escape must restore every entry. Screenshots
 `console-transcript-{end,middle,start,search}-*` show each state.

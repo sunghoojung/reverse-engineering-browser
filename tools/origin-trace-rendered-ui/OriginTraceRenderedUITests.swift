@@ -2438,10 +2438,43 @@ final class OriginTraceRenderedUITests: XCTestCase {
       })()
       """
     let frames = "new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => done(true))))"
-    // A wait that says where the transcript was if it times out.
+    // Records each scroll, scrollend, key and layout write on the transcript,
+    // and each frame whose geometry changed, so a failed wait shows how the
+    // transcript got where it is. still(ms) resolves once it has not scrolled
+    // for that long, counted in frames.
+    let recorder = """
+      (() => {
+        const scroll = document.querySelector('#native-console-scroll'), output = document.querySelector('#native-console-output');
+        const offset = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop'), log = [];
+        const geometry = () => `top ${offset.get.call(scroll)} height ${scroll.scrollHeight} padding ${output.style.paddingTop} ${output.style.paddingBottom}`;
+        let moved = performance.now(), last = '', repeats = 0;
+        const note = text => { log.push(`${performance.now().toFixed(1)} ${text}`); if (log.length > 500) log.splice(0, 100); last = ''; };
+        Object.defineProperty(scroll, 'scrollTop', {configurable: true, get() { return offset.get.call(this); },
+          set(value) { note(`write ${value} over ${geometry()}`); offset.set.call(this, value); }});
+        scroll.addEventListener('scroll', () => { moved = performance.now(); note(`scroll ${geometry()}`); });
+        scroll.addEventListener('scrollend', () => note(`scrollend ${geometry()}`));
+        for (const kind of ['keydown', 'keyup']) document.addEventListener(kind, event => note(`${kind} ${event.key}`), true);
+        (function frame() {
+          const now = geometry();
+          if (now !== last) { note(`frame ${now}`); last = now; repeats = 1; }
+          else log[log.length - 1] = log[log.length - 1].replace(/ x\\d+$/, '') + ` x${++repeats}`;
+          requestAnimationFrame(frame);
+        })();
+        window.__rebTranscript = {
+          log: () => log.slice(-200).join('\\n'),
+          still: ms => new Promise(done => (function frame(now) { if (now - moved >= ms) done(true); else requestAnimationFrame(frame); })(performance.now())),
+        };
+        return true;
+      })()
+      """
+    // A wait that says where the transcript was, and how it got there, if it times out.
     func wait(_ ui: Harness, _ condition: String, timeout: TimeInterval = 15, _ message: String) async throws {
       do { try await ui.waitUntil(condition, timeout: timeout, message) }
-      catch { throw HarnessError("\(error) \((try? await ui.json(window)) ?? [:])") }
+      catch {
+        let state = (try? await ui.json(window)) ?? [:]
+        let events = (try? await ui.value("window.__rebTranscript?.log() ?? ''")) as? String ?? ""
+        throw HarnessError("\(error) \(state)\n\(events)")
+      }
     }
     for size in windowSizes {
       let ui = try await prepare(size)
@@ -2536,12 +2569,17 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertLayout(ui, "#native-console-panel", "\(size.name) Console transcript middle")
       try await ui.screenshot("console-transcript-middle-\(size.name)")
 
-      // The keyboard scrolls the focused transcript like any other.
+      // The keyboard scrolls the focused transcript like any other. Each key
+      // waits for the previous scroll to stop: WebKit before bug 330293 aims
+      // Home and End by a distance from the position it last knew, so one
+      // pressed while PageDown still moves lands short by what PageDown had
+      // left, as on any page.
+      _ = try await ui.value(recorder)
       _ = try await ui.value("(() => { document.querySelector('#native-console-scroll').focus({focusVisible: true}); return true; })()")
       let before = try await ui.json(window)
       try await ui.key(121, "\u{F72D}", modifiers: [.function])
       try await wait(ui, "(\(window)).visible > \(before["visible"] as? Int ?? 0)", "\(size.name): PageDown did not scroll the transcript")
-      _ = try await ui.value(frames)
+      _ = try await ui.value("window.__rebTranscript.still(300)")
       let paged = try await ui.json(window)
       XCTAssertEqual(paged["gap"] as? Double, 0, "\(size.name): PageDown leaves the viewport covered: \(paged)")
       try await ui.key(115, "\u{F729}", modifiers: [.function])
@@ -2552,6 +2590,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertEqual(start["firstDrawn"] as? String, "Context selected: top #31 · https://auth", "\(size.name): the first entry is kept: \(start)")
       XCTAssertEqual(start["gap"] as? Double, 0, "\(size.name): drawn rows cover the viewport at the start: \(start)")
       try await ui.screenshot("console-transcript-start-\(size.name)")
+      _ = try await ui.value("window.__rebTranscript.still(300)")
       try await ui.key(119, "\u{F72B}", modifiers: [.function])
       try await wait(ui, "(() => { const state = \(window); return state.large && state.largeEnd === 0; })()",
         "\(size.name): End did not return to the 1 MiB message")

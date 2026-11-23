@@ -4599,7 +4599,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     try await clearSavedSites(ui)
     let focus = { try await ui.json("__rebUiProbe.focusState()") }
     let checked = "Object.fromEntries([...document.querySelectorAll('#session-panel input[id^=\"session-panel-option-\"]')].map(box => [box.id.replace('session-panel-option-', ''), box.checked]))"
-    let advancedKeys = ["request-stacks", "promise-stacks", "wasm-dispatch", "ignore-debugger-statements", "document-start",
+    let advancedKeys = ["request-stacks", "promise-stacks", "wasm-dispatch", "wasm-every-record", "ignore-debugger-statements", "document-start",
                         "canvas-images", "browser-internal", "extension-traffic"]
     let startFails = { (name: String) in
       try await ui.click("#session-panel-start")
@@ -4649,6 +4649,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
         XCTAssertEqual(after["id"] as? String, "session-panel-offline", "\(name): the actions follow the options: \(after)")
         let defaults = try await ui.json(checked)
         XCTAssertEqual(defaults as? [String: Bool], ["fresh-profile": false, "request-stacks": true, "promise-stacks": false, "wasm-dispatch": true,
+          "wasm-every-record": false,
           "ignore-debugger-statements": true, "document-start": true, "canvas-images": true, "browser-internal": false, "extension-traffic": false],
           "\(name): app sessions start with the defaults: \(defaults)")
         let text = try await panelText(ui)
@@ -4696,7 +4697,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertEqual(saved?["version"] as? Int, 1, "\(String(describing: saved))")
       XCTAssertEqual(saved?["mode"] as? String, "metadata", "\(String(describing: saved))")
       XCTAssertEqual(saved?["options"] as? [String: Bool], ["request_stacks": true, "promise_stacks": true,
-        "wasm_dispatch": false, "ignore_debugger_statements": true, "canvas_images": true, "invocation_digests": true,
+        "wasm_dispatch": false, "wasm_every_record": false, "ignore_debugger_statements": true, "canvas_images": true, "invocation_digests": true,
         "document_start": true, "browser_internal": true, "extension_traffic": false], "the saved options: \(String(describing: saved))")
       let mode = (try FileManager.default.attributesOfItem(atPath: expected.sessionPreferences)[.posixPermissions] as? NSNumber)?.intValue
       XCTAssertEqual(mode, 0o600, "the saved choices are the researcher's alone")

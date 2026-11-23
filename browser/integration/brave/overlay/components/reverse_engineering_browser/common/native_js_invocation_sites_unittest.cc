@@ -4,6 +4,7 @@
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 #include "brave/components/reverse_engineering_browser/common/native_js_invocation_sites.h"
 
+#include <algorithm>
 #include <string>
 
 #include "testing/gtest/include/gtest/gtest.h"
@@ -25,13 +26,14 @@ TEST(NativeJsInvocationSites, ExactRecords) {
   ASSERT_EQ(records->size(), kNativeJsInvocationSiteRecordSize);
   EXPECT_EQ((*records)[40], kNativeJsInvocationFunctionEntryShape);
   EXPECT_EQ((*records)[41], 0);
-  std::array<NativeJsInvocationSite, kNativeJsInvocationSiteLimit> sites{};
-  ASSERT_EQ(DecodeNativeJsInvocationSites(*records, sites), 1U);
-  EXPECT_EQ(sites[0].anchor_offset, 120U);
-  EXPECT_EQ(sites[0].source_length, 456U);
-  EXPECT_EQ(sites[0].source_sha256[0], 1);
-  EXPECT_EQ(sites[0].source_sha256[31], 0x20);
-  EXPECT_TRUE(sites[0].armed);
+  const auto sites = DecodeNativeJsInvocationSites(*records);
+  ASSERT_TRUE(sites);
+  ASSERT_EQ(sites->size(), 1U);
+  EXPECT_EQ((*sites)[0].anchor_offset, 120U);
+  EXPECT_EQ((*sites)[0].source_length, 456U);
+  EXPECT_EQ((*sites)[0].source_sha256[0], 1);
+  EXPECT_EQ((*sites)[0].source_sha256[31], 0x20);
+  EXPECT_TRUE((*sites)[0].armed);
 }
 TEST(NativeJsInvocationSites, RejectsOtherShapesAndMalformedInputs) {
   // A dispatch site file never arms a function entry, and the reverse.
@@ -47,15 +49,16 @@ TEST(NativeJsInvocationSites, RejectsOtherShapesAndMalformedInputs) {
   EXPECT_FALSE(ParseNativeJsInvocationSites(
       Replace(kSites, "\"anchor_offset\":120", "\"anchor_offset\":456")));
   EXPECT_FALSE(ParseNativeJsInvocationSites(R"({"sites":[],"version":1})"));
-  std::array<NativeJsInvocationSite, kNativeJsInvocationSiteLimit> sites{};
+  EXPECT_FALSE(ParseNativeJsInvocationSites(""));
   auto records = *ParseNativeJsInvocationSites(kSites);
   records[40] = 1;  // a switch record is not a function-entry record
-  EXPECT_FALSE(DecodeNativeJsInvocationSites(records, sites));
+  EXPECT_FALSE(DecodeNativeJsInvocationSites(records));
   records[40] = kNativeJsInvocationFunctionEntryShape;
   records[41] = 2;  // only the disarmed flag is defined
-  EXPECT_FALSE(DecodeNativeJsInvocationSites(records, sites));
-  EXPECT_FALSE(
-      ParseNativeJsInvocationSites(std::string(kNativeJsInvocationSitesFileLimit + 1, ' ')));
+  EXPECT_FALSE(DecodeNativeJsInvocationSites(records));
+  records[41] = 0;
+  records.pop_back();  // records are whole
+  EXPECT_FALSE(DecodeNativeJsInvocationSites(records));
 }
 // Version 2 is a slot table: a slot keeps its site and only `armed` changes,
 // so a revision can disarm one without renumbering the others. An empty table
@@ -70,9 +73,10 @@ TEST(NativeJsInvocationSites, SlotTableWithArmedFlags) {
   EXPECT_FALSE((*list)[0].armed);
   const auto records = EncodeNativeJsInvocationSites(*list);
   EXPECT_EQ(records[41], kNativeJsInvocationSiteDisarmed);
-  std::array<NativeJsInvocationSite, kNativeJsInvocationSiteLimit> sites{};
-  ASSERT_EQ(DecodeNativeJsInvocationSites(records, sites), 1U);
-  EXPECT_FALSE(sites[0].armed);
+  const auto sites = DecodeNativeJsInvocationSites(records);
+  ASSERT_TRUE(sites);
+  ASSERT_EQ(sites->size(), 1U);
+  EXPECT_FALSE((*sites)[0].armed);
   EXPECT_TRUE(ParseNativeJsInvocationSiteList(Replace(table, "\"armed\":false", "\"armed\":true"))
                   .value()[0]
                   .armed);
@@ -80,34 +84,44 @@ TEST(NativeJsInvocationSites, SlotTableWithArmedFlags) {
   const auto empty = ParseNativeJsInvocationSites(R"({"sites":[],"version":2})");
   ASSERT_TRUE(empty);
   EXPECT_TRUE(empty->empty());
-  EXPECT_EQ(DecodeNativeJsInvocationSites(*empty, sites), 0U);
+  const auto none = DecodeNativeJsInvocationSites(*empty);
+  ASSERT_TRUE(none);
+  EXPECT_TRUE(none->empty());
 }
-// Every one-byte slot is armable, and a full list of the longest canonical
-// sites fits the file limit in both versions.
-std::string ManySites(std::size_t count, bool slot_table = false) {
+// The longest canonical sites, each anchor once unless repeat names a slot
+// whose anchor repeats its predecessor's.
+std::string ManySites(std::size_t count,
+                      bool slot_table = false,
+                      std::size_t repeat = std::string::npos) {
   std::string json = R"({"sites":[)";
   for (std::size_t n = 0; n < count; ++n) {
     json +=
-        std::string(n ? "," : "") + R"({"anchor_offset":)" + std::to_string(10 + n) +
-        (slot_table ? R"(,"armed":false)" : "") +
+        std::string(n ? "," : "") + R"({"anchor_offset":)" +
+        std::to_string(10 + (n == repeat ? n - 1 : n)) + (slot_table ? R"(,"armed":false)" : "") +
         R"(,"artifact_id":"18446744073709551615","artifact_sha256":"00000000000000000000000000000000000000000000000000000000000000ab","byte_offset":2147483647,"shape":"function-entry","source_length":2147483647,"source_sha256":"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"})";
   }
   return json + (slot_table ? R"(],"version":2})" : R"(],"version":1})");
 }
-TEST(NativeJsInvocationSites, EverySlotUpToTheLimit) {
+// Neither the file nor the list has a fixed size: 20,000 sites, a file of
+// several megabytes, keep every slot, and only a repeated key refuses it.
+TEST(NativeJsInvocationSites, EverySlotOfALongList) {
+  constexpr std::size_t kCount = 20000;
   for (const bool slot_table : {false, true}) {
-    const auto full = ManySites(kNativeJsInvocationSiteLimit, slot_table);
-    ASSERT_LE(full.size(), kNativeJsInvocationSitesFileLimit);
-    const auto records = ParseNativeJsInvocationSites(full);
+    const auto records = ParseNativeJsInvocationSites(ManySites(kCount, slot_table));
     ASSERT_TRUE(records);
-    ASSERT_EQ(records->size(), kNativeJsInvocationSiteLimit * kNativeJsInvocationSiteRecordSize);
-    std::array<NativeJsInvocationSite, kNativeJsInvocationSiteLimit> sites{};
-    ASSERT_EQ(DecodeNativeJsInvocationSites(*records, sites), kNativeJsInvocationSiteLimit);
-    EXPECT_EQ(sites.back().anchor_offset, 10U + kNativeJsInvocationSiteLimit - 1);
-    EXPECT_EQ(sites.back().armed, !slot_table);
-    EXPECT_FALSE(
-        ParseNativeJsInvocationSites(ManySites(kNativeJsInvocationSiteLimit + 1, slot_table)));
+    ASSERT_EQ(records->size(), kCount * kNativeJsInvocationSiteRecordSize);
+    const auto sites = DecodeNativeJsInvocationSites(*records);
+    ASSERT_TRUE(sites);
+    ASSERT_EQ(sites->size(), kCount);
+    EXPECT_EQ(sites->back().anchor_offset, 10U + kCount - 1);
+    EXPECT_EQ(sites->back().armed, !slot_table);
+    EXPECT_FALSE(ParseNativeJsInvocationSites(ManySites(kCount, slot_table, kCount - 1)));
   }
+  // The renderer refuses repeated records the same way.
+  auto records = *ParseNativeJsInvocationSites(ManySites(2));
+  std::copy(records.begin(), records.begin() + kNativeJsInvocationSiteRecordSize,
+            records.begin() + kNativeJsInvocationSiteRecordSize);
+  EXPECT_FALSE(DecodeNativeJsInvocationSites(records));
 }
 }  // namespace
 }  // namespace reb

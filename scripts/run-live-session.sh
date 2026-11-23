@@ -69,6 +69,9 @@ readonly native_wasm_samples_per_indirect_site="${REB_NATIVE_WASM_SAMPLES_PER_IN
 readonly native_wasm_function_allow="${REB_NATIVE_WASM_FUNCTION_ALLOW:-}"
 readonly native_wasm_function_deny="${REB_NATIVE_WASM_FUNCTION_DENY:-}"
 readonly native_wasm_module_allowlist="${REB_NATIVE_WASM_MODULE_ALLOWLIST:-}"
+# Every Wasm record: no per-window pacing in the renderer and no browser
+# ceiling, so each execution the filters admit is a full record.
+readonly native_wasm_every_record="${REB_NATIVE_WASM_EVERY_RECORD:-0}"
 readonly native_guest_adapter="${REB_NATIVE_WASM_GUEST_ADAPTER:-}"
 readonly native_js_dispatch_sites="${REB_NATIVE_JS_DISPATCH_SITES:-}"
 readonly native_js_invocation_sites="${REB_NATIVE_JS_INVOCATION_SITES:-}"
@@ -258,7 +261,14 @@ if [[ -n "${native_wasm_module_allowlist}" ]]; then
     fail_live_session 2 "REB_NATIVE_WASM_MODULE_ALLOWLIST must contain between 1 and 1024 bytes."
   fi
 fi
-if [[ -n "${native_wasm_samples_per_function}${native_wasm_samples_per_indirect_site}${native_wasm_function_allow}${native_wasm_function_deny}${native_wasm_module_allowlist}" ]] &&
+if [[ "${native_wasm_every_record}" != 0 && "${native_wasm_every_record}" != 1 ]]; then
+  fail_live_session 2 "REB_NATIVE_WASM_EVERY_RECORD must be 0 or 1."
+fi
+if [[ "${native_wasm_every_record}" == 1 ]] &&
+   [[ -n "${native_wasm_samples_per_function}${native_wasm_samples_per_indirect_site}" ]]; then
+  fail_live_session 2 "REB_NATIVE_WASM_EVERY_RECORD keeps every record, so it takes no REB_NATIVE_WASM_SAMPLES_PER_FUNCTION or REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE."
+fi
+if [[ -n "${native_wasm_samples_per_function}${native_wasm_samples_per_indirect_site}${native_wasm_function_allow}${native_wasm_function_deny}${native_wasm_module_allowlist}" || "${native_wasm_every_record}" == 1 ]] &&
    [[ "${native_wasm_dispatch}" != 1 && "${native_wasm_call_indirect}" != 1 ]]; then
   fail_live_session 2 "Wasm sample budget options require REB_NATIVE_WASM_DISPATCH=1 or REB_NATIVE_WASM_CALL_INDIRECT=1."
 fi
@@ -967,6 +977,9 @@ if [[ "${native_wasm_call_indirect}" == 1 ]]; then
   ui_arguments+=(--session-wasm-call-indirect)
 fi
 if [[ "${native_wasm_dispatch}" == 1 || "${native_wasm_call_indirect}" == 1 ]]; then
+  if [[ "${native_wasm_every_record}" == 1 ]]; then
+    ui_arguments+=(--session-wasm-every-record)
+  fi
   if [[ -n "${native_wasm_samples_per_function}" ]]; then
     ui_arguments+=(--session-wasm-samples-per-function "$((10#${native_wasm_samples_per_function}))")
   fi
@@ -1064,6 +1077,9 @@ if [[ -n "${native_guest_adapter}" ]]; then
 fi
 # Absent options are unset in the extracted launch slice, which runs under
 # set -u. An empty value is the historical unrestricted budget.
+if [[ "${native_wasm_every_record:-0}" == 1 ]]; then
+  brave_arguments+=("--reb-wasm-every-record")
+fi
 if [[ -n "${native_wasm_samples_per_function:-}" ]]; then
   brave_arguments+=("--reb-wasm-samples-per-function=${native_wasm_samples_per_function}")
 fi
@@ -1235,7 +1251,7 @@ if [[ "${promise_stacks_state}" == browser_unsupported ]]; then
   echo "Promise registration stacks: unavailable; this Brave does not define --reb-promise-stacks"
 fi
 echo "Native switches: quiet=${native_quiet_mode} wasm_br_table=${native_wasm_dispatch} wasm_call_indirect=${native_wasm_call_indirect} wasm_guest=$([[ -n "${native_guest_adapter}" ]] && echo 1 || echo 0) js_dispatch=$([[ -n "${native_js_dispatch_sites}" ]] && echo 1 || echo 0) js_invocation=$([[ "${js_invocation_session_state}" == armed ]] && echo 1 || echo 0) js_invocation_live=${js_invocation_live} request_stacks=$([[ "${request_stacks_state}" == on ]] && echo 1 || echo 0) promise_stacks=$([[ "${promise_stacks_state}" == on ]] && echo 1 || echo 0)"
-echo "Wasm sample budgets: per_function=${native_wasm_samples_per_function:-unset} per_indirect_site=${native_wasm_samples_per_indirect_site:-unset} function_allow=${native_wasm_function_allow:-unset} function_deny=${native_wasm_function_deny:-unset} module_allowlist=$([[ -n "${native_wasm_module_allowlist:-}" ]] && echo 1 || echo 0) reset_file=${wasm_budget_reset_file:-unset}"
+echo "Wasm sample budgets: every_record=${native_wasm_every_record} per_function=${native_wasm_samples_per_function:-unset} per_indirect_site=${native_wasm_samples_per_indirect_site:-unset} function_allow=${native_wasm_function_allow:-unset} function_deny=${native_wasm_function_deny:-unset} module_allowlist=$([[ -n "${native_wasm_module_allowlist:-}" ]] && echo 1 || echo 0) reset_file=${wasm_budget_reset_file:-unset}"
 if [[ "${native_js_invocation_live}" == 1 && "${js_invocation_live}" == 0 &&
       "${js_invocation_session_state}" != browser_unsupported ]]; then
   echo "JavaScript invocation tracking: Brave at ${brave_binary} cannot revise armed sites while it runs, so saved functions apply from the next capture"

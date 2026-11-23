@@ -115,9 +115,15 @@ Traffic view, retaining prior delivered metadata for that session/document.
 Each record has an event ID, document ID, browser resource ID, completion time,
 origin, method, HTTP status, network error, cache state and last evaluation
 request ID. Paths, query strings, headers and bodies are excluded. Observation
-order is not a causal claim. Completed resources before the initial listing,
-other documents and evicted records are not reconstructed or replayed. Refresh
-discarding undelivered records increments the visible drop count. The view
+order is not a causal claim. The browser keeps every completion of a current
+target until it is read, with no count limit. One `traffic` reply carries the
+oldest that fit the 64 KiB runtime response and `more: true` while some
+remain; Experiment activity reads on until none remain, up to 64 replies per
+read, and says when more wait. Completed resources before the initial listing
+and of other documents are not reconstructed or replayed. Only a listing that
+can no longer name a document discards its unread records: a refresh without
+the live binding renumbers every target, and a document that left the listing
+is gone. Each discarded record increments the visible drop count. The view
 never merges these ephemeral records into baseline evidence.
 
 ## Ownership and bounds

@@ -612,6 +612,9 @@ class Session final {
         base::CommandLine::ForCurrentProcess()->HasSwitch(kNativeConsoleLiveBindingSwitch);
     auto previous = std::move(targets_);
     targets_.clear();
+    // Without the live binding a listing renumbers every target, so no
+    // traffic request can name the old IDs again: their events are counted as
+    // dropped and freed.
     if (!live) {
       activity_drops_ =
           std::min(2147483647u, activity_drops_ + static_cast<unsigned>(activity_.size()));
@@ -640,6 +643,11 @@ class Session final {
               });
           if (same_document != previous.end())
             target.id = same_document->id;
+          // A document that reported before it was listed, such as a child
+          // frame's document-start record, keeps the ID it reported with.
+          else if (const auto reported = documents_.find(frame->GetDocumentToken().value());
+                   reported != documents_.end())
+            target.id = reported->second;
         }
         if (!target.id) {
           if (!next_target_) {

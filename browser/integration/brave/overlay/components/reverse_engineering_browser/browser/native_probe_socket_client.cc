@@ -40,7 +40,6 @@
 #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
 #include "brave/components/reverse_engineering_browser/common/native_factory_owner_hook.h"
-#include "brave/components/reverse_engineering_browser/common/native_js_invocation.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_sample_budget.h"
 
 namespace reb {
@@ -489,10 +488,10 @@ void NativeProbeSocketClient::PollJsInvocationSites() {
   // The backend replaces the site file before it advances the generation, so
   // this read sees that revision or a newer one. Each revision is a whole slot
   // table, so a newer one applied twice changes nothing. An unreadable file
-  // reaches the session as a refused revision and its gap.
+  // reaches the session as a refused revision and its gap. The file has no
+  // size limit; the session parses it off the browser sequence.
   std::string json;
-  if (!base::ReadFileToStringWithMaxSize(base::FilePath(js_invocation_sites_file_), &json,
-                                         kNativeJsInvocationSitesFileLimit)) {
+  if (!base::ReadFileToString(base::FilePath(js_invocation_sites_file_), &json)) {
     json.clear();
   }
   browser_task_runner_->PostTask(FROM_HERE,

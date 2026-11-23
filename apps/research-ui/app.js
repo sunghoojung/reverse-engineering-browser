@@ -2983,20 +2983,24 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       // (protocol/http-api.md): the window and allowances this session's
       // renderers sample Wasm br_table and call_indirect with. Read after each
       // valid poll until it answers. Null, for a session that records no Wasm
-      // stream or a backend from before the addition, hides the strip.
+      // stream or a backend from before the addition, hides the strip. A
+      // backend from before every_record omits it, which means false; with it,
+      // there is no window budget and no allowance.
       function vmWasmSamplingFromContext(sampling) {
         if (sampling === null || sampling === undefined) return null;
         const count = (value, min, max) => Number.isSafeInteger(value) && value >= min && value <= max;
         const streams = Array.isArray(sampling?.streams) ? sampling.streams : [];
-        const allowance = value => value === null || count(value, 1, sampling.records_per_window);
+        const everyRecord = sampling?.every_record ?? false;
+        const allowance = value => value === null || (!everyRecord && count(value, 1, sampling.records_per_window));
         const valid = sampling?.version === 1 && streams.length >= 1 && streams.length <= 2 &&
           new Set(streams).size === streams.length && streams.every(stream => stream === 'br_table' || stream === 'call_indirect') &&
-          count(sampling.window_ms, 1, 3600000) && count(sampling.records_per_window, 1, 0xffffffff) &&
+          count(sampling.window_ms, 1, 3600000) && typeof everyRecord === 'boolean' &&
+          (everyRecord ? sampling.records_per_window === null : count(sampling.records_per_window, 1, 0xffffffff)) &&
           allowance(sampling.samples_per_function) && allowance(sampling.samples_per_indirect_site) &&
           count(sampling.function_allow_count, 0, 32) && count(sampling.function_deny_count, 0, 32) &&
           typeof sampling.module_allowlist === 'boolean' && (sampling.reset === 'available' || sampling.reset === 'unavailable');
         if (!valid) return Object.freeze({malformed: true});
-        return Object.freeze({streams: Object.freeze([...streams]), window_ms: sampling.window_ms,
+        return Object.freeze({streams: Object.freeze([...streams]), window_ms: sampling.window_ms, every_record: everyRecord,
           records_per_window: sampling.records_per_window, samples_per_function: sampling.samples_per_function,
           samples_per_indirect_site: sampling.samples_per_indirect_site, function_allow_count: sampling.function_allow_count,
           function_deny_count: sampling.function_deny_count, module_allowlist: sampling.module_allowlist, reset: sampling.reset});
@@ -3024,10 +3028,14 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const allowance = (value, unit, unlimited, unnamed) => value === null ? unnamed
           : value >= sampling.records_per_window ? unlimited : `${count(value)} per ${unit}`;
         const period = sampling.window_ms === 1000 ? 'each second' : `each ${count(sampling.window_ms)} ms`;
-        const parts = [`Wasm sampling: ${sampling.streams.join(' and ')}`,
-          `up to ${count(sampling.records_per_window)} full records per stream ${period}`,
-          allowance(sampling.samples_per_function, 'function', 'no per-function limit', '64 per function (browser default)')];
-        if (sampling.streams.includes('call_indirect')) {
+        const parts = [`Wasm sampling: ${sampling.streams.join(' and ')}`];
+        if (sampling.every_record) {
+          parts.push('every record, with no per-second or per-function limit');
+        } else {
+          parts.push(`up to ${count(sampling.records_per_window)} full records per stream ${period}`,
+            allowance(sampling.samples_per_function, 'function', 'no per-function limit', '64 per function (browser default)'));
+        }
+        if (sampling.streams.includes('call_indirect') && !sampling.every_record) {
           parts.push(allowance(sampling.samples_per_indirect_site, 'call site', 'no per-call-site limit', 'no per-call-site limit'));
         }
         if (sampling.function_allow_count) parts.push(plural(sampling.function_allow_count, 'allowed function'));
@@ -3043,7 +3051,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         strip.hidden = !sampling;
         if (!sampling) return;
         const reset = state.vmWasmSamplingReset;
-        const available = !sampling.malformed && sampling.reset === 'available';
+        // Every record has no window, so a reset would change nothing.
+        const available = !sampling.malformed && sampling.reset === 'available' && !sampling.every_record;
         if (sampling.malformed) {
           elements.vmWasmSamplingPolicy.textContent = 'Wasm sampling labels from this backend were malformed and are not shown. Retained samples remain visible.';
         } else {
@@ -3060,6 +3069,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         let kind = reset?.status ?? 'idle', message = '';
         if (sampling.malformed) kind = 'idle';
+        else if (sampling.every_record) { kind = 'unavailable'; message = 'This session keeps every record, so there is no sample window to reset.'; }
         else if (!available) { kind = 'unavailable'; message = 'This session has no sample-budget reset file.'; }
         else if (kind === 'pending') message = 'Requesting a new sample window…';
         else if (kind === 'done') message = `New sample window requested (reset ${reset.generation.toLocaleString('en-US')}). Renderers open it within about 250 ms; sample indexes keep counting.`;
@@ -3076,7 +3086,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       // reset_wasm_sample_budgets closes the current one-second window of both
       // streams in every renderer of the capture browser (protocol/http-api.md).
       async function resetVmWasmSampleBudgets() {
-        if (state.vmWasmSamplingReset?.status === 'pending' || state.vmWasmSampling?.reset !== 'available') return;
+        if (state.vmWasmSamplingReset?.status === 'pending' || state.vmWasmSampling?.reset !== 'available' ||
+            state.vmWasmSampling?.every_record) return;
         state.vmWasmSamplingReset = {status: 'pending'};
         renderVmWasmSampling();
         const controller = new AbortController();

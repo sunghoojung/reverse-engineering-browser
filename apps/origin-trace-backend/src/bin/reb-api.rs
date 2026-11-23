@@ -165,6 +165,10 @@ enum SessionCommand {
         /// SHA-256 module digests to admit. Other modules do not consume either budget.
         #[arg(long, value_delimiter = ',')]
         wasm_module_allowlist: Vec<String>,
+        /// Keep every Wasm record the filters admit: no per-second window, browser
+        /// ceiling or per-function or per-site allowance.
+        #[arg(long)]
+        wasm_every_record: bool,
         /// Absolute path of a native Wasm guest adapter recipe. Needs --wasm-dispatch.
         #[arg(long, value_name = "FILE")]
         guest_adapter: Option<PathBuf>,
@@ -1448,6 +1452,7 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         wasm_function_allow,
         wasm_function_deny,
         wasm_module_allowlist,
+        wasm_every_record,
         guest_adapter,
         js_dispatch_sites,
         quiet,
@@ -1478,6 +1483,7 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         wasm_function_allow,
         wasm_function_deny,
         wasm_module_allowlist,
+        wasm_every_record,
         wasm_budget_malformed: false,
         guest_adapter,
         js_dispatch_sites,

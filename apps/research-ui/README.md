@@ -1112,6 +1112,7 @@ and an environment variable set to `0` or `1` seeds it for that app run:
 | **Request stacks** | On | `REB_NATIVE_REQUEST_STACKS` |
 | **Promise stacks** (turns on request stacks) | Off | `REB_NATIVE_PROMISE_STACKS` |
 | **Wasm dispatch sampling** | On | `REB_NATIVE_WASM_DISPATCH` |
+| **Every Wasm record** (turns on Wasm dispatch sampling) | Off | `REB_NATIVE_WASM_EVERY_RECORD` |
 | **Ignore debugger statements** | On | `REB_NATIVE_QUIET_MODE` |
 | **Allow document-start Console scripts** | On | `REB_CONSOLE_DOCUMENT_START` |
 | **Canvas images** (Content only) | On | `REB_CAPTURE_CANVAS_IMAGES` |
@@ -1125,7 +1126,11 @@ defaults always have, instead of failing the launch.
 By default every app session also enables quiet mode and native Wasm
 `br_table` and `call_indirect` dispatch capture; Wasm dispatch forces
 Liftoff-only compilation, so Wasm-heavy pages run slower. Turn either off in
-**Advanced options**. It also permits
+**Advanced options**. Wasm dispatch keeps up to 1024 full records per stream
+each second, 64 of one function; **Every Wasm record** keeps every record
+instead, with no window, browser ceiling or per-function count, and clears an
+inherited `REB_NATIVE_WASM_SAMPLES_PER_FUNCTION` or
+`REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE`, which it cannot be combined with. It also permits
 [document-start Console scripts](#document-start-scripts), which arms nothing;
 **Allow document-start Console scripts** turns that off.
 Guest-state and JavaScript dispatch-site capture still need an adapter or site
@@ -1565,12 +1570,14 @@ For a live session that records a Wasm stream, VM Lab shows the session
 context's `capture_options.wasm_sampling` under its notice: the streams, the
 records each window keeps, the per-function and per-call-site allowances (an
 unnamed per-function allowance is the browser's 64), and the function and
-module filters. Its Reset sample budgets button posts
+module filters; a session that keeps every record says so in place of the
+window and allowances. Its Reset sample budgets button posts
 `reset_wasm_sample_budgets` and shows the new reset generation or the
 backend's refusal, for example while capture is stopped, under the policy;
 the button keeps its place at the end of the first line, and a narrow strip
 wraps only between the policy's parts. It is disabled when the session has no
-reset file, and a malformed label is named rather than shown. The strip is
+reset file or keeps every record, which has no window to reset, and a
+malformed label is named rather than shown. The strip is
 hidden for every other session.
 Filter reasons (`native_wasm_dispatch_filtered`, `native_wasm_indirect_filtered`,
 and their `_browser_` counterparts) are sample-policy exclusions: the
@@ -2433,8 +2440,9 @@ Saving changes nothing in the open page. A capture the app started follows the
 saved set: the pane says it tracks a saved function at once, and a removed one
 stops recording new calls while a call already running still settles. A
 function the page compiled before it was saved is tracked after the page
-reloads. A function saved once the capture has used all 256 site slots waits
-for the next capture, and the pane says so. With a Brave built before site
+reloads. A function saved once the capture has used all of its site slots
+waits for the next capture, and the pane says so. That is 48,806,446 sites,
+the most one shared memory region carries to a renderer. With a Brave built before site
 revisions the pane says tracking starts with the next capture. The start panel
 that **New Live Session…** opens shows "Tracking N functions" with each label
 and script URL, a Remove for each and Clear All (which asks once more), and
@@ -2445,8 +2453,8 @@ showed, so a list that changed since is refused rather than edited. Content mode
 the calls' settled-value digests; Metadata mode does not. The titlebar names
 what the running capture tracks, says when its Brave predates invocation
 capture and started without the sites, and warns when this session retained
-another version of a saved script, which the saved site will not match. At
-most 256 functions are saved, the most one capture can arm, in
+another version of a saved script, which the saved site will not match. The
+saved functions, any number up to the 48,806,446 one capture can arm, are in
 `~/Library/Application Support/Origin Trace/js-invocation-sites-v1.json` with a
 label sidecar; `REB_JS_INVOCATION_SITE_STORE` names another file. Stored-evidence
 native mode has no backend for these routes and says so. The routes and

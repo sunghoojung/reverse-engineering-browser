@@ -91,16 +91,15 @@ impl Provenance {
             .unwrap_or(Mode::Unknown)
             .label()
     }
+}
 
-    pub(crate) fn aggregate<'a>(&self, records: impl Iterator<Item = &'a Value>) -> &'static str {
-        let modes = records
-            .map(|record| self.mode(&record["session_id"]))
-            .collect::<BTreeSet<_>>();
-        if modes.len() == 1 {
-            modes.into_iter().next().unwrap()
-        } else {
-            "unknown"
-        }
+/// The one capture mode the records' sessions share, else unknown.
+pub(crate) fn aggregate(modes: impl IntoIterator<Item = &'static str>) -> &'static str {
+    let modes = modes.into_iter().collect::<BTreeSet<_>>();
+    if modes.len() == 1 {
+        modes.into_iter().next().unwrap()
+    } else {
+        "unknown"
     }
 }
 
@@ -124,9 +123,12 @@ mod tests {
         assert_eq!(modes.mode(&json!(1)), "unknown");
         let first = json!({"session_id":"1"});
         let second = json!({"session_id":"2"});
-        assert_eq!(modes.aggregate([&first].into_iter()), "native-stealth");
-        assert_eq!(modes.aggregate([&first, &second].into_iter()), "unknown");
-        assert_eq!(modes.aggregate(std::iter::empty()), "unknown");
+        let of =
+            |records: &[&Value]| aggregate(records.iter().map(|r| modes.mode(&r["session_id"])));
+        assert_eq!(of(&[&first]), "native-stealth");
+        assert_eq!(of(&[&first, &first]), "native-stealth");
+        assert_eq!(of(&[&first, &second]), "unknown");
+        assert_eq!(of(&[]), "unknown");
     }
 
     #[test]

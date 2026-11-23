@@ -6,8 +6,8 @@ import Foundation
 // absence of size limits and deadlines.
 final class StoredEvidenceBackend {
   static let getRoutes: Set<String> = [
-    "/api/requests", "/api/request-headers", "/api/request-cookies", "/api/cookie-provenance",
-    "/api/request-stack", "/api/native-debugger", "/api/source-format", "/api/source-facts",
+    "/api/requests", "/api/requests/har", "/api/request-headers", "/api/request-cookies", "/api/cookie-provenance",
+    "/api/request-stack", "/api/native-debugger", "/api/source-format", "/api/origin-trace", "/api/source-facts",
     "/api/source-facts/rows", "/api/deobfuscation", "/api/artifact-map", "/api/wasm", "/api/wasm/search", "/api/wasm/functions",
     "/api/wasm/graph", "/api/wasm/identification", "/api/wasm/pseudocode", "/api/wasm/value-flow", "/api/wasm/call-sites", "/api/wasm/diff",
     "/api/artifacts/search",
@@ -23,14 +23,49 @@ final class StoredEvidenceBackend {
     let message: String
   }
 
-  // The bare /api/events window stays with StoredEventWindow and the bare artifact
-  // list with the scheme handler. Filtered and cursor-paged reads of both go to Rust,
-  // which pages the manifest by record boundary off the main thread.
+  // Fields the app owns in a forwarded JSON object, such as the broker state of
+  // the bare event poll: the backend runs idle and cannot know them. `tag` names
+  // their values inside the ETag, so a change in either is a new answer.
+  struct Overlay {
+    let fields: [String: Any]
+    let tag: String
+
+    func etag(_ backend: String) -> String {
+      backend.hasSuffix("\"") ? "\(backend.dropLast())-\(tag)\"" : "\(backend)-\(tag)"
+    }
+
+    // The backend's own tag, or nil when the app's fields changed since.
+    func backendTag(_ etag: String) -> String? {
+      for suffix in ["-\(tag)\"", "-\(tag)"] where etag.hasSuffix(suffix) {
+        return String(etag.dropLast(suffix.count)) + (suffix.hasSuffix("\"") ? "\"" : "")
+      }
+      return nil
+    }
+
+    func apply(_ body: Data) -> Data? {
+      guard var object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else { return nil }
+      object.merge(fields) { _, app in app }
+      return try? JSONSerialization.data(withJSONObject: object)
+    }
+  }
+
+  // The bare event poll: GET /api/events with at most a limit.
+  static func isEventPoll(_ request: URLRequest) -> Bool {
+    guard (request.httpMethod ?? "GET") == "GET", let url = request.url, url.path == "/api/events" else { return false }
+    let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+    return items.allSatisfy { $0.name == "limit" }
+  }
+
+  // Every event read goes to Rust, whose event index counts gaps and drops over
+  // the whole store. The bare artifact list stays with the scheme handler;
+  // filtered and cursor-paged reads of it go to Rust, which pages the manifest
+  // by record boundary off the main thread.
   static func serves(_ request: URLRequest) -> Bool {
     guard let url = request.url else { return false }
     switch request.httpMethod ?? "GET" {
     case "GET":
-      if url.path == "/api/events" || url.path == "/api/artifacts" {
+      if url.path == "/api/events" { return true }
+      if url.path == "/api/artifacts" {
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
         return items.contains { $0.name != "limit" }
       }
@@ -59,6 +94,11 @@ final class StoredEvidenceBackend {
   init(executableURL: URL, arguments: [String]) {
     self.executableURL = executableURL
     self.arguments = arguments
+    session = Self.loopbackSession()
+  }
+
+  // Loopback only: no proxy, cache or cookies.
+  static func loopbackSession() -> URLSession {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.connectionProxyDictionary = [:]
     configuration.urlCache = nil
@@ -70,7 +110,7 @@ final class StoredEvidenceBackend {
     // the transport never cuts one off: both intervals are the resource default.
     configuration.timeoutIntervalForRequest = 7 * 24 * 60 * 60
     configuration.timeoutIntervalForResource = 7 * 24 * 60 * 60
-    session = URLSession(configuration: configuration)
+    return URLSession(configuration: configuration)
   }
 
   deinit {
@@ -137,7 +177,9 @@ final class StoredEvidenceBackend {
   /// Replies exactly once, also after `cancel`; the caller drops a reply its
   /// request no longer wants.
   @discardableResult
-  func forward(_ request: URLRequest, reply: @escaping (Data, Int, String, [String: String]) -> Void) -> Forwarding {
+  func forward(
+    _ request: URLRequest, overlay: Overlay? = nil, reply: @escaping (Data, Int, String, [String: String]) -> Void
+  ) -> Forwarding {
     let json = "application/json; charset=utf-8"
     let forwarding = Forwarding()
     launches.async {
@@ -148,7 +190,7 @@ final class StoredEvidenceBackend {
       }
       let forwarded: URLRequest
       do {
-        forwarded = try self.backendRequest(for: request, origin: try self.start())
+        forwarded = try self.backendRequest(for: request, origin: try self.start(), overlay: overlay)
       } catch let failure as Failure {
         reply(Self.body(failure), failure.status, json, [:])
         return
@@ -164,14 +206,84 @@ final class StoredEvidenceBackend {
           return
         }
         var headers: [String: String] = [:]
-        if let tag = response.value(forHTTPHeaderField: "ETag") { headers["ETag"] = tag }
-        reply(data ?? Data(), response.statusCode, response.value(forHTTPHeaderField: "Content-Type") ?? json, headers)
+        if let tag = response.value(forHTTPHeaderField: "ETag") { headers["ETag"] = overlay?.etag(tag) ?? tag }
+        var body = data ?? Data()
+        if let overlay, response.statusCode == 200 {
+          guard let applied = overlay.apply(body) else {
+            reply(Self.body(Failure(status: 502, code: "dependency_unavailable", message: "The bundled backend returned malformed JSON")), 502, json, [:])
+            return
+          }
+          body = applied
+        }
+        reply(body, response.statusCode, response.value(forHTTPHeaderField: "Content-Type") ?? json, headers)
       })
     }
     return forwarding
   }
 
-  private func backendRequest(for request: URLRequest, origin: URL) throws -> URLRequest {
+  // A GET of this backend written to `destination` as it arrives.
+  func download(path: String, query: String, to destination: URL, done: @escaping (Failure?) -> Void) {
+    launches.async {
+      let origin: URL
+      do {
+        origin = try self.start()
+      } catch let failure as Failure {
+        done(failure)
+        return
+      } catch {
+        done(Failure(status: 503, code: "dependency_unavailable", message: "The bundled backend is unavailable"))
+        return
+      }
+      guard var target = URLComponents(url: origin, resolvingAgainstBaseURL: false) else {
+        done(Failure(status: 400, code: "invalid_request", message: "Invalid application URL"))
+        return
+      }
+      target.percentEncodedPath = path
+      target.percentEncodedQuery = query
+      guard let url = target.url else {
+        done(Failure(status: 400, code: "invalid_request", message: "Invalid application URL"))
+        return
+      }
+      Self.download(url, to: destination, session: self.session, done: done)
+    }
+  }
+
+  // URLSession streams the answer to a temporary file, so an export of any
+  // size never sits in memory. Only a whole 200 answer replaces `destination`:
+  // a transfer that ends early, or an error answer, leaves it as it was.
+  static func download(_ url: URL, to destination: URL, session: URLSession, done: @escaping (Failure?) -> Void) {
+    session.downloadTask(with: URLRequest(url: url)) { location, response, error in
+      guard error == nil, let location, let response = response as? HTTPURLResponse else {
+        done(Failure(status: 502, code: "dependency_unavailable", message: "The backend stopped before the answer ended"))
+        return
+      }
+      guard response.statusCode == 200 else {
+        let failure = (try? Data(contentsOf: location)).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+        done(Failure(status: response.statusCode, code: failure?["code"] as? String ?? "dependency_unavailable",
+          message: failure?["error"] as? String ?? "The backend returned HTTP \(response.statusCode)"))
+        return
+      }
+      // The system's temporary file can be on another volume: move it beside
+      // the destination first, so the replacement itself is one rename.
+      let files = FileManager.default
+      let staged = destination.deletingLastPathComponent()
+        .appendingPathComponent(".\(destination.lastPathComponent).\(UUID().uuidString).partial")
+      do {
+        try files.moveItem(at: location, to: staged)
+        if files.fileExists(atPath: destination.path) {
+          _ = try files.replaceItemAt(destination, withItemAt: staged)
+        } else {
+          try files.moveItem(at: staged, to: destination)
+        }
+        done(nil)
+      } catch {
+        try? files.removeItem(at: staged)
+        done(Failure(status: 500, code: "io_error", message: "The file could not be written. Choose a writable destination and try again."))
+      }
+    }.resume()
+  }
+
+  private func backendRequest(for request: URLRequest, origin: URL, overlay: Overlay?) throws -> URLRequest {
     let invalid = Failure(status: 400, code: "invalid_request", message: "Invalid application URL")
     guard let url = request.url, let source = URLComponents(url: url, resolvingAgainstBaseURL: false),
       var target = URLComponents(url: origin, resolvingAgainstBaseURL: false)
@@ -181,8 +293,11 @@ final class StoredEvidenceBackend {
     guard let targetURL = target.url else { throw invalid }
     var forwarded = URLRequest(url: targetURL)
     forwarded.httpMethod = request.httpMethod ?? "GET"
-    if let tag = request.value(forHTTPHeaderField: "If-None-Match") {
-      forwarded.setValue(tag, forHTTPHeaderField: "If-None-Match")
+    // A tag from before the app's fields changed matches nothing.
+    if let tag = request.value(forHTTPHeaderField: "If-None-Match"),
+      let backend = overlay == nil ? tag : overlay?.backendTag(tag)
+    {
+      forwarded.setValue(backend, forHTTPHeaderField: "If-None-Match")
     }
     if forwarded.httpMethod == "POST" {
       forwarded.httpBody = try Self.body(of: request)

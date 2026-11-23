@@ -77,9 +77,12 @@ a next request. Responses remain streamed and bounded even for large 3xx bodies.
 HTTPX uses its explicit streaming send path. Neither automatically decompresses
 response bytes. Default transport headers can still differ from a browser.
 
-The existing supported request limits remain: complete UTF-8 text up to 64 KiB,
-at most 64 header pairs/16 KiB aggregate, and no credential/transport-controlled
-headers. Python additionally requires ASCII URLs/header values and well-formed media-type
+The supported request limits: complete UTF-8 text up to 64 KiB and at most 64
+header pairs with values of at most 64 KiB. Captured `Authorization`, `Cookie`,
+`Origin`, `Referer`, `User-Agent` and browser headers are sent as reviewed; only
+framing and hop-by-hop headers (`Host`, `Content-Length`, `Connection`,
+`Transfer-Encoding`, `Keep-Alive`, `Proxy-Connection`, `TE`, `Trailer`,
+`Upgrade`) are refused, because the HTTP client computes them. Python additionally requires ASCII URLs/header values and well-formed media-type
 parameters. Duplicate, malformed, extended or non-UTF-8 charset declarations
 are refused before send. Provider
 preparation that changes the exact path/query is refused before send; especially

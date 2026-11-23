@@ -1,15 +1,15 @@
 //! Exact retained dispatch-parent links. Frame correlation never supplies a PC.
+//! Host events whose direct parent is a VM record are listed, as only those
+//! can carry a guest position; the rest of the frame is counted, with the
+//! `get_events` filter that lists it, so a busy frame never grows a row list.
 use crate::{error::Result, vm};
 use serde_json::{Value, json};
-
-const MAX_LINKS: usize = 4096;
-const MAX_WORKSPACE_LINKS: usize = 256;
 
 fn reference(event: &Value) -> Value {
     json!({"session_id":event["session_id"], "process_id":event["process_id"],
         "sequence_number":event["sequence_number"]})
 }
-fn host_event(event: &Value) -> bool {
+pub(crate) fn host_event(event: &Value) -> bool {
     matches!(
         event["category"].as_str(),
         Some(
@@ -71,15 +71,15 @@ fn position(host: &Value, artifact: &Value, samples: &[Value]) -> Option<Value> 
     })
 }
 
-/// Builds the report. vm::store_documents publishes it with the workspace
-/// document it names.
+/// Builds the report from the retained host events and the frame counts.
+/// vm::store_documents publishes it with the workspace document it names.
 pub(crate) fn document(
     workspace_document: &Value,
     artifacts: &[Value],
     events: &[Value],
+    runtime: &vm::Runtime,
 ) -> Result<Value> {
     let mut workspaces = Vec::new();
-    let mut total = 0;
     for workspace in workspace_document["workspaces"]
         .as_array()
         .into_iter()
@@ -126,14 +126,11 @@ pub(crate) fn document(
         }
         for event in events.iter().filter(|event| {
             host_event(event)
+                && event["artifact_id"] == artifact["artifact_id"]
                 && ["session_id", "navigation_id", "frame_id"]
                     .iter()
                     .all(|key| event[*key] == artifact[*key])
         }) {
-            if links.len() == MAX_WORKSPACE_LINKS || total == MAX_LINKS {
-                omissions.push("host-link-limit");
-                break;
-            }
             let guest = position(event, artifact, &samples);
             let (state, reason) = if guest.is_some() {
                 ("observed", "direct-dispatch-parent")
@@ -144,13 +141,16 @@ pub(crate) fn document(
             };
             links.push(json!({"host_event":reference(event), "category":event["category"], "type":event["type"],
                 "state":state, "reason":reason, "guest_position":guest}));
-            total += 1;
         }
-        if links.is_empty() && !omissions.contains(&"host-link-limit") {
+        let (frame_hosts, named_hosts) = runtime.hosts(artifact);
+        if frame_hosts == 0 {
             omissions.push("host-events-unavailable");
         }
         workspaces.push(json!({"interpreter_artifact_id":artifact["artifact_id"],
-            "source_artifact_sha256":artifact["sha256"], "links":links,"omissions":omissions}));
+            "source_artifact_sha256":artifact["sha256"], "links":links,
+            "frame_host_records":frame_hosts, "attributed_host_records":named_hosts,
+            "events_filter":{"session_id":artifact["session_id"],"navigation_id":artifact["navigation_id"],"frame_id":artifact["frame_id"]},
+            "omissions":omissions}));
     }
     let mut document = json!({"contract_version":1,"document_kind":"vm-host-links",
         "workspace_document_digest":workspace_document["document_digest"], "workspaces":workspaces});
@@ -176,7 +176,8 @@ mod tests {
         (workspace, artifact, host)
     }
     fn analyze(workspace: &Value, artifacts: &[Value], events: &[Value]) -> Value {
-        let document = super::document(workspace, artifacts, events).unwrap();
+        let runtime = vm::Runtime::of(events);
+        let document = super::document(workspace, artifacts, events, &runtime).unwrap();
         let schema: Value = serde_json::from_str(include_str!(
             "../../../protocol/vm-host-links-v1.schema.json"
         ))
@@ -227,7 +228,6 @@ mod tests {
         for (key, value) in [
             ("parent_event_id", json!("1")),
             ("process_id", json!(8)),
-            ("artifact_id", json!("10")),
             ("sequence_number", json!("2")),
         ] {
             let mut event = host.clone();
@@ -254,13 +254,23 @@ mod tests {
             let mut event = host.clone();
             event[key] = json!("99");
             let result = analyze(&workspace, std::slice::from_ref(&artifact), &[event]);
-            assert!(
-                result["workspaces"][0]["links"]
-                    .as_array()
-                    .unwrap()
-                    .is_empty()
-            );
+            let row = &result["workspaces"][0];
+            assert!(row["links"].as_array().unwrap().is_empty());
+            assert_eq!(row["frame_host_records"], 0);
+            assert_eq!(row["omissions"], json!(["host-events-unavailable"]));
         }
+        // Another artifact's host event in the frame is counted, not listed.
+        let mut event = host.clone();
+        event["artifact_id"] = json!("10");
+        let result = analyze(&workspace, std::slice::from_ref(&artifact), &[event]);
+        let row = &result["workspaces"][0];
+        assert!(row["links"].as_array().unwrap().is_empty());
+        assert_eq!(row["frame_host_records"], 1);
+        assert_eq!(row["attributed_host_records"], 0);
+        assert_eq!(
+            row["events_filter"],
+            json!({"session_id":"1","navigation_id":"2","frame_id":"3"})
+        );
     }
     #[test]
     fn absent_and_unretained_samples_remain_unknown_with_named_omissions() {
@@ -279,7 +289,7 @@ mod tests {
         );
     }
     #[test]
-    fn host_link_retention_is_bounded_per_workspace_and_document() {
+    fn every_host_event_is_listed_or_counted() {
         let (mut workspace, artifact, host) = inputs();
         let events = (3..303)
             .map(|sequence| {
@@ -307,23 +317,16 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         let document = analyze(&workspace, &artifacts, &events);
-        let rows = document["workspaces"].as_array().unwrap();
-        assert_eq!(
-            rows.iter()
-                .map(|row| row["links"].as_array().unwrap().len())
-                .sum::<usize>(),
-            MAX_LINKS
-        );
-        assert!(
-            rows.iter()
-                .all(|row| row["links"].as_array().unwrap().len() <= MAX_WORKSPACE_LINKS)
-        );
-        assert!(rows.iter().all(|row| {
-            row["omissions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("host-link-limit"))
-        }));
+        for row in document["workspaces"].as_array().unwrap() {
+            let named = row["interpreter_artifact_id"] == "9";
+            assert_eq!(
+                row["links"].as_array().unwrap().len(),
+                if named { 300 } else { 0 }
+            );
+            assert_eq!(row["frame_host_records"], 300);
+            assert_eq!(row["attributed_host_records"], if named { 300 } else { 0 });
+            assert_eq!(row["omissions"], json!([]));
+        }
     }
     #[test]
     fn native_guest_host_positions_require_verified_semantics() {

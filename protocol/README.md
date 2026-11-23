@@ -149,8 +149,8 @@ sensitive header block artifacts, one per hop and source; type 32
 `cookie_list` (sent and received cookies per hop with inclusion status, and
 the sensitive `cookie_list` artifact); and type 39 `script_cookie`
 (`document.cookie` and Cookie Store API calls).
-[Request index v1](request-index-v1.md) defines the backend's one-row-per-request
-index of a whole session, its private sidecar beside the store and
+[Request index v2](request-index-v2.md) defines the backend's one-row-per-request
+index of a whole session, its private database beside the store and
 `GET /api/requests`, which Traffic pages instead of the newest network window.
 [Flow graph v1](flow-graph-v1.md) folds every recorded stack of a session into
 one graph across realms, JavaScript, eval and Wasm for the Flow workspace's Flow

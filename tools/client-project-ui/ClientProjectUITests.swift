@@ -20,7 +20,7 @@ final class ClientProjectUITests: XCTestCase {
       "REB_APP_SMOKE_NATIVE_CLOSE": "", "REB_APP_SMOKE_LIVE_FAILURE": "0"]
     app.launch()
     defer { if app.state != .notRunning { app.terminate() } }
-    for phase in ["save", "writeFailure", "replacementSave"] {
+    for phase in ["save", "writeFailure", "replacementSave", "harSave"] {
       let window = app.windows["Client project smoke: " + phase]
       XCTAssertTrue(window.waitForExistence(timeout: 30), "Missing native phase " + phase)
       let save = window.sheets.buttons["Save"].firstMatch
@@ -44,7 +44,7 @@ final class ClientProjectUITests: XCTestCase {
       let folder = app.textFields.matching(NSPredicate(format: "value == %@", destination)).firstMatch
       XCTAssertTrue(folder.exists && folder.isHittable, "Go to Folder did not receive the exact owned path")
       let filename = window.sheets.textFields.matching(
-        NSPredicate(format: "value == %@", "reb-client-project.raw.zip")).firstMatch
+        NSPredicate(format: "value == %@", phase == "harSave" ? "requests.raw.har" : "reb-client-project.raw.zip")).firstMatch
       XCTAssertTrue(filename.exists, "Go to Folder unexpectedly changed the Save As filename")
       folder.click()
       XCTAssertTrue(folder.value as? String == destination, "Go to Folder path changed before Return")

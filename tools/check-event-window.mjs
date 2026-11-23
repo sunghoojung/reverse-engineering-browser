@@ -58,7 +58,7 @@ assert.equal(
 );
 api.renderNetworkNotice();
 assert.equal(notice.kind, 'gap');
-assert.match(notice.text, /Showing the last 5,000 evidence events/);
+assert.match(notice.text, /Traffic shows requests from the newest 5,000 evidence events until the request index answers/);
 assert.match(notice.text, /280 sequence-gap IDs were observed in the stored capture/);
 assert.match(notice.text, /The queue reports 280 dropped events; counts may overlap sequence gaps/);
 assert.equal(
@@ -153,7 +153,17 @@ for (const invalid of [
   {...bounded, event_window: {...coverage, scope: 'store'}},
   {...bounded, event_window: {...coverage, scan_end: '99'}},
   {...bounded, event_window: {...coverage, scan_end: '67108965'}},
+  {...bounded, event_window: {...coverage, next_before: '201'}},
+  {...bounded, event_window: {...coverage, next_before: 100}},
 ]) assert.equal(api.isBrokerResponse(invalid), false);
+// The event index counts a whole store larger than the scan limit; the windows
+// still end at scan_end, and next_before reads the older events.
+const indexedStore = {...bounded, event_window: {...coverage, scope: 'store', scan_start: '0',
+  scan_end: '450000000', next_before: '449000000'}};
+assert.equal(api.isBrokerResponse(indexedStore), true);
+api.acceptEventWindow(indexedStore);
+assert.match(api.eventGapLabel(api.shownSequenceGaps(), api.shownQueueDrops()), /^280 sequence-gap IDs \(the stored capture\)/);
+assert.equal(api.isBrokerResponse({...indexedStore, event_window: {...indexedStore.event_window, next_before: null}}), true);
 api.acceptEventWindow({count: 0, events: []});
 assert.equal(state.sequenceGaps, null, 'legacy/missing summaries must not preserve old totals');
 assert.equal(state.queueDrops, null);
@@ -359,4 +369,11 @@ for (const named_gaps of [
 ]) assert.equal(api.isBrokerResponse({...liveResponse, named_gaps}), false, JSON.stringify(named_gaps).slice(0, 80));
 assert.equal(api.isBrokerResponse({...liveResponse, queue_drops: '2', queue_drops_saturated: true,
   named_gaps: [{category: 'vm', reason: 'native_reason', count: '3'}]}), true, 'a saturated total is a lower bound');
-console.log('PASS named gap summaries are strict, unique, bounded and covered by queue_drops');
+// Every pair is listed, however many producers name a reason.
+const manyPairs = Array.from({length: 300}, (_, index) => ({category: 'vm', reason: `native_reason_${index}`, count: '1'}));
+assert.equal(api.isBrokerResponse({...liveResponse, queue_drops: '300', named_gaps: manyPairs}), true);
+api.acceptEventWindow({...liveResponse, queue_drops: '300', named_gaps: manyPairs});
+assert.equal(api.shownNamedGaps().length, 300);
+assert.equal(api.namedGapsFromEvents(manyPairs.map((pair, index) => ({...liveBudgets[0], sequence_number: String(index + 1),
+  payload: Buffer.from(pair.reason).toString('hex'), payload_size: pair.reason.length}))).length, 300);
+console.log('PASS named gap summaries are strict, unique, complete and covered by queue_drops');

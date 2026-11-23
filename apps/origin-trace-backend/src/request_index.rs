@@ -1,58 +1,60 @@
-//! Session-wide request index for Traffic; contract in protocol/request-index-v1.md.
+//! Session-wide request index for Traffic; contract in protocol/request-index-v2.md.
+//!
+//! Rows live in a SQLite index beside the event store (`index_db`), one per
+//! request of the whole session, so Traffic filters, sorts and pages a session
+//! of any length with the database's bounded page cache in memory. Each row
+//! keeps its folded state as JSON beside the columns its queries filter, sort
+//! and count by; a query's ordered rows sit in a temporary table that the next
+//! page reads instead of sorting again.
 use crate::{
     app::{Query, validate_event},
-    durable,
     error::{Error, Result},
     event_query::RecordRange,
     event_window::unsigned,
-    evidence,
+    index_db::{self, Indexed, Position, SqlResult},
 };
 use regex::Regex;
+use rusqlite::{
+    Connection, OptionalExtension, Transaction, params, params_from_iter, types::Value as SqlValue,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    cmp::Ordering,
-    collections::{BTreeMap, HashMap},
-    fs::File,
-    io::{Read, Seek, SeekFrom},
+    collections::{HashMap, hash_map::Entry},
     path::{Path, PathBuf},
     sync::LazyLock,
     time::{Duration, Instant},
 };
 
-pub const SIDECAR_SUFFIX: &str = ".requests-v1";
-const FORMAT: &str = "reb-request-index-v1";
-/// Sidecar row layout; a sidecar of another layout is rebuilt from byte 0.
-const LAYOUT: u32 = 12;
-/// Bounds one call; a larger store reports partial coverage and continues next call.
-const SCAN_BYTES: u64 = 64 * 1024 * 1024;
+pub const SIDECAR_SUFFIX: &str = ".requests-v2";
+/// Version 1 kept at most 131,072 rows in one JSON file; version 2 removes it.
+const LEGACY_SUFFIX: &str = ".requests-v1";
+const FORMAT: &str = "reb-request-index-v2";
+/// The index's row layout; an index of another layout is rebuilt from byte 0.
+const LAYOUT: &str = "reb-request-index-v2/3";
 const RECORD_BYTES: usize = 4096;
-const ANCHOR_BYTES: u64 = 4096;
-pub const MAX_REQUESTS: usize = 131_072;
-const MAX_KEYS: usize = 4 * MAX_REQUESTS;
-const MAX_MEMBERS: usize = 8;
-const MAX_TARGETS: usize = 8;
-const SIDECAR_BYTES: usize = 256 * 1024 * 1024;
-pub const PERSIST_INTERVAL: Duration = Duration::from_secs(30);
+/// How long a read folds new records before it answers from what is indexed.
+/// The backend's indexer folds the rest in the background, so a long store
+/// answers with partial coverage while it is first indexed.
+const READ_FOLD: Duration = Duration::from_millis(200);
+/// One background fold: a read waits for the index at most this long.
+pub const FOLD_SLICE: Duration = Duration::from_millis(250);
+/// Rows a fold holds before writing them back (`Batch`).
+const HELD_ROWS: usize = 4096;
+/// Row ids and request keys a fold remembers between write-backs.
+const HELD_KEYS: usize = 65_536;
 const DEFAULT_PAGE: usize = 100;
 const MAX_PAGE: usize = 500;
-const MAX_DOMAINS: usize = 512;
+/// Domains a tab facet previews; the domain facet of that tab lists them all.
 const TAB_DOMAINS: usize = 8;
 const MAX_NAMED: usize = 64;
 const MAX_LOCATE: usize = 4;
 const MAX_TEXT: usize = 512;
 const TIMELINE_BUCKETS: usize = 120;
-/// Worker tab sets a row links to (protocol/native-network-v3.md `tab_set`).
-const MAX_TAB_SETS: usize = 4096;
-const MAX_SET_TABS: usize = 256;
 /// `script_identity` payloads of one renderer, keyed by isolate key and script
 /// ID: script IDs are unique only within one isolate.
 pub type IdentityPayloads = HashMap<(u64, u32), String>;
-/// `script_identity` records kept for the Initiator column's innermost frame.
-const MAX_IDENTITIES: usize = 16_384;
-/// `script_cookie` records located for `get_cookie_provenance`, 16 bytes each.
-const MAX_SCRIPT_COOKIES: usize = 65_536;
 const UNIDENTIFIED: &str = "Unidentified network event";
 /// Records that belong to a row without changing its lifecycle; a selected
 /// row reads them back by member (protocol/native-network-v2.md and v3).
@@ -148,11 +150,11 @@ struct Member {
     records: u64,
 }
 #[derive(Clone, Serialize, Deserialize)]
-struct Target {
-    scheme: Option<String>,
-    port: u16,
-    length: u32,
-    text: String,
+pub(crate) struct Target {
+    pub(crate) scheme: Option<String>,
+    pub(crate) port: u16,
+    pub(crate) length: u32,
+    pub(crate) text: String,
 }
 /// A `response_body` child (protocol/native-network-v3.md), decoded as
 /// `decodeResponseBodyRecord` does.
@@ -199,7 +201,10 @@ struct Child {
     target: Option<Target>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+/// A request's folded state. It is stored without the fields that hold
+/// their default (`encode`), which `#[serde(default)]` restores.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct Row {
     id: String,
     path: String,
@@ -220,7 +225,6 @@ struct Row {
     /// request_started, request_initiated, then any record with a request ID.
     roots: [Option<Root>; 3],
     members: Vec<Member>,
-    members_limited: bool,
     first_offset: u64,
     end_offset: u64,
     records: u64,
@@ -237,7 +241,7 @@ struct Row {
     memory_cache_source: Option<String>,
     /// The newest `response_started`: its session, process and sequence.
     response: Option<(String, u32, u64)>,
-    /// `response_body` children, the newest of each parent, at most `MAX_TARGETS`.
+    /// `response_body` children, the newest of each parent.
     bodies: Vec<BodyChild>,
     /// The row has a `request_redirected` record.
     redirected: bool,
@@ -282,60 +286,6 @@ struct Row {
     browser_start: Option<u8>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct State {
-    format: String,
-    layout: u32,
-    epoch: String,
-    identity: String,
-    indexed_to: u64,
-    head: String,
-    tail: String,
-    malformed: u64,
-    unindexed: u64,
-    rows: Vec<Row>,
-    keys: HashMap<String, String>,
-    /// `session:set_id` to the set's total and the tabs of its parts seen so far.
-    tab_sets: HashMap<String, (u32, Vec<u64>)>,
-    /// `session:process:script_id` to its newest `script_identity` payload.
-    identities: HashMap<String, String>,
-    /// Each session's `script_cookie` records by byte range, oldest first: a
-    /// cookie spans the session, so provenance reads its script calls here
-    /// wherever they sit instead of only in its newest window.
-    script_cookies: HashMap<String, Vec<(u64, u64)>>,
-    /// `script_cookie` records past `MAX_SCRIPT_COOKIES`, which no list names.
-    script_cookies_unindexed: u64,
-    #[serde(skip)]
-    by_id: HashMap<String, u32>,
-}
-impl State {
-    fn empty(identity: String) -> Self {
-        let seed = format!(
-            "{}:{identity}:{:?}",
-            std::process::id(),
-            std::time::SystemTime::now()
-        );
-        Self {
-            format: FORMAT.into(),
-            layout: LAYOUT,
-            epoch: hex::encode(&Sha256::digest(seed)[..8]),
-            identity,
-            indexed_to: 0,
-            head: digest(&[]),
-            tail: digest(&[]),
-            malformed: 0,
-            unindexed: 0,
-            rows: Vec::new(),
-            keys: HashMap::new(),
-            tab_sets: HashMap::new(),
-            identities: HashMap::new(),
-            script_cookies: HashMap::new(),
-            script_cookies_unindexed: 0,
-            by_id: HashMap::new(),
-        }
-    }
-}
-
 struct View {
     path: String,
     target_kind: &'static str,
@@ -354,28 +304,33 @@ struct View {
 
 pub struct RequestIndex {
     store: PathBuf,
-    sidecar: PathBuf,
-    state: Option<State>,
-    views: Vec<View>,
+    index: Indexed,
+    /// Answers for a store that does not exist yet, or no longer does.
+    empty: Option<Connection>,
+    empty_epoch: String,
+    /// Where the index stood at the last refresh; None before the first.
+    position: Option<Position>,
+    /// The store did not exist at the last refresh.
+    missing: bool,
+    /// Changes whenever the indexed rows may have changed.
     generation: u64,
-    reopened: bool,
-    loaded: bool,
-    changed: bool,
-    persisted_at: Option<Instant>,
-    persist_error: Option<String>,
-    store_end: u64,
-    order: Option<(String, u64, Selection)>,
+    total: usize,
+    malformed: u64,
+    legacy_removed: bool,
+    /// The query whose ordered rows the temporary `selection` table holds.
+    selection: Option<(String, u64, Summary)>,
+    facets: Option<(String, u64, (Value, i64))>,
 }
 
-/// One query's rows plus what the footer and timing strip show for it.
+/// What the footer and timing strip show for one query's rows.
 #[derive(Clone)]
-struct Selection {
-    order: Vec<u32>,
-    hidden_internal: usize,
+struct Summary {
+    matching: usize,
+    hidden_internal: u64,
     transferred: u64,
     resources: u64,
     /// First start, last record and per-bucket starts of every row the time range would admit.
-    timeline: Option<(u64, u64, Vec<u32>)>,
+    timeline: Option<(u64, u64, Vec<u64>)>,
 }
 
 pub enum Answer {
@@ -410,6 +365,8 @@ pub struct RequestQuery {
     third_party: bool,
     from: u64,
     to: u64,
+    /// An export's exact rows by ID, in their order, in place of a selection.
+    rows: Vec<String>,
     raw: String,
 }
 /// The `q` grammar Traffic search uses; port of `trafficParseFilter`.
@@ -498,9 +455,56 @@ fn glob(pattern: &str, text: &str) -> bool {
     }
     text.len() >= at + last.len() && text.ends_with(last)
 }
+/// The keys an export takes: a whole selection in list order, never a page.
+pub const EXPORT_KEYS: [&str; 14] = [
+    "through",
+    "sort",
+    "order",
+    "q",
+    "tab_id",
+    "domain",
+    "type",
+    "named",
+    "failed",
+    "invert",
+    "hide_internal",
+    "third_party",
+    "from_ns",
+    "to_ns",
+];
 impl RequestQuery {
     pub fn parse(q: &Query, raw: &str) -> Result<Self> {
         q.only(&QUERY_KEYS, &[])?;
+        Self::read(q, raw)
+    }
+    /// The selection of an export, which also takes `extra` keys of its own,
+    /// or with `rows` the exact rows it names, in that order.
+    pub fn parse_export(q: &Query, raw: &str, extra: &[&str]) -> Result<Self> {
+        let mut keys = extra.to_vec();
+        keys.push("rows");
+        q.only(&EXPORT_KEYS, &keys)?;
+        let mut query = Self::read(q, raw)?;
+        if let Some(list) = q.one("rows")? {
+            if EXPORT_KEYS
+                .iter()
+                .any(|key| q.one(key).is_ok_and(|value| value.is_some()))
+            {
+                return Err(Error::bad(
+                    "rows names the exact rows to export; pass no selection parameter with it",
+                ));
+            }
+            query.rows = list.split(',').map(str::to_owned).collect();
+            if query
+                .rows
+                .iter()
+                .any(|id| id.is_empty() || id.len() > MAX_TEXT)
+            {
+                return Err(Error::bad("rows lists request row IDs separated by commas"));
+            }
+        }
+        Ok(query)
+    }
+    fn read(q: &Query, raw: &str) -> Result<Self> {
         let count = |key: &str| -> Result<Option<usize>> {
             q.one(key)?
                 .map(|_| q.number(key, None, 64, false).map(|n| n as usize))
@@ -552,13 +556,6 @@ impl RequestQuery {
                     })?,
             ),
         };
-        let flag = |key: &str| -> Result<bool> {
-            match q.one(key)? {
-                None | Some("0") => Ok(false),
-                Some("1") => Ok(true),
-                Some(_) => Err(Error::bad(format!("{key} must be 0 or 1"))),
-            }
-        };
         let bound = |key: &str| -> Result<Option<u64>> {
             q.one(key)?
                 .map(|_| q.number(key, None, 64, false))
@@ -598,10 +595,10 @@ impl RequestQuery {
             descending,
             filter: Filter::parse(&needle),
             needle,
-            failed: flag("failed")?,
-            invert: flag("invert")?,
-            hide_internal: flag("hide_internal")?,
-            third_party: flag("third_party")?,
+            failed: q.flag("failed")?,
+            invert: q.flag("invert")?,
+            hide_internal: q.flag("hide_internal")?,
+            third_party: q.flag("third_party")?,
             from: from.unwrap_or(0),
             to: to.unwrap_or(u64::MAX),
             tab,
@@ -620,6 +617,7 @@ impl RequestQuery {
                     ids
                 }
             },
+            rows: Vec::new(),
             raw: raw.into(),
         })
     }
@@ -656,28 +654,6 @@ fn text(value: &Value) -> String {
 }
 fn number(value: &Value) -> i64 {
     value.as_i64().unwrap_or(0)
-}
-pub(crate) fn identity_of(metadata: &std::fs::Metadata) -> String {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        format!("{}:{}", metadata.dev(), metadata.ino())
-    }
-    #[cfg(not(unix))]
-    {
-        format!("{:?}", metadata.created().ok())
-    }
-}
-fn read_range(file: &mut File, start: u64, end: u64) -> Result<Vec<u8>> {
-    let mut bytes = vec![0; (end - start) as usize];
-    file.seek(SeekFrom::Start(start))?;
-    file.read_exact(&mut bytes)?;
-    Ok(bytes)
-}
-fn anchors(file: &mut File, end: u64) -> Result<(String, String)> {
-    let head = read_range(file, 0, end.min(ANCHOR_BYTES))?;
-    let tail = read_range(file, end.saturating_sub(ANCHOR_BYTES), end)?;
-    Ok((digest(&head), digest(&tail)))
 }
 
 // Matches TextDecoder (drops a leading BOM) and JavaScript's whitespace set.
@@ -928,60 +904,6 @@ fn short_name(target: &str) -> String {
     format!("{segment}{query}")
 }
 
-fn fold_tab_set(event: &Value, sets: &mut HashMap<String, (u32, Vec<u64>)>) {
-    let Ok(bytes) = hex::decode(event["payload"].as_str().unwrap_or("")) else {
-        return;
-    };
-    if bytes.len() != 128 {
-        return;
-    }
-    let set_id = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
-    let total = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
-    let count = usize::from(u16::from_le_bytes([bytes[20], bytes[21]])).min(26);
-    let key = format!("{}:{set_id}", text(&event["session_id"]));
-    if !sets.contains_key(&key) && sets.len() >= MAX_TAB_SETS {
-        return;
-    }
-    let (_, tabs) = sets.entry(key).or_insert((total, Vec::new()));
-    for slot in bytes[24..24 + 4 * count].as_chunks::<4>().0 {
-        let tab = u64::from(u32::from_le_bytes(*slot));
-        if tab != 0 && tabs.len() < MAX_SET_TABS && !tabs.contains(&tab) {
-            tabs.push(tab);
-        }
-    }
-    tabs.sort_unstable();
-}
-
-fn fold_identity(event: &Value, identities: &mut HashMap<String, String>) {
-    let payload = event["payload"].as_str().unwrap_or("");
-    // Script IDs are unique per isolate; version 2 names a worker's at byte 80.
-    let Some((isolate, script)) = hex::decode(payload)
-        .ok()
-        .filter(|bytes| bytes.len() == 128)
-        .map(|bytes| {
-            let isolate = if bytes[0] == 2 {
-                u64::from_le_bytes(bytes[80..88].try_into().unwrap())
-            } else {
-                0
-            };
-            (
-                isolate,
-                u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
-            )
-        })
-    else {
-        return;
-    };
-    let key = format!(
-        "{}:{}:{isolate}:{script}",
-        text(&event["session_id"]),
-        number(&event["process_id"])
-    );
-    if identities.contains_key(&key) || identities.len() < MAX_IDENTITIES {
-        identities.insert(key, payload.to_owned());
-    }
-}
-
 fn extension_link(event: &Value) -> Option<String> {
     let bytes = hex::decode(event["payload"].as_str()?).ok()?;
     let id = bytes.get(8..40)?;
@@ -1000,34 +922,6 @@ fn tab_link(event: &Value) -> Option<(String, (u8, u32))> {
         format!("{}:{set_id}", text(&event["session_id"])),
         (bytes[4], count),
     ))
-}
-
-/// The row's own tab and its linked set's tabs; empty is a capture error.
-fn row_tabs(row: &Row, sets: &HashMap<String, (u32, Vec<u64>)>) -> Vec<u64> {
-    let mut tabs = row
-        .tab_set
-        .as_ref()
-        .and_then(|key| sets.get(key))
-        .map_or_else(Vec::new, |(_, tabs)| tabs.clone());
-    if row.tab != 0 && !tabs.contains(&row.tab) {
-        tabs.push(row.tab);
-        tabs.sort_unstable();
-    }
-    tabs
-}
-
-/// Tab 0 selects the rows with no tab and no extension.
-fn in_tab(row: &Row, sets: &HashMap<String, (u32, Vec<u64>)>, scope: &TabScope) -> bool {
-    let linked = row.tab_set.as_ref().and_then(|key| sets.get(key));
-    match scope {
-        TabScope::Extension(id) => row.extension.as_ref() == Some(id),
-        TabScope::Tab(0) => {
-            row.tab == 0
-                && row.extension.is_none()
-                && linked.is_none_or(|(_, tabs)| tabs.is_empty())
-        }
-        TabScope::Tab(tab) => row.tab == *tab || linked.is_some_and(|(_, tabs)| tabs.contains(tab)),
-    }
 }
 
 fn initiator(row: &Row) -> Option<&'static str> {
@@ -1177,49 +1071,6 @@ fn correlated_identity(event: &Value) -> String {
         number(&event["initiator_process_id"]),
         number(&event["initiator_request_id"])
     )
-}
-/// Port of `requestIdentity` over the browser keys learned so far.
-fn request_identity(event: &Value, keys: &HashMap<String, String>) -> String {
-    if event["type"] == "request_initiated" || event["type"] == "memory_cache_reuse" {
-        return renderer_identity(event);
-    }
-    let request = text(&event["request_id"]);
-    let correlated = if number(&event["initiator_process_id"]) > 0 {
-        correlated_identity(event)
-    } else if request != "0" {
-        browser_key(event).expect("nonzero request")
-    } else {
-        format!(
-            "S{}:P{}:E{}",
-            text(&event["session_id"]),
-            number(&event["process_id"]),
-            text(&event["sequence_number"])
-        )
-    };
-    browser_key(event)
-        .and_then(|key| keys.get(&key).cloned())
-        .unwrap_or(correlated)
-}
-fn learn_keys(event: &Value, keys: &mut HashMap<String, String>) {
-    if text(&event["request_id"]) == "0" || keys.len() >= MAX_KEYS {
-        return;
-    }
-    if event["type"] == "request_initiated" || event["type"] == "memory_cache_reuse" {
-        if let Some(key) = legacy_key(event) {
-            keys.insert(key, renderer_identity(event));
-        }
-        return;
-    }
-    if number(&event["initiator_process_id"]) == 0 {
-        return;
-    }
-    let identity = correlated_identity(event);
-    for key in [browser_key(event), legacy_key(event)]
-        .into_iter()
-        .flatten()
-    {
-        keys.entry(key).or_insert_with(|| identity.clone());
-    }
 }
 fn canonical(value: &Value, nonzero: bool) -> Option<u64> {
     value
@@ -1456,7 +1307,7 @@ fn body_document(row: &Row) -> Value {
                 "sha256": snapshot.sha256, "record_sequence": sequence.to_string(), "record_time_ns": time.to_string()})),
     })
 }
-fn decode_target(event: &Value) -> Option<Target> {
+pub(crate) fn decode_target(event: &Value) -> Option<Target> {
     let payload = event["payload"].as_str()?;
     let (sequence, parent) = (
         canonical(&event["sequence_number"], true)?,
@@ -1667,188 +1518,796 @@ fn type_label(kind: &str) -> &'static str {
         .find(|(id, _)| *id == kind)
         .map_or("Other", |t| t.1)
 }
-// Locale collation stand-in: case-folded first, then exact text.
-fn compare_text(left: &str, right: &str) -> Ordering {
-    left.to_lowercase()
-        .cmp(&right.to_lowercase())
-        .then_with(|| left.cmp(right))
+
+/// One row per request: the columns queries filter, sort and count by,
+/// derived from its folded state at each write. The state itself is in
+/// `states`, so a query that scans every row reads only these. Times and
+/// offsets are below 2^63 (`clamp`); tab IDs keep their bits (`index_db::key`).
+const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS rows(
+    ordinal INTEGER PRIMARY KEY,
+    id TEXT NOT NULL UNIQUE,
+    first_ns INTEGER NOT NULL,
+    last_ns INTEGER NOT NULL,
+    tab INTEGER NOT NULL,
+    tab_set TEXT,
+    extension TEXT,
+    resource TEXT NOT NULL,
+    failed INTEGER NOT NULL,
+    internal INTEGER NOT NULL,
+    main_frame INTEGER NOT NULL,
+    domain TEXT NOT NULL,
+    domain_lower TEXT NOT NULL,
+    host_lower TEXT NOT NULL,
+    site TEXT,
+    haystack TEXT NOT NULL,
+    method TEXT NOT NULL,
+    status_code INTEGER,
+    transfer INTEGER,
+    decoded INTEGER,
+    mime TEXT,
+    protocol TEXT,
+    name TEXT NOT NULL,
+    name_fold TEXT NOT NULL,
+    type_label TEXT NOT NULL,
+    initiator_label TEXT,
+    duration_us INTEGER,
+    root_session TEXT,
+    root_process INTEGER,
+    root_sequence TEXT,
+    body_case TEXT NOT NULL,
+    body_withheld INTEGER NOT NULL,
+    body_earlier INTEGER NOT NULL,
+    first_offset INTEGER NOT NULL,
+    end_offset INTEGER NOT NULL,
+    loader INTEGER NOT NULL,
+    start_request TEXT);
+-- Each row's folded state as JSON (`encode`).
+CREATE TABLE IF NOT EXISTS states(ordinal INTEGER PRIMARY KEY, data BLOB NOT NULL);
+-- Third-party rows compare their site with their tab's latest document.
+CREATE INDEX IF NOT EXISTS rows_documents ON rows(tab, first_ns, ordinal)
+    WHERE main_frame = 1 AND tab != 0;
+-- The session summary counts every row's body case from this compact index,
+-- without reading the rows or sorting them.
+CREATE INDEX IF NOT EXISTS rows_body_cases ON rows(body_case, body_withheld, body_earlier);
+-- The rows each (session, process, request) member belongs to.
+CREATE TABLE IF NOT EXISTS members(
+    request TEXT NOT NULL,
+    session TEXT NOT NULL,
+    process INTEGER NOT NULL,
+    ordinal INTEGER NOT NULL,
+    PRIMARY KEY (request, session, process, ordinal)) WITHOUT ROWID;
+-- Browser request keys to the row id a renderer record gave them.
+CREATE TABLE IF NOT EXISTS keys(key TEXT PRIMARY KEY, id TEXT NOT NULL) WITHOUT ROWID;
+-- Worker tab sets (protocol/native-network-v3.md `tab_set`): each set's total
+-- and the tabs of its parts seen so far.
+CREATE TABLE IF NOT EXISTS tab_sets(key TEXT PRIMARY KEY, total INTEGER NOT NULL) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS set_tabs(
+    set_key TEXT NOT NULL,
+    tab INTEGER NOT NULL,
+    PRIMARY KEY (set_key, tab)) WITHOUT ROWID;
+-- The newest `script_identity` payload of each script, for the Initiator
+-- column's innermost frame.
+CREATE TABLE IF NOT EXISTS identities(
+    session TEXT NOT NULL,
+    process INTEGER NOT NULL,
+    isolate INTEGER NOT NULL,
+    script INTEGER NOT NULL,
+    payload TEXT NOT NULL,
+    PRIMARY KEY (session, process, isolate, script)) WITHOUT ROWID;
+-- Each session's `script_cookie` records by byte range: a cookie spans the
+-- session, so provenance reads its script calls wherever they sit.
+CREATE TABLE IF NOT EXISTS script_cookies(
+    session TEXT NOT NULL,
+    start INTEGER NOT NULL,
+    end INTEGER NOT NULL,
+    PRIMARY KEY (session, start)) WITHOUT ROWID;
+-- Each session's `cookie_list` records of an indexed request by byte range,
+-- for the same reason: provenance reads every list that set or sent a name.
+CREATE TABLE IF NOT EXISTS cookie_lists(
+    session TEXT NOT NULL,
+    start INTEGER NOT NULL,
+    end INTEGER NOT NULL,
+    PRIMARY KEY (session, start)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS counts(id INTEGER PRIMARY KEY CHECK (id = 0), malformed INTEGER NOT NULL);
+INSERT OR IGNORE INTO counts VALUES (0, 0);
+";
+
+/// A stored time for SQL comparison: monotonic times stay below 2^63.
+fn clamp(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
-impl RequestIndex {
-    pub fn new(store: &Path) -> Self {
-        let mut name = store.file_name().unwrap_or_default().to_os_string();
-        name.push(SIDECAR_SUFFIX);
+fn root(row: &Row) -> Option<&Root> {
+    row.roots.iter().flatten().next()
+}
+
+impl Row {
+    fn new(id: String, kind: &str, start: u64, end: u64) -> Self {
         Self {
-            store: store.to_owned(),
-            sidecar: store.with_file_name(name),
-            state: None,
-            views: Vec::new(),
-            generation: 0,
-            reopened: false,
-            loaded: false,
-            changed: false,
-            persisted_at: None,
-            persist_error: None,
-            store_end: 0,
-            order: None,
+            id,
+            path: UNIDENTIFIED.into(),
+            method: "EVENT".into(),
+            code: 0,
+            rank: 0,
+            status_rank: 0,
+            target_rank: 0,
+            target_event: None,
+            children: Vec::new(),
+            resource: "other".into(),
+            tab: 0,
+            operation: kind.into(),
+            first_ns: u64::MAX,
+            last_ns: 0,
+            failed: false,
+            interrupted: false,
+            roots: [None, None, None],
+            members: Vec::new(),
+            first_offset: start,
+            end_offset: end,
+            records: 0,
+            transfer: None,
+            decoded: None,
+            cache: false,
+            worker_served: false,
+            memory_cache: false,
+            static_data: false,
+            memory_cache_source: None,
+            response: None,
+            bodies: Vec::new(),
+            redirected: false,
+            scheme_only: false,
+            worker_answer: None,
+            browser: false,
+            end_lost: false,
+            mime: None,
+            protocol: None,
+            response_ns: None,
+            error: 0,
+            loader: false,
+            renderer: false,
+            worker_started: false,
+            main_frame: false,
+            scheme_class: 0,
+            stack_state: 0,
+            navigation_script: false,
+            stack_frame: None,
+            stack_thread: 0,
+            tab_set: None,
+            tab_link: (0, 0),
+            extension: None,
+            watch: None,
+            renderer_start: None,
+            browser_start: None,
         }
     }
+}
 
-    /// Removes the derived copy before a capture clear empties the store.
-    pub fn discard(&mut self) -> Result<()> {
-        self.reset(None);
-        self.loaded = true;
-        match std::fs::remove_file(&self.sidecar) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
-            _ => Ok(()),
-        }
+fn member(row: &mut Row, event: &Value, start: u64, end: u64) {
+    row.first_offset = row.first_offset.min(start);
+    row.end_offset = row.end_offset.max(end);
+    row.records += 1;
+    // A link is no request of its own; tab_link, tab_ids and extension_id carry it.
+    if event["type"] == "request_tab_link" || event["type"] == "request_extension_link" {
+        return;
     }
+    let (session, process, request) = (
+        text(&event["session_id"]),
+        number(&event["process_id"]) as u32,
+        text(&event["request_id"]),
+    );
+    match row
+        .members
+        .iter_mut()
+        .find(|m| m.session == session && m.process == process && m.request == request)
+    {
+        Some(member) => member.records += 1,
+        None => row.members.push(Member {
+            session,
+            process,
+            request,
+            records: 1,
+        }),
+    }
+}
 
-    fn reset(&mut self, state: Option<State>) {
-        self.views = state
+/// A record that belongs to a row without changing its lifecycle.
+fn fold_child(row: &mut Row, event: &Value, kind: &str, start: u64, end: u64) {
+    member(row, event, start, end);
+    if kind == "request_initiator_stack" {
+        let bytes = hex::decode(event["payload"].as_str().unwrap_or("")).unwrap_or_default();
+        row.stack_state = bytes.get(4).copied().unwrap_or(0);
+        // Version 3 names the isolate its script IDs belong to.
+        let scoped = bytes.len() == 128 && bytes[0] == 3;
+        row.stack_thread = if scoped { bytes[80] } else { 0 };
+        row.stack_frame = (bytes.len() == 128 && matches!(row.stack_state, 1 | 4 | 5)).then(|| {
+            (
+                text(&event["session_id"]),
+                number(&event["process_id"]) as u32,
+                if scoped {
+                    u64::from_le_bytes(bytes[88..96].try_into().unwrap())
+                } else {
+                    0
+                },
+                bytes[64..80].try_into().unwrap(),
+            )
+        });
+    }
+    row.navigation_script |= kind == "navigation_initiator_link";
+    if kind == "request_tab_link"
+        && let Some((set, link)) = tab_link(event)
+    {
+        (row.tab_set, row.tab_link) = (Some(set), link);
+    }
+    if kind == "request_extension_link"
+        && let Some(id) = extension_link(event)
+    {
+        row.extension = Some(id);
+    }
+    if kind == "request_watch_match" && row.watch.is_none() {
+        let detail =
+            crate::debugger_observation::decode(event).map(|decoded| decoded["detail"].clone());
+        row.watch = Some(Watch {
+            session: text(&event["session_id"]),
+            process: number(&event["process_id"]) as u32,
+            sequence: text(&event["sequence_number"]),
+            frame: text(&event["frame_id"]),
+            rule: detail.as_ref().and_then(|d| d["rule"].as_u64()),
+            method_matched: detail.and_then(|d| d["method_matched"].as_bool()),
+        });
+    }
+    let parent = (
+        text(&event["session_id"]),
+        number(&event["process_id"]) as u32,
+        text(&event["parent_event_id"]),
+    );
+    if kind == "response_body"
+        && let (Some(parent_sequence), Some(sequence)) = (
+            canonical(&event["parent_event_id"], true),
+            canonical(&event["sequence_number"], true),
+        )
+    {
+        let time = unsigned(&event["monotonic_time_ns"]).unwrap_or(0);
+        let record = decode_response_body(event);
+        let snapshot = record
             .as_ref()
-            .map_or_else(Vec::new, |state| state.rows.iter().map(view).collect());
-        self.state = state;
-        self.generation += 1;
-        self.order = None;
-        self.changed = false;
-    }
-
-    fn load_sidecar(&mut self) -> Option<State> {
-        let bytes = durable::read_private(&self.sidecar, SIDECAR_BYTES).ok()??;
-        let mut state: State = serde_json::from_slice(&bytes).ok()?;
-        if state.format != FORMAT || state.layout != LAYOUT || state.rows.len() > MAX_REQUESTS {
-            return None;
-        }
-        for (ordinal, row) in state.rows.iter().enumerate() {
-            if state.by_id.insert(row.id.clone(), ordinal as u32).is_some() {
-                return None;
-            }
-        }
-        Some(state)
-    }
-
-    fn persist(&mut self) {
-        let Some(state) = &self.state else { return };
-        let result = serde_json::to_vec(state)
-            .map_err(|error| Error::new(500, error.to_string()))
-            .and_then(|bytes| durable::write_private(&self.sidecar, &bytes));
-        self.persist_error = result.err().map(|error| error.message);
-        self.persisted_at = Some(Instant::now());
-        self.changed = false;
-    }
-
-    /// The backend's own schedule; reads never write the sidecar.
-    pub fn maintain(&mut self) -> Result<()> {
-        self.refresh()?;
-        if self.changed {
-            self.persist();
-        }
-        Ok(())
-    }
-
-    /// A rewritten or replaced store rebuilds from byte 0.
-    pub fn refresh(&mut self) -> Result<()> {
-        let mut file = match evidence::regular_file(&self.store) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if self
-                    .state
-                    .as_ref()
-                    .is_none_or(|state| state.indexed_to > 0 || !state.rows.is_empty())
-                {
-                    self.reset(Some(State::empty(String::new())));
+            .filter(|record| record.state == 3 && record.captured != 0)
+            .map(|record| (sequence, time, record.clone()));
+        let mut child = BodyChild {
+            parent: (parent.0.clone(), parent.1, parent_sequence),
+            sequence,
+            time,
+            record,
+            snapshot,
+        };
+        // A later end supersedes partial snapshots of the same response; the
+        // newest retained snapshot is kept beside it.
+        match row
+            .bodies
+            .iter_mut()
+            .find(|body| body.parent == child.parent)
+        {
+            Some(held) => {
+                let newer_snapshot = match (&held.snapshot, &child.snapshot) {
+                    (Some(old), Some(new)) => new.0 > old.0,
+                    (None, Some(_)) => true,
+                    _ => false,
+                };
+                // A repeated or older record replaces nothing, so it must not
+                // take the held snapshot either.
+                if held.sequence < sequence {
+                    if !newer_snapshot {
+                        child.snapshot = held.snapshot.take();
+                    }
+                    *held = child;
+                } else if newer_snapshot {
+                    held.snapshot = child.snapshot;
                 }
-                self.store_end = 0;
-                return Ok(());
             }
-            Err(error) => return Err(error.into()),
-        };
-        let metadata = file.metadata()?;
-        let identity = identity_of(&metadata);
-        let end = metadata.len();
-        if !self.loaded {
-            self.loaded = true;
-            let state = self.load_sidecar();
-            self.reopened = state.is_some();
-            self.reset(state);
+            None => row.bodies.push(child),
         }
-        let valid = match &self.state {
-            Some(state) => {
-                state.identity == identity
-                    && state.indexed_to <= end
-                    && anchors(&mut file, state.indexed_to)?
-                        == (state.head.clone(), state.tail.clone())
-            }
-            None => false,
-        };
-        if !valid {
-            self.reopened = false;
-            self.reset(Some(State::empty(identity)));
+    }
+    if kind == "request_target" && !row.children.iter().any(|child| child.parent == parent) {
+        row.children.push(Child {
+            parent,
+            target: decode_target(event),
+        });
+    }
+}
+
+/// A lifecycle record of `incoming` rank.
+fn fold_lifecycle(row: &mut Row, event: &Value, kind: &str, incoming: u8, start: u64, end: u64) {
+    let payload =
+        payload_text(&hex::decode(event["payload"].as_str().unwrap_or("")).unwrap_or_default());
+    let reuse = memory_cache(event);
+    let (target, scheme_only) = match &reuse {
+        Some(reuse) => memory_cache_target(event, &reuse.host),
+        None => scoped_target(network_target(&payload, kind), &payload, event),
+    };
+    let version = event["protocol_version"].as_u64().unwrap_or(0);
+    let time = unsigned(&event["monotonic_time_ns"]).unwrap_or(0);
+    row.first_ns = row.first_ns.min(time);
+    row.last_ns = row.last_ns.max(time);
+    let interruption = version >= 3
+        && kind == "request_failed"
+        && number(&event["error_code"]) == -3
+        && ["proxy_destroyed", "redirect_handoff"].contains(&payload.as_str());
+    row.failed |= !interruption && (kind == "request_failed" || number(&event["error_code"]) != 0);
+    row.interrupted |= interruption;
+    let code = number(&event["status_code"]);
+    if code > 0 && incoming >= row.status_rank {
+        row.code = code;
+        row.status_rank = incoming;
+    }
+    row.browser |= context_token(event).is_some();
+    if matches!(kind, "request_completed" | "request_failed")
+        && number(&event["flags"]) & 4 != 0
+        && number(&event["initiator_process_id"]) == 0
+        && context_token(event).is_none()
+    {
+        row.worker_answer = Some((kind == "request_failed", code, number(&event["error_code"])));
+    }
+    if let Some((method, value)) = target.filter(|_| incoming >= row.target_rank) {
+        row.target_rank = incoming;
+        row.path = value;
+        row.scheme_only = scheme_only;
+        if let Some(method) = method {
+            row.method = method;
         }
-        self.store_end = end;
-        let from = self.state.as_ref().expect("index state").indexed_to;
-        let limit = end.min(from + SCAN_BYTES);
-        if limit == from {
+        row.target_event = Some((
+            text(&event["session_id"]),
+            number(&event["process_id"]) as u32,
+            text(&event["sequence_number"]),
+        ));
+    }
+    let flags = number(&event["flags"]);
+    if let Some(class) = event["scheme_class"]
+        .as_u64()
+        .filter(|class| (1..=255).contains(class))
+    {
+        row.scheme_class = class as u8;
+    }
+    // A memory-cache reuse is the renderer's own row; no loader made it.
+    let renderer_row = kind == "request_initiated" || kind == "memory_cache_reuse";
+    row.loader |= !renderer_row;
+    row.renderer |= renderer_row || number(&event["initiator_process_id"]) > 0;
+    let loader_kind = u8::try_from(number(&event["loader_kind"])).unwrap_or(0);
+    // A memory-cache reuse names its owner as request_initiated does.
+    if renderer_row && row.renderer_start.is_none() {
+        let frame = text(&event["frame_id"]);
+        row.renderer_start = Some((loader_kind, !frame.is_empty() && frame != "0"));
+    }
+    if kind == "request_started" {
+        row.worker_started |= flags & 4 != 0;
+        row.main_frame |= number(&event["resource_type"]) == 0;
+        row.browser_start = Some(if loader_kind == 0 {
+            row.browser_start.unwrap_or(0)
+        } else {
+            loader_kind
+        });
+    }
+    let response = (kind == "response_started").then(|| response_metadata(&payload));
+    row.redirected |= kind == "request_redirected";
+    if kind == "response_started"
+        && let Some(sequence) = canonical(&event["sequence_number"], true)
+        && row
+            .response
+            .as_ref()
+            .is_none_or(|(_, _, newest)| *newest < sequence)
+    {
+        row.response = Some((
+            text(&event["session_id"]),
+            number(&event["process_id"]) as u32,
+            sequence,
+        ));
+    }
+    // A renderer completion carries the response's cache and service-worker
+    // flags, and a service worker's end without a response its own.
+    if response.is_some() || matches!(kind, "request_completed" | "request_failed") {
+        row.cache |= flags & 2 != 0;
+        row.worker_served |= flags & 4 != 0;
+    }
+    if let Some(reuse) = &reuse {
+        row.memory_cache = true;
+        row.static_data = reuse.static_data;
+        row.resource = memory_cache_resource(reuse.blink_type).into();
+        if reuse.source.is_some() {
+            row.memory_cache_source.clone_from(&reuse.source);
+        }
+    }
+    if let Some((mime, protocol)) = &response {
+        row.mime = mime.clone();
+        row.protocol = protocol.clone();
+        row.response_ns.get_or_insert(time);
+    }
+    if incoming == 5 {
+        row.transfer = length(&event["encoded_data_length"]);
+        row.decoded = length(&event["decoded_body_length"]);
+    }
+    if number(&event["error_code"]) != 0 {
+        row.error = number(&event["error_code"]);
+    }
+    let lower = payload.to_ascii_lowercase();
+    if lower
+        .strip_prefix("application/wasm")
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(';'))
+    {
+        row.resource = "wasm".into();
+    } else if kind == "request_started" {
+        row.resource = resource(number(&event["resource_type"])).into();
+    } else if let Some((Some(mime), _)) = &response
+        && row.resource == "other"
+    {
+        row.resource = mime_class(mime).into();
+    }
+    if incoming >= row.rank {
+        row.operation = kind.into();
+    }
+    row.rank = row.rank.max(incoming);
+    if version == 3 && number(&event["tab_id"]) > 0 {
+        row.tab = number(&event["tab_id"]) as u64;
+    }
+    let request = text(&event["request_id"]);
+    if request != "0" {
+        let root = Root {
+            session: text(&event["session_id"]),
+            process: number(&event["process_id"]) as u32,
+            sequence: text(&event["sequence_number"]),
+            request,
+        };
+        let slot = match kind {
+            "request_started" => Some(0),
+            "request_initiated" => Some(1),
+            _ => None,
+        };
+        if let Some(slot) = slot {
+            row.roots[slot].get_or_insert_with(|| root.clone());
+        }
+        row.roots[2].get_or_insert(root);
+    }
+    member(row, event, start, end);
+}
+
+fn fold_tab_set(transaction: &Transaction<'_>, event: &Value) -> Result<()> {
+    let Ok(bytes) = hex::decode(event["payload"].as_str().unwrap_or("")) else {
+        return Ok(());
+    };
+    if bytes.len() != 128 {
+        return Ok(());
+    }
+    let set_id = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+    let total = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
+    let count = usize::from(u16::from_le_bytes([bytes[20], bytes[21]])).min(26);
+    let key = format!("{}:{set_id}", text(&event["session_id"]));
+    // The first part names the set's total.
+    transaction
+        .prepare_cached("INSERT OR IGNORE INTO tab_sets(key, total) VALUES (?1, ?2)")
+        .sql()?
+        .execute(params![key, total])
+        .sql()?;
+    let mut insert = transaction
+        .prepare_cached("INSERT OR IGNORE INTO set_tabs(set_key, tab) VALUES (?1, ?2)")
+        .sql()?;
+    for slot in bytes[24..24 + 4 * count].as_chunks::<4>().0 {
+        let tab = u32::from_le_bytes(*slot);
+        if tab != 0 {
+            insert.execute(params![key, tab]).sql()?;
+        }
+    }
+    Ok(())
+}
+
+fn fold_identity(transaction: &Transaction<'_>, event: &Value) -> Result<()> {
+    let payload = event["payload"].as_str().unwrap_or("");
+    // Script IDs are unique per isolate; version 2 names a worker's at byte 80.
+    let Some((isolate, script)) = hex::decode(payload)
+        .ok()
+        .filter(|bytes| bytes.len() == 128)
+        .map(|bytes| {
+            let isolate = if bytes[0] == 2 {
+                u64::from_le_bytes(bytes[80..88].try_into().unwrap())
+            } else {
+                0
+            };
+            (
+                isolate,
+                u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            )
+        })
+    else {
+        return Ok(());
+    };
+    transaction
+        .prepare_cached(
+            "INSERT OR REPLACE INTO identities(session, process, isolate, script, payload)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .sql()?
+        .execute(params![
+            text(&event["session_id"]),
+            number(&event["process_id"]),
+            index_db::key(isolate),
+            script,
+            payload
+        ])
+        .sql()?;
+    Ok(())
+}
+
+const INSERT_ROW: &str = "INSERT OR REPLACE INTO rows(ordinal, id, first_ns, last_ns, tab,
+    tab_set, extension, resource, failed, internal, main_frame, domain, domain_lower, host_lower,
+    site, haystack, method, status_code, transfer, decoded, mime, protocol, name, name_fold,
+    type_label, initiator_label, duration_us, root_session, root_process, root_sequence,
+    body_case, body_withheld, body_earlier, first_offset, end_offset, loader, start_request)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19,
+    ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37)";
+const INSERT_STATE: &str = "INSERT OR REPLACE INTO states(ordinal, data) VALUES (?1, ?2)";
+
+/// Writes a row's state and the columns its queries filter, sort and count by.
+fn write_row(transaction: &Transaction<'_>, ordinal: i64, row: &Row) -> Result<()> {
+    let view = view(row);
+    let (case, body) = body_case(row);
+    let withheld = body
+        .and_then(|body| body.record.as_ref())
+        .is_some_and(|record| record.flags & 0x80 != 0);
+    // A refused or malformed newest record whose row names an earlier
+    // snapshot, as body_document's earlier_snapshot does.
+    let earlier = body.is_some_and(|body| {
+        body.snapshot.is_some()
+            && body
+                .record
+                .as_ref()
+                .is_none_or(|record| record.artifact == "0")
+    });
+    let root = root(row);
+    let domain_lower = view.domain.to_lowercase();
+    transaction
+        .prepare_cached(INSERT_STATE)
+        .sql()?
+        .execute(params![ordinal, encode(row)?])
+        .sql()?;
+    transaction
+        .prepare_cached(INSERT_ROW)
+        .sql()?
+        .execute(params![
+            ordinal,
+            row.id,
+            clamp(row.first_ns),
+            clamp(row.last_ns),
+            index_db::key(row.tab),
+            row.tab_set,
+            row.extension,
+            row.resource,
+            outcome(row).0,
+            view.internal,
+            row.main_frame,
+            view.domain,
+            domain_lower,
+            host_of(&domain_lower),
+            site(&view.domain),
+            view.haystack,
+            view.method,
+            view.status.as_i64(),
+            row.transfer,
+            row.decoded,
+            row.mime,
+            row.protocol,
+            view.name,
+            view.name.to_lowercase(),
+            type_label(&row.resource),
+            initiator_label(row),
+            duration(row).map(|d| (d / 1000) as i64),
+            root.map(|root| &root.session),
+            root.map(|root| root.process),
+            root.map(|root| &root.sequence),
+            case,
+            withheld,
+            earlier,
+            clamp(row.first_offset),
+            clamp(row.end_offset),
+            row.loader,
+            row.roots[0].as_ref().map(|root| &root.request),
+        ])
+        .sql()?;
+    Ok(())
+}
+
+/// A row's JSON without its null, false and empty-list fields: most rows hold
+/// their default in most of them. Only an `Option` serializes as null, a
+/// `bool` as false and a `Vec` as an empty list, so each restores exactly.
+/// Zero and empty text stay: a `Some(0)` would come back as `None`.
+fn encode(row: &Row) -> Result<Vec<u8>> {
+    let failed = |error: serde_json::Error| Error::new(500, error.to_string());
+    let mut value = serde_json::to_value(row).map_err(failed)?;
+    if let Value::Object(fields) = &mut value {
+        fields.retain(|_, field| match field {
+            Value::Null | Value::Bool(false) => false,
+            Value::Array(items) => !items.is_empty(),
+            _ => true,
+        });
+    }
+    serde_json::to_vec(&value).map_err(failed)
+}
+
+/// One fold's working set. Rows it changes stay in memory and are written
+/// back before the fold commits, or sooner once `HELD_ROWS` are held: a
+/// request's records sit close together in the store, so most records find
+/// their row here and each row is written once per fold instead of once per
+/// record. Request keys are written through; ids and keys read from the
+/// index are remembered until the next write-back.
+#[derive(Default)]
+struct Batch {
+    rows: HashMap<i64, Row>,
+    ids: HashMap<String, Option<i64>>,
+    keys: HashMap<String, Option<String>>,
+    next: Option<i64>,
+    malformed: u64,
+}
+impl Batch {
+    fn ordinal(&mut self, transaction: &Transaction<'_>, id: &str) -> Result<Option<i64>> {
+        if let Some(found) = self.ids.get(id) {
+            return Ok(*found);
+        }
+        let found = transaction
+            .prepare_cached("SELECT ordinal FROM rows WHERE id = ?1")
+            .sql()?
+            .query_row([id], |row| row.get(0))
+            .optional()
+            .sql()?;
+        self.ids.insert(id.to_owned(), found);
+        Ok(found)
+    }
+
+    fn row(&mut self, transaction: &Transaction<'_>, ordinal: i64) -> Result<&mut Row> {
+        Ok(match self.rows.entry(ordinal) {
+            Entry::Occupied(held) => held.into_mut(),
+            Entry::Vacant(slot) => slot.insert(load(transaction, ordinal)?),
+        })
+    }
+
+    fn create(
+        &mut self,
+        transaction: &Transaction<'_>,
+        id: String,
+        kind: &str,
+        start: u64,
+        end: u64,
+    ) -> Result<i64> {
+        let ordinal = match self.next {
+            Some(next) => next,
+            None => transaction
+                .query_row(
+                    "SELECT COALESCE(MAX(ordinal) + 1, 0) FROM rows",
+                    [],
+                    |row| row.get(0),
+                )
+                .sql()?,
+        };
+        self.next = Some(ordinal + 1);
+        self.ids.insert(id.clone(), Some(ordinal));
+        self.rows.insert(ordinal, Row::new(id, kind, start, end));
+        Ok(ordinal)
+    }
+
+    fn key(&mut self, transaction: &Transaction<'_>, key: &str) -> Result<Option<String>> {
+        if let Some(found) = self.keys.get(key) {
+            return Ok(found.clone());
+        }
+        let found: Option<String> = transaction
+            .prepare_cached("SELECT id FROM keys WHERE key = ?1")
+            .sql()?
+            .query_row([key], |row| row.get(0))
+            .optional()
+            .sql()?;
+        self.keys.insert(key.to_owned(), found.clone());
+        Ok(found)
+    }
+
+    /// Records the row a browser key names; the first key learned stays
+    /// unless `replace`.
+    fn learn(
+        &mut self,
+        transaction: &Transaction<'_>,
+        key: String,
+        id: String,
+        replace: bool,
+    ) -> Result<()> {
+        if !replace && matches!(self.keys.get(&key), Some(Some(_))) {
             return Ok(());
         }
-        let bytes = read_range(&mut file, from, limit)?;
-        let Some(last) = bytes.iter().rposition(|byte| *byte == b'\n') else {
-            if bytes.len() > RECORD_BYTES {
-                return Err(Error::new(
-                    500,
-                    "The evidence store contains an oversized event",
-                ));
-            }
-            return Ok(());
+        let sql = if replace {
+            "INSERT OR REPLACE INTO keys(key, id) VALUES (?1, ?2)"
+        } else {
+            "INSERT OR IGNORE INTO keys(key, id) VALUES (?1, ?2)"
         };
-        let mut position = 0;
-        while position <= last {
-            let newline = position
-                + bytes[position..]
-                    .iter()
-                    .position(|byte| *byte == b'\n')
-                    .expect("terminated");
-            self.fold(
-                &bytes[position..newline],
-                from + position as u64,
-                from + newline as u64 + 1,
-            );
-            position = newline + 1;
+        let changed = transaction
+            .prepare_cached(sql)
+            .sql()?
+            .execute(params![key, id])
+            .sql()?;
+        if changed == 1 {
+            self.keys.insert(key, Some(id));
+        } else {
+            self.keys.remove(&key);
         }
-        let indexed_to = from + last as u64 + 1;
-        let (head, tail) = anchors(&mut file, indexed_to)?;
-        let state = self.state.as_mut().expect("index state");
-        (state.indexed_to, state.head, state.tail) = (indexed_to, head, tail);
-        self.generation += 1;
-        self.order = None;
-        self.changed = true;
         Ok(())
     }
 
-    fn fold(&mut self, line: &[u8], start: u64, end: u64) {
-        let state = self.state.as_mut().expect("index state");
+    fn learn_keys(&mut self, transaction: &Transaction<'_>, event: &Value) -> Result<()> {
+        if text(&event["request_id"]) == "0" {
+            return Ok(());
+        }
+        if event["type"] == "request_initiated" || event["type"] == "memory_cache_reuse" {
+            if let Some(key) = legacy_key(event) {
+                self.learn(transaction, key, renderer_identity(event), true)?;
+            }
+            return Ok(());
+        }
+        if number(&event["initiator_process_id"]) == 0 {
+            return Ok(());
+        }
+        let identity = correlated_identity(event);
+        for key in [browser_key(event), legacy_key(event)]
+            .into_iter()
+            .flatten()
+        {
+            self.learn(transaction, key, identity.clone(), false)?;
+        }
+        Ok(())
+    }
+
+    /// Port of `requestIdentity` over the browser keys learned so far.
+    fn identity(&mut self, transaction: &Transaction<'_>, event: &Value) -> Result<String> {
+        if event["type"] == "request_initiated" || event["type"] == "memory_cache_reuse" {
+            return Ok(renderer_identity(event));
+        }
+        let request = text(&event["request_id"]);
+        let correlated = if number(&event["initiator_process_id"]) > 0 {
+            correlated_identity(event)
+        } else if request != "0" {
+            browser_key(event).expect("nonzero request")
+        } else {
+            format!(
+                "S{}:P{}:E{}",
+                text(&event["session_id"]),
+                number(&event["process_id"]),
+                text(&event["sequence_number"])
+            )
+        };
+        Ok(match browser_key(event) {
+            Some(key) => self.key(transaction, &key)?.unwrap_or(correlated),
+            None => correlated,
+        })
+    }
+
+    fn fold(
+        &mut self,
+        transaction: &Transaction<'_>,
+        line: &[u8],
+        start: u64,
+        end: u64,
+    ) -> Result<()> {
         if line.iter().all(u8::is_ascii_whitespace) {
-            return;
+            return Ok(());
         }
         // Only a network record names its category in its bytes. A line that is
         // no complete object may have lost those bytes, so it cannot be skipped.
         if line.len() <= RECORD_BYTES && !line.windows(7).any(|window| window == b"network") {
             if line.trim_ascii().first() != Some(&b'{') || line.trim_ascii().last() != Some(&b'}') {
-                state.malformed += 1;
+                self.malformed += 1;
             }
-            return;
+            return Ok(());
         }
         let event = match serde_json::from_slice::<Value>(line) {
             Ok(event) if line.len() <= RECORD_BYTES && validate_event(&event).is_ok() => event,
             _ => {
-                state.malformed += 1;
-                return;
+                self.malformed += 1;
+                return Ok(());
             }
         };
         let kind = event["type"].as_str().unwrap_or("");
         if event["category"] != "network" {
-            return;
+            return Ok(());
         }
         let Some(incoming) = rank(kind) else {
             // A service worker's end the renderer could not join to its start
@@ -1860,638 +2319,602 @@ impl RequestIndex {
                     .as_deref()
                     == Some(b"service_worker_end_lost".as_slice())
             {
-                if let Some(&ordinal) = state.by_id.get(&correlated_identity(&event)) {
-                    state.rows[ordinal as usize].end_lost = true;
-                    self.views[ordinal as usize] = view(&state.rows[ordinal as usize]);
+                if let Some(ordinal) = self.ordinal(transaction, &correlated_identity(&event))? {
+                    self.row(transaction, ordinal)?.end_lost = true;
                 }
-                return;
+                return Ok(());
             }
-            if kind == "tab_set" {
-                fold_tab_set(&event, &mut state.tab_sets);
-                return;
-            }
-            if kind == "script_identity" {
-                fold_identity(&event, &mut state.identities);
-                return;
-            }
-            if kind == "script_cookie" {
-                let located: usize = state.script_cookies.values().map(Vec::len).sum();
-                if located < MAX_SCRIPT_COOKIES {
-                    state
-                        .script_cookies
-                        .entry(text(&event["session_id"]))
-                        .or_default()
-                        .push((start, end));
-                } else {
-                    state.script_cookies_unindexed += 1;
-                }
-                return;
-            }
-            if CHILD_TYPES.contains(&kind) {
-                let id = request_identity(&event, &state.keys);
-                if let Some(&ordinal) = state.by_id.get(&id) {
-                    let row = &mut state.rows[ordinal as usize];
-                    Self::member(row, &event, start, end);
-                    if kind == "request_initiator_stack" {
-                        let bytes = hex::decode(event["payload"].as_str().unwrap_or(""))
-                            .unwrap_or_default();
-                        row.stack_state = bytes.get(4).copied().unwrap_or(0);
-                        // Version 3 names the isolate its script IDs belong to.
-                        let scoped = bytes.len() == 128 && bytes[0] == 3;
-                        row.stack_thread = if scoped { bytes[80] } else { 0 };
-                        row.stack_frame = (bytes.len() == 128
-                            && matches!(row.stack_state, 1 | 4 | 5))
-                        .then(|| {
-                            (
-                                text(&event["session_id"]),
-                                number(&event["process_id"]) as u32,
-                                if scoped {
-                                    u64::from_le_bytes(bytes[88..96].try_into().unwrap())
-                                } else {
-                                    0
-                                },
-                                bytes[64..80].try_into().unwrap(),
-                            )
-                        });
-                    }
-                    row.navigation_script |= kind == "navigation_initiator_link";
-                    if kind == "request_tab_link"
-                        && let Some((set, link)) = tab_link(&event)
-                    {
-                        (row.tab_set, row.tab_link) = (Some(set), link);
-                    }
-                    if kind == "request_extension_link"
-                        && let Some(id) = extension_link(&event)
-                    {
-                        row.extension = Some(id);
-                    }
-                    if kind == "request_watch_match" && row.watch.is_none() {
-                        let detail = crate::debugger_observation::decode(&event)
-                            .map(|decoded| decoded["detail"].clone());
-                        row.watch = Some(Watch {
-                            session: text(&event["session_id"]),
-                            process: number(&event["process_id"]) as u32,
-                            sequence: text(&event["sequence_number"]),
-                            frame: text(&event["frame_id"]),
-                            rule: detail.as_ref().and_then(|d| d["rule"].as_u64()),
-                            method_matched: detail.and_then(|d| d["method_matched"].as_bool()),
-                        });
-                    }
-                    let parent = (
-                        text(&event["session_id"]),
-                        number(&event["process_id"]) as u32,
-                        text(&event["parent_event_id"]),
-                    );
-                    if kind == "response_body"
-                        && let (Some(parent_sequence), Some(sequence)) = (
-                            canonical(&event["parent_event_id"], true),
-                            canonical(&event["sequence_number"], true),
+            match kind {
+                "tab_set" => fold_tab_set(transaction, &event)?,
+                "script_identity" => fold_identity(transaction, &event)?,
+                "script_cookie" => {
+                    transaction
+                        .prepare_cached(
+                            "INSERT OR IGNORE INTO script_cookies(session, start, end) VALUES (?1, ?2, ?3)",
                         )
-                    {
-                        let time = unsigned(&event["monotonic_time_ns"]).unwrap_or(0);
-                        let record = decode_response_body(&event);
-                        let snapshot = record
-                            .as_ref()
-                            .filter(|record| record.state == 3 && record.captured != 0)
-                            .map(|record| (sequence, time, record.clone()));
-                        let mut child = BodyChild {
-                            parent: (parent.0.clone(), parent.1, parent_sequence),
-                            sequence,
-                            time,
-                            record,
-                            snapshot,
-                        };
-                        // A later end supersedes partial snapshots of the same
-                        // response; the newest retained snapshot is kept beside it.
-                        match row
-                            .bodies
-                            .iter()
-                            .position(|body| body.parent == child.parent)
-                        {
-                            Some(at) => {
-                                let held = &mut row.bodies[at];
-                                let newer_snapshot = match (&held.snapshot, &child.snapshot) {
-                                    (Some(old), Some(new)) => new.0 > old.0,
-                                    (None, Some(_)) => true,
-                                    _ => false,
-                                };
-                                // A repeated or older record replaces nothing, so
-                                // it must not take the held snapshot either.
-                                if held.sequence < sequence {
-                                    if !newer_snapshot {
-                                        child.snapshot = held.snapshot.take();
-                                    }
-                                    *held = child;
-                                } else if newer_snapshot {
-                                    held.snapshot = child.snapshot;
-                                }
-                            }
-                            None if row.bodies.len() < MAX_TARGETS => row.bodies.push(child),
-                            None => {}
+                        .sql()?
+                        .execute(params![text(&event["session_id"]), clamp(start), clamp(end)])
+                        .sql()?;
+                }
+                _ if CHILD_TYPES.contains(&kind) => {
+                    let id = self.identity(transaction, &event)?;
+                    if let Some(ordinal) = self.ordinal(transaction, &id)? {
+                        fold_child(self.row(transaction, ordinal)?, &event, kind, start, end);
+                        if kind == "cookie_list" {
+                            transaction
+                                .prepare_cached(
+                                    "INSERT OR IGNORE INTO cookie_lists(session, start, end) VALUES (?1, ?2, ?3)",
+                                )
+                                .sql()?
+                                .execute(params![
+                                    text(&event["session_id"]),
+                                    clamp(start),
+                                    clamp(end)
+                                ])
+                                .sql()?;
                         }
                     }
-                    if kind == "request_target"
-                        && row.children.len() < MAX_TARGETS
-                        && !row.children.iter().any(|child| child.parent == parent)
-                    {
-                        row.children.push(Child {
-                            parent,
-                            target: decode_target(&event),
-                        });
-                    }
-                    self.views[ordinal as usize] = view(row);
                 }
+                _ => {}
             }
-            return;
+            return Ok(());
         };
-        learn_keys(&event, &mut state.keys);
-        let id = request_identity(&event, &state.keys);
-        let ordinal = match state.by_id.get(&id) {
-            Some(&ordinal) => ordinal,
-            None if state.rows.len() >= MAX_REQUESTS => {
-                state.unindexed += 1;
-                return;
+        self.learn_keys(transaction, &event)?;
+        let id = self.identity(transaction, &event)?;
+        let ordinal = match self.ordinal(transaction, &id)? {
+            Some(ordinal) => ordinal,
+            None => self.create(transaction, id, kind, start, end)?,
+        };
+        let row = self.row(transaction, ordinal)?;
+        fold_lifecycle(row, &event, kind, incoming, start, end);
+        Ok(())
+    }
+
+    /// Writes every held row back and forgets what was read from the index.
+    fn flush(&mut self, transaction: &Transaction<'_>) -> Result<()> {
+        let mut members = transaction
+            .prepare_cached(
+                "INSERT OR IGNORE INTO members(request, session, process, ordinal) VALUES (?1, ?2, ?3, ?4)",
+            )
+            .sql()?;
+        // In ordinal order, so new rows append to full pages.
+        let mut rows = self.rows.drain().collect::<Vec<_>>();
+        rows.sort_unstable_by_key(|(ordinal, _)| *ordinal);
+        for (ordinal, row) in rows {
+            write_row(transaction, ordinal, &row)?;
+            for member in &row.members {
+                members
+                    .execute(params![
+                        member.request,
+                        member.session,
+                        member.process,
+                        ordinal
+                    ])
+                    .sql()?;
+            }
+        }
+        self.ids.clear();
+        self.keys.clear();
+        Ok(())
+    }
+}
+impl index_db::Fold for Batch {
+    fn line(
+        &mut self,
+        transaction: &Transaction<'_>,
+        line: &[u8],
+        start: u64,
+        end: u64,
+    ) -> Result<()> {
+        self.fold(transaction, line, start, end)?;
+        if self.rows.len() >= HELD_ROWS || self.ids.len() + self.keys.len() >= HELD_KEYS {
+            self.flush(transaction)?;
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self, transaction: &Transaction<'_>) -> Result<()> {
+        self.flush(transaction)?;
+        transaction
+            .execute(
+                "UPDATE counts SET malformed = malformed + ?1 WHERE id = 0",
+                [clamp(std::mem::take(&mut self.malformed))],
+            )
+            .sql()?;
+        Ok(())
+    }
+}
+
+fn unreadable(error: serde_json::Error) -> Error {
+    Error::new(
+        500,
+        format!("The request index holds an unreadable row: {error}"),
+    )
+}
+
+fn load(connection: &Connection, ordinal: i64) -> Result<Row> {
+    let data: Vec<u8> = connection
+        .prepare_cached("SELECT data FROM states WHERE ordinal = ?1")
+        .sql()?
+        .query_row([ordinal], |row| row.get(0))
+        .sql()?;
+    serde_json::from_slice(&data).map_err(unreadable)
+}
+
+fn load_id(connection: &Connection, id: &str) -> Result<Option<Row>> {
+    let data: Option<Vec<u8>> = connection
+        .prepare_cached(
+            "SELECT s.data FROM rows r JOIN states s ON s.ordinal = r.ordinal WHERE r.id = ?1",
+        )
+        .sql()?
+        .query_row([id], |row| row.get(0))
+        .optional()
+        .sql()?;
+    data.map(|data| serde_json::from_slice(&data).map_err(unreadable))
+        .transpose()
+}
+
+/// The row's own tab and its linked set's tabs; empty is a capture error.
+fn row_tabs(connection: &Connection, row: &Row) -> Result<Vec<u64>> {
+    let mut tabs = match &row.tab_set {
+        Some(key) => connection
+            .prepare_cached("SELECT tab FROM set_tabs WHERE set_key = ?1 ORDER BY tab")
+            .sql()?
+            .query_map([key], |row| row.get::<_, i64>(0))
+            .sql()?
+            .map(|tab| tab.map(|tab| tab as u64))
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .sql()?,
+        None => Vec::new(),
+    };
+    if row.tab != 0 && !tabs.contains(&row.tab) {
+        tabs.push(row.tab);
+        tabs.sort_unstable();
+    }
+    Ok(tabs)
+}
+
+/// A query's condition over `rows r`, with its parameters in the order the
+/// SQL names them.
+struct Condition {
+    sql: String,
+    values: Vec<SqlValue>,
+}
+impl Condition {
+    fn and(&mut self, sql: &str, values: impl IntoIterator<Item = SqlValue>) {
+        self.sql.push_str(" AND ");
+        self.sql.push_str(sql);
+        self.values.extend(values);
+    }
+
+    /// Tab 0 selects the rows with no tab and no extension.
+    fn tab(&mut self, scope: &TabScope) {
+        match scope {
+            TabScope::Extension(id) => self.and("r.extension = ?", [SqlValue::Text(id.clone())]),
+            TabScope::Tab(0) => self.and(
+                "r.tab = 0 AND r.extension IS NULL
+                 AND NOT EXISTS (SELECT 1 FROM set_tabs s WHERE s.set_key = r.tab_set)",
+                [],
+            ),
+            TabScope::Tab(tab) => self.and(
+                "(r.tab = ? OR EXISTS (SELECT 1 FROM set_tabs s WHERE s.set_key = r.tab_set AND s.tab = ?))",
+                [SqlValue::Integer(index_db::key(*tab)), SqlValue::Integer(index_db::key(*tab))],
+            ),
+        }
+    }
+}
+
+/// Rows of the first `through` whose site differs from their tab's latest
+/// top-level document at their start.
+const THIRD_PARTY: &str = "COALESCE(r.site != (SELECT d.site FROM rows d
+    WHERE d.main_frame = 1 AND d.tab != 0 AND d.tab = r.tab AND d.ordinal < ?
+      AND (d.first_ns, d.ordinal) <= (r.first_ns, r.ordinal)
+    ORDER BY d.first_ns DESC, d.ordinal DESC LIMIT 1), 0) = 1";
+
+/// Every filter except the time range and the browser-internal switch.
+fn matching(query: &RequestQuery, through: usize) -> Condition {
+    let through = SqlValue::Integer(i64::try_from(through).unwrap_or(i64::MAX));
+    let mut condition = Condition {
+        sql: "r.ordinal < ?".into(),
+        values: vec![through.clone()],
+    };
+    if let Some(tab) = &query.tab {
+        condition.tab(tab);
+    }
+    if let Some(domain) = &query.domain {
+        condition.and("r.domain = ?", [SqlValue::Text(domain.clone())]);
+    }
+    if let Some(kind) = query.kind {
+        condition.and("r.resource = ?", [SqlValue::Text(kind.into())]);
+    }
+    if query.failed {
+        condition.and("r.failed = 1", []);
+    }
+    if query.third_party {
+        condition.and(THIRD_PARTY, [through]);
+    }
+    let filter = &query.filter;
+    if !filter.active() {
+        return condition;
+    }
+    let (mut found, mut values) = (Vec::new(), Vec::new());
+    if !filter.text.is_empty() {
+        let mut text = "instr(r.haystack, ?) > 0".to_owned();
+        values.push(SqlValue::Text(filter.text.clone()));
+        if !query.named.is_empty() {
+            text.push_str(&format!(
+                " OR (r.root_session, r.root_process, r.root_sequence) IN (VALUES {})",
+                vec!["(?, ?, ?)"; query.named.len()].join(", ")
+            ));
+            for (session, process, sequence) in &query.named {
+                values.extend([
+                    SqlValue::Text(session.clone()),
+                    SqlValue::Integer(i64::from(*process)),
+                    SqlValue::Text(sequence.clone()),
+                ]);
+            }
+        }
+        found.push(format!("({text})"));
+    }
+    for exclude in &filter.exclude {
+        found.push("instr(r.haystack, ?) = 0".into());
+        values.push(SqlValue::Text(exclude.clone()));
+    }
+    for token in &filter.tokens {
+        let value = SqlValue::Text(token.value.clone());
+        let test = match token.key {
+            "domain" => {
+                values.extend([value.clone(), value]);
+                "(reb_glob(?, r.domain_lower) OR reb_glob(?, r.host_lower))"
+            }
+            "method" => {
+                values.push(value);
+                "lower(r.method) = ?"
+            }
+            "status-code" => {
+                values.push(SqlValue::Integer(token.value.parse().unwrap_or(-1)));
+                "r.status_code = ?"
+            }
+            "larger-than" => {
+                values.push(SqlValue::Integer(clamp(token.bytes)));
+                "r.transfer > ?"
+            }
+            _ => {
+                values.push(value);
+                "r.mime = ?"
+            }
+        };
+        found.push(format!(
+            "COALESCE({test}, 0) = {}",
+            if token.negated { 0 } else { 1 }
+        ));
+    }
+    let expected = if query.invert { 0 } else { 1 };
+    condition.and(
+        &format!("COALESCE({}, 0) = {expected}", found.join(" AND ")),
+        values,
+    );
+    condition
+}
+
+/// Nulls last in either direction, then capture order; text compares
+/// case-folded first, then exactly, as a locale collation would.
+fn order(sort: &str, descending: bool) -> String {
+    let direction = if descending { "DESC" } else { "ASC" };
+    let numeric = |column: &str| format!("{column} IS NULL, {column} {direction}, r.ordinal");
+    let text = |column: &str, folded: &str| {
+        format!("{column} IS NULL, {folded} {direction}, {column} {direction}, r.ordinal")
+    };
+    match sort {
+        "capture" => format!("r.ordinal {direction}"),
+        // Traffic compares the displayed microseconds.
+        "time" => numeric("r.duration_us"),
+        "status" => numeric("r.status_code"),
+        "size" => numeric("r.transfer"),
+        "start" => numeric("r.first_ns"),
+        "name" => text("r.name", "r.name_fold"),
+        // These labels are ASCII, which SQL's lower() folds as Rust does.
+        "type" => text("r.type_label", "lower(r.type_label)"),
+        "initiator" => text("r.initiator_label", "lower(r.initiator_label)"),
+        "protocol" => text("r.protocol", "lower(r.protocol)"),
+        _ => text("r.method", "lower(r.method)"),
+    }
+}
+
+/// SQL functions the queries use, on every connection that answers them.
+fn register(connection: &Connection) -> rusqlite::Result<()> {
+    use rusqlite::functions::FunctionFlags;
+    let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
+    connection.create_scalar_function("reb_glob", 2, flags, |context| {
+        Ok(glob(
+            context.get_raw(0).as_str()?,
+            context.get_raw(1).as_str()?,
+        ))
+    })?;
+    // The timeline bucket of a start between `first` and `last`.
+    connection.create_scalar_function("reb_bucket", 3, flags, |context| {
+        let (at, first, last) = (
+            i128::from(context.get::<i64>(0)?),
+            i128::from(context.get::<i64>(1)?),
+            i128::from(context.get::<i64>(2)?),
+        );
+        let span = (last - first) as u128 + 1;
+        Ok(((at - first) as u128 * TIMELINE_BUCKETS as u128 / span) as i64)
+    })?;
+    Ok(())
+}
+
+fn collect<T, F>(rows: rusqlite::Result<rusqlite::MappedRows<'_, F>>) -> Result<Vec<T>>
+where
+    F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+{
+    rows.sql()?.collect::<rusqlite::Result<Vec<_>>>().sql()
+}
+
+impl RequestIndex {
+    pub fn new(store: &Path) -> Self {
+        Self {
+            store: store.to_owned(),
+            index: Indexed::new(store, SIDECAR_SUFFIX, LAYOUT, SCHEMA).with_setup(register),
+            empty: None,
+            empty_epoch: hex::encode(
+                &Sha256::digest(format!(
+                    "{}:{}:{:?}",
+                    std::process::id(),
+                    store.display(),
+                    std::time::SystemTime::now()
+                ))[..8],
+            ),
+            position: None,
+            missing: false,
+            generation: 0,
+            total: 0,
+            malformed: 0,
+            legacy_removed: false,
+            selection: None,
+            facets: None,
+        }
+    }
+
+    /// Removes the index from disk before a capture clear empties the store.
+    pub fn discard(&mut self) -> Result<()> {
+        self.index.discard()?;
+        self.remove_legacy()?;
+        self.position = None;
+        self.selection = None;
+        self.facets = None;
+        self.generation += 1;
+        Ok(())
+    }
+
+    /// Version 1 kept every row in one JSON file that nothing reads now.
+    fn remove_legacy(&mut self) -> Result<()> {
+        self.legacy_removed = true;
+        match std::fs::remove_file(index_db::sidecar_path(&self.store, LEGACY_SUFFIX)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
+            _ => Ok(()),
+        }
+    }
+
+    /// The connection that answers queries: the index, or an empty one while
+    /// the store does not exist.
+    fn db(&self) -> &Connection {
+        match self.index.connection() {
+            Some(connection) if !self.missing => connection,
+            _ => self.empty.as_ref().expect("a refreshed index"),
+        }
+    }
+
+    /// Folds what the store gained until `deadline`; the background indexer
+    /// folds the rest. A rewritten or replaced store rebuilds from byte 0.
+    pub fn refresh(&mut self, deadline: Instant) -> Result<()> {
+        if !self.legacy_removed {
+            // A read-only evidence directory keeps its old file.
+            let _ = self.remove_legacy();
+        }
+        let position = match self.index.open()? {
+            Some((mut file, position)) => {
+                self.missing = false;
+                self.index.sidecar().fold(
+                    &mut file,
+                    &position,
+                    u64::MAX,
+                    deadline,
+                    RECORD_BYTES,
+                    "The evidence store contains an oversized event",
+                    &mut Batch::default(),
+                )?
             }
             None => {
-                let ordinal = state.rows.len() as u32;
-                state.by_id.insert(id.clone(), ordinal);
-                state.rows.push(Row {
-                    id,
-                    path: UNIDENTIFIED.into(),
-                    method: "EVENT".into(),
-                    code: 0,
-                    rank: 0,
-                    status_rank: 0,
-                    target_rank: 0,
-                    target_event: None,
-                    children: Vec::new(),
-                    resource: "other".into(),
-                    tab: 0,
-                    operation: kind.into(),
-                    first_ns: u64::MAX,
-                    last_ns: 0,
-                    failed: false,
-                    interrupted: false,
-                    roots: [None, None, None],
-                    members: Vec::new(),
-                    members_limited: false,
-                    first_offset: start,
-                    end_offset: end,
-                    records: 0,
-                    transfer: None,
-                    decoded: None,
-                    cache: false,
-                    worker_served: false,
-                    memory_cache: false,
-                    static_data: false,
-                    memory_cache_source: None,
-                    response: None,
-                    bodies: Vec::new(),
-                    redirected: false,
-                    scheme_only: false,
-                    worker_answer: None,
-                    browser: false,
-                    end_lost: false,
-                    mime: None,
-                    protocol: None,
-                    response_ns: None,
-                    error: 0,
-                    loader: false,
-                    renderer: false,
-                    worker_started: false,
-                    main_frame: false,
-                    scheme_class: 0,
-                    stack_state: 0,
-                    navigation_script: false,
-                    stack_frame: None,
-                    stack_thread: 0,
-                    tab_set: None,
-                    tab_link: (0, 0),
-                    extension: None,
-                    watch: None,
-                    renderer_start: None,
-                    browser_start: None,
-                });
-                self.views.push(view(state.rows.last().unwrap()));
-                ordinal
+                self.missing = true;
+                if self.empty.is_none() {
+                    let connection = Connection::open_in_memory().sql()?;
+                    connection.execute_batch(SCHEMA).sql()?;
+                    register(&connection).sql()?;
+                    self.empty = Some(connection);
+                }
+                Position {
+                    epoch: self.empty_epoch.clone(),
+                    indexed_to: 0,
+                    scanned_to: 0,
+                    file_end: 0,
+                    reopened: false,
+                }
             }
         };
-        let row = &mut state.rows[ordinal as usize];
-        let payload =
-            payload_text(&hex::decode(event["payload"].as_str().unwrap_or("")).unwrap_or_default());
-        let reuse = memory_cache(&event);
-        let (target, scheme_only) = match &reuse {
-            Some(reuse) => memory_cache_target(&event, &reuse.host),
-            None => scoped_target(network_target(&payload, kind), &payload, &event),
-        };
-        let version = event["protocol_version"].as_u64().unwrap_or(0);
-        let time = unsigned(&event["monotonic_time_ns"]).unwrap_or(0);
-        row.first_ns = row.first_ns.min(time);
-        row.last_ns = row.last_ns.max(time);
-        let interruption = version >= 3
-            && kind == "request_failed"
-            && number(&event["error_code"]) == -3
-            && ["proxy_destroyed", "redirect_handoff"].contains(&payload.as_str());
-        row.failed |=
-            !interruption && (kind == "request_failed" || number(&event["error_code"]) != 0);
-        row.interrupted |= interruption;
-        let code = number(&event["status_code"]);
-        if code > 0 && incoming >= row.status_rank {
-            row.code = code;
-            row.status_rank = incoming;
-        }
-        row.browser |= context_token(&event).is_some();
-        if matches!(kind, "request_completed" | "request_failed")
-            && number(&event["flags"]) & 4 != 0
-            && number(&event["initiator_process_id"]) == 0
-            && context_token(&event).is_none()
-        {
-            row.worker_answer =
-                Some((kind == "request_failed", code, number(&event["error_code"])));
-        }
-        if let Some((method, value)) = target.filter(|_| incoming >= row.target_rank) {
-            row.target_rank = incoming;
-            row.path = value;
-            row.scheme_only = scheme_only;
-            if let Some(method) = method {
-                row.method = method;
-            }
-            row.target_event = Some((
-                text(&event["session_id"]),
-                number(&event["process_id"]) as u32,
-                text(&event["sequence_number"]),
-            ));
-        }
-        let flags = number(&event["flags"]);
-        if let Some(class) = event["scheme_class"]
-            .as_u64()
-            .filter(|class| (1..=255).contains(class))
-        {
-            row.scheme_class = class as u8;
-        }
-        // A memory-cache reuse is the renderer's own row; no loader made it.
-        let renderer_row = kind == "request_initiated" || kind == "memory_cache_reuse";
-        row.loader |= !renderer_row;
-        row.renderer |= renderer_row || number(&event["initiator_process_id"]) > 0;
-        let loader_kind = u8::try_from(number(&event["loader_kind"])).unwrap_or(0);
-        // A memory-cache reuse names its owner as request_initiated does.
-        if renderer_row && row.renderer_start.is_none() {
-            let frame = text(&event["frame_id"]);
-            row.renderer_start = Some((loader_kind, !frame.is_empty() && frame != "0"));
-        }
-        if kind == "request_started" {
-            row.worker_started |= flags & 4 != 0;
-            row.main_frame |= number(&event["resource_type"]) == 0;
-            row.browser_start = Some(if loader_kind == 0 {
-                row.browser_start.unwrap_or(0)
-            } else {
-                loader_kind
-            });
-        }
-        let response = (kind == "response_started").then(|| response_metadata(&payload));
-        row.redirected |= kind == "request_redirected";
-        if kind == "response_started"
-            && let Some(sequence) = canonical(&event["sequence_number"], true)
-            && row
-                .response
-                .as_ref()
-                .is_none_or(|(_, _, newest)| *newest < sequence)
-        {
-            row.response = Some((
-                text(&event["session_id"]),
-                number(&event["process_id"]) as u32,
-                sequence,
-            ));
-        }
-        // A renderer completion carries the response's cache and service-worker
-        // flags, and a service worker's end without a response its own.
-        if response.is_some() || matches!(kind, "request_completed" | "request_failed") {
-            row.cache |= flags & 2 != 0;
-            row.worker_served |= flags & 4 != 0;
-        }
-        if let Some(reuse) = &reuse {
-            row.memory_cache = true;
-            row.static_data = reuse.static_data;
-            row.resource = memory_cache_resource(reuse.blink_type).into();
-            if reuse.source.is_some() {
-                row.memory_cache_source.clone_from(&reuse.source);
-            }
-        }
-        if let Some((mime, protocol)) = &response {
-            row.mime = mime.clone();
-            row.protocol = protocol.clone();
-            row.response_ns.get_or_insert(time);
-        }
-        if incoming == 5 {
-            row.transfer = length(&event["encoded_data_length"]);
-            row.decoded = length(&event["decoded_body_length"]);
-        }
-        if number(&event["error_code"]) != 0 {
-            row.error = number(&event["error_code"]);
-        }
-        let lower = payload.to_ascii_lowercase();
-        if lower
-            .strip_prefix("application/wasm")
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with(';'))
-        {
-            row.resource = "wasm".into();
-        } else if kind == "request_started" {
-            row.resource = resource(number(&event["resource_type"])).into();
-        } else if let Some((Some(mime), _)) = &response
-            && row.resource == "other"
-        {
-            row.resource = mime_class(mime).into();
-        }
-        if incoming >= row.rank {
-            row.operation = kind.into();
-        }
-        row.rank = row.rank.max(incoming);
-        if version == 3 && number(&event["tab_id"]) > 0 {
-            row.tab = number(&event["tab_id"]) as u64;
-        }
-        let request = text(&event["request_id"]);
-        if request != "0" {
-            let root = Root {
-                session: text(&event["session_id"]),
-                process: number(&event["process_id"]) as u32,
-                sequence: text(&event["sequence_number"]),
-                request,
-            };
-            let slot = match kind {
-                "request_started" => Some(0),
-                "request_initiated" => Some(1),
-                _ => None,
-            };
-            if let Some(slot) = slot {
-                row.roots[slot].get_or_insert_with(|| root.clone());
-            }
-            row.roots[2].get_or_insert(root);
-        }
-        Self::member(row, &event, start, end);
-        self.views[ordinal as usize] = view(row);
-    }
-
-    fn member(row: &mut Row, event: &Value, start: u64, end: u64) {
-        row.first_offset = row.first_offset.min(start);
-        row.end_offset = row.end_offset.max(end);
-        row.records += 1;
-        // A link is no request of its own; tab_link, tab_ids and extension_id carry it.
-        if event["type"] == "request_tab_link" || event["type"] == "request_extension_link" {
-            return;
-        }
-        let (session, process, request) = (
-            text(&event["session_id"]),
-            number(&event["process_id"]) as u32,
-            text(&event["request_id"]),
-        );
-        let found = row
-            .members
-            .iter()
-            .position(|m| m.session == session && m.process == process && m.request == request);
-        match found {
-            Some(index) => row.members[index].records += 1,
-            None if row.members.len() < MAX_MEMBERS => row.members.push(Member {
-                session,
-                process,
-                request,
-                records: 1,
-            }),
-            None => row.members_limited = true,
-        }
-    }
-
-    /// Every filter except the time range and the browser-internal switch.
-    fn matches(&self, query: &RequestQuery, ordinal: usize, third_party: &[bool]) -> bool {
-        let (row, view) = (
-            &self.state.as_ref().unwrap().rows[ordinal],
-            &self.views[ordinal],
-        );
-        let sets = &self.state.as_ref().unwrap().tab_sets;
-        let scoped = query.tab.as_ref().is_none_or(|tab| in_tab(row, sets, tab))
-            && query
-                .domain
-                .as_ref()
-                .is_none_or(|domain| view.domain == *domain)
-            && query.kind.is_none_or(|kind| row.resource == kind)
-            && (!query.failed || outcome(row).0)
-            && (!query.third_party || third_party[ordinal]);
-        if !scoped {
-            return false;
-        }
-        let filter = &query.filter;
-        let named = || {
-            Self::root(row).is_some_and(|root| {
-                query.named.iter().any(|(session, process, sequence)| {
-                    root.session == *session
-                        && root.process == *process
-                        && root.sequence == *sequence
-                })
-            })
-        };
-        let token = |token: &Token| match token.key {
-            "domain" => {
-                let domain = view.domain.to_lowercase();
-                glob(&token.value, &domain) || glob(&token.value, host_of(&domain))
-            }
-            "method" => view.method.to_lowercase() == token.value,
-            "status-code" => view.status.as_i64() == token.value.parse().ok(),
-            "larger-than" => row.transfer.is_some_and(|size| size as u64 > token.bytes),
-            _ => row.mime.as_deref() == Some(token.value.as_str()),
-        };
-        let found = (filter.text.is_empty() || view.haystack.contains(&filter.text) || named())
-            && filter
-                .exclude
-                .iter()
-                .all(|text| !view.haystack.contains(text.as_str()))
-            && filter.tokens.iter().all(|t| token(t) != t.negated);
-        found != (query.invert && filter.active())
-    }
-
-    /// Rows whose site differs from their tab's latest top-level document at their start.
-    fn third_party(&self, through: usize) -> Vec<bool> {
-        let rows = &self.state.as_ref().unwrap().rows;
-        let mut documents: HashMap<u64, Vec<(u64, usize)>> = HashMap::new();
-        for (ordinal, row) in rows.iter().enumerate().take(through) {
-            if row.main_frame && row.tab != 0 {
-                documents
-                    .entry(row.tab)
-                    .or_default()
-                    .push((row.first_ns, ordinal));
-            }
-        }
-        for list in documents.values_mut() {
-            list.sort_unstable();
-        }
-        (0..through)
-            .map(|ordinal| {
-                let row = &rows[ordinal];
-                let Some(list) = documents.get(&row.tab) else {
-                    return false;
-                };
-                let at = list.partition_point(|key| *key <= (row.first_ns, ordinal));
-                let (Some(own), Some(&(_, document))) = (
-                    site(&self.views[ordinal].domain),
-                    at.checked_sub(1).map(|at| &list[at]),
-                ) else {
-                    return false;
-                };
-                site(&self.views[document].domain).is_some_and(|first| first != own)
-            })
-            .collect()
-    }
-
-    fn root(row: &Row) -> Option<&Root> {
-        row.roots.iter().flatten().next()
-    }
-
-    fn select(&mut self, query: &RequestQuery, through: usize) -> &Selection {
-        let key = query.order_key(through);
-        if self
-            .order
+        let moved = self
+            .position
             .as_ref()
-            .is_none_or(|(cached, generation, _)| *cached != key || *generation != self.generation)
-        {
-            let third_party = if query.third_party {
-                self.third_party(through)
-            } else {
-                Vec::new()
-            };
-            let rows = &self.state.as_ref().unwrap().rows;
-            let (mut order, mut scope, mut hidden_internal) = (Vec::new(), Vec::new(), 0);
-            for (ordinal, row) in rows.iter().enumerate().take(through) {
-                if !self.matches(query, ordinal, &third_party) {
-                    continue;
-                }
-                let in_range = row.first_ns <= query.to && row.last_ns >= query.from;
-                if query.hide_internal && self.views[ordinal].internal {
-                    hidden_internal += usize::from(in_range);
-                    continue;
-                }
-                scope.push(ordinal as u32);
-                if in_range {
-                    order.push(ordinal as u32);
-                }
-            }
-            let timeline = scope.iter().map(|&i| &rows[i as usize]).fold(
-                None,
-                |bounds: Option<(u64, u64)>, row| {
-                    Some(bounds.map_or((row.first_ns, row.last_ns), |(first, last)| {
-                        (first.min(row.first_ns), last.max(row.last_ns))
-                    }))
-                },
-            );
-            let timeline = timeline.map(|(first, last)| {
-                let mut buckets = vec![0u32; TIMELINE_BUCKETS];
-                let span = u128::from(last - first) + 1;
-                for &i in &scope {
-                    let offset = u128::from(rows[i as usize].first_ns - first);
-                    buckets[(offset * TIMELINE_BUCKETS as u128 / span) as usize] += 1;
-                }
-                (first, last, buckets)
-            });
-            let total = |pick: fn(&Row) -> Option<i64>| {
-                order
-                    .iter()
-                    .map(|&i| pick(&rows[i as usize]).unwrap_or(0) as u64)
-                    .sum::<u64>()
-            };
-            let (transferred, resources) = (total(|row| row.transfer), total(|row| row.decoded));
-            let views = &self.views;
-            let direction = |ordering: Ordering| {
-                if query.descending {
-                    ordering.reverse()
-                } else {
-                    ordering
-                }
-            };
-            let numeric = |order: &mut Vec<u32>, value: &dyn Fn(u32) -> Option<i64>| {
-                order.sort_by(|&a, &b| match (value(a), value(b)) {
-                    (Some(x), Some(y)) => direction(x.cmp(&y)).then(a.cmp(&b)),
-                    (None, None) => a.cmp(&b),
-                    (None, _) => Ordering::Greater,
-                    (_, None) => Ordering::Less,
-                });
-            };
-            match query.sort {
-                "capture" if query.descending => order.reverse(),
-                "capture" => {}
-                // Traffic compares the displayed microseconds.
-                "time" => numeric(&mut order, &|i| {
-                    duration(&rows[i as usize]).map(|d| (d / 1000) as i64)
-                }),
-                "status" => numeric(&mut order, &|i| views[i as usize].status.as_i64()),
-                "size" => numeric(&mut order, &|i| rows[i as usize].transfer),
-                "start" => numeric(&mut order, &|i| {
-                    i64::try_from(rows[i as usize].first_ns).ok()
-                }),
-                sort => {
-                    let value = |i: u32| -> Option<&str> {
-                        let (row, view) = (&rows[i as usize], &views[i as usize]);
-                        match sort {
-                            "name" => Some(&view.name),
-                            "type" => Some(type_label(&row.resource)),
-                            "initiator" => initiator_label(row),
-                            "protocol" => row.protocol.as_deref(),
-                            _ => Some(&view.method),
-                        }
-                    };
-                    order.sort_by(|&a, &b| match (value(a), value(b)) {
-                        (Some(x), Some(y)) => direction(compare_text(x, y)).then(a.cmp(&b)),
-                        (None, None) => a.cmp(&b),
-                        (None, _) => Ordering::Greater,
-                        (_, None) => Ordering::Less,
-                    });
-                }
-            }
-            let selection = Selection {
-                order,
-                hidden_internal,
-                transferred,
-                resources,
-                timeline,
-            };
-            self.order = Some((key, self.generation, selection));
+            .is_none_or(|old| old.epoch != position.epoch || old.indexed_to != position.indexed_to);
+        self.position = Some(position);
+        if moved {
+            self.generation += 1;
+            let db = self.db();
+            let total: i64 = db
+                .query_row(
+                    "SELECT COALESCE(MAX(ordinal) + 1, 0) FROM rows",
+                    [],
+                    |row| row.get(0),
+                )
+                .sql()?;
+            let malformed: i64 = db
+                .query_row("SELECT malformed FROM counts WHERE id = 0", [], |row| {
+                    row.get(0)
+                })
+                .sql()?;
+            (self.total, self.malformed) = (total as usize, malformed as u64);
         }
-        &self.order.as_ref().unwrap().2
+        Ok(())
     }
 
-    fn row_document(&self, ordinal: usize) -> Value {
-        let (row, view) = (
-            &self.state.as_ref().unwrap().rows[ordinal],
-            &self.views[ordinal],
-        );
+    fn read(&mut self) -> Result<()> {
+        self.refresh(Instant::now() + READ_FOLD)
+    }
+
+    fn select(&mut self, query: &RequestQuery, through: usize) -> Result<Summary> {
+        let key = query.order_key(through);
+        if let Some((cached, generation, summary)) = &self.selection
+            && *cached == key
+            && *generation == self.generation
+        {
+            return Ok(summary.clone());
+        }
+        self.selection = None;
+        let db = self.db();
+        let condition = matching(query, through);
+        let hidden = if query.hide_internal {
+            "r.internal = 1"
+        } else {
+            "0"
+        };
+        // ?1 and ?2 come first in each statement, so the condition's own
+        // parameters number from 3.
+        let mut values = vec![
+            SqlValue::Integer(clamp(query.to)),
+            SqlValue::Integer(clamp(query.from)),
+        ];
+        values.extend(condition.values.iter().cloned());
+        let in_range = "(r.first_ns <= ?1 AND r.last_ns >= ?2)";
+        let (hidden_internal, first, last, transferred, resources) = db
+            .query_row(
+                &format!(
+                    "SELECT COALESCE(SUM({hidden} AND {in_range}), 0),
+                        MIN(CASE WHEN NOT ({hidden}) THEN r.first_ns END),
+                        MAX(CASE WHEN NOT ({hidden}) THEN r.last_ns END),
+                        COALESCE(SUM(CASE WHEN NOT ({hidden}) AND {in_range} THEN COALESCE(r.transfer, 0) END), 0),
+                        COALESCE(SUM(CASE WHEN NOT ({hidden}) AND {in_range} THEN COALESCE(r.decoded, 0) END), 0)
+                     FROM rows r WHERE {}",
+                    condition.sql
+                ),
+                params_from_iter(&values),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .sql()?;
+        let timeline = match first.zip(last) {
+            Some((first, last)) => {
+                let mut buckets = vec![0u64; TIMELINE_BUCKETS];
+                let mut bounds = vec![SqlValue::Integer(first), SqlValue::Integer(last)];
+                bounds.extend(condition.values.iter().cloned());
+                let mut statement = db
+                    .prepare(&format!(
+                        "SELECT reb_bucket(r.first_ns, ?1, ?2), COUNT(*) FROM rows r
+                         WHERE {} AND NOT ({hidden}) GROUP BY 1",
+                        condition.sql
+                    ))
+                    .sql()?;
+                let counts = collect(statement.query_map(params_from_iter(&bounds), |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                }))?;
+                for (bucket, count) in counts {
+                    buckets[bucket as usize] = count as u64;
+                }
+                Some((first as u64, last as u64, buckets))
+            }
+            None => None,
+        };
+        db.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS selection(position INTEGER PRIMARY KEY, ordinal INTEGER NOT NULL);
+             DELETE FROM temp.selection;",
+        )
+        .sql()?;
+        // Positions number from 1 in this order: the table starts empty.
+        let matching = db
+            .execute(
+                &format!(
+                    "INSERT INTO temp.selection(ordinal) SELECT r.ordinal FROM rows r
+                     WHERE {in_range} AND {} AND NOT ({hidden}) ORDER BY {}",
+                    condition.sql,
+                    order(query.sort, query.descending)
+                ),
+                params_from_iter(&values),
+            )
+            .sql()?;
+        let summary = Summary {
+            matching,
+            hidden_internal: hidden_internal as u64,
+            transferred: transferred as u64,
+            resources: resources as u64,
+            timeline,
+        };
+        self.selection = Some((key, self.generation, summary.clone()));
+        Ok(summary)
+    }
+
+    fn row_document(&self, ordinal: i64) -> Result<Value> {
+        let db = self.db();
+        let row = load(db, ordinal)?;
+        let view = view(&row);
+        let tabs = row_tabs(db, &row)?;
         let member = |member: &Member| {
             json!({"session_id": member.session, "process_id": member.process,
             "request_id": member.request, "records": member.records})
+        };
+        let set: Option<(i64, i64)> = match &row.tab_set {
+            Some(key) => db
+                .prepare_cached(
+                    "SELECT total, (SELECT COUNT(*) FROM set_tabs s WHERE s.set_key = t.key)
+                     FROM tab_sets t WHERE t.key = ?1",
+                )
+                .sql()?
+                .query_row([key], |row| Ok((row.get(0)?, row.get(1)?)))
+                .optional()
+                .sql()?,
+            None => None,
         };
         let mut document = json!({
             "id": row.id, "ordinal": ordinal, "method": row.method, "path": view.path,
             "target_kind": view.target_kind, "host": view.host, "target": view.target,
             "url_truncated": view.url_truncated, "target_length": view.target_length,
             "target_malformed": view.target_malformed, "status": view.status,
-            "failed": outcome(row).0, "interrupted": outcome(row).1,
-            "time": duration(row).map_or_else(|| "pending".to_owned(), milliseconds),
-            "duration_ns": duration(row).map(|d| d.to_string()),
+            "failed": outcome(&row).0, "interrupted": outcome(&row).1,
+            "time": duration(&row).map_or_else(|| "pending".to_owned(), milliseconds),
+            "duration_ns": duration(&row).map(|d| d.to_string()),
             "type": row.resource, "tab_id": row.tab.to_string(), "operation": row.operation,
-            "tab_ids": row_tabs(row, &self.state.as_ref().unwrap().tab_sets).iter().map(u64::to_string).collect::<Vec<_>>(),
+            "tab_ids": tabs.iter().map(u64::to_string).collect::<Vec<_>>(),
             "tab_link": (row.tab_link.0 != 0).then(|| {
-                let set = row.tab_set.as_ref().and_then(|key| self.state.as_ref().unwrap().tab_sets.get(key));
                 json!({"kind": row.tab_link.0, "count": row.tab_link.1,
-                    "complete": set.is_some_and(|(total, tabs)| tabs.len() == *total as usize)})
+                    "complete": set.is_some_and(|(total, tabs)| tabs == total)})
             }),
             "first_time_ns": row.first_ns.to_string(), "last_time_ns": row.last_ns.to_string(),
             "domain": view.domain,
-            "root": Self::root(row).map(|root| json!({"session_id": root.session, "process_id": root.process,
+            "root": root(&row).map(|root| json!({"session_id": root.session, "process_id": root.process,
                 "sequence_number": root.sequence, "request_id": root.request})),
             "members": row.members.iter().map(member).collect::<Vec<_>>(),
-            "members_limited": row.members_limited,
             "first_offset": row.first_offset.to_string(), "end_offset": row.end_offset.to_string(),
             "records": row.records,
             "transfer_size": row.transfer, "resource_size": row.decoded,
             "from_cache": row.cache, "from_service_worker": row.worker_served,
             "mime_type": row.mime, "protocol": row.protocol,
             "response_time_ns": row.response_ns.map(|time| time.to_string()),
-            "error_code": outcome(row).3, "loader_observed": row.loader, "initiator": initiator(row),
+            "error_code": outcome(&row).3, "loader_observed": row.loader, "initiator": initiator(&row),
             "main_frame": row.main_frame, "browser_internal": view.internal,
         });
         document["extension_id"] = json!(row.extension);
@@ -2503,23 +2926,24 @@ impl RequestIndex {
         document["static_data"] = json!(row.static_data);
         document["race_network"] = json!(row.worker_answer.is_some() && row.browser);
         document["end_lost"] = json!(row.end_lost);
-        document["response_body"] = body_document(row);
+        document["response_body"] = body_document(&row);
         // The reused response's own row, when this session recorded it.
-        document["memory_cache_source"] = json!(row.memory_cache_source.as_ref().map(|id| {
-            let state = self.state.as_ref().unwrap();
-            let source = state.by_id.get(id).map(|&ordinal| &state.rows[ordinal as usize]);
-            let reason = match source {
-                None => Some("not_recorded"),
-                Some(source) => source_mismatch(row, source),
-            };
-            let shown = source.filter(|_| reason.is_none());
-            json!({"id": id, "found": shown.is_some(), "reason": reason,
-                "response_body": shown.map(body_document),
-                "method": shown.map(|row| row.method.clone()), "path": shown.map(|row| row.path.clone()),
-                "type": shown.map(|row| row.resource.clone()), "mime_type": shown.and_then(|row| row.mime.clone())})
-        }));
-        let owned = row.extension.is_some()
-            || !row_tabs(row, &self.state.as_ref().unwrap().tab_sets).is_empty();
+        document["memory_cache_source"] = match &row.memory_cache_source {
+            None => Value::Null,
+            Some(id) => {
+                let source = load_id(db, id)?;
+                let reason = match &source {
+                    None => Some("not_recorded"),
+                    Some(source) => source_mismatch(&row, source),
+                };
+                let shown = source.as_ref().filter(|_| reason.is_none());
+                json!({"id": id, "found": shown.is_some(), "reason": reason,
+                    "response_body": shown.map(body_document),
+                    "method": shown.map(|row| row.method.clone()), "path": shown.map(|row| row.path.clone()),
+                    "type": shown.map(|row| row.resource.clone()), "mime_type": shown.and_then(|row| row.mime.clone())})
+            }
+        };
+        let owned = row.extension.is_some() || !tabs.is_empty();
         document["tab_reason"] = json!((!owned).then(|| {
             crate::request_tabs::unresolved_reason(
                 row.renderer_start
@@ -2528,53 +2952,92 @@ impl RequestIndex {
             )
         }));
         // Raw; the get_requests handler replaces it with the frame's resolution.
-        document["initiator_frame"] = json!(row.stack_frame.as_ref().map(|(session, process, isolate, frame)| {
-            let script = u32::from_le_bytes(frame[4..8].try_into().unwrap());
-            json!({"session_id": session, "process_id": process, "isolate_key": isolate.to_string(),
-                "thread": row.stack_thread,
-                "frame": hex::encode(frame),
-                "identity": self.state.as_ref().unwrap().identities.get(&format!("{session}:{process}:{isolate}:{script}"))})
-        }));
-        document
+        document["initiator_frame"] = match &row.stack_frame {
+            None => Value::Null,
+            Some((session, process, isolate, frame)) => {
+                let script = u32::from_le_bytes(frame[4..8].try_into().unwrap());
+                let identity: Option<String> = db
+                    .prepare_cached(
+                        "SELECT payload FROM identities
+                         WHERE session = ?1 AND process = ?2 AND isolate = ?3 AND script = ?4",
+                    )
+                    .sql()?
+                    .query_row(
+                        params![session, process, index_db::key(*isolate), script],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .sql()?;
+                json!({"session_id": session, "process_id": process, "isolate_key": isolate.to_string(),
+                    "thread": row.stack_thread, "frame": hex::encode(frame), "identity": identity})
+            }
+        };
+        Ok(document)
     }
 
-    fn facets(&self, query: &RequestQuery, through: usize) -> Value {
-        let state = self.state.as_ref().unwrap();
-        let (rows, sets) = (&state.rows, &state.tab_sets);
-        // Tab ids, `extension:<id>` and `0` for rows with no owner.
-        let mut tabs: BTreeMap<String, (u64, u64, Vec<String>, bool)> = BTreeMap::new();
-        let mut domains: BTreeMap<&str, u64> = BTreeMap::new();
-        for (row, view) in rows.iter().zip(&self.views).take(through) {
-            let mut own = row_tabs(row, sets)
-                .iter()
-                .map(u64::to_string)
-                .collect::<Vec<_>>();
-            if let Some(id) = &row.extension {
-                own.push(format!("extension:{id}"));
+    /// Owners and domains of the first `through` rows, and how many failed.
+    fn facets(&mut self, query: &RequestQuery, through: usize) -> Result<(Value, i64)> {
+        let key = format!("{through}:{:?}", query.tab);
+        if let Some((cached, generation, facets)) = &self.facets
+            && *cached == key
+            && *generation == self.generation
+        {
+            return Ok(facets.clone());
+        }
+        let db = self.db();
+        let limit = i64::try_from(through).unwrap_or(i64::MAX);
+        // Tab ids, `extension:<id>` and `0` for rows with no owner, each with
+        // its first TAB_DOMAINS domains in capture order and one more to tell
+        // whether there are others.
+        let mut statement = db
+            .prepare_cached(
+                "WITH owned(owner, ordinal, first_ns, domain) AS (
+                    SELECT CAST(r.tab AS TEXT), r.ordinal, r.first_ns, r.domain FROM rows r
+                     WHERE r.ordinal < ?1 AND r.tab != 0
+                    UNION
+                    SELECT CAST(s.tab AS TEXT), r.ordinal, r.first_ns, r.domain
+                      FROM rows r JOIN set_tabs s ON s.set_key = r.tab_set WHERE r.ordinal < ?1
+                    UNION ALL
+                    SELECT 'extension:' || r.extension, r.ordinal, r.first_ns, r.domain FROM rows r
+                     WHERE r.ordinal < ?1 AND r.extension IS NOT NULL
+                    UNION ALL
+                    SELECT '0', r.ordinal, r.first_ns, r.domain FROM rows r
+                     WHERE r.ordinal < ?1 AND r.tab = 0 AND r.extension IS NULL
+                       AND NOT EXISTS (SELECT 1 FROM set_tabs s WHERE s.set_key = r.tab_set))
+                 SELECT owner, domain, place, count, first FROM (
+                    SELECT owner, domain,
+                        ROW_NUMBER() OVER (PARTITION BY owner ORDER BY MIN(ordinal)) AS place,
+                        SUM(COUNT(*)) OVER (PARTITION BY owner) AS count,
+                        MIN(MIN(first_ns)) OVER (PARTITION BY owner) AS first
+                    FROM owned GROUP BY owner, domain)
+                 WHERE place <= ?2 ORDER BY owner, place",
+            )
+            .sql()?;
+        let listed = collect(
+            statement.query_map(params![limit, TAB_DOMAINS as i64 + 1], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            }),
+        )?;
+        drop(statement);
+        let mut tabs: Vec<(String, i64, i64, Vec<String>, bool)> = Vec::new();
+        for (owner, domain, place, count, first) in listed {
+            if tabs.last().is_none_or(|tab| tab.0 != owner) {
+                tabs.push((owner, count, first, Vec::new(), false));
             }
-            if own.is_empty() {
-                own.push("0".to_owned());
-            }
-            for id in own {
-                let tab = tabs
-                    .entry(id)
-                    .or_insert((0, row.first_ns, Vec::new(), false));
-                tab.0 += 1;
-                tab.1 = tab.1.min(row.first_ns);
-                if !tab.2.contains(&view.domain) {
-                    if tab.2.len() < TAB_DOMAINS {
-                        tab.2.push(view.domain.clone())
-                    } else {
-                        tab.3 = true
-                    }
-                }
-            }
-            if query.tab.as_ref().is_none_or(|tab| in_tab(row, sets, tab)) {
-                *domains.entry(&view.domain).or_default() += 1;
+            let tab = tabs.last_mut().unwrap();
+            if place as usize <= TAB_DOMAINS {
+                tab.3.push(domain);
+            } else {
+                tab.4 = true;
             }
         }
-        let mut tabs = tabs.into_iter().collect::<Vec<_>>();
-        tabs.sort_by_key(|(tab, (_, first, _, _))| {
+        tabs.sort_by_key(|(tab, _, first, _, _)| {
             (
                 tab == "0",
                 *first,
@@ -2582,43 +3045,58 @@ impl RequestIndex {
                 tab.clone(),
             )
         });
-        let truncated = domains.len() > MAX_DOMAINS;
-        let selected = query.domain.as_deref();
-        let listed = domains
-            .iter()
-            .enumerate()
-            .filter(|(index, (domain, _))| *index < MAX_DOMAINS || selected == Some(**domain))
-            .map(|(_, (domain, count))| json!({"domain": domain, "count": count}))
-            .collect::<Vec<_>>();
-        json!({
-            "tabs": tabs.iter().map(|(tab, (count, first, domains, more))| json!({"tab_id": tab,
-                "count": count, "first_time_ns": first.to_string(), "domains": domains, "domains_truncated": more}))
-                .collect::<Vec<_>>(),
-            "domains": listed,
-            "domains_truncated": truncated,
-        })
+        let mut scope = Condition {
+            sql: "r.ordinal < ?".into(),
+            values: vec![SqlValue::Integer(limit)],
+        };
+        if let Some(tab) = &query.tab {
+            scope.tab(tab);
+        }
+        let mut statement = db
+            .prepare(&format!(
+                "SELECT r.domain, COUNT(*) FROM rows r WHERE {} GROUP BY r.domain ORDER BY r.domain",
+                scope.sql
+            ))
+            .sql()?;
+        let domains = collect(statement.query_map(params_from_iter(&scope.values), |row| {
+            Ok(json!({"domain": row.get::<_, String>(0)?, "count": row.get::<_, i64>(1)?}))
+        }))?;
+        drop(statement);
+        let failed: i64 = db
+            .prepare_cached("SELECT COUNT(*) FROM rows WHERE ordinal < ?1 AND failed = 1")
+            .sql()?
+            .query_row([limit], |row| row.get(0))
+            .sql()?;
+        let facets = (
+            json!({
+                "tabs": tabs.iter().map(|(tab, count, first, domains, more)| json!({"tab_id": tab,
+                    "count": count, "first_time_ns": first.to_string(), "domains": domains,
+                    "domains_truncated": more}))
+                    .collect::<Vec<_>>(),
+                "domains": domains,
+            }),
+            failed,
+        );
+        self.facets = Some((key, self.generation, facets.clone()));
+        Ok(facets)
     }
 
-    /// Whether the index has folded every complete record in the store.
-    fn caught_up(&self, indexed_to: u64) -> bool {
-        self.store_end.saturating_sub(indexed_to) <= RECORD_BYTES as u64
+    /// Whether the index has folded every complete record in the store, as of
+    /// the last refresh. A route uses this to tell a transient "not named
+    /// yet" from a final one.
+    pub fn is_caught_up(&self) -> bool {
+        self.position
+            .as_ref()
+            .is_some_and(|position| position.caught_up(RECORD_BYTES as u64))
     }
 
-    /// The store identity the index rows belong to and the byte offset folded
+    /// The store epoch the index rows belong to and the byte offset folded
     /// up to, as of the last refresh: what a cached answer derived from the
     /// index depends on.
     pub fn position(&self) -> Option<(String, u64)> {
-        self.state
+        self.position
             .as_ref()
-            .map(|state| (state.epoch.clone(), state.indexed_to))
-    }
-
-    /// Whether the index covers the store, as of the last refresh. A route uses
-    /// this to tell a transient "not named yet" from a final one.
-    pub fn is_caught_up(&self) -> bool {
-        self.state
-            .as_ref()
-            .is_some_and(|state| self.caught_up(state.indexed_to))
+            .map(|position| (position.epoch.clone(), position.indexed_to))
     }
 
     /// The bytes of the rows that have this member, across rows when several do.
@@ -2631,47 +3109,52 @@ impl RequestIndex {
         process: Option<u32>,
         request: &str,
     ) -> Result<Option<RecordRange>> {
-        self.refresh()?;
-        let state = self.state.as_ref().expect("index state");
-        let names = |row: &Row| {
-            row.members.iter().any(|member| {
-                member.request == request
-                    && session.is_none_or(|session| member.session == session)
-                    && process.is_none_or(|process| member.process == process)
-            })
-        };
+        self.read()?;
+        let db = self.db();
+        let named = "SELECT MIN(r.first_offset), MAX(r.end_offset) FROM rows r
+            WHERE r.ordinal IN (SELECT m.ordinal FROM members m WHERE m.request = ?1
+                AND (?2 IS NULL OR m.session = ?2) AND (?3 IS NULL OR m.process = ?3))";
         // A row's browser identity is its request_started record's.
-        let browser_row = |row: &&Row| {
-            names(row)
-                && process.is_none()
-                && row.loader
-                && row.roots[0]
-                    .as_ref()
-                    .is_none_or(|root| root.request == request)
+        let browser = format!(
+            "{named} AND ?3 IS NULL AND r.loader = 1
+                AND (r.start_request IS NULL OR r.start_request = ?1)"
+        );
+        let range = |sql: &str| -> Result<Option<(i64, i64)>> {
+            let (first, end): (Option<i64>, Option<i64>) = db
+                .prepare_cached(sql)
+                .sql()?
+                .query_row(params![request, session, process], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .sql()?;
+            Ok(first.zip(end))
         };
-        let chosen: Vec<&Row> = if state.rows.iter().any(|row| browser_row(&row)) {
-            state.rows.iter().filter(browser_row).collect()
-        } else {
-            state.rows.iter().filter(|row| names(row)).collect()
+        let found = match range(&browser)? {
+            Some(found) => Some(found),
+            None => range(named)?,
         };
-        let range = chosen.iter().fold(None, |range: Option<(u64, u64)>, row| {
-            let (first, end) = range.unwrap_or((row.first_offset, row.end_offset));
-            Some((first.min(row.first_offset), end.max(row.end_offset)))
-        });
-        let indexed = self.caught_up(state.indexed_to);
-        Ok(range.map(|(first, end)| RecordRange {
-            first,
-            end,
+        let indexed = self.is_caught_up();
+        Ok(found.map(|(first, end)| RecordRange {
+            first: first as u64,
+            end: end as u64,
             indexed,
         }))
     }
 
     /// Identifies how far the index has reached while it is behind the store,
     /// so a validator on a detail answer changes as its coverage can change.
+    /// The record boundary the index has folded to and the store's length,
+    /// as of the last refresh.
+    pub fn extent(&self) -> (u64, u64) {
+        self.position
+            .as_ref()
+            .map_or((0, 0), |position| (position.indexed_to, position.file_end))
+    }
+
     pub fn progress_marker(&self) -> String {
-        match &self.state {
-            Some(state) if !self.caught_up(state.indexed_to) => state.indexed_to.to_string(),
-            Some(_) => "caught-up".to_owned(),
+        match &self.position {
+            Some(_) if self.is_caught_up() => "caught-up".to_owned(),
+            Some(position) => position.indexed_to.to_string(),
             None => "unopened".to_owned(),
         }
     }
@@ -2679,101 +3162,149 @@ impl RequestIndex {
     /// `script_identity` payloads of one renderer by isolate key and script
     /// ID, and whether a script missing from them is missing from the store.
     pub fn identities(&mut self, session: &str, process: u32) -> Result<(IdentityPayloads, bool)> {
-        self.refresh()?;
-        let state = self.state.as_ref().expect("index state");
-        let prefix = format!("{session}:{process}:");
-        let identities = state
-            .identities
-            .iter()
-            .filter_map(|(key, payload)| {
-                let (isolate, script) = key.strip_prefix(&prefix)?.split_once(':')?;
-                Some((
-                    (isolate.parse().ok()?, script.parse().ok()?),
-                    payload.clone(),
-                ))
-            })
-            .collect();
-        let exhaustive =
-            self.caught_up(state.indexed_to) && state.identities.len() < MAX_IDENTITIES;
-        Ok((identities, exhaustive))
+        self.read()?;
+        let mut statement = self
+            .db()
+            .prepare_cached(
+                "SELECT isolate, script, payload FROM identities WHERE session = ?1 AND process = ?2",
+            )
+            .sql()?;
+        let identities = collect(statement.query_map(params![session, process], |row| {
+            Ok((
+                (row.get::<_, i64>(0)? as u64, row.get::<_, u32>(1)?),
+                row.get::<_, String>(2)?,
+            ))
+        }))?;
+        Ok((identities.into_iter().collect(), self.is_caught_up()))
     }
 
     /// Byte ranges of a session's `script_cookie` records, oldest first, and
     /// whether they are every one the store holds.
     pub fn script_cookies(&mut self, session: &str) -> Result<(Vec<RecordRange>, bool)> {
-        self.refresh()?;
-        let state = self.state.as_ref().expect("index state");
-        let ranges = state
-            .script_cookies
-            .get(session)
-            .map(|ranges| {
-                ranges
-                    .iter()
-                    .map(|&(first, end)| RecordRange {
-                        first,
-                        end,
-                        indexed: true,
-                    })
-                    .collect()
+        self.session_ranges(
+            "SELECT start, end FROM script_cookies WHERE session = ?1 ORDER BY start",
+            session,
+        )
+    }
+
+    /// Byte ranges of the `cookie_list` records of a session's indexed
+    /// requests, oldest first, and whether they are every one the store holds.
+    pub fn cookie_lists(&mut self, session: &str) -> Result<(Vec<RecordRange>, bool)> {
+        self.session_ranges(
+            "SELECT start, end FROM cookie_lists WHERE session = ?1 ORDER BY start",
+            session,
+        )
+    }
+
+    fn session_ranges(&mut self, query: &str, session: &str) -> Result<(Vec<RecordRange>, bool)> {
+        self.read()?;
+        let mut statement = self.db().prepare_cached(query).sql()?;
+        let ranges = collect(statement.query_map([session], |row| {
+            Ok(RecordRange {
+                first: row.get::<_, i64>(0)? as u64,
+                end: row.get::<_, i64>(1)? as u64,
+                indexed: true,
             })
-            .unwrap_or_default();
-        let exhaustive = self.caught_up(state.indexed_to) && state.script_cookies_unindexed == 0;
-        Ok((ranges, exhaustive))
+        }))?;
+        Ok((ranges, self.is_caught_up()))
     }
 
     /// Every row's body case, counted for `get_session_summary`, and whether
     /// the index has caught up with the store.
     pub fn response_bodies(&mut self) -> Result<Value> {
-        self.refresh()?;
-        let state = self.state.as_ref().expect("index state");
-        let mut cases = BTreeMap::<&str, u64>::new();
-        let mut earlier = BTreeMap::<&str, u64>::new();
-        let mut withheld = 0u64;
-        for row in &state.rows {
-            let (case, body) = body_case(row);
-            *cases.entry(case).or_default() += 1;
-            withheld += u64::from(
-                body.and_then(|body| body.record.as_ref())
-                    .is_some_and(|record| record.flags & 0x80 != 0),
-            );
-            // A refused or malformed newest record whose row names an
-            // earlier snapshot, as body_document's earlier_snapshot does.
-            if body.is_some_and(|body| {
-                body.snapshot.is_some()
-                    && body
-                        .record
-                        .as_ref()
-                        .is_none_or(|record| record.artifact == "0")
-            }) {
-                *earlier.entry(case).or_default() += 1;
+        self.read()?;
+        let mut statement = self
+            .db()
+            .prepare_cached(
+                "SELECT body_case, COUNT(*), SUM(body_withheld), SUM(body_earlier)
+                 FROM rows GROUP BY body_case ORDER BY body_case",
+            )
+            .sql()?;
+        let counted = collect(statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        }))?;
+        let (mut cases, mut earlier, mut withheld) =
+            (serde_json::Map::new(), serde_json::Map::new(), 0);
+        for (case, count, held, snapshots) in counted {
+            withheld += held;
+            if snapshots > 0 {
+                earlier.insert(case.clone(), json!(snapshots.to_string()));
             }
+            cases.insert(case, json!(count.to_string()));
         }
-        let counts = |counts: BTreeMap<&str, u64>| {
-            counts
-                .into_iter()
-                .map(|(case, count)| (case.to_owned(), json!(count.to_string())))
-                .collect::<serde_json::Map<_, _>>()
-        };
         Ok(json!({
-            "complete": self.caught_up(state.indexed_to),
-            "requests": state.rows.len().to_string(),
-            "unindexed_records": state.unindexed.to_string(),
+            "complete": self.is_caught_up(),
+            "requests": self.total.to_string(),
             "snapshots_withheld": withheld.to_string(),
-            "cases": counts(cases),
-            "earlier_snapshots": counts(earlier),
+            "cases": cases,
+            "earlier_snapshots": earlier,
         }))
     }
 
+    /// Every row `query` selects, in its order with no page bound, as the
+    /// ordinals an export reads in batches; and the index state they are from.
+    pub fn export_rows(&mut self, query: &RequestQuery) -> Result<(Vec<i64>, Value)> {
+        self.read()?;
+        let position = self.position.clone().expect("a refreshed index");
+        let through = query.through.unwrap_or(self.total).min(self.total);
+        let ordinals = if query.rows.is_empty() {
+            self.select(query, through)?;
+            collect(
+                self.db()
+                    .prepare_cached("SELECT ordinal FROM temp.selection ORDER BY position")
+                    .sql()?
+                    .query_map([], |row| row.get::<_, i64>(0)),
+            )?
+        } else {
+            let mut statement = self
+                .db()
+                .prepare_cached("SELECT ordinal FROM rows WHERE id = ?1")
+                .sql()?;
+            let mut ordinals = Vec::with_capacity(query.rows.len());
+            for id in &query.rows {
+                let ordinal: Option<i64> = statement
+                    .query_row([id], |row| row.get(0))
+                    .optional()
+                    .sql()?;
+                ordinals.push(
+                    ordinal
+                        .ok_or_else(|| Error::new(404, format!("No request row has ID {id}")))?,
+                );
+            }
+            ordinals
+        };
+        let index = json!({
+            "epoch": position.epoch, "indexed_end": position.indexed_to.to_string(),
+            "store_end": position.file_end.to_string(), "complete": self.is_caught_up(),
+            "through": through,
+        });
+        Ok((ordinals, index))
+    }
+    /// The `get_requests` documents of these rows, read as they are now.
+    pub fn export_documents(&mut self, ordinals: &[i64]) -> Result<Vec<Value>> {
+        ordinals
+            .iter()
+            .map(|ordinal| self.row_document(*ordinal))
+            .collect()
+    }
     pub fn respond(&mut self, query: &RequestQuery, etag: Option<&str>) -> Result<Answer> {
-        self.refresh()?;
-        let store_end = self.store_end;
-        let state = self.state.as_ref().expect("index state");
+        self.read()?;
+        let position = self.position.clone().expect("a refreshed index");
         let tag = format!(
             "\"{}\"",
             digest(
                 format!(
-                    "{}:{}:{}:{store_end}:{}",
-                    state.epoch, self.generation, state.indexed_to, query.raw
+                    "{}:{}:{}:{}:{}",
+                    position.epoch,
+                    self.generation,
+                    position.indexed_to,
+                    position.file_end,
+                    query.raw
                 )
                 .as_bytes()
             )
@@ -2781,36 +3312,43 @@ impl RequestIndex {
         if etag == Some(tag.as_str()) {
             return Ok(Answer::Unchanged(tag));
         }
-        let total = state.rows.len();
+        let total = self.total;
         let through = query.through.unwrap_or(total).min(total);
-        let failed = (0..through).filter(|&i| outcome(&state.rows[i]).0).count();
         let index = json!({
-            "epoch": state.epoch, "indexed_end": state.indexed_to.to_string(), "store_end": store_end.to_string(),
-            "complete": self.caught_up(state.indexed_to),
-            "malformed_records": state.malformed.to_string(), "unindexed_records": state.unindexed.to_string(),
-            "request_limit": MAX_REQUESTS, "reopened": self.reopened,
-            "persisted": self.persisted_at.is_some() && self.persist_error.is_none(), "persist_error": self.persist_error,
+            "epoch": position.epoch, "indexed_end": position.indexed_to.to_string(),
+            "store_end": position.file_end.to_string(), "complete": self.is_caught_up(),
+            "malformed_records": self.malformed.to_string(), "reopened": position.reopened,
+            "persisted": self.index.temporary_reason().is_none(),
+            "persist_error": self.index.temporary_reason(),
         });
-        let facets = self.facets(query, through);
-        let since = query.since;
-        let selection = self.select(query, through).clone();
-        let order = &selection.order;
-        let page = order
-            .iter()
-            .skip(query.offset)
-            .take(query.limit)
-            .map(|&i| self.row_document(i as usize))
-            .collect::<Vec<_>>();
-        let rows = &self.state.as_ref().unwrap().rows;
+        let (facets, failed) = self.facets(query, through)?;
+        let summary = self.select(query, through)?;
+        let db = self.db();
+        let clamped = |value: usize| i64::try_from(value).unwrap_or(i64::MAX);
+        let ordinals = collect(
+            db.prepare_cached(
+                "SELECT ordinal FROM temp.selection WHERE position > ?1 ORDER BY position LIMIT ?2",
+            )
+            .sql()?
+            .query_map(
+                params![clamped(query.offset), clamped(query.limit)],
+                |row| row.get::<_, i64>(0),
+            ),
+        )?;
+        let page = ordinals
+            .into_iter()
+            .map(|ordinal| self.row_document(ordinal))
+            .collect::<Result<Vec<_>>>()?;
+        let matching = summary.matching;
         let mut document = json!({
-            "format": FORMAT, "total": total, "matching": order.len(), "through": through,
+            "format": FORMAT, "total": total, "matching": matching, "through": through,
             "offset": query.offset, "limit": query.limit, "returned": page.len(),
-            "next_offset": (query.offset + page.len() < order.len()).then_some(query.offset + page.len()),
+            "next_offset": (query.offset.saturating_add(page.len()) < matching).then_some(query.offset + page.len()),
             "previous_offset": (query.offset > 0).then(|| query.offset.saturating_sub(query.limit)),
             "failed": failed, "facets": facets, "index": index,
-            "sizes": {"transferred": selection.transferred, "resources": selection.resources},
-            "hidden_internal": selection.hidden_internal,
-            "timeline": match &selection.timeline {
+            "sizes": {"transferred": summary.transferred, "resources": summary.resources},
+            "hidden_internal": summary.hidden_internal,
+            "timeline": match &summary.timeline {
                 Some((first, last, buckets)) => json!({"first_time_ns": first.to_string(),
                     "last_time_ns": last.to_string(), "buckets": buckets}),
                 None => json!({"first_time_ns": null, "last_time_ns": null, "buckets": vec![0; TIMELINE_BUCKETS]}),
@@ -2828,16 +3366,28 @@ impl RequestIndex {
                 "to_ns": (query.to < u64::MAX).then(|| query.to.to_string())},
             "requests": page,
         });
-        if let Some(since) = since {
-            document["added"] = json!(order.iter().filter(|&&i| i as usize >= since).count());
+        if let Some(since) = query.since {
+            let added: i64 = db
+                .prepare_cached("SELECT COUNT(*) FROM temp.selection WHERE ordinal >= ?1")
+                .sql()?
+                .query_row([clamped(since)], |row| row.get(0))
+                .sql()?;
+            document["added"] = json!(added);
         }
         if !query.locate.is_empty() {
+            let mut statement = db
+                .prepare_cached(
+                    "SELECT s.position - 1 FROM temp.selection s
+                     WHERE s.ordinal = (SELECT ordinal FROM rows WHERE id = ?1)",
+                )
+                .sql()?;
             let mut located = serde_json::Map::new();
             for id in &query.locate {
-                located.insert(
-                    id.clone(),
-                    json!(order.iter().position(|&i| rows[i as usize].id == *id)),
-                );
+                let at: Option<i64> = statement
+                    .query_row([id], |row| row.get(0))
+                    .optional()
+                    .sql()?;
+                located.insert(id.clone(), json!(at));
             }
             document["located"] = Value::Object(located);
         }
@@ -3752,7 +4302,18 @@ mod tests {
     fn write(path: &Path, store: &Store) {
         fs::write(path, store.bytes()).unwrap();
     }
+    /// Indexes the store to its end. A read folds new records for at most
+    /// `READ_FOLD` and answers from what is indexed, so a test that expects
+    /// an answer over the whole store catches up first instead of racing that
+    /// slice on a loaded machine.
+    fn catch_up(index: &mut RequestIndex) {
+        index
+            .refresh(Instant::now() + Duration::from_secs(120))
+            .unwrap();
+        assert!(index.is_caught_up());
+    }
     fn page(index: &mut RequestIndex, raw: &str) -> Value {
+        catch_up(index);
         let query = RequestQuery::parse(&Query::new(raw), raw).unwrap();
         match index.respond(&query, None).unwrap() {
             Answer::Document(document, _) => document,
@@ -4595,6 +5156,7 @@ mod tests {
         );
         write(&path, &store);
         let mut index = RequestIndex::new(&path);
+        catch_up(&mut index);
         let range = index.member_range(Some("1"), None, "5").unwrap().unwrap();
         assert!(
             range.first >= renderer_end,
@@ -4617,12 +5179,16 @@ mod tests {
         let path = root.path().join("events.jsonl");
         let mut store = fixture();
         write(&path, &store);
+        let legacy = root.path().join("events.jsonl.requests-v1");
+        fs::write(&legacy, b"{}").unwrap();
         let mut first = RequestIndex::new(&path);
         let epoch = page(&mut first, "")["index"]["epoch"].clone();
-        let sidecar = root.path().join("events.jsonl.requests-v1");
-        assert!(!sidecar.exists(), "a read never writes the sidecar");
-        first.maintain().unwrap();
-        assert!(sidecar.is_file());
+        let sidecar = root.path().join("events.jsonl.requests-v2");
+        assert!(
+            sidecar.is_file(),
+            "rows commit with the position they describe"
+        );
+        assert!(!legacy.exists(), "the version 1 file is removed");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -4652,7 +5218,7 @@ mod tests {
             (&json!(16), &json!("1"))
         );
         assert_eq!(grown["index"]["epoch"], epoch);
-        first.persist();
+        drop(first);
         let mut reopened = RequestIndex::new(&path);
         let document = page(&mut reopened, "");
         assert_eq!(
@@ -4734,11 +5300,12 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_pages_are_not_modified_and_the_request_limit_is_counted() {
+    fn unchanged_pages_are_not_modified_until_the_store_grows() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("events.jsonl");
         write(&path, &fixture());
         let mut index = RequestIndex::new(&path);
+        catch_up(&mut index);
         let query = RequestQuery::parse(&Query::new(""), "").unwrap();
         let Answer::Document(_, tag) = index.respond(&query, None).unwrap() else {
             panic!("document")
@@ -4752,9 +5319,6 @@ mod tests {
             index.respond(&other, Some(&tag)).unwrap(),
             Answer::Document(..)
         ));
-        let state = index.state.as_mut().unwrap();
-        let first = state.rows[0].clone();
-        state.rows.resize(MAX_REQUESTS, first);
         let mut late = Store {
             events: Vec::new(),
             sequence: 900,
@@ -4763,7 +5327,7 @@ mod tests {
             7,
             999,
             "request_started",
-            b"GET over.example.test",
+            b"GET late.example.test",
             json!({}),
         );
         fs::OpenOptions::new()
@@ -4772,12 +5336,11 @@ mod tests {
             .unwrap()
             .write_all(&late.bytes())
             .unwrap();
-        index.refresh().unwrap();
-        assert_eq!(
-            index.state.as_ref().unwrap().unindexed,
-            1,
-            "a request past the limit is counted"
-        );
+        catch_up(&mut index);
+        let Answer::Document(document, _) = index.respond(&query, Some(&tag)).unwrap() else {
+            panic!("a grown store answers again")
+        };
+        assert_eq!(document["total"], 16);
     }
 
     #[test]
@@ -4791,6 +5354,7 @@ mod tests {
         response_bodies(&mut store);
         write(&path, &store);
         let mut index = RequestIndex::new(&path);
+        catch_up(&mut index);
         let counts = index.response_bodies().unwrap();
         assert_eq!(counts["complete"], true);
         let cases = counts["cases"].as_object().unwrap();

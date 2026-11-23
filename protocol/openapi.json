@@ -16353,7 +16353,7 @@
               "sample_index": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 255
+                "maximum": 2147483646
               },
               "instruction_pointer": {
                 "type": "integer",

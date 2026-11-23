@@ -303,7 +303,7 @@ fn resolve(
     let recipe_sha = hex::encode(&p[96..]);
     if instance == 0
         || invocation == 0
-        || index >= 256
+        || u64::from(index) >= SAMPLE_LIMIT_MAX
         || length == 0
         || length as usize > MAX_SNAPSHOT_BYTES
         || base.checked_add(length as u64).is_none()
@@ -1108,6 +1108,8 @@ mod tests {
             module[k] = json!(v);
         }
         let mut r = recipe(&module["sha256"]);
+        // The widest budget, so the last index it can claim is a sample too.
+        r["sample_limit"] = json!(SAMPLE_LIMIT_MAX);
         r["function_index"] = json!(1);
         r["dispatch_module_offset"] = json!(58);
         r["pc"]["adjustment"] = json!("0");
@@ -1154,6 +1156,7 @@ mod tests {
             "pc-range",
             "snapshot-limit",
             "memory-overflow",
+            "last-sample",
             "sample-limit",
             "digest",
             "signed-adjustment",
@@ -1192,7 +1195,11 @@ mod tests {
                 .collect::<Vec<_>>();
             let accepted = matches!(
                 mode,
-                "default" | "wide-identities" | "legacy-invocation" | "parent-dispatch"
+                "default"
+                    | "wide-identities"
+                    | "last-sample"
+                    | "legacy-invocation"
+                    | "parent-dispatch"
             );
             let rows = collect(
                 root.path(),

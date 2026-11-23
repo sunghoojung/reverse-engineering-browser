@@ -498,6 +498,9 @@ RESPONSE_CAPTURE_BYTES = 16 * 1024 * 1024
 # V8's largest Wasm module (kV8MaxWasmModuleSize); include/reb/wasm_dispatch.hpp
 # kWasmModuleByteOffsetLimit.
 WASM_MODULE_OFFSET_LIMIT = 1 << 30
+# A guest sample's index is below its recipe's limit, a Chromium JSON integer;
+# include/reb/wasm_guest.hpp kWasmGuestSampleIndexLimit.
+WASM_GUEST_SAMPLE_INDEX_LIMIT = (1 << 31) - 1
 # script_identity versions 1 and 2 digest only a source of at most this length.
 SCRIPT_IDENTITY_V2_SOURCE_LIMIT = 16 * 1024 * 1024
 
@@ -1389,7 +1392,7 @@ def validate_event(event: object, line_number: int) -> None:
         else:
             invalid |= (not 0 < int(event["parent_event_id"]) < int(event["sequence_number"])
                         or not 8 <= at(8, 4) < WASM_MODULE_OFFSET_LIMIT or at(16, 4) >= 16777216
-                        or at(20, 4) >= 256 or at(24, 8) == 0 or at(32, 8) == 0
+                        or at(20, 4) >= WASM_GUEST_SAMPLE_INDEX_LIMIT or at(24, 8) == 0 or at(32, 8) == 0
                         or at(56, 8) == 0 or at(56, 8) == int(event["artifact_id"])
                         or not 0 < at(72, 4) <= 65536 or at(40, 8) >= at(72, 4)
                         or at(64, 8) + at(72, 4) > 0xFFFFFFFFFFFFFFFF or not any(payload[96:]))

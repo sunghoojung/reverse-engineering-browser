@@ -12,6 +12,9 @@
       // V8's largest Wasm module (kV8MaxWasmModuleSize) bounds a byte offset in
       // one; include/reb/wasm_dispatch.hpp kWasmModuleByteOffsetLimit.
       const WASM_MODULE_OFFSET_LIMIT = 2 ** 30;
+      // A guest sample's index is below its recipe's limit, a Chromium JSON
+      // integer; include/reb/wasm_guest.hpp kWasmGuestSampleIndexLimit.
+      const WASM_GUEST_SAMPLE_INDEX_LIMIT = 2 ** 31 - 1;
 
       function fingerprintEventsFromEvents(events) {
         return events.filter(event => fingerprintSignalCategories.has(event.category));
@@ -1194,7 +1197,7 @@
         const length = view.getUint32(72,true);
         return isCanonicalInteger(event.parent_event_id,1n,uint64Max) && BigInt(event.parent_event_id) < BigInt(event.sequence_number) &&
           view.getUint32(8,true) >= 8 && view.getUint32(8,true) < WASM_MODULE_OFFSET_LIMIT && view.getUint32(16,true) < 16777216 &&
-          view.getUint32(20,true) < 256 && u64(24) > 0n && u64(32) > 0n &&
+          view.getUint32(20,true) < WASM_GUEST_SAMPLE_INDEX_LIMIT && u64(24) > 0n && u64(32) > 0n &&
           u64(56) > 0n && u64(56) !== BigInt(event.artifact_id) && length > 0 && length <= 65536 &&
           u64(40) < BigInt(length) && u64(64) + BigInt(length) <= uint64Max && bytes.slice(96).some(b => b !== 0) ? {} : null;
       }
@@ -2918,7 +2921,7 @@
           !['i32','i64'].includes(row.pc_value_type) || typeof row.pc_subtract_memory_base !== 'boolean' ||
           !['pc_local_index','memory_index','selector','opcode'].every(k => isSafeIntegerInRange(row[k],0,0xffffffff)) ||
           !isSafeIntegerInRange(row.function_index,0,16777215) || !isSafeIntegerInRange(row.module_byte_offset,8,WASM_MODULE_OFFSET_LIMIT - 1) ||
-          !isSafeIntegerInRange(row.table_count,0,16777215) || !isSafeIntegerInRange(row.sample_index,0,255) ||
+          !isSafeIntegerInRange(row.table_count,0,16777215) || !isSafeIntegerInRange(row.sample_index,0,WASM_GUEST_SAMPLE_INDEX_LIMIT - 1) ||
           row.selected_arm !== Math.min(row.selector,row.table_count) || row.is_default !== (row.selector >= row.table_count) ||
           !isSafeIntegerInRange(row.memory_length,1,65536) || !isSafeIntegerInRange(row.instruction_pointer,0,65535) ||
           row.instruction_pointer_units !== 'byte-offset' || ![1,2,4].includes(row.opcode_width) ||

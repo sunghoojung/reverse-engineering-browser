@@ -43,7 +43,10 @@ All sites share one `sample_limit`, the renderer's 128 tracked activations and
 its 16 document bindings, so no budget is multiplied per site. The recipe
 chooses the limit, any count from 1 to 2,147,483,647: the largest integer
 Chromium's JSON reader keeps exact, and no smaller ceiling applies. Browsers
-before v0.6.0 refused a limit past 256. When the shared limit is reached the
+before v0.6.0 refused a limit past 256. A dispatch's `sample_index` is its
+claim's ordinal in the configuration, so any value below that limit, and the
+broker, backend and readers accept every one; before v0.6.0 they refused an
+index past 255. When the shared limit is reached the
 next sample at any site records `native_guest_sample_limit`, as with one site.
 The browser's session parser refuses a malformed version 2 adapter (too large,
 0 or more than 8 sites, a duplicate or out-of-order site, a per-site or zero

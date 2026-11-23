@@ -618,6 +618,11 @@ class Session final {
               });
           if (same_document != previous.end())
             target.id = same_document->id;
+          // A document that reported before it was listed, such as a child
+          // frame's document-start record, keeps the ID it reported with.
+          else if (const auto reported = documents_.find(frame->GetDocumentToken().value());
+                   reported != documents_.end())
+            target.id = reported->second;
         }
         if (!target.id) {
           if (!next_target_) {

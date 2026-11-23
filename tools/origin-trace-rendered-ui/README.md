@@ -102,16 +102,20 @@ a failure prints them. Fewer than
 through forty scroll steps there and back, and those rows must be consecutive
 messages that cover the viewport with no gap. PageDown must scroll the focused
 transcript through WebKit's own scroll animation, which the layout never
-interrupts. Home is then pressed while a second PageDown still moves, with no
-wait between them, and must reach the first entry; the transcript scrolls to
-its edge itself, because WebKit before bug 330293 aims Home by a distance from
-the position it last knew and would land short by what PageDown had left. A
-try in which PageDown finished first is made again, up to five times. End,
-Command-Up and Command-Down must reach the last line of the 1 MiB message, the
-first entry and the last line again, each handled by the transcript. A
-timed-out wait prints each scroll, `scrollend`, key, scroll request, layout
-write and changed frame that led to it, and how many scroll requests each key
-made. Search
+interrupts, with a step in each of at least three frames. Home is then
+pressed while a second PageDown still moves. The page reports PageDown's
+first step in a script message, and the test presses Home from that report
+with no script call between them, so Home goes down before PageDown's next
+frame however slow the runner is. A try counts when Home followed fewer steps
+than a lone PageDown took, the last of them within a frame. One that does not
+count is made again, up to five times, and the test fails if none counts.
+Home must reach the first entry, handled by the transcript, and stay there
+300 ms later, past the step WebKit's keyboard scroll takes after the
+transcript's write. End, Command-Up and Command-Down must reach the last line
+of the 1 MiB message, the first entry and the last line again, each handled by
+the transcript. A timed-out wait prints each scroll, `scrollend`, key, layout
+write and changed frame that led to it, and for each key the steps before it,
+the frames since the last of them and the writes after it. Search
 must find `rendered message 4242` among rows that are not drawn and draw only
 that match, and Escape must restore every entry. Screenshots
 `console-transcript-{end,middle,start,search}-*` show each state.

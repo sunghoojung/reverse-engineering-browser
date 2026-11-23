@@ -127,6 +127,9 @@
     // settles. placed is the offset the layout last left; pull asks to
     // follow the end because entries arrived or Latest was chosen.
     let placed = 0, laid = 0, scrolling = false, pull = false;
+    // held is the edge Home or End last put the transcript at, -1 for the
+    // start and 1 for the end, while it holds it there, and 0 otherwise.
+    let held = 0, heldSince = 0;
     // Drawn beyond each edge of the viewport, so a scroll step rarely reaches
     // an edge that is not drawn yet.
     const overscan = 800;
@@ -289,16 +292,17 @@
     // A new filter is a new transcript, laid out at its own extent.
     function refilter() {
       detach(from, to); from = to = 0;
-      shown = entries.filter(matches); stale = true; scrolling = false; schedule();
+      shown = entries.filter(matches); stale = true; scrolling = false; held = 0; schedule();
     }
     // Only the reader's own scrolls start or stop following the end. One the
     // layout made can arrive after more entries did, when it no longer looks
     // like the end, so it leaves following as it was.
     // A reader's scroll is over once it has stood still: three frames after
     // a scrollend, or 300 ms where none comes. A scrollend alone does not say
-    // so, since WebKit fires one for an animation that a newer scroll cancels,
-    // such as a PageDown that Home interrupts, and one for the layout's own
-    // write, after the newer scroll has begun. Frames count the stillness,
+    // so, since WebKit fires one after each step of its keyboard scroll, one
+    // for an animation that a newer scroll cancels, such as a PageDown that
+    // PageUp interrupts, and one for the layout's own write, after the newer
+    // scroll has begun. Frames count the stillness,
     // not a timer: a frame dispatches the scrolls that arrived before it runs
     // its callbacks, so a page that was busy never settles under a scroll
     // that is still moving.
@@ -318,7 +322,44 @@
         layout();
       });
     }
+    // Choosing Latest ends any scroll the reader was making.
+    function latest() { follow = pull = true; unread = 0; scrolling = false; held = 0; layout(); updateOutputState(); }
+    // Home, End, Command-Up and Command-Down put the transcript at that edge
+    // in one write, as a jump does, and end any scroll still under way; End
+    // follows new entries again, as Latest does. A write does not stop
+    // WebKit's keyboard scroll at once: it takes one more step on its own
+    // path. So the edge is held: a scroll that no key, wheel, pointer or
+    // touch on the transcript began goes back to it, until the reader does
+    // one of those or the edge has held for 300 ms. A scroll animated to the
+    // edge would not reliably arrive: WebKit before bug 330293 aims Home and
+    // End by a distance from a position an animation may have left, it can
+    // drop a smooth scroll asked for while its keyboard scroll still moves,
+    // and as it fires scrollend after each step, the layout settles a smooth
+    // scroll that pauses for three frames and its write stops it short.
+    function toEdge(toward) {
+      const holding = held;
+      if (toward > 0) latest(); else { follow = scrolling = false; jump = 0; layout(); updateOutputState(); }
+      if (!holding) requestAnimationFrame(function hold(now) {
+        if (!held) return;
+        heldSince ||= now;
+        if (now - heldSince < 300) requestAnimationFrame(hold); else held = 0;
+      });
+      held = toward; heldSince = 0;
+    }
+    function edge(event) {
+      if (event.altKey || event.ctrlKey || event.shiftKey) return 0;
+      if (event.metaKey) return event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : 0;
+      return event.key === 'Home' ? -1 : event.key === 'End' ? 1 : 0;
+    }
+    controls.scroll.addEventListener('keydown', event => {
+      held = 0;
+      const toward = edge(event);
+      if (!toward || event.defaultPrevented || event.target.closest('input, textarea, select, [contenteditable]')) return;
+      event.preventDefault(); toEdge(toward);
+    });
+    for (const type of ['wheel', 'pointerdown', 'touchstart']) controls.scroll.addEventListener(type, () => { held = 0; }, {passive: true});
     controls.scroll.addEventListener('scroll', () => {
+      if (held && controls.scroll.scrollTop !== placed) { toEdge(held); return; }
       if (controls.scroll.scrollTop !== placed) {
         follow = atBottom(); if (follow) unread = 0;
         descending = controls.scroll.scrollTop > placed; scrolling = true; ended = false; still = 0;
@@ -327,42 +368,6 @@
       layout(); updateOutputState();
     });
     controls.scroll.addEventListener('scrollend', () => { if (scrolling) ended = true; });
-    // Home, End, Command-Up and Command-Down scroll straight to that edge of
-    // the transcript, as WebKit does after bug 330293. Before it, WebKit aims
-    // them by a distance from the position it last knew, so one pressed while
-    // another scroll still moves, such as PageDown, lands short by what that
-    // scroll had left. That WebKit can also drop a scroll asked for while its
-    // keyboard scroll still moves: it stops PageDown and starts nothing. So
-    // the request is made again once the transcript has stood still for four
-    // frames short of the edge, up to eight times, until another key, a wheel
-    // or a pointer takes over.
-    function edge(event) {
-      if (event.altKey || event.ctrlKey || event.shiftKey) return 0;
-      if (event.metaKey) return event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : 0;
-      return event.key === 'Home' ? -1 : event.key === 'End' ? 1 : 0;
-    }
-    let edgeRun = 0;
-    function toEdge(toward) {
-      const run = ++edgeRun, scroll = controls.scroll;
-      const request = () => scroll.scrollTo({top: toward < 0 ? 0 : scroll.scrollHeight,
-        behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'});
-      let last = scroll.scrollTop, still = 0, tries = 0;
-      request();
-      requestAnimationFrame(function check() {
-        if (run !== edgeRun) return;
-        const top = scroll.scrollTop;
-        if (Math.abs(top - (toward < 0 ? 0 : scroll.scrollHeight - scroll.clientHeight)) < 1) return;
-        if (top !== last) { last = top; still = 0; }
-        else if (++still >= 4) { if (++tries > 8) return; still = 0; request(); }
-        requestAnimationFrame(check);
-      });
-    }
-    controls.scroll.addEventListener('keydown', event => {
-      const toward = edge(event);
-      if (!toward || event.defaultPrevented || event.target.closest('input, textarea, select, [contenteditable]')) { ++edgeRun; return; }
-      event.preventDefault(); toEdge(toward);
-    });
-    for (const type of ['wheel', 'pointerdown', 'touchstart']) controls.scroll.addEventListener(type, () => { ++edgeRun; }, {passive: true});
     new ResizeObserver(schedule).observe(controls.scroll);
     return {
       size: () => entries.length,
@@ -389,11 +394,10 @@
         detach(from, to); from = to = 0;
         entries.length = 0; shown = []; tops = [0]; stale = false; heights.clear(); measured = 0; typical = 24; typicalStale = false;
         follow = true; unread = 0; position = shift = laid = 0; compressed = false; jump = null;
-        pull = scrolling = false;
+        pull = scrolling = false; held = 0;
         controls.output.style.paddingTop = controls.output.style.paddingBottom = '0px';
       },
-      // Choosing Latest ends any scroll the reader was making.
-      latest() { follow = pull = true; unread = 0; scrolling = false; layout(); updateOutputState(); },
+      latest,
       // Live rows that match, rendered or not.
       find: predicate => entries.filter(entry => !entry.build && predicate(entry.node)),
       // Scrolls one entry to the middle of the viewport and returns its row.
@@ -401,7 +405,7 @@
         if (!shown.includes(entry)) { controls.filter.value = ''; controls.level.value = 'all'; refilter(); }
         offsets();
         const index = shown.indexOf(entry);
-        follow = false; jump = tops[index] - (controls.scroll.clientHeight - (entry.height ?? estimate())) / 2;
+        follow = false; held = 0; jump = tops[index] - (controls.scroll.clientHeight - (entry.height ?? estimate())) / 2;
         layout();
         return entry.node;
       }

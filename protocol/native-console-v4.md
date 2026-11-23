@@ -129,15 +129,19 @@ the drawn rows, and a scroll that reaches either end of the extent shows that
 end of the transcript. The scroll offset and extent take up the difference
 once the scroll has stood still, for three frames after `scrollend` or for
 300 ms. A `scrollend` alone does not end it, because WebKit also fires one for
-an animation that a newer scroll cancels, such as a PageDown that Home
-interrupts. Home, End, Command-Up and Command-Down scroll the focused
-transcript to that edge itself, as WebKit does after bug 330293; before it,
-WebKit aims them by a distance from the position it last knew, so one pressed
-while PageDown still moves would land short. That WebKit can also drop a
-scroll asked for while its keyboard scroll still moves, stopping PageDown and
-starting nothing, so the transcript asks again once it has stood still short
-of the edge for four frames, up to eight times, until another key, a wheel or
-a pointer takes over. The end is followed when entries
+an animation that a newer scroll cancels, and one after each step of its
+keyboard scroll. Home, End, Command-Up and Command-Down put the focused
+transcript at that edge in one write, as a jump does, and End follows new
+entries again, as **Latest** does. A scroll animated to the edge would not
+reliably arrive. WebKit before bug 330293 aims Home and End by a distance from
+a position an animation may have left. It can drop a smooth scroll asked for
+while its keyboard scroll still moves. And since it fires `scrollend` after
+each step, the layout settles a smooth scroll that pauses for three frames, and
+that write stops it short. A write does not stop WebKit's keyboard scroll at
+once either: it takes one more step on its own path. So the transcript holds
+the edge: a scroll that no key, wheel, pointer or touch on the transcript began
+goes back to it, until the reader does one of those or the edge has held for
+300 ms. The end is followed when entries
 arrive or **Latest** is chosen, never against the reader's scroll, and a
 scroll down that ends within 40 px of the end lands on it.
 WebKit measures a word, text with no break opportunity, as one width, and past
@@ -191,8 +195,9 @@ silently loses data.
   not rendered, a tall row that does not stretch the estimate, a compressed
   transcript scrolled step by step and by drag to both ends, a reader's scroll
   whose offset and extent the layout never moves, even past a `scrollend` from a
-  cancelled animation, Home, End and Command-Up and -Down scrolled to their edge
-  by the transcript and asked again when the engine drops the request, every
+  cancelled animation, Home, End and Command-Up and -Down put at their edge in
+  one write during a scroll still under way and the edge held against the step
+  the engine takes after it, until the reader's next input or 300 ms, every
   other key left to WebKit, a long word drawn in
   bounded runs on grapheme boundaries with the text around it whole, a command
   past 64 MiB sent whole, the incremental completion

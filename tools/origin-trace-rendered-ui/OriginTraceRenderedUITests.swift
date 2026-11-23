@@ -260,6 +260,13 @@ final class Harness {
   // scroll animation, may still run.
   func key(_ code: UInt16, _ characters: String, modifiers: NSEvent.ModifierFlags = [], settling: Bool = true) async throws {
     try await activate()
+    try press(code, characters, modifiers: modifiers)
+    if settling { try await settle() }
+  }
+
+  // One press and release, sent to the window at once and without first
+  // activating it, so a test can send it from a callback.
+  func press(_ code: UInt16, _ characters: String, modifiers: NSEvent.ModifierFlags = []) throws {
     for type in [NSEvent.EventType.keyDown, .keyUp] {
       guard let event = NSEvent.keyEvent(
         with: type, location: .zero, modifierFlags: modifiers, timestamp: ProcessInfo.processInfo.systemUptime,
@@ -268,7 +275,6 @@ final class Harness {
       else { throw HarnessError("Could not create a key event") }
       window.sendEvent(event)
     }
-    if settling { try await settle() }
   }
 
   // Types into the focused field with native key events, one character each.
@@ -407,6 +413,17 @@ final class Harness {
 struct HarnessError: Error, CustomStringConvertible {
   let description: String
   init(_ description: String) { self.description = description }
+}
+
+// Answers a message the page posts, on the app's main thread as it arrives,
+// so a test can act on something the page saw with no script call between.
+@MainActor
+final class PageSignal: NSObject, WKScriptMessageHandler {
+  let received: @MainActor () -> Void
+  init(_ received: @escaping @MainActor () -> Void) { self.received = received }
+  func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+    received()
+  }
 }
 
 struct Expectations: Decodable {
@@ -2413,10 +2430,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // that logs twelve thousand messages of mixed heights and then one of 1 MiB,
   // so WebKit itself lays out the window: the drawn rows stay few and always
   // cover the viewport, the scroll offset, PageDown, Home, End and Command-Up
-  // and -Down reach every part of the transcript, Home lands on the start even
-  // when pressed while PageDown still moves, the large message is drawn whole
-  // and inside its wrap width, and search finds a row that is not in the
-  // document.
+  // and -Down reach every part of the transcript, Home lands on the start and
+  // stays there even when pressed while PageDown still moves, the large
+  // message is drawn whole and inside its wrap width, and search finds a row
+  // that is not in the document.
   @MainActor
   func test45ConsoleTranscriptKeepsEveryEntry() async throws {
     // The rows in the document, the largest gap between visible rows, and the
@@ -2442,33 +2459,45 @@ final class OriginTraceRenderedUITests: XCTestCase {
       })()
       """
     let frames = "new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => done(true))))"
-    // Records each scroll, scrollend, key, layout write and scroll request on
-    // the transcript, and each frame whose geometry changed, so a failed wait
-    // shows how the transcript got where it is. keys() says, for each key,
-    // whether a scroll still moved when it went down, whether the transcript
-    // handled it, and how many scrolls the transcript asked for after it.
-    // still(ms) resolves once the transcript has not scrolled for that long,
-    // and moved(from) once its offset is no longer from, counted in frames.
+    // Records each scroll, scrollend, key and layout write on the transcript,
+    // and each frame whose geometry changed, so a failed wait shows how the
+    // transcript got where it is. Scrolls are seen before the transcript's
+    // own listener can answer them. A step is a scroll the layout did not write;
+    // the app's WebKit fires scrollend after each one, so scrollend does not
+    // say a scroll is over. keys() says, for each key, how many steps came
+    // since the key before it, how many frames since the last of them,
+    // whether the transcript handled it, and how many writes followed it.
+    // steps() counts the steps since the last key. relay() posts
+    // rebTranscriptStep on the first step after the next PageDown. still(ms)
+    // resolves once the transcript has not scrolled for that long.
     let recorder = """
       (() => {
         const scroll = document.querySelector('#native-console-scroll'), output = document.querySelector('#native-console-output');
         const offset = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop'), log = [], keys = [];
         const geometry = () => `top ${offset.get.call(scroll)} height ${scroll.scrollHeight} padding ${output.style.paddingTop} ${output.style.paddingBottom}`;
-        let moved = performance.now(), last = '', repeats = 0, scrolls = 0, ended = false;
+        let moved = performance.now(), last = '', repeats = 0, steps = 0, frames = 0, stepped = 0, written = null, relay = false;
         const note = text => { log.push(`${performance.now().toFixed(1)} ${text}`); if (log.length > 500) log.splice(0, 100); last = ''; };
         Object.defineProperty(scroll, 'scrollTop', {configurable: true, get() { return offset.get.call(this); },
-          set(value) { note(`write ${value} over ${geometry()}`); offset.set.call(this, value); }});
-        const scrollTo = scroll.scrollTo;
-        scroll.scrollTo = function (options) { if (keys.length) ++keys[keys.length - 1].requests; note(`scrollTo ${JSON.stringify(options)} over ${geometry()}`); return scrollTo.call(this, options); };
-        scroll.addEventListener('scroll', () => { moved = performance.now(); ++scrolls; note(`scroll ${geometry()}`); });
-        scroll.addEventListener('scrollend', () => { ended = true; note(`scrollend ${geometry()}`); });
+          set(value) {
+            note(`write ${value} over ${geometry()}`); offset.set.call(this, value); written = offset.get.call(this);
+            if (keys.length) ++keys[keys.length - 1].writes;
+          }});
+        document.addEventListener('scroll', event => {
+          if (event.target !== scroll) return;
+          moved = performance.now(); note(`scroll ${geometry()}`);
+          if (offset.get.call(scroll) === written) { written = null; return; }
+          ++steps; stepped = frames;
+          if (relay && keys.at(-1)?.key === 'PageDown') { relay = false; note('relay'); window.webkit.messageHandlers.rebTranscriptStep.postMessage(true); }
+        }, true);
+        document.addEventListener('scrollend', event => { if (event.target === scroll) note(`scrollend ${geometry()}`); }, true);
         document.addEventListener('keydown', event => {
-          keys.push({key: event.key, moving: scrolls > 0 && !ended, handled: false, requests: 0}); scrolls = 0; ended = false;
+          keys.push({key: event.key, steps, sinceStep: steps ? frames - stepped : -1, handled: false, writes: 0}); steps = 0;
           note(`keydown ${event.key}${event.metaKey ? ' with Command' : ''}`);
         }, true);
         document.addEventListener('keydown', event => { if (keys.length) keys[keys.length - 1].handled = event.defaultPrevented; });
         document.addEventListener('keyup', event => note(`keyup ${event.key}`), true);
         (function frame() {
+          ++frames;
           const now = geometry();
           if (now !== last) { note(`frame ${now}`); last = now; repeats = 1; }
           else log[log.length - 1] = log[log.length - 1].replace(/ x\\d+$/, '') + ` x${++repeats}`;
@@ -2477,8 +2506,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
         window.__rebTranscript = {
           log: () => log.slice(-200).join('\\n'),
           keys: () => keys.slice(-8),
+          steps: () => steps,
+          relay: () => { relay = true; return true; },
           still: ms => new Promise(done => (function frame(now) { if (now - moved >= ms) done(true); else requestAnimationFrame(frame); })(performance.now())),
-          moved: from => new Promise(done => (function frame() { if (Math.round(offset.get.call(scroll)) !== from) done(true); else requestAnimationFrame(frame); })()),
         };
         return true;
       })()
@@ -2617,7 +2647,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertLayout(ui, "#native-console-panel", "\(size.name) Console transcript middle")
       try await ui.screenshot("console-transcript-middle-\(size.name)")
 
-      // The keyboard scrolls the focused transcript. PageDown is WebKit's own.
+      // The keyboard scrolls the focused transcript. PageDown is WebKit's own,
+      // and a lone one takes a step in each of several frames.
       _ = try await ui.value(recorder)
       _ = try await ui.value("(() => { document.querySelector('#native-console-scroll').focus({focusVisible: true}); return true; })()")
       let before = try await ui.json(window)
@@ -2625,29 +2656,42 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await wait(ui, "(\(window)).visible > \(before["visible"] as? Int ?? 0)", "\(size.name): PageDown did not scroll the transcript")
       _ = try await ui.value("window.__rebTranscript.still(300)")
       let paged = try await ui.json(window)
+      let lone = try await ui.value("window.__rebTranscript.steps()") as? Int ?? 0
       XCTAssertEqual(paged["gap"] as? Double, 0, "\(size.name): PageDown leaves the viewport covered: \(paged)")
+      XCTAssertGreaterThanOrEqual(lone, 3, "\(size.name): a lone PageDown takes a step in each of at least three frames: \(lone) steps")
 
-      // Home pressed while a second PageDown still moves lands on the start.
-      // WebKit before bug 330293 would aim it by a distance from a position
-      // PageDown had already left, so the transcript scrolls to the edge
-      // itself. PageDown moves for under 100 ms here, so Home follows its first
-      // frame, and a try in which PageDown finished first is made again.
-      var home: [String: Any] = [:]
-      for _ in 0..<5 {
-        let from = try await ui.json(window)["offset"] as? Int ?? 0
+      // Home pressed while a second PageDown still moves lands on the start,
+      // in one write by the transcript, and stays there. The page reports
+      // PageDown's first step and the test presses Home from that report, with
+      // no script call between them, so Home goes down before PageDown's next
+      // frame however slow the runner is. A try counts when Home followed
+      // fewer steps than a lone PageDown takes, the last of them within a
+      // frame; one that did not is made again, up to five times.
+      let relay = PageSignal { [weak ui] in try? ui?.press(115, "\u{F729}", modifiers: [.function]) }
+      let pages = ui.webView.configuration.userContentController
+      pages.add(relay, contentWorld: .page, name: "rebTranscriptStep")
+      defer { pages.removeScriptMessageHandler(forName: "rebTranscriptStep", contentWorld: .page) }
+      var home: [String: Any] = [:], overlapped = false, tries: [String] = []
+      for attempt in 0..<5 {
+        _ = try await ui.value("window.__rebTranscript.relay()")
         try await ui.key(121, "\u{F72D}", modifiers: [.function], settling: false)
-        _ = try await ui.value("window.__rebTranscript.moved(\(from))")
-        try await ui.key(115, "\u{F729}", modifiers: [.function])
+        try await wait(ui, "window.__rebTranscript.keys().at(-1)?.key === 'Home'", "\(size.name): Home was not pressed on PageDown's first step")
         try await wait(ui, "(\(window)).offset === 0", "\(size.name): Home pressed while PageDown moved did not reach the start of the transcript")
-        home = try await ui.json("window.__rebTranscript.keys().filter(key => key.key === 'Home').at(-1) ?? {}")
-        if home["moving"] as? Bool == true { break }
+        home = try await ui.json("window.__rebTranscript.keys().at(-1)")
+        tries.append("\(home)")
+        let steps = home["steps"] as? Int ?? 0, since = home["sinceStep"] as? Int ?? .max
+        overlapped = steps >= 1 && steps < lone && since <= 1
+        if overlapped || attempt == 4 { break }
         _ = try await ui.value("(() => { document.querySelector('#native-console-scroll').scrollTop = \(paged["offset"] as? Int ?? 0); return true; })()")
         _ = try await ui.value("window.__rebTranscript.still(300)")
       }
-      XCTAssertEqual(home["moving"] as? Bool, true, "\(size.name): Home was pressed while PageDown still moved: \(home)")
-      XCTAssertEqual(home["handled"] as? Bool, true, "\(size.name): the transcript scrolled to its start itself: \(home)")
-      _ = try await ui.value(frames)
+      if !overlapped {
+        XCTFail("\(size.name): in none of 5 tries did Home go down while PageDown still moved (fewer than \(lone) steps, the last within a frame): \(tries)")
+      }
+      XCTAssertEqual(home["handled"] as? Bool, true, "\(size.name): the transcript went to its start itself: \(home)")
+      _ = try await ui.value("window.__rebTranscript.still(300)")
       let start = try await ui.json(window)
+      XCTAssertEqual(start["offset"] as? Int, 0, "\(size.name): Home stays at the start once PageDown's steps were due: \(start)")
       XCTAssertEqual(start["first"] as? Int, 0, "\(size.name): the first message is drawn at the start: \(start)")
       XCTAssertEqual(start["firstDrawn"] as? String, "Context selected: top #31 · https://auth", "\(size.name): the first entry is kept: \(start)")
       XCTAssertEqual(start["gap"] as? Double, 0, "\(size.name): drawn rows cover the viewport at the start: \(start)")
@@ -2662,8 +2706,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.key(125, "\u{F701}", modifiers: [.command, .function, .numericPad])
       try await wait(ui, atEnd, "\(size.name): Command-Down did not return to the 1 MiB message")
       let edges = try await ui.value("window.__rebTranscript.keys().slice(-3).map(key => `${key.key} ${key.handled}`).join(', ')") as? String ?? ""
-      let requests = try await ui.value("JSON.stringify(window.__rebTranscript.keys())") as? String ?? ""
-      XCTAssertEqual(edges, "End true, ArrowUp true, ArrowDown true", "\(size.name): the transcript scrolled to each edge itself: \(requests)")
+      let keys = try await ui.value("JSON.stringify(window.__rebTranscript.keys())") as? String ?? ""
+      XCTAssertEqual(edges, "End true, ArrowUp true, ArrowDown true", "\(size.name): the transcript went to each edge itself: \(keys)")
 
       // Search runs over every entry, drawn or not, and Escape restores them.
       try await ui.click("#native-console-search")

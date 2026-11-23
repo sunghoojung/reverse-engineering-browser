@@ -892,9 +892,9 @@ scroll, filter and follow at the same cost, and filters search rows that are
 not rendered. The transcript never moves a scroll the reader is making, or
 the extent it scrolls through, so wheel momentum and the PageUp and PageDown
 animations run to their end; a row measured on the way is taken up once that
-scroll has stood still. Home, End, Command-Up and Command-Down scroll the
-focused transcript straight to its first or last entry, even while another
-scroll still moves. A word of more than 4096 characters with no space, such
+scroll has stood still. Home, End, Command-Up and Command-Down put the
+focused transcript at its first or last entry at once, even while another
+scroll still moves, and End follows new entries again. A word of more than 4096 characters with no space, such
 as a long base64 or JSON string, wraps at any character, so every line of a
 1 MiB message stays inside the wrap width.
 An evaluation link in Traffic scrolls its command into view wherever it is. Clear removes output and releases retained values while

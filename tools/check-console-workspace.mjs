@@ -297,9 +297,9 @@ export async function checkConsoleDOM(root) {
   const fixture=createConsoleFixture();let copies=0;
   const source=await readFile(join(root,'apps/research-ui/native_console.js'),'utf8');
   // Animation frames run only when a check advances them, 16 ms apart.
-  const animation=[];let clock=0,reducedMotion=false;
+  const animation=[];let clock=0;
   const frames=(count=1)=>{for(let frame=0;frame<count;frame+=1){clock+=16;for(const callback of animation.splice(0))callback(clock);}};
-  const context={document,TextEncoder,console,setTimeout,clearTimeout,setInterval(){},requestAnimationFrame:callback=>animation.push(callback),matchMedia:query=>({matches:reducedMotion&&query==='(prefers-reduced-motion: reduce)'}),ResizeObserver:class{observe(){}},MutationObserver:class{observe(){}},CustomEvent:class{},navigator:{clipboard:{writeText:async()=>{copies++;}}},createNativeConsoleCompletion:()=>({close(){},keydown(){return false;}}),codeViewColor:(node,text)=>{node.append(document.createTextNode(text));return node;},sourcePrettyTokens:()=>[],fetch:async(path,options)=>{const reply=await fixture.respond(path,options?.body?JSON.parse(options.body):null);return {ok:reply.status===200,status:reply.status,json:async()=>reply.body};}};
+  const context={document,TextEncoder,console,setTimeout,clearTimeout,setInterval(){},requestAnimationFrame:callback=>animation.push(callback),ResizeObserver:class{observe(){}},MutationObserver:class{observe(){}},CustomEvent:class{},navigator:{clipboard:{writeText:async()=>{copies++;}}},createNativeConsoleCompletion:()=>({close(){},keydown(){return false;}}),codeViewColor:(node,text)=>{node.append(document.createTextNode(text));return node;},sourcePrettyTokens:()=>[],fetch:async(path,options)=>{const reply=await fixture.respond(path,options?.body?JSON.parse(options.body):null);return {ok:reply.status===200,status:reply.status,json:async()=>reply.body};}};
   // The layout extent becomes settable so a model transcript can pass it.
   const staged=source.replace('const transcriptExtent = 1 << 24;','let transcriptExtent = 1 << 24;');assert.notEqual(staged,source,'the transcript extent is declared where the fixture expects it');
   runInNewContext(staged.replace(/\}\)\(\);\s*$/, 'globalThis.testConsole = {initialize, logs, poll, renderControls, extent:value=>{transcriptExtent=value;}, state:()=>({session,pending,submitting,generation,outputGeneration,entries:transcript.size()})};})();'),context);
@@ -516,33 +516,48 @@ export async function checkConsoleDOM(root) {
     assert.equal(top,content()-viewport,'a scroll down that ends within reach of the end lands on it');
     scroll.scrollTop=top-20;await scroll.emit('scroll');quiet();
     assert.equal(top,content()-viewport-20,'a scroll up from the end is never pulled back, even once it settles');
-    // Home, End, Command-Up and Command-Down scroll straight to that edge,
-    // smoothly unless the reader asked for reduced motion. Other keys, and
-    // these with another modifier, are left to the engine.
-    const asked=[];scroll.scrollTo=options=>asked.push(options);
+    // Home, End, Command-Up and Command-Down put the transcript at that edge
+    // in one write and ask the engine for no animation. Other keys, and these
+    // with another modifier, are left to the engine. Each step first lets the
+    // edge the key before it holds go.
+    const offset=Object.getOwnPropertyDescriptor(scroll,'scrollTop');let writes=0;
+    Object.defineProperty(scroll,'scrollTop',{get:offset.get,set(value){++writes;offset.set(value);},configurable:true});
+    const engine=async to=>{offset.set(to);await scroll.emit('scroll');await scroll.emit('scrollend');};
+    scroll.scrollTo=()=>assert.fail('an edge key asks the engine for no scroll');
     const press=async(key,modifiers={})=>{let prevented=false;await scroll.emit('keydown',{key,altKey:false,ctrlKey:false,shiftKey:false,metaKey:false,defaultPrevented:false,...modifiers,preventDefault(){prevented=true;}});return prevented;};
-    for(const [key,modifiers,top,name] of [['Home',{},0,'Home'],['End',{},content(),'End'],['ArrowUp',{metaKey:true},0,'Command-Up'],['ArrowDown',{metaKey:true},content(),'Command-Down']]){
+    for(const [key,modifiers,edge,name] of [['Home',{},()=>0,'Home'],['End',{},()=>content()-viewport,'End'],['ArrowUp',{metaKey:true},()=>0,'Command-Up'],['ArrowDown',{metaKey:true},()=>content()-viewport,'Command-Down']]){
+      frames(20);await engine(content()/2);frames(20);writes=0;
       assert.equal(await press(key,modifiers),true,`${name} is the transcript's own`);
-      assert.deepEqual({...asked.at(-1)},{top,behavior:'smooth'},`${name} scrolls straight to that edge`);
+      assert.deepEqual([top,writes],[edge(),1],`${name} puts the transcript at that edge in one write`);
     }
-    const handled=asked.length;
+    frames(20);await engine(content()/2);frames(20);writes=0;
     for(const [key,modifiers] of [['Home',{shiftKey:true}],['End',{altKey:true}],['End',{ctrlKey:true}],['ArrowUp',{}],['PageDown',{}],['ArrowDown',{metaKey:true,shiftKey:true}],['Home',{defaultPrevented:true}]])
       assert.equal(await press(key,modifiers),false,`${key} with ${JSON.stringify(modifiers)} is left to the engine`);
-    assert.equal(asked.length,handled);
-    reducedMotion=true;await press('End');assert.equal(asked.at(-1).behavior,'auto','with reduced motion an edge key jumps');reducedMotion=false;
-    // WebKit can drop the scroll an edge key asks for while its own keyboard
-    // scroll still moves, so the request is made again once the transcript
-    // stands still short of the edge, a bounded number of times, until it
-    // arrives or the reader takes over.
-    await press('PageDown');asked.length=0;
-    await press('Home');frames(3);assert.equal(asked.length,1,'a request is not repeated while the transcript may still start moving');
-    frames(1);assert.equal(asked.length,2,'a request the engine dropped is made again once the transcript stands still');
-    frames(100);assert.equal(asked.length,9,'a dropped request is made again at most eight times');
-    asked.length=0;await press('Home');await scroll.emit('wheel');frames(20);assert.equal(asked.length,1,'a wheel takes over from an edge key');
-    asked.length=0;await press('Home');await press('ArrowDown');frames(20);assert.equal(asked.length,1,'another key takes over from an edge key');
-    asked.length=0;scroll.scrollTo=options=>{asked.push(options);scroll.scrollTop=options.top;};
-    await press('Home');frames(20);assert.deepEqual([asked.length,top],[1,0],'a request the engine honors is made once');
-    delete scroll.scrollTo;
+    assert.equal(writes,0,'a key left to the engine moves nothing');
+    // WebKit fires scrollend after each step of its own keyboard scroll, and
+    // takes one more step after a write, on its own path. Home pressed while
+    // one still moves, over rows whose heights the estimate missed, lands on
+    // the first entry in one write, that step goes back to it, and frames
+    // that pass leave it there. The edge is held for 300 ms, or until a key,
+    // wheel, pointer or touch on the transcript, and End follows new entries.
+    Node.prototype.getBoundingClientRect=function(){const height=this.textContent.includes('fixture tall')?tall:row+0.109375;return {top:0,bottom:height,left:0,right:600,width:600,height};};
+    await get('latest').click();await settle();frames(20);
+    for(const step of [240,270,290])await engine(top-step);
+    writes=0;await press('Home');
+    assert.deepEqual([top,writes],[0,1],'Home during a scroll still under way lands on the first entry in one write');
+    await engine(content()/2);frames(40);
+    assert.deepEqual([top,writes,numbers()[0]],[0,2,0],'the step the engine takes after the write goes back to the first entry, and frames leave it there');
+    await engine(500);assert.equal(top,500,'a scroll once the edge has held for 300 ms is the reader\'s');
+    for(const type of ['wheel','pointerdown','touchstart','keydown']){
+      await press('Home');await scroll.emit(type,{key:'ArrowDown',altKey:false,ctrlKey:false,shiftKey:false,metaKey:false,preventDefault(){}});await engine(700);
+      assert.equal(top,700,`a ${type} on the transcript lets the edge go`);
+    }
+    frames(20);for(const step of [240,270,290])await engine(top+step);
+    await press('End');await engine(content()/3);frames(40);
+    assert.equal(top,content()-viewport,'End during a scroll still under way lands on the end, and the step after goes back to it');
+    api.logs({messages:[{level:'info',text:'fixture message after End',time:0}],dropped:0});await settle();frames(4);
+    assert(output.children.at(-1).textContent.includes('fixture message after End')&&top===content()-viewport,'End follows new entries again');assert.equal(get('latest').hidden,true);
+    delete scroll.scrollTo;Object.defineProperty(scroll,'scrollTop',offset);
     await get('latest').click();await settle();
     Node.prototype.getBoundingClientRect=rect;delete scroll.getBoundingClientRect;delete output.getBoundingClientRect;
     Object.defineProperties(scroll,{clientHeight:{value:1e9,writable:true,configurable:true},scrollHeight:{value:100,writable:true,configurable:true},scrollTop:{value:0,writable:true,configurable:true}});

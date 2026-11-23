@@ -250,7 +250,7 @@ bool NativeProbeTransport::EmitWasmDispatch(const NativeWasmDispatchObservation&
       observation.caller_kind, observation.caller_function_index, observation.sample_index,
       observation.js_invocation_state, observation.js_invocation_id,
       std::string(observation.source_url), observation.module_token,
-      mojo_base::BigBuffer(observation.module_bytes));
+      mojo_base::BigBuffer(observation.module_bytes), observation.module_bytes.size());
   return true;
 }
 
@@ -275,7 +275,7 @@ bool NativeProbeTransport::EmitWasmIndirect(const NativeWasmIndirectObservation&
       static_cast<std::uint32_t>(observation.resolution), observation.sample_index,
       observation.js_invocation_state, observation.js_invocation_id,
       std::string(observation.source_url), observation.module_token,
-      mojo_base::BigBuffer(observation.module_bytes));
+      mojo_base::BigBuffer(observation.module_bytes), observation.module_bytes.size());
   return true;
 }
 
@@ -301,7 +301,7 @@ bool NativeProbeTransport::EmitWasmExecution(const NativeWasmExecutionObservatio
       static_cast<std::uint8_t>(observation.bounds), observation.known,
       static_cast<std::uint8_t>(observation.related_stream), observation.js_invocation_state,
       observation.js_invocation_id, std::string(observation.source_url), observation.module_token,
-      mojo_base::BigBuffer(observation.module_bytes));
+      mojo_base::BigBuffer(observation.module_bytes), observation.module_bytes.size());
   return true;
 }
 
@@ -310,7 +310,6 @@ bool NativeProbeTransport::EmitNativeGuest(const NativeGuestCapture& capture,
   auto& transport = Get();
   const auto epoch = transport.wasm_capture_epoch_.load(std::memory_order_acquire);
   if (!epoch || !NativeProbeSink::Get().CanAdmitEvent(capture.dispatch, generation) ||
-      capture.module_bytes.size() > kNativeArtifactMaxContentBytes ||
       capture.bytecode_bytes.size() > kNativeGuestSnapshotLimit ||
       capture.adapter_json.size() > kNativeGuestAdapterLimit)
     return false;
@@ -320,11 +319,11 @@ bool NativeProbeTransport::EmitNativeGuest(const NativeGuestCapture& capture,
     return false;
   const auto invocation = EventRecordBytes(capture.invocation);
   const auto dispatch = EventRecordBytes(capture.dispatch);
-  (*host)->CaptureNativeGuest(epoch, invocation, dispatch, capture.execution_context_id,
-                              capture.document_token_high, capture.document_token_low,
-                              std::string(capture.source_url), std::string(capture.adapter_json),
-                              mojo_base::BigBuffer(capture.module_bytes),
-                              mojo_base::BigBuffer(capture.bytecode_bytes));
+  (*host)->CaptureNativeGuest(
+      epoch, invocation, dispatch, capture.execution_context_id, capture.document_token_high,
+      capture.document_token_low, std::string(capture.source_url),
+      std::string(capture.adapter_json), mojo_base::BigBuffer(capture.module_bytes),
+      mojo_base::BigBuffer(capture.bytecode_bytes), capture.module_bytes.size());
   return true;
 }
 bool NativeProbeTransport::EmitNativeGuestHost(const NativeProbeEvent& event,

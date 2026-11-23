@@ -12,11 +12,13 @@
 namespace reb {
 // Cookie records, see "Cookies" in protocol/native-network-v3.md. The overlay's
 // common/native_network_cookies.h is the producer half of this ABI.
-inline constexpr std::uint16_t kCookiePayloadVersion = 1;
+// cookie_list version 2 retains a list of any length; version 1 recorded one
+// longer than kCookieListLimitV1Bytes as not_captured_block_limit.
+inline constexpr std::uint16_t kCookiePayloadVersion = 2;
 // script_cookie version 2 names the isolate of its frame and stack (byte 6);
 // version 3 records each cookie name a document.cookie read returned.
 inline constexpr std::uint16_t kScriptCookiePayloadVersion = 3;
-inline constexpr std::uint32_t kCookieListLimitBytes = 2U * 1024U * 1024U;
+inline constexpr std::uint32_t kCookieListLimitV1Bytes = 2U * 1024U * 1024U;
 inline constexpr std::uint32_t kCookieListHeaderBytes = 16;
 inline constexpr std::uint32_t kCookieEntryBytes = 64;
 inline constexpr std::uint32_t kScriptCookieNamePrefixBytes = 24;
@@ -150,8 +152,9 @@ template <class Bytes>
   using enum HeaderState;
   using cookie_detail::Zero;
   const auto state = static_cast<HeaderState>(value.state);
-  if (value.protocol_version != kCookiePayloadVersion || value.payload_size != 128 ||
-      value.reserved0 != 0 || value.reserved1 != 0 || !Zero(value.reserved2) ||
+  if (value.protocol_version < 1 || value.protocol_version > kCookiePayloadVersion ||
+      value.payload_size != 128 || value.reserved0 != 0 || value.reserved1 != 0 ||
+      !Zero(value.reserved2) ||
       (value.direction != static_cast<std::uint8_t>(CookieDirection::kSent) &&
        value.direction != static_cast<std::uint8_t>(CookieDirection::kReceived)) ||
       value.state < static_cast<std::uint8_t>(kCaptured) ||
@@ -165,7 +168,10 @@ template <class Bytes>
       (!empty && static_cast<std::uint64_t>(value.list_length) <
                      kCookieListHeaderBytes +
                          static_cast<std::uint64_t>(kCookieEntryBytes) * value.cookie_count) ||
-      limited != (value.list_length > kCookieListLimitBytes) || Zero(value.sha256) != limited) {
+      limited != (value.protocol_version == 1
+                      ? value.list_length > kCookieListLimitV1Bytes
+                      : value.list_length == kHeaderLengthUnrepresentable) ||
+      Zero(value.sha256) != limited) {
     return false;
   }
   return has_artifact == (state == kCaptured || state == kCapturedShared);
@@ -219,9 +225,9 @@ template <class Bytes>
   const std::uint16_t version = value.protocol_version;
   const bool scoped = version >= 2 && version <= kScriptCookiePayloadVersion;
   const bool named_reads = version == kScriptCookiePayloadVersion;
-  if ((version != kCookiePayloadVersion && !scoped) || value.payload_size != 128 ||
-      value.reserved0 != 0 || (scoped ? value.thread > 4 : value.thread != 0) || value.api < 1 ||
-      value.api > 6 || value.count == 0 || (value.flags & ~(named_reads ? 0x1fU : 0x0fU)) != 0) {
+  if ((version != 1 && !scoped) || value.payload_size != 128 || value.reserved0 != 0 ||
+      (scoped ? value.thread > 4 : value.thread != 0) || value.api < 1 || value.api > 6 ||
+      value.count == 0 || (value.flags & ~(named_reads ? 0x1fU : 0x0fU)) != 0) {
     return false;
   }
   // A version 2 or 3 record that names no thread records no frame or stack.

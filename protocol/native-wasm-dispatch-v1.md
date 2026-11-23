@@ -115,7 +115,12 @@ The browser captures the module through the artifact receiver and emits the
 observation only after accepted ACK. Stale navigation/configuration callbacks
 are rejected. Observations of the same module in the same document share one
 module artifact; each is emitted once that artifact is accepted (or at once if
-it already was). A module is at most 16 MiB.
+it already was). A module of any size is sent, charged to the renderer's
+256 MiB artifact credit until the browser has copied it out. A record whose
+module the credit cannot take fills its sequence slot with
+`native_wasm_module_backlog`, in the `call_indirect` and execution outcome
+streams too, and the thread's next record that names the module carries its
+bytes again. Module byte offsets are bounded by V8's largest module, 1 GiB.
 
 Full observations are paced, never stopped for the session. Each renderer
 keeps a one-second sample window on its own monotonic clock. A window retains

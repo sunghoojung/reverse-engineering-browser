@@ -178,7 +178,7 @@ impl ArtifactLookupCache {
             check_deadline(deadline)?;
             let start = position;
             position += line.len();
-            if line.len() > 8192 {
+            if line.len() > crate::artifact_query::MANIFEST_RECORD_BYTES {
                 return Err(Error::new(
                     500,
                     "The artifact manifest contains an oversized record",
@@ -282,6 +282,33 @@ mod tests {
         }
     }
 
+    // An artifact URL can be as long as any URL Chromium carries, 2 MiB.
+    #[test]
+    fn a_record_with_a_two_mib_url_is_found_and_listed() {
+        let root = tempfile::tempdir().unwrap();
+        let url = format!(
+            "https://synthetic.invalid/{}",
+            "a".repeat(2 * 1024 * 1024 - 26)
+        );
+        let mut long: Value = serde_json::from_slice(&record(2)).unwrap();
+        long["url"] = json!(url);
+        let manifest = [record(1), format!("{long}\n").into_bytes()].concat();
+        fs::write(root.path().join("manifest.jsonl"), manifest).unwrap();
+        let mut cache = ArtifactLookupCache::default();
+        compare(&mut cache, root.path(), "2");
+        assert_eq!(
+            evidence::find_artifact(root.path(), "2").unwrap()["url"],
+            url
+        );
+        assert_eq!(evidence::artifacts(root.path(), 10).unwrap().len(), 2);
+        let filter = crate::artifact_query::ArtifactFilter::default();
+        let page =
+            crate::artifact_query::read(root.path(), &filter, crate::event_query::Cursor::Tail, 10)
+                .unwrap();
+        assert_eq!(page.records.len(), 2);
+        assert_eq!(page.records[1]["url"], url);
+    }
+
     #[cfg(unix)]
     #[test]
     fn exact_byte_reuse_append_and_lifecycle_match_complete_scan() {
@@ -348,7 +375,7 @@ mod tests {
             record(1),
             b"{\"protocol_version\":".to_vec(),
             b"{}\n".to_vec(),
-            vec![b' '; 8193],
+            vec![b' '; crate::artifact_query::MANIFEST_RECORD_BYTES + 1],
         ] {
             fs::write(&path, record(1)).unwrap();
             compare(&mut cache, root.path(), "1");

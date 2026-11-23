@@ -1531,7 +1531,8 @@ fn stored_export(
     let mut artifact_file = None;
     if let Some(store) = &artifacts_store {
         let mut file = store.root.file("manifest.jsonl", false)?;
-        file.lines(16 * 1024 * 1024, 8192, 10_000, budget.deadline, |line| {
+        let record = crate::artifact_query::MANIFEST_RECORD_BYTES;
+        file.lines(16 * 1024 * 1024, record, 10_000, budget.deadline, |line| {
             let mut value = parse(line, budget).map_err(|e| export_failure(e, budget))?;
             let digest: [u8; 32] =
                 Sha256::digest(serde_json::to_vec(&value).map_err(|_| frozen::limit())?).into();

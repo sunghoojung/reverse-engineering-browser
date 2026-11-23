@@ -120,9 +120,11 @@ reject other generated artifacts.
 
 Limits:
 
-- 32 bytes minimum, 16 MiB maximum, same cap as other generated artifacts.
-- At most 16 typed-array snapshots per session and 32 MiB queued, sharing
-  the existing generated-artifact queue.
+- 32 bytes minimum and no maximum, as for every generated artifact. A buffer
+  and its allocating script's source are charged to the renderer's 256 MiB
+  artifact credit until the browser has copied them out.
+- At most 16 typed-array snapshots per session, and 16 pending at a task
+  checkpoint.
 - Inactive path: one atomic load, then return.
 - Content is original bytes. Do not inflate, decrypt, or interpret in the
   renderer.

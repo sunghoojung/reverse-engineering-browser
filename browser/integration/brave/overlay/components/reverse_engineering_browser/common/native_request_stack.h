@@ -27,6 +27,9 @@ inline constexpr std::uint16_t kNativeRequestStackTaskPayloadVersion = 2;
 inline constexpr std::uint16_t kNativeRequestStackScopePayloadVersion = 3;
 // script_identity and async_task_stack version 2 add the stack scope.
 inline constexpr std::uint16_t kNativeScriptIdentityScopeVersion = 2;
+// script_identity version 3 digests a source of any length, so it never sets
+// source_too_large, and adds source_backlog.
+inline constexpr std::uint16_t kNativeScriptIdentityBacklogVersion = 3;
 inline constexpr std::uint16_t kNativeAsyncTaskStackScopeVersion = 2;
 inline constexpr std::uint32_t kNativeRequestStackSyncLimit = 1024;
 inline constexpr std::uint32_t kNativeRequestStackAsyncLimit = 32;
@@ -50,7 +53,8 @@ inline constexpr std::size_t kNativeStackArtifactMaxBytes =
     kNativeStackArtifactScopeHeaderSize +
     kNativeStackFrameSize * (kNativeRequestStackSyncLimit + kNativeRequestStackAsyncLimit) +
     kNativeTaskSegmentSize * kNativeTaskSegmentLimit;
-inline constexpr std::uint64_t kNativeScriptIdentityMaxSourceBytes = 16ULL * 1024ULL * 1024ULL;
+// Versions 1 and 2 digest only a source of at most this many bytes.
+inline constexpr std::uint64_t kNativeScriptIdentityV2SourceLimit = 16ULL * 1024ULL * 1024ULL;
 
 enum class NativeStackFrameKind : std::uint8_t {
   kJavaScript = 1,
@@ -148,9 +152,13 @@ enum class NativeNavigationKind : std::uint8_t {
 enum class NativeScriptIdentityKind : std::uint8_t { kJavaScript = 1, kWasm = 2 };
 inline constexpr std::uint8_t kNativeScriptIdentityEval = 1U << 0U;
 inline constexpr std::uint8_t kNativeScriptIdentitySourceQueued = 1U << 1U;
+// Versions 1 and 2 only.
 inline constexpr std::uint8_t kNativeScriptIdentitySourceTooLarge = 1U << 2U;
 inline constexpr std::uint8_t kNativeScriptIdentitySourceUnavailable = 1U << 3U;
 inline constexpr std::uint8_t kNativeScriptIdentityNotRetained = 1U << 4U;
+// Version 3: the source was to be retained, but the renderer's artifact
+// credit was in use, so its text was not sent.
+inline constexpr std::uint8_t kNativeScriptIdentitySourceBacklog = 1U << 5U;
 
 struct NativeStackFrame final {
   std::uint8_t kind = 0;
@@ -531,16 +539,20 @@ inline void SetNativeStackScope(std::array<std::uint8_t, N>& tail,
   using native_request_stack_detail::AllZero;
   constexpr std::uint8_t kRetention =
       kNativeScriptIdentitySourceQueued | kNativeScriptIdentitySourceTooLarge |
-      kNativeScriptIdentitySourceUnavailable | kNativeScriptIdentityNotRetained;
+      kNativeScriptIdentitySourceUnavailable | kNativeScriptIdentityNotRetained |
+      kNativeScriptIdentitySourceBacklog;
   const std::uint8_t retention = v.flags & kRetention;
-  const bool scoped = v.protocol_version == kNativeScriptIdentityScopeVersion;
+  const bool any_length = v.protocol_version == kNativeScriptIdentityBacklogVersion;
+  const bool scoped = v.protocol_version == kNativeScriptIdentityScopeVersion || any_length;
   if ((v.protocol_version != kNativeRequestStackPayloadVersion && !scoped) ||
       v.payload_size != 128 || v.reserved0 != 0 || v.reserved1 != 0 ||
       (scoped ? !IsValidNativeStackScope(NativeStackScopeOf(v.reserved2)) ||
                     !IsZeroAfterNativeStackScope(v.reserved2)
               : !AllZero(v.reserved2)) ||
       v.script_id == 0 || v.execution_context_id == 0 ||
-      (v.flags & ~(kRetention | kNativeScriptIdentityEval)) != 0 || std::popcount(retention) > 1) {
+      (v.flags & ~(kRetention | kNativeScriptIdentityEval)) != 0 || std::popcount(retention) > 1 ||
+      (v.flags & (any_length ? kNativeScriptIdentitySourceTooLarge
+                             : kNativeScriptIdentitySourceBacklog)) != 0) {
     return false;
   }
   if (v.kind == static_cast<std::uint8_t>(NativeScriptIdentityKind::kWasm) &&
@@ -560,9 +572,10 @@ inline void SetNativeStackScope(std::array<std::uint8_t, N>& tail,
     return v.source_length == 0 && AllZero(v.sha256);
   }
   if (retention == kNativeScriptIdentitySourceTooLarge) {
-    return v.source_length > kNativeScriptIdentityMaxSourceBytes && AllZero(v.sha256);
+    return v.source_length > kNativeScriptIdentityV2SourceLimit && AllZero(v.sha256);
   }
-  return v.source_length != 0 && v.source_length <= kNativeScriptIdentityMaxSourceBytes &&
+  return v.source_length != 0 &&
+         (any_length || v.source_length <= kNativeScriptIdentityV2SourceLimit) &&
          !AllZero(v.sha256);
 }
 

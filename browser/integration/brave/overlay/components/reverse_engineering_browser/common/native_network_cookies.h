@@ -18,13 +18,15 @@
 namespace reb {
 // Producer half of "Cookies" in protocol/native-network-v3.md. The core mirror
 // in include/reb/network_cookies.hpp decodes and validates the same bytes.
-inline constexpr std::uint16_t kNativeCookiePayloadVersion = 1;
+// cookie_list version 2 retains a list of any length, recording only one
+// longer than its length field holds as kNotCapturedBlockLimit (with
+// kNativeHeaderLengthUnrepresentable). Version 1 retained one of at most 2 MiB.
+inline constexpr std::uint16_t kNativeCookiePayloadVersion = 2;
+// The RBCK list artifact's own format, unchanged by the record's version.
+inline constexpr std::uint16_t kNativeCookieListFormatVersion = 1;
 // script_cookie version 2 names the isolate of its frame and stack (byte 6);
 // version 3 records each cookie name a document.cookie read returned.
 inline constexpr std::uint16_t kNativeScriptCookiePayloadVersion = 3;
-// 180 cookies per domain of 4 KiB name and value plus two 1 KiB attributes is
-// about 1.1 MiB; the rest leaves room for excluded and partitioned cookies.
-inline constexpr std::size_t kNativeCookieListLimitBytes = 2U * 1024U * 1024U;
 inline constexpr std::size_t kNativeCookieListHeaderBytes = 16;
 inline constexpr std::size_t kNativeCookieEntryBytes = 64;
 inline constexpr std::size_t kNativeScriptCookieNamePrefixBytes = 24;
@@ -138,7 +140,7 @@ inline void AppendNativeCookieListHeader(std::vector<std::uint8_t>& out,
                                          const NativeCookieDirection direction,
                                          const std::uint32_t count) {
   std::array<std::uint8_t, kNativeCookieListHeaderBytes> fields = {'R', 'B', 'C', 'K'};
-  native_cookie_detail::PutLe(fields, 4, kNativeCookiePayloadVersion, 2);
+  native_cookie_detail::PutLe(fields, 4, kNativeCookieListFormatVersion, 2);
   fields[6] = static_cast<std::uint8_t>(direction);
   native_cookie_detail::PutLe(fields, 8, count, 4);
   out.insert(out.end(), fields.begin(), fields.end());

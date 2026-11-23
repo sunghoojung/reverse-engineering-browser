@@ -449,6 +449,29 @@ def check_receiver_stop(receiver: str) -> None:
     still end that wait: a handler that only set a flag lost it, and the
     receiver waited for a next frame that an idle browser never sends.
     """
+    # The stop must land between the receiver reading the whole frame and
+    # answering it. On a loaded machine this process can be descheduled for
+    # that whole window, so an attempt where the answer came first proves
+    # nothing and runs again; it must still stop.
+    attempts = 5
+    for attempt in range(1, attempts + 1):
+        unanswered, stopped = receiver_stop_attempt(receiver)
+        if unanswered:
+            break
+    else:
+        raise AssertionError(
+            f"the artifact was answered before the stop in all {attempts} attempts, "
+            "so nothing raced"
+        )
+    print(
+        "PASS artifact receiver stop: SIGTERM while it consumes an artifact ends it in "
+        f"{stopped * 1000:.0f} ms with the browser's connection open and idle "
+        f"(attempt {attempt} of {attempts})"
+    )
+
+
+def receiver_stop_attempt(receiver: str) -> tuple[bool, float]:
+    """One SIGTERM sent right after a whole artifact frame; whether it came before the answer."""
     with tempfile.TemporaryDirectory(prefix="reb-stop-", dir="/tmp") as temporary:
         root = Path(temporary)
         token = root / "token"
@@ -504,13 +527,9 @@ def check_receiver_stop(receiver: str) -> None:
             if child.poll() is None:
                 child.kill()
                 child.communicate()
-        assert unanswered, "the artifact was answered before the stop, so nothing raced"
         assert child.returncode == 0, errors.decode()
         assert "Artifact receiver stopped:" in errors.decode(), errors.decode()
-    print(
-        "PASS artifact receiver stop: SIGTERM while it consumes an artifact ends it in "
-        f"{stopped * 1000:.0f} ms with the browser's connection open and idle"
-    )
+    return unanswered, stopped
 
 
 def check_broker_stop(broker: str) -> None:

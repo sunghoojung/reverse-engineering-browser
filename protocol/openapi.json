@@ -14361,23 +14361,20 @@
               },
               "site_count": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 1000000
+                "minimum": 0
               },
               "br_table_count": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 1000000
+                "minimum": 0
               },
               "call_indirect_count": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 1000000
+                "minimum": 0
               },
               "omitted_site_count": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 1000000
+                "description": "Always 0 since VM detector 1.12.0, which lists every decoded site. Earlier producers listed the 256 best ranked and counted the rest here."
               },
               "selected_byte_offset": {
                 "type": [
@@ -14388,7 +14385,6 @@
               },
               "candidates": {
                 "type": "array",
-                "maxItems": 256,
                 "items": {
                   "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/dispatchSite"
                 }
@@ -16775,8 +16771,7 @@
               "omitted_site_count": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 4294967295,
-                "description": "Classified sites not listed: site_count minus the listed sites."
+                "description": "Always 0 since VM detector 1.12.0, which lists every classified site. Earlier producers listed the 256 strongest and counted the rest here."
               },
               "role_counts": {
                 "type": "object",
@@ -16841,7 +16836,6 @@
               },
               "sites": {
                 "type": "array",
-                "maxItems": 256,
                 "items": {
                   "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/dispatchClassificationSite"
                 }
@@ -18615,7 +18609,6 @@
               },
               "refused": {
                 "type": "array",
-                "maxItems": 64,
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -18878,23 +18871,20 @@
               },
               "site_count": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 1000000
+                "minimum": 0
               },
               "br_table_count": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 1000000
+                "minimum": 0
               },
               "call_indirect_count": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 1000000
+                "minimum": 0
               },
               "omitted_site_count": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 1000000
+                "description": "Always 0 since VM detector 1.12.0, which lists every decoded site. Earlier producers listed the 256 best ranked and counted the rest here."
               },
               "selected_byte_offset": {
                 "type": [
@@ -18905,7 +18895,6 @@
               },
               "candidates": {
                 "type": "array",
-                "maxItems": 256,
                 "items": {
                   "$ref": "#/components/schemas/VmAnalysis/$defs/dispatchSite"
                 }
@@ -20058,8 +20047,7 @@
               "omitted_site_count": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 4294967295,
-                "description": "Classified sites not listed: site_count minus the listed sites."
+                "description": "Always 0 since VM detector 1.12.0, which lists every classified site. Earlier producers listed the 256 strongest and counted the rest here."
               },
               "role_counts": {
                 "type": "object",
@@ -20124,7 +20112,6 @@
               },
               "sites": {
                 "type": "array",
-                "maxItems": 256,
                 "items": {
                   "$ref": "#/components/schemas/VmAnalysis/$defs/dispatchClassificationSite"
                 }

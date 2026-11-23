@@ -1885,7 +1885,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           return section;
         }
         const roles = classification.role_counts;
-        section.append(textElement('p', '', `${vmCountText(classification.site_count, 'classified site')}: ${vmCountText(roles['interpreter-candidate'], 'cursor-loop interpreter candidate')}, ${vmCountText(roles.multiplexer, 'router')}, ${roles.other} other. ${classification.sites.length} listed; ${classification.omitted_site_count} omitted from this bounded list.`));
+        section.append(textElement('p', '', `${vmCountText(classification.site_count, 'classified site')}: ${vmCountText(roles['interpreter-candidate'], 'cursor-loop interpreter candidate')}, ${vmCountText(roles.multiplexer, 'router')}, ${roles.other} other. ${classification.omitted_site_count ? `${classification.sites.length} listed; ${classification.omitted_site_count} more were not listed by the earlier detector that produced this document.` : 'Every classified site is listed.'}`));
         for (const omission of classification.omissions) {
           const count = omission.omitted_records === undefined ? '' : ` ${vmCountText(omission.omitted_records, 'record')} omitted.`;
           section.append(textElement('p', 'vm-workspace-notice', `${omission.reason}: ${omission.detail}${count}`));
@@ -1968,7 +1968,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           section.append(textElement('p', '', 'No module-wide dispatch inventory is retained in this document.'));
           return section;
         }
-        section.append(textElement('p', '', `${vmCountText(inventory.site_count, 'module site')}: ${inventory.br_table_count} br_table, ${inventory.call_indirect_count} call_indirect. ${vmCountText(inventory.candidates.length, 'ranked site')} retained; ${inventory.omitted_site_count} omitted from this bounded list.`));
+        section.append(textElement('p', '', `${vmCountText(inventory.site_count, 'module site')}: ${inventory.br_table_count} br_table, ${inventory.call_indirect_count} call_indirect. ${inventory.omitted_site_count ? `${vmCountText(inventory.candidates.length, 'ranked site')} retained; ${inventory.omitted_site_count} more were not listed by the earlier detector that produced this document.` : 'Every site is ranked and listed.'}`));
         section.append(textElement('p', '', 'Candidate dispatchers are ranked by loop shape, then by br_table arm count or call_indirect element fanout. Arm counts exclude the default. Unique branch targets cluster repeated Wasm labels. A small br_table is a CFF/relooper candidate, a large br_table is a handler-table candidate, and call_indirect is an indirect funcref candidate. None of these is a proven guest opcode ISA. This inventory does not invent registers, a stack, or a guest PC.'));
         const retainedRows = vmOpcodeRows(workspace);
         const classificationLabel = classification => classification === 'cff-helper-candidate' ? 'CFF / relooper candidate'
@@ -1987,7 +1987,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
               ? 'Selector index to Wasm branch target. Samples are absent, so this is a handler-table candidate, not a proven guest opcode ISA. No guest PC, register, or stack is inferred.'
               : 'Static CFF or relooper arms. No guest opcode, guest PC, register, or stack is inferred.';
           // Rank and the heuristic label stay in the collapsed summary. Opening
-          // every row is not usable once the bounded list reaches 256 sites.
+          // every row is not usable once a module lists hundreds of sites.
           row.append(textElement('summary', '', `#${rank} · ${selected ? 'Default · ' : ''}f${site.function_index} · ${site.kind} · ${count} · byte ${site.byte_offset} · ${classification}${vmDispatchShapeSuffix(workspace, site.byte_offset)}`));
           if (selected) row.open = true;
           row.append(textElement('p', 'vm-effect-detail', `${classification} · ${vmDispatchEvidenceText(site)} · body ${site.function_body_size} bytes · loop depth ${site.loop_depth} · IP-like read/write pattern ${site.ip_like ? 'present' : 'absent'}. ${honesty}`));
@@ -2629,7 +2629,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         for (const row of arming.refused) {
           panel.append(textElement('p', 'vm-effect-detail', `Not armed: ${row.instruction} at byte ${row.byte_offset} (${row.reason})`));
         }
-        if (arming.omitted_refused_count) panel.append(textElement('p', 'vm-workspace-notice', `${arming.omitted_refused_count} more refused sites are not listed.`));
+        if (arming.omitted_refused_count) panel.append(textElement('p', 'vm-workspace-notice', `${arming.omitted_refused_count} more refused sites were not listed by the earlier detector that produced this document.`));
         if (arming.file !== null) panel.append(textElement('pre', 'vm-effect-detail vm-evidence-audit', arming.file));
       }
 

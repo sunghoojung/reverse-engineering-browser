@@ -1,9 +1,10 @@
-//! Bounded static site ranking, not an interpreter or guest-ISA classifier.
+//! Static site ranking, not an interpreter or guest-ISA classifier. Every
+//! decoded site is ranked and listed; VM detector producers before 1.12.0
+//! kept the 256 best ranked and counted the rest in `omitted_site_count`.
 use super::Instruction;
 use serde_json::{Value, json};
 use std::{cmp::Reverse, collections::BTreeMap, ops::Range};
 
-pub(super) const MAX_SITES: usize = 256;
 /// Same cutoff the rank uses to prefer interpreter-scale sites over small
 /// state-machine helpers. It is not an opcode-cardinality assumption.
 pub(super) const MAJOR_ARM_COUNT: u32 = 32;
@@ -107,9 +108,6 @@ impl Inventory {
                 "ip_like": ip_like, "structural_score": score, "classification": classification,
                 "evidence_class": evidence_class,
             }));
-            if self.ranked.len() > MAX_SITES {
-                self.ranked.pop_first();
-            }
             if instruction.loop_depth > 0
                 && best
                     .as_ref()
@@ -131,7 +129,7 @@ impl Inventory {
         json!({
             "ranking_version": 1, "site_count": self.sites,
             "br_table_count": self.br_tables, "call_indirect_count": self.indirect_calls,
-            "omitted_site_count": self.sites.saturating_sub(candidates.len()),
+            "omitted_site_count": 0,
             "selected_byte_offset": selected, "candidates": candidates,
         })
     }

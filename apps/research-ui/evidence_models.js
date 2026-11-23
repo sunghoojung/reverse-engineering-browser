@@ -2692,7 +2692,8 @@
             (omission.omitted_records === undefined || isSafeIntegerInRange(omission.omitted_records, 1, Number.MAX_SAFE_INTEGER))) ||
           classification.classification_version !== 1 ||
           !isSafeIntegerInRange(classification.site_count, 0, 4294967295) ||
-          !Array.isArray(classification.sites) || classification.sites.length > 256 ||
+          // Producers before VM detector 1.12.0 listed at most 256 sites; every site is listed since.
+          !Array.isArray(classification.sites) ||
           classification.omitted_site_count !== classification.site_count - classification.sites.length ||
           !vmWorkspaceExact(classification.role_counts, ['interpreter-candidate', 'multiplexer', 'other']) ||
           !vmWorkspaceExact(classification.kind_counts, vmDispatchKinds)) return false;
@@ -2708,9 +2709,10 @@
         if (!vmWorkspaceExact(inventory, ['ranking_version', 'site_count', 'br_table_count', 'call_indirect_count',
           'omitted_site_count', 'selected_byte_offset', 'candidates']) || inventory.ranking_version !== 1 ||
           !['site_count', 'br_table_count', 'call_indirect_count', 'omitted_site_count'].every(key =>
-            isSafeIntegerInRange(inventory[key], 0, 1000000)) ||
+            isSafeIntegerInRange(inventory[key], 0, Number.MAX_SAFE_INTEGER)) ||
           inventory.site_count !== inventory.br_table_count + inventory.call_indirect_count ||
-          !Array.isArray(inventory.candidates) || inventory.candidates.length > 256 ||
+          // Producers before VM detector 1.12.0 listed at most 256 sites; every site is listed since.
+          !Array.isArray(inventory.candidates) ||
           inventory.site_count !== inventory.candidates.length + inventory.omitted_site_count) return false;
         const offsets = new Set();
         for (const site of inventory.candidates) {
@@ -2853,7 +2855,9 @@
           arming.version !== 1 || !(arming.source_sha256 === null || vmWorkspaceDigest(arming.source_sha256)) ||
           !(arming.source_length === null || isSafeIntegerInRange(arming.source_length, 0, 0xffffffff)) ||
           (arming.source_sha256 === null) !== (arming.source_length === null) ||
-          !Array.isArray(arming.sites) || arming.sites.length > 256 || !Array.isArray(arming.refused) || arming.refused.length > 64 ||
+          // A site file arms at most 256 sites, its record's one-byte slot. Every refused site is
+          // listed since producer 2.20.0; earlier ones listed 64 and counted the rest.
+          !Array.isArray(arming.sites) || arming.sites.length > 256 || !Array.isArray(arming.refused) ||
           !isSafeIntegerInRange(arming.omitted_refused_count, 0, Number.MAX_SAFE_INTEGER) ||
           (arming.omitted_refused_count > 0 && arming.refused.length !== 64)) return false;
         const seen = new Set();

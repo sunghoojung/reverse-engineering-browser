@@ -1392,6 +1392,17 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertEqual(vm["tone"] as? String, "limit", "\(size.name): \(vm)")
       XCTAssertEqual(vm["chips"] as? [String], [budgets], "\(size.name): one chip per class: \(vm)")
       try await assertFullyVisible(ui, "#vm-notice", "\(size.name) VM capture limits")
+      // Never a fixed-height scroll box: the notice grows with its chips, so no line is cut off.
+      let box = try await ui.json("""
+        (notice => { const style = getComputedStyle(notice), rect = notice.getBoundingClientRect();
+          const chips = notice.querySelector('.ev-notice-chips').getBoundingClientRect();
+          return {maxHeight: style.maxHeight, overflow: style.overflowY, scrolls: notice.scrollHeight > notice.clientHeight + 1,
+            inside: chips.top >= rect.top - 0.5 && chips.bottom <= rect.bottom + 0.5}; })(document.querySelector('#vm-notice'))
+        """)
+      XCTAssertEqual(box["maxHeight"] as? String, "none", "\(size.name): the VM notice has no height cap: \(box)")
+      XCTAssertEqual(box["overflow"] as? String, "visible", "\(size.name): the VM notice is not a scroll box: \(box)")
+      XCTAssertEqual(box["scrolls"] as? Bool, false, "\(size.name): nothing in the VM notice scrolls out of view: \(box)")
+      XCTAssertEqual(box["inside"] as? Bool, true, "\(size.name): the chip row sits inside the VM notice: \(box)")
       try await assertInert(ui, "\(size.name) VM capture limits")
       try await assertLayout(ui, "#screen-vm", "\(size.name) VM capture limits")
       try await ui.screenshot("vm-capture-limits-\(size.name)")

@@ -3957,7 +3957,9 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #screen-vm .vm-session-copy { display: none; }
 #screen-vm .vm-session-chip { padding: 3px 6px; font-size: 10px; letter-spacing: 0; }
 #vm-findings-workspace:not([hidden]) { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; overflow: hidden; }
-#vm-findings-workspace > .vm-notice { margin: 0; padding: 4px 12px; font-size: 10px; max-height: 48px; overflow: auto; border-bottom: 1px solid var(--line); }
+/* The notice grows with its chips when they wrap, and the grid's flexible row
+   gives the room back: a fixed-height scroll box cut its lines off. */
+#vm-findings-workspace > .vm-notice { margin: 0; padding: 4px 12px; font-size: 10px; border-bottom: 1px solid var(--line); }
 #vm-findings-workspace > .vm-grid { height: auto; min-height: 0; max-height: none; grid-template-columns: 210px minmax(0, 1fr); }
 #vm-findings-workspace > .vm-notice { grid-row: 1; }
 #vm-findings-workspace > .vm-wasm-sampling { grid-row: 2; }

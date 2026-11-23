@@ -5601,7 +5601,10 @@ async fn wasm_run_reads_of_any_size_are_read_whole_in_pages() {
     );
     for (route, status) in [
         (format!("/api/wasm/runs/memory?run_id={run_id}&read=3"), 404),
-        (format!("/api/wasm/runs/memory?run_id=wr-1-00&read=0"), 404),
+        (
+            "/api/wasm/runs/memory?run_id=wr-1-00&read=0".to_owned(),
+            404,
+        ),
         (
             format!(
                 "/api/wasm/runs/memory?run_id={run_id}&read=0&start={}",

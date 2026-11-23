@@ -106,10 +106,17 @@ def drive(run: Run) -> None:
         return
     target = {"session_id": session, "target_id": top["id"]}
     try:
-        # Activity: every completion waits until Traffic reads it.
-        measured.fetched = console({"action": "evaluate", **target, "source": (
-            f"(await Promise.all(Array.from({{length: {RESOURCES}}}, (_, i) => fetch("
-            "'/console-tables/resource?' + i, {cache: 'no-store'}).then(r => r.text())))).length")}).get("text", "")
+        # Activity: every completion waits until Traffic reads it. A plain
+        # evaluate has no top-level await, so the page counts its own fetches.
+        console({"action": "evaluate", **target, "source": (
+            f"window.rebFetched = 0; for (let i = 0; i < {RESOURCES}; i++) "
+            "fetch('/console-tables/resource?' + i, {cache: 'no-store'}).then(r => r.text())"
+            ".then(() => window.rebFetched++); 'started'")})
+        deadline = time.monotonic() + 30
+        while measured.fetched != str(RESOURCES) and time.monotonic() < deadline:
+            time.sleep(0.2)
+            measured.fetched = console({"action": "evaluate", **target,
+                                        "source": "String(window.rebFetched)"}).get("text", "")
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             reply = console({"action": "runtime", **target, "command": {"operation": "traffic"}})["runtime"]

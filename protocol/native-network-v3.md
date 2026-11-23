@@ -333,10 +333,10 @@ handles each call after its detached and observer check:
    nothing else is done. Every other reuse is recorded; nothing counts them.
 2. Only an admitted reuse takes a fresh renderer request ID, its fetch owner
    and its host: 121 bytes, one past what the record keeps, or in content
-   sessions the whole host up to one past an artifact URL's 8,192 bytes. In
-   content sessions only it also takes its target
-   (`NativeRequestTargetRange` keeps the range inside the URL whatever the
-   parser left): the whole path and query of an `http` or `https` URL up to
+   sessions the whole host up to one past an artifact URL's 2 MiB
+   (`kNativeArtifactMaxUrlBytes`). In content sessions only it also takes its
+   target (`NativeRequestTargetRange` keeps the range inside the URL whatever
+   the parser left): the whole path and query of an `http` or `https` URL up to
    the 2 MiB the browser keeps for its own requests
    (`NativeMemoryCacheTargetBytes`, Chromium patch
    `0065-record-whole-memory-cache-targets`), else a 116-byte prefix, since a

@@ -101,9 +101,10 @@ cancellation and bounded work are not a hard cancellation guarantee.
 
 ### Export resources and errors
 
-- Each source is scanned to EOF, at any length and row count. A row is at
-  most 4096 bytes in the event store and 8192 in the manifest, including its
-  separator: those are the stores' record contracts, not scan bounds.
+- Each source is scanned to EOF, at any length and row count. An event store
+  row is at most 4096 bytes, its separator included, and a manifest row at
+  most the manifest's record bound, which fits a 2 MiB URL: those are the
+  stores' record contracts, not scan bounds.
 - Every identity a scan sees is recorded with the SHA-256 of its row in a
   private temporary SQLite database that SQLite deletes when the export ends,
   so duplicate and conflicting identities, missing selections and sequence

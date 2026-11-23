@@ -11,9 +11,11 @@
 
 #include "base/command_line.h"
 #include "base/files/file_util.h"
+#include "base/functional/bind.h"
 #include "base/no_destructor.h"
 #include "base/process/process_handle.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/task/thread_pool.h"
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
@@ -37,10 +39,13 @@ bool ReadNativeWasmSampleBudget(const base::CommandLine& command_line,
                                 const std::uint64_t category_mask,
                                 NativeWasmSampleBudgetPolicy& policy) {
   policy = {};
+  // Every record removes the pacing, so it takes no per-key count either.
+  policy.every_record = command_line.HasSwitch("reb-wasm-every-record");
   // Paced by default: one hot function keeps at most this many full samples
   // per window, so the rest of the page still gets the window's budget.
-  policy.samples_per_function = kNativeWasmDefaultSamplesPerFunction;
-  const bool present = command_line.HasSwitch("reb-wasm-samples-per-function") ||
+  policy.samples_per_function = policy.every_record ? 0 : kNativeWasmDefaultSamplesPerFunction;
+  const bool present = policy.every_record ||
+                       command_line.HasSwitch("reb-wasm-samples-per-function") ||
                        command_line.HasSwitch("reb-wasm-samples-per-indirect-site") ||
                        command_line.HasSwitch("reb-wasm-function-allow") ||
                        command_line.HasSwitch("reb-wasm-function-deny") ||
@@ -208,8 +213,7 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
     // session. Its armed flags and appended slots may change.
     const auto path = command_line->GetSwitchValuePath("reb-js-invocation-sites");
     std::string json;
-    if (path.empty() ||
-        !base::ReadFileToStringWithMaxSize(path, &json, kNativeJsInvocationSitesFileLimit) ||
+    if (path.empty() || !base::ReadFileToString(path, &json) ||
         (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kVm)) == 0 ||
         !(invocation_sites = ParseNativeJsInvocationSiteList(json)) ||
         !KeepsJsInvocationSlots(*invocation_sites)) {
@@ -289,7 +293,25 @@ void NativeProbeSession::AdoptJsInvocationSlots(
 void NativeProbeSession::UpdateJsInvocationSites(const std::string& json) noexcept {
   if (!IsActive() || !js_invocation_sites_)
     return;
-  const auto sites = ParseNativeJsInvocationSiteList(json);
+  if (!js_invocation_parser_) {
+    js_invocation_parser_ =
+        base::ThreadPool::CreateSequencedTaskRunner({base::TaskPriority::USER_VISIBLE});
+  }
+  js_invocation_parser_->PostTaskAndReplyWithResult(
+      FROM_HERE,
+      base::BindOnce(
+          [](const std::string& revision) { return ParseNativeJsInvocationSiteList(revision); },
+          json),
+      base::BindOnce(&NativeProbeSession::ApplyJsInvocationSites, base::Unretained(this),
+                     session_id()));
+}
+
+void NativeProbeSession::ApplyJsInvocationSites(
+    const std::uint64_t session_id,
+    const std::optional<std::vector<NativeJsInvocationSite>> sites) noexcept {
+  // NoDestructor: the session outlives every reply.
+  if (!IsActive() || !js_invocation_sites_ || session_id != this->session_id())
+    return;
   if (!sites || !KeepsJsInvocationSlots(*sites)) {
     EmitNamedGap(NativeProbeCategory::kVm, "native_js_invocation_sites_revision_refused");
     return;

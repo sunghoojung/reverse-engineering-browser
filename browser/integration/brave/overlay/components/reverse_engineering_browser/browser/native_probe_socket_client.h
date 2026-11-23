@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -88,17 +89,18 @@ class NativeProbeSocketClient final {
   NativeProbeQueue queue_;
   // A burst that outruns the broker waits here once queue_ is full, so a page
   // that floods the renderer rings keeps every record the browser could
-  // forward. Chunks are allocated only while a burst outruns the writer and
-  // freed once it has sent them. Records the bound refuses are counted in
-  // spill_dropped_ and reported as a transport gap.
+  // forward. Chunks are mapped only while a burst outruns the writer and
+  // unmapped once it has sent them. A record the system has no pages for is
+  // counted in spill_dropped_ and reported as a transport gap.
   base::Lock spill_lock_;
   Spill spill_ GUARDED_BY(spill_lock_);
   // Chunks alive in spill_ and in the batch the writer is sending; the memory
   // bound applies to both.
   std::size_t spill_chunks_ GUARDED_BY(spill_lock_) = 0;
-  // 256 MiB, about 800,000 records. It bounds the browser's memory when a
-  // page outruns the broker for longer than a burst.
-  std::size_t spill_chunk_limit_ GUARDED_BY(spill_lock_) = (256u << 20) / kSpillChunkBytes;
+  // No bound of its own: the spill holds what the broker has not taken yet,
+  // as long as the system maps pages for it. Only tests lower it, to reach
+  // the refusal path. Earlier browsers stopped at 256 MiB.
+  std::size_t spill_chunk_limit_ GUARDED_BY(spill_lock_) = std::numeric_limits<std::size_t>::max();
   std::uint64_t spill_dropped_ GUARDED_BY(spill_lock_) = 0;
   // Set by every record that spills and cleared by the writer only after it
   // has sent everything spilled. While it is set, every record spills, so a

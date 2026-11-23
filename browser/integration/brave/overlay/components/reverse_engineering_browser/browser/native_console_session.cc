@@ -15,9 +15,11 @@
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "base/command_line.h"
@@ -353,8 +355,9 @@ class Session final {
 
   // One monotonic identity space for Console targets and document-start
   // records. A document that is not a current target still gets a stable
-  // nonsecret ID, remembered in a bounded table keyed by its exact generation.
-  // The lookup half of DocumentId: no assignment, no recycling.
+  // nonsecret ID, remembered for the session keyed by its exact generation,
+  // so a document that reports again after any number of others keeps it.
+  // The lookup half of DocumentId: no assignment.
   std::uint64_t DocumentIdIfAssigned(content::RenderFrameHost* frame) {
     DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
     if (!Eligible(frame))
@@ -363,12 +366,8 @@ class Session final {
       if (target.document.AsRenderFrameHostIfValid() == frame)
         return target.id;
     }
-    const auto token = frame->GetDocumentToken().value();
-    for (const auto& entry : documents_) {
-      if (entry.first == token)
-        return entry.second;
-    }
-    return 0;
+    const auto found = documents_.find(frame->GetDocumentToken().value());
+    return found == documents_.end() ? 0 : found->second;
   }
 
   std::uint64_t DocumentId(content::RenderFrameHost* frame) {
@@ -380,18 +379,12 @@ class Session final {
         return target.id;
     }
     const auto token = frame->GetDocumentToken().value();
-    for (const auto& entry : documents_) {
-      if (entry.first == token)
-        return entry.second;
-    }
+    if (const auto found = documents_.find(token); found != documents_.end())
+      return found->second;
     if (!next_target_)
       return 0;
-    // Recycling the oldest entry only relabels a long-idle document that
-    // reports again; it never drops or rewrites a retained record.
-    if (documents_.size() >= 256)
-      documents_.pop_front();
     const auto id = next_target_++;
-    documents_.emplace_back(token, id);
+    documents_.emplace(token, id);
     return id;
   }
 
@@ -439,17 +432,37 @@ class Session final {
       return;
     }
     if (operation && *operation == "traffic") {
+      // Every event waits until the owner reads it. A reply takes the oldest
+      // that fit the transport and says whether more remain, so no number of
+      // events is refused or lost.
       base::ListValue events;
-      for (auto iterator = activity_.begin(); iterator != activity_.end();) {
-        if (*iterator->FindString("document_id") == base::NumberToString(request.target_id)) {
-          events.Append(std::move(*iterator));
-          iterator = activity_.erase(iterator);
-        } else
-          ++iterator;
+      bool more = false;
+      if (const auto found = activity_.find(request.target_id); found != activity_.end()) {
+        // The envelope at its widest: status, dropped and more.
+        std::size_t bytes =
+            std::string_view(R"({"dropped":2147483647,"events":[],"more":false,"status":"ok"})")
+                .size();
+        auto& pending = found->second;
+        while (!pending.empty()) {
+          std::string event;
+          if (!base::JSONWriter::Write(pending.front(), &event))
+            event.clear();
+          const std::size_t needed = event.size() + (events.empty() ? 0 : 1);
+          if (bytes + needed > kNativeConsoleReplyLimit) {
+            more = true;
+            break;
+          }
+          bytes += needed;
+          events.Append(std::move(pending.front()));
+          pending.pop_front();
+        }
+        if (pending.empty())
+          activity_.erase(found);
       }
       base::DictValue value;
       value.Set("status", "ok");
       value.Set("events", std::move(events));
+      value.Set("more", more);
       value.Set("dropped", static_cast<int>(activity_drops_));
       activity_drops_ = 0;
       if (!base::JSONWriter::Write(value, &reply->payload) ||
@@ -569,9 +582,12 @@ class Session final {
         base::CommandLine::ForCurrentProcess()->HasSwitch(kNativeConsoleLiveBindingSwitch);
     auto previous = std::move(targets_);
     targets_.clear();
+    // Without the live binding a listing renumbers every target, so no
+    // traffic request can name the old IDs again: their events are counted as
+    // dropped and freed.
     if (!live) {
-      activity_drops_ =
-          std::min(2147483647u, activity_drops_ + static_cast<unsigned>(activity_.size()));
+      for (const auto& [document, pending] : activity_)
+        CountActivityDrops(pending.size());
       activity_.clear();
     }
     std::erase_if(observers_,
@@ -602,6 +618,11 @@ class Session final {
               });
           if (same_document != previous.end())
             target.id = same_document->id;
+          // A document that reported before it was listed, such as a child
+          // frame's document-start record, keeps the ID it reported with.
+          else if (const auto reported = documents_.find(frame->GetDocumentToken().value());
+                   reported != documents_.end())
+            target.id = reported->second;
         }
         if (!target.id) {
           if (!next_target_) {
@@ -637,15 +658,16 @@ class Session final {
         targets_.push_back(std::move(target));
       });
     }
+    // A document that is no longer a target cannot be named again either.
     if (live) {
-      const auto before = activity_.size();
-      std::erase_if(activity_, [this](const auto& event) {
-        return std::none_of(targets_.begin(), targets_.end(), [&](const Target& target) {
-          return *event.FindString("document_id") == base::NumberToString(target.id);
+      std::erase_if(activity_, [this](const auto& entry) {
+        const bool gone = std::none_of(targets_.begin(), targets_.end(), [&](const Target& target) {
+          return target.id == entry.first;
         });
+        if (gone)
+          CountActivityDrops(entry.second.size());
+        return gone;
       });
-      activity_drops_ =
-          std::min(2147483647u, activity_drops_ + static_cast<unsigned>(before - activity_.size()));
     }
     reply->header.type = NativeConsoleType::kTargets;
     // The owner learns from the listing whether this browser session permits
@@ -778,28 +800,30 @@ class Session final {
       auto origin = url::Origin::Create(info.final_url).Serialize();
       if (origin.size() > 256 || origin == "null")
         return;
-      if (activity_.size() == 64) {
-        activity_.pop_front();
-        if (activity_drops_ < 2147483647)
-          ++activity_drops_;
-      }
-      activity_.push_back(base::DictValue()
-                              .Set("event_id", base::NumberToString(next_activity_++))
-                              .Set("document_id", base::NumberToString(target.id))
-                              .Set("resource_id", base::NumberToString(info.request_id))
-                              .Set("after_request_id", base::NumberToString(last_evaluation_))
-                              .Set("origin", origin)
-                              .Set("method", info.method.substr(0, 16))
-                              .Set("status", info.http_status_code)
-                              .Set("network_error", info.net_error)
-                              .Set("cached", info.was_cached)
-                              .Set("time", base::Time::Now().InMillisecondsFSinceUnixEpoch())
-                              .Set("operation", "resource_load_complete"));
+      activity_[target.id].push_back(
+          base::DictValue()
+              .Set("event_id", base::NumberToString(next_activity_++))
+              .Set("document_id", base::NumberToString(target.id))
+              .Set("resource_id", base::NumberToString(info.request_id))
+              .Set("after_request_id", base::NumberToString(last_evaluation_))
+              .Set("origin", origin)
+              .Set("method", info.method.substr(0, 16))
+              .Set("status", info.http_status_code)
+              .Set("network_error", info.net_error)
+              .Set("cached", info.was_cached)
+              .Set("time", base::Time::Now().InMillisecondsFSinceUnixEpoch())
+              .Set("operation", "resource_load_complete"));
       break;
     }
   }
+  void CountActivityDrops(const std::size_t count) {
+    activity_drops_ = static_cast<unsigned>(
+        std::min<std::size_t>(2147483647u, std::size_t{activity_drops_} + count));
+  }
   std::vector<std::unique_ptr<ConsoleActivity>> observers_;
-  std::deque<base::DictValue> activity_;
+  // Each target's resource completions, oldest first, until the owner reads
+  // them; there is no count limit.
+  std::map<std::uint64_t, std::deque<base::DictValue>> activity_;
   std::uint64_t next_activity_ = 1;
   std::uint64_t last_evaluation_ = 0;
   unsigned activity_drops_ = 0;
@@ -807,8 +831,9 @@ class Session final {
   // Metadata and weak document references only; no V8 objects are retained.
   base::FilePath user_data_dir_;
   std::vector<Target> targets_;
-  // Exact document generations only; recycled oldest-first and never published.
-  std::deque<std::pair<base::UnguessableToken, std::uint64_t>> documents_;
+  // Exact document generations only; kept for the session and never
+  // published.
+  std::map<base::UnguessableToken, std::uint64_t> documents_;
   std::uint64_t next_target_ = 1;
   // Kept watch scope serials; never 0.
   std::uint64_t next_scope_ = 1;

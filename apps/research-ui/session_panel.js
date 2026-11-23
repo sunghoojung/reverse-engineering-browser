@@ -125,6 +125,8 @@
       detail: 'Also record where each promise a request awaited was created. Slower; turns on request stacks.'},
     {key: 'wasm_dispatch', name: 'Wasm dispatch sampling',
       detail: 'Sample br_table and call_indirect targets. Wasm then compiles with Liftoff only, so Wasm-heavy pages run slower.'},
+    {key: 'wasm_every_record', name: 'Every Wasm record', needs: 'wasm_dispatch',
+      detail: 'Keep every br_table, call_indirect and execution record instead of up to 1024 a second. A hot loop can write millions; turns on Wasm dispatch sampling.'},
     {key: 'ignore_debugger_statements', name: 'Ignore debugger statements',
       detail: 'Pages cannot pause the browser with a debugger statement.'},
     {key: 'document_start', name: 'Allow document-start Console scripts',

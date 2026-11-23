@@ -15,7 +15,8 @@ headers=(
   base/threading/platform_thread.h base/time/time.h
   base/memory/shared_memory_mapping.h base/memory/unsafe_shared_memory_region.h
   base/no_destructor.h base/threading/thread_local.h base/functional/bind.h
-  base/task/sequenced_task_runner.h mojo/public/cpp/base/big_buffer.h
+  base/task/sequenced_task_runner.h base/task/single_thread_task_runner.h
+  base/location.h mojo/public/cpp/base/big_buffer.h
   base/synchronization/lock.h
   mojo/public/cpp/bindings/associated_receiver.h
   mojo/public/cpp/bindings/pending_associated_receiver.h mojo/public/cpp/bindings/shared_remote.h

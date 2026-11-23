@@ -1,0 +1,84 @@
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+index cdd3e16963a430296e6363ea9aafa7ecbaff04aa..7c7300dc6aec192762a5927d54e1f48d88e8661e 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+@@ -687,25 +687,31 @@ std::uint64_t NativeJsInvocationEpoch() {
+   return reb::NativeProbeSink::Get().NativeJsInvocationEpoch();
+ }
+ 
++// Copies what fits in chunks and returns the whole count; V8 asks again with
++// room for every site when it does not fit.
+ std::size_t NativeJsInvocationSites(const std::uint64_t epoch,
+                                     v8::JsInvocationSite* const sites,
+                                     const std::size_t capacity) {
+-  if (!sites || capacity == 0) {
++  if (!sites) {
+     return 0;
+   }
+-  std::array<reb::NativeJsInvocationSite, reb::kNativeJsInvocationSiteLimit>
+-      copied;
+-  const std::size_t count = std::min(
+-      reb::NativeProbeSink::Get().CopyNativeJsInvocationSites(epoch, copied),
+-      capacity);
+   const auto out = UNSAFE_BUFFERS(base::span(sites, capacity));
+-  for (std::size_t i = 0; i < count; ++i) {
+-    base::span(out[i].source_sha256)
+-        .copy_from(base::span(copied[i].source_sha256));
+-    out[i].source_length = copied[i].source_length;
+-    out[i].anchor_offset = copied[i].anchor_offset;
++  std::array<reb::NativeJsInvocationSite, 256> chunk;
++  std::size_t total = 0;
++  for (std::size_t first = 0;; first += chunk.size()) {
++    total = reb::NativeProbeSink::Get().CopyNativeJsInvocationSites(epoch, first,
++                                                                    chunk);
++    const std::size_t end = std::min({total, capacity, first + chunk.size()});
++    for (std::size_t i = first; i < end; ++i) {
++      base::span(out[i].source_sha256)
++          .copy_from(base::span(chunk[i - first].source_sha256));
++      out[i].source_length = chunk[i - first].source_length;
++      out[i].anchor_offset = chunk[i - first].anchor_offset;
++    }
++    if (end < first + chunk.size() || end == capacity) {
++      return total;
++    }
+   }
+-  return count;
+ }
+ 
+ // The revision of the epoch's sites. A changed revision makes V8 copy the
+@@ -749,14 +755,13 @@ bool CaptureJsInvocationStart(v8::Local<v8::Context> context,
+                               const v8::JsInvocationStart& start) {
+   reb::NativeProbeSink& sink = reb::NativeProbeSink::Get();
+   const auto [frame_id, document_id] = NativeInvocationDocument(context);
+-  // A slot past the record's one-byte field is refused, never narrowed.
+   if (frame_id == 0 || document_id == 0 || !start.source_sha256 ||
+-      start.script_id <= 0 || start.slot >= reb::kNativeJsInvocationSiteLimit) {
++      start.script_id <= 0) {
+     sink.NoteNativeJsInvocationInputUnavailable(epoch, frame_id);
+     return false;
+   }
+   reb::NativeJsInvocationStartPayload payload;
+-  payload.site_slot = static_cast<std::uint8_t>(start.slot);
++  payload.site_slot = start.slot;
+   payload.argument_count = static_cast<std::uint16_t>(
+       std::min<std::uint32_t>(start.argument_count, 0xFFFF));
+   payload.flags = static_cast<std::uint8_t>(
+@@ -792,8 +797,7 @@ void CaptureJsInvocationSettle(v8::Local<v8::Context> context,
+                                const v8::JsInvocationSettle& settle) {
+   reb::NativeProbeSink& sink = reb::NativeProbeSink::Get();
+   const auto [frame_id, document_id] = NativeInvocationDocument(context);
+-  if (frame_id == 0 || document_id == 0 ||
+-      settle.slot >= reb::kNativeJsInvocationSiteLimit) {
++  if (frame_id == 0 || document_id == 0) {
+     // The settle job ran after its document went away. The ID still closes
+     // the recorded start.
+     sink.NoteNativeJsInvocationSettleUnavailable(epoch, frame_id,
+@@ -801,7 +805,7 @@ void CaptureJsInvocationSettle(v8::Local<v8::Context> context,
+     return;
+   }
+   reb::NativeJsInvocationSettlePayload payload;
+-  payload.site_slot = static_cast<std::uint8_t>(settle.slot);
++  payload.site_slot = settle.slot;
+   payload.outcome = static_cast<std::uint8_t>(settle.outcome);
+   payload.via = static_cast<std::uint8_t>(settle.via);
+   payload.value_kind = static_cast<std::uint8_t>(settle.value_kind);

@@ -12,6 +12,9 @@
       // V8's largest Wasm module (kV8MaxWasmModuleSize) bounds a byte offset in
       // one; include/reb/wasm_dispatch.hpp kWasmModuleByteOffsetLimit.
       const WASM_MODULE_OFFSET_LIMIT = 2 ** 30;
+      // A guest sample's index is below its recipe's limit, a Chromium JSON
+      // integer; include/reb/wasm_guest.hpp kWasmGuestSampleIndexLimit.
+      const WASM_GUEST_SAMPLE_INDEX_LIMIT = 2 ** 31 - 1;
 
       function fingerprintEventsFromEvents(events) {
         return events.filter(event => fingerprintSignalCategories.has(event.category));
@@ -1108,9 +1111,13 @@
         const u16 = at => view.getUint16(at, true);
         const u32 = at => view.getUint32(at, true);
         const u64 = at => view.getBigUint64(at, true);
-        // Version 2 records every call of up to 256 sites, with u32 ordinals.
-        // Version 1, from earlier builds, had 8 sites and sampled indexes.
+        // Version 2 records every call of every site: byte 4 is zero and the
+        // u32 slot follows the payload (start 112, settle 72), with u32
+        // ordinals. Version 1, from earlier builds, had 8 one-byte slots and
+        // sampled indexes.
         const v1 = u16(0) === 1;
+        const siteSlot = wide => v1 ? (bytes[4] < 8 ? [bytes[4], wide] : null)
+          : bytes[4] === 0 ? [u32(wide), wide + 4] : null;
         if (![1, 2].includes(u16(0)) || u16(2) !== 128) return null;
         if (event.type === 'js_invocation_request') {
           const [state, id] = [bytes[4], u32(8)];
@@ -1122,9 +1129,11 @@
         if (event.frame_id === '0' || event.request_id !== '0') return null;
         const validKind = (kind, low) => kind >= 1 && kind <= 14 && (kind === 1 || (kind === 7 ? low <= 1 : low === 0));
         if (event.type === 'js_invocation_start') {
-          const [slot, flags, argc, id, parent] = [bytes[4], bytes[5], u16(6), u32(20), u32(24)];
-          if ((v1 && (slot > 7 || u16(28) >= 64 || u16(30) >= 256)) || (flags & ~0x03) !== 0 || u32(8) === 0 ||
-            u32(16) === 0 || u32(12) >= u32(16) || id === 0 || u64(104) === 0n || bytes.slice(112).some(byte => byte !== 0) ||
+          const named = siteSlot(112);
+          if (!named) return null;
+          const [[slot, reserved], flags, argc, id, parent] = [named, bytes[5], u16(6), u32(20), u32(24)];
+          if ((v1 && (u16(28) >= 64 || u16(30) >= 256)) || (flags & ~0x03) !== 0 || u32(8) === 0 ||
+            u32(16) === 0 || u32(12) >= u32(16) || id === 0 || u64(104) === 0n || bytes.slice(reserved).some(byte => byte !== 0) ||
             (parent !== 0 && (parent >= id || (flags & 1) !== 0)) || ((flags & 2) !== 0) !== (argc > 8)) return null;
           const kinds = [];
           for (let index = 0; index < 8; index += 1) {
@@ -1135,13 +1144,15 @@
           return {slot, invocation_id: id, parent_invocation_id: parent, parent_unknown: (flags & 1) !== 0,
             argument_count: argc, argument_kinds: kinds};
         }
-        const [slot, outcome, via, kind] = [bytes[4], bytes[5], bytes[6], bytes[7]];
+        const named = siteSlot(72);
+        if (!named) return null;
+        const [[slot, reserved], outcome, via, kind] = [named, bytes[5], bytes[6], bytes[7]];
         const [length, state, encoding, flags, byteLength, rolling] =
           [u32(12), bytes[16], bytes[17], bytes[18], u32(20), u64(24)];
         const [fulfilled, rejected] = [outcome === 1, outcome === 2];
         const [string, raw] = [kind === 3, kind === 12 || kind === 13];
-        if ((v1 && slot > 7) || !(fulfilled || rejected) || kind < 1 || kind > 14 || u32(8) === 0 || u64(64) === 0n ||
-          bytes[19] !== 0 || (flags & ~1) !== 0 || bytes.slice(72).some(byte => byte !== 0) ||
+        if (!(fulfilled || rejected) || kind < 1 || kind > 14 || u32(8) === 0 || u64(64) === 0n ||
+          bytes[19] !== 0 || (flags & ~1) !== 0 || bytes.slice(reserved).some(byte => byte !== 0) ||
           !((via === 1 && fulfilled) || (via === 2 && rejected) || via === 3) ||
           (length !== 0 && !(string || raw || kind === 11))) return null;
         if (state === 1) {
@@ -1186,7 +1197,7 @@
         const length = view.getUint32(72,true);
         return isCanonicalInteger(event.parent_event_id,1n,uint64Max) && BigInt(event.parent_event_id) < BigInt(event.sequence_number) &&
           view.getUint32(8,true) >= 8 && view.getUint32(8,true) < WASM_MODULE_OFFSET_LIMIT && view.getUint32(16,true) < 16777216 &&
-          view.getUint32(20,true) < 256 && u64(24) > 0n && u64(32) > 0n &&
+          view.getUint32(20,true) < WASM_GUEST_SAMPLE_INDEX_LIMIT && u64(24) > 0n && u64(32) > 0n &&
           u64(56) > 0n && u64(56) !== BigInt(event.artifact_id) && length > 0 && length <= 65536 &&
           u64(40) < BigInt(length) && u64(64) + BigInt(length) <= uint64Max && bytes.slice(96).some(b => b !== 0) ? {} : null;
       }
@@ -2910,7 +2921,7 @@
           !['i32','i64'].includes(row.pc_value_type) || typeof row.pc_subtract_memory_base !== 'boolean' ||
           !['pc_local_index','memory_index','selector','opcode'].every(k => isSafeIntegerInRange(row[k],0,0xffffffff)) ||
           !isSafeIntegerInRange(row.function_index,0,16777215) || !isSafeIntegerInRange(row.module_byte_offset,8,WASM_MODULE_OFFSET_LIMIT - 1) ||
-          !isSafeIntegerInRange(row.table_count,0,16777215) || !isSafeIntegerInRange(row.sample_index,0,255) ||
+          !isSafeIntegerInRange(row.table_count,0,16777215) || !isSafeIntegerInRange(row.sample_index,0,WASM_GUEST_SAMPLE_INDEX_LIMIT - 1) ||
           row.selected_arm !== Math.min(row.selector,row.table_count) || row.is_default !== (row.selector >= row.table_count) ||
           !isSafeIntegerInRange(row.memory_length,1,65536) || !isSafeIntegerInRange(row.instruction_pointer,0,65535) ||
           row.instruction_pointer_units !== 'byte-offset' || ![1,2,4].includes(row.opcode_width) ||

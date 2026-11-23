@@ -112,9 +112,15 @@ Traffic view, retaining prior delivered metadata for that session/document.
 Each record has an event ID, document ID, browser resource ID, completion time,
 origin, method, HTTP status, network error, cache state and last evaluation
 request ID. Paths, query strings, headers and bodies are excluded. Observation
-order is not a causal claim. Completed resources before the initial listing,
-other documents and evicted records are not reconstructed or replayed. Refresh
-discarding undelivered records increments the visible drop count. The view
+order is not a causal claim. The browser keeps every completion of a current
+target until it is read, with no count limit. One `traffic` reply carries the
+oldest that fit the 64 KiB runtime response and `more: true` while some
+remain; Experiment activity reads on until none remain, up to 64 replies per
+read, and says when more wait. Completed resources before the initial listing
+and of other documents are not reconstructed or replayed. Only a listing that
+can no longer name a document discards its unread records: a refresh without
+the live binding renumbers every target, and a document that left the listing
+is gone. Each discarded record increments the visible drop count. The view
 never merges these ephemeral records into baseline evidence.
 
 ## Ownership and bounds
@@ -142,9 +148,9 @@ and page temporary variables require explicit researcher actions.
 | Property page / depth | 16 properties plus prototype; UI depth 8; first 65536 array indices |
 | Completion | 8 path components, 24 suggestions, 1024 lexical names, 4096 names per prototype, 8 prototypes |
 | Renderer messages | 32 / 32 KiB serialized JSON; visible saturating drop count |
-| Browser activity | 64 events; visible saturating drop count |
+| Browser activity | Every event of a current target until read; 64 KiB reply pages with `more`; a visible saturating drop count only for documents a listing can no longer name |
 | UI transcript / history | Each 128 entries / 256 KiB; transcript also caps 8192 DOM elements; eviction is visible |
-| Snippets / activity view | 16 / 64 KiB snippets; 128 metadata records |
+| Snippets / activity view | 16 / 64 KiB snippets; every delivered metadata record of the session |
 | Event monitors | Any number of Elements, four event types each, until `unmonitorEvents`, Clear, Disconnect or navigation |
 | Command run time | Until it returns or is stopped, within the session hour |
 | Dispatch / record transfer / Stop answer | 500 ms / 2 seconds / 5 seconds |

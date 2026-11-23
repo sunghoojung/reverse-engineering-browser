@@ -792,6 +792,7 @@ class Receiver {
   void Bind(PendingReceiver<T>) {}
 };
 }  // namespace mojo
+#include "native_wasm_records_stub.h"
 namespace reb::mojom {
 class NativeProbeClient {
  public:
@@ -804,13 +805,13 @@ class NativeProbeClient {
                          std::uint64_t,
                          const std::string&,
                          const std::vector<std::uint8_t>&,
-                         const std::optional<std::vector<std::uint8_t>>&,
+                         std::optional<mojo_base::BigBuffer>,
                          bool,
                          bool,
                          bool) = 0;
   virtual void SetWasmSampleBudget(const std::vector<std::uint8_t>&) = 0;
   virtual void ResetWasmSampleBudgets() = 0;
-  virtual void UpdateJsInvocationSites(const std::vector<std::uint8_t>&) = 0;
+  virtual void UpdateJsInvocationSites(mojo_base::BigBuffer) = 0;
   virtual void SetDebuggerWatchScope(NativeWatchScopePtr) = 0;
   virtual void Disable() = 0;
   virtual void NativeGuestModuleStatus(std::uint64_t, std::uint64_t, bool) = 0;
@@ -821,78 +822,7 @@ class NativeProbeHost {
  public:
   virtual ~NativeProbeHost() = default;
   virtual void EventsAvailable() = 0;
-  virtual void CaptureWasmDispatch(std::uint64_t,
-                                   std::uint64_t,
-                                   std::uint64_t,
-                                   std::uint64_t,
-                                   std::uint32_t,
-                                   std::uint32_t,
-                                   std::uint64_t,
-                                   std::uint64_t,
-                                   std::uint64_t,
-                                   std::uint64_t,
-                                   std::uint32_t,
-                                   std::uint32_t,
-                                   std::uint32_t,
-                                   std::uint32_t,
-                                   bool,
-                                   std::uint8_t,
-                                   std::uint32_t,
-                                   std::uint32_t,
-                                   std::uint8_t,
-                                   std::uint32_t,
-                                   const std::string&,
-                                   std::uint64_t,
-                                   mojo_base::BigBuffer,
-                                   std::uint64_t) = 0;
-  virtual void CaptureWasmIndirect(std::uint64_t,
-                                   std::uint64_t,
-                                   std::uint64_t,
-                                   std::uint64_t,
-                                   std::uint32_t,
-                                   std::uint32_t,
-                                   std::uint64_t,
-                                   std::uint64_t,
-                                   std::uint64_t,
-                                   std::uint64_t,
-                                   std::uint32_t,
-                                   std::uint32_t,
-                                   std::uint32_t,
-                                   std::uint32_t,
-                                   std::uint32_t,
-                                   std::uint32_t,
-                                   std::uint32_t,
-                                   std::uint8_t,
-                                   std::uint32_t,
-                                   const std::string&,
-                                   std::uint64_t,
-                                   mojo_base::BigBuffer,
-                                   std::uint64_t) = 0;
-  virtual void CaptureWasmExecution(std::uint64_t,
-                                    std::uint64_t,
-                                    std::uint64_t,
-                                    std::uint64_t,
-                                    std::uint32_t,
-                                    std::uint32_t,
-                                    std::uint64_t,
-                                    std::uint64_t,
-                                    std::uint64_t,
-                                    std::uint64_t,
-                                    std::uint32_t,
-                                    std::uint32_t,
-                                    std::uint32_t,
-                                    std::uint32_t,
-                                    std::uint8_t,
-                                    std::uint8_t,
-                                    std::uint8_t,
-                                    std::uint8_t,
-                                    std::uint8_t,
-                                    std::uint8_t,
-                                    std::uint32_t,
-                                    const std::string&,
-                                    std::uint64_t,
-                                    mojo_base::BigBuffer,
-                                    std::uint64_t) = 0;
+  virtual void CaptureWasmRecords(std::uint64_t, std::vector<NativeWasmRecordPtr>) = 0;
   virtual void CaptureNativeGuest(std::uint64_t,
                                   const std::vector<std::uint8_t>&,
                                   const std::vector<std::uint8_t>&,

@@ -102,7 +102,9 @@ const WASM_RECORDS_PER_WINDOW: u32 = 1024;
 /// one-second window, and the policy the launcher passed, as counts. Null when
 /// neither stream records or the backend is not live. An allowance the
 /// launcher did not name is null: the browser's own default applies, which
-/// this backend does not know for every build. `reset` says whether
+/// this backend does not know for every build. `every_record` says the
+/// session keeps every record the filters admit; it then has no window budget
+/// or allowance, so `records_per_window` is null too. `reset` says whether
 /// `reset_wasm_sample_budgets` has a reset file to write.
 pub fn wasm_sampling(options: &crate::config::Options) -> Value {
     if options.capture_mode() != crate::config::CaptureMode::Live
@@ -121,7 +123,8 @@ pub fn wasm_sampling(options: &crate::config::Options) -> Value {
         "version": 1,
         "streams": streams,
         "window_ms": 1000,
-        "records_per_window": WASM_RECORDS_PER_WINDOW,
+        "every_record": options.session_wasm_every_record,
+        "records_per_window": (!options.session_wasm_every_record).then_some(WASM_RECORDS_PER_WINDOW),
         "samples_per_function": options.session_wasm_samples_per_function,
         "samples_per_indirect_site": options.session_wasm_samples_per_indirect_site,
         "function_allow_count": options.session_wasm_function_allow_count.unwrap_or(0),
@@ -249,10 +252,23 @@ mod tests {
         );
         assert_eq!(
             sampling(&["--session-wasm-dispatch"]),
-            json!({"version":1,"streams":["br_table"],"window_ms":1000,"records_per_window":1024,
-                "samples_per_function":null,"samples_per_indirect_site":null,
+            json!({"version":1,"streams":["br_table"],"window_ms":1000,"every_record":false,
+                "records_per_window":1024,"samples_per_function":null,"samples_per_indirect_site":null,
                 "function_allow_count":0,"function_deny_count":0,"module_allowlist":false,
                 "reset":"unavailable"})
+        );
+        assert_eq!(
+            sampling(&[
+                "--session-wasm-dispatch",
+                "--session-wasm-call-indirect",
+                "--session-wasm-every-record",
+                "--session-wasm-function-deny-count",
+                "1",
+            ]),
+            json!({"version":1,"streams":["br_table","call_indirect"],"window_ms":1000,
+                "every_record":true,"records_per_window":null,"samples_per_function":null,
+                "samples_per_indirect_site":null,"function_allow_count":0,"function_deny_count":1,
+                "module_allowlist":false,"reset":"unavailable"})
         );
         assert_eq!(
             sampling(&[
@@ -271,7 +287,8 @@ mod tests {
                 "/tmp/reset",
             ]),
             json!({"version":1,"streams":["br_table","call_indirect"],"window_ms":1000,
-                "records_per_window":1024,"samples_per_function":1024,"samples_per_indirect_site":2,
+                "every_record":false,"records_per_window":1024,"samples_per_function":1024,
+                "samples_per_indirect_site":2,
                 "function_allow_count":3,"function_deny_count":32,"module_allowlist":true,
                 "reset":"available"})
         );
@@ -281,6 +298,16 @@ mod tests {
             &["--session-wasm-samples-per-indirect-site", "1025"],
             &["--session-wasm-function-allow-count", "0"],
             &["--session-wasm-function-deny-count", "33"],
+            &[
+                "--session-wasm-every-record",
+                "--session-wasm-samples-per-function",
+                "2",
+            ],
+            &[
+                "--session-wasm-every-record",
+                "--session-wasm-samples-per-indirect-site",
+                "2",
+            ],
         ] {
             assert!(parse(arguments).is_err(), "{arguments:?}");
         }

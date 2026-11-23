@@ -293,7 +293,10 @@ export async function checkConsoleDOM(root) {
   get('level').value='all';get('scroll').append(get('output'));get('output').clientHeight=100;get('scroll').clientHeight=1e9;get('source').value='';
   const fixture=createConsoleFixture();let copies=0;
   const source=await readFile(join(root,'apps/research-ui/native_console.js'),'utf8');
-  const context={document,TextEncoder,console,setTimeout,clearTimeout,setInterval(){},ResizeObserver:class{observe(){}},MutationObserver:class{observe(){}},CustomEvent:class{},navigator:{clipboard:{writeText:async()=>{copies++;}}},createNativeConsoleCompletion:()=>({close(){},keydown(){return false;}}),codeViewColor:(node,text)=>{node.append(document.createTextNode(text));return node;},sourcePrettyTokens:()=>[],fetch:async(path,options)=>{const reply=await fixture.respond(path,options?.body?JSON.parse(options.body):null);return {ok:reply.status===200,status:reply.status,json:async()=>reply.body};}};
+  // Animation frames run only when a check advances them, 16 ms apart.
+  const animation=[];let clock=0;
+  const frames=(count=1)=>{for(let frame=0;frame<count;frame+=1){clock+=16;for(const callback of animation.splice(0))callback(clock);}};
+  const context={document,TextEncoder,console,setTimeout,clearTimeout,setInterval(){},requestAnimationFrame:callback=>animation.push(callback),ResizeObserver:class{observe(){}},MutationObserver:class{observe(){}},CustomEvent:class{},navigator:{clipboard:{writeText:async()=>{copies++;}}},createNativeConsoleCompletion:()=>({close(){},keydown(){return false;}}),codeViewColor:(node,text)=>{node.append(document.createTextNode(text));return node;},sourcePrettyTokens:()=>[],fetch:async(path,options)=>{const reply=await fixture.respond(path,options?.body?JSON.parse(options.body):null);return {ok:reply.status===200,status:reply.status,json:async()=>reply.body};}};
   // The layout extent becomes settable so a model transcript can pass it.
   const staged=source.replace('const transcriptExtent = 1 << 24;','let transcriptExtent = 1 << 24;');assert.notEqual(staged,source,'the transcript extent is declared where the fixture expects it');
   runInNewContext(staged.replace(/\}\)\(\);\s*$/, 'globalThis.testConsole = {initialize, logs, poll, renderControls, extent:value=>{transcriptExtent=value;}, state:()=>({session,pending,submitting,generation,outputGeneration,entries:transcript.size()})};})();'),context);
@@ -461,31 +464,52 @@ export async function checkConsoleDOM(root) {
     assert(output.children.at(-1).textContent.includes('fixture tall'),'the newest entry is reachable');assert.equal(get('latest').hidden,true);
     api.extent(1<<24);await get('latest').click();await settle();assert.equal(content(),12001*row+tall,'a transcript that fits again is drawn whole');
     // A scroll the reader makes is never written over. A small scroll up
-    // from the end stays put; rows measured above the viewport while the
-    // reader scrolls move the space above the drawn rows, not the reader; the
-    // scroll offset takes that up once the scroll settles, without moving
-    // what the reader sees; and a scroll to the top reaches the first entry.
+    // from the end stays put; rows measured while the reader scrolls move the
+    // space around the drawn rows, not the reader or the extent; the scroll
+    // offset takes that up once the scroll stands still, without moving what
+    // the reader sees; and a scroll to either end of the extent reaches that
+    // end of the transcript. Each step below is one frame of a scroll.
     const firstVisible=()=>{let y=parseFloat(output.style.paddingTop);for(const child of output.children){const height=child.getBoundingClientRect().height;if(y+height>top)return child.textContent;y+=height;}return null;};
     const covered=()=>{const start=parseFloat(output.style.paddingTop);return start<=top&&start+output.children.reduce((sum,child)=>sum+child.getBoundingClientRect().height,0)>=top+viewport;};
     const followed=top;scroll.scrollTop=top-10;await scroll.emit('scroll');
     assert.equal(top,followed-10,'a small scroll up from the end is not pulled back to it');
     Node.prototype.getBoundingClientRect=function(){const number=Number(this.textContent.match(/fixture message (\d+)/)?.[1]);const height=this.textContent.includes('fixture tall')?tall:number%97===0?2*row:row;return {top:0,bottom:height,left:0,right:600,width:600,height};};
-    scroll.scrollTop=3000*row;await scroll.emit('scroll');
-    let wanted=top;
+    scroll.scrollTop=3000*row;await scroll.emit('scroll');frames();
+    let wanted=top;const held=content();
     for(let step=0;step<40;step+=1){
-      wanted=top-300;scroll.scrollTop=wanted;await scroll.emit('scroll');
+      wanted=top-300;scroll.scrollTop=wanted;await scroll.emit('scroll');frames();
       assert.equal(top,wanted,`step ${step}: the layout never moves a scroll the reader is making`);
+      assert.equal(content(),held,`step ${step}: nor the extent it scrolls through`);
       assert(covered(),`step ${step}: the drawn rows cover the viewport`);assert(contiguous(numbers()));
+      // WebKit ends an animation that a newer scroll cancels, as Home cancels
+      // PageDown, once the newer one has begun to move.
+      if(step===20){await scroll.emit('scrollend');frames();assert.equal(top,wanted,'a scrollend while the scroll still moves does not end it');}
     }
-    const seen=firstVisible();await new Promise(resolve=>setTimeout(resolve,400));
-    assert(top>wanted,'once the scroll settles, the scroll offset takes up the rows measured above');
+    const seen=firstVisible();await scroll.emit('scrollend');frames(2);
+    assert(top>wanted,'once the scroll stands still after its scrollend, the scroll offset takes up the rows measured above');
     assert.equal(firstVisible(),seen,'settling moves the scroll offset, not what the reader sees');
-    while(top>0){scroll.scrollTop=top-300;await scroll.emit('scroll');assert(covered(),'the drawn rows cover the viewport on the way up');}
+    while(top>0){scroll.scrollTop=top-300;await scroll.emit('scroll');frames();assert(covered(),'the drawn rows cover the viewport on the way up');}
     assert.equal(numbers()[0],0,'a scroll to the top reaches the first entry');assert.equal(parseFloat(output.style.paddingTop),0);
-    const quiet=()=>new Promise(resolve=>setTimeout(resolve,400));
-    scroll.scrollTop=content()-viewport-20;await scroll.emit('scroll');await quiet();
+    // Where no scrollend comes, 300 ms without a scroll ends it.
+    const climbed=content();frames(15);assert.equal(content(),climbed,'a scroll still for 240 ms is not over');
+    frames(5);assert(content()>climbed,'a scroll still for 300 ms is over, and the extent takes up the rows measured on the way');
+    // A scroll down to the end of the extent, as End makes, shows the end of
+    // the transcript although rows measured on the way grew it, and lands on
+    // the end once it stands still.
+    const descent=content();
+    while(top<descent-viewport){
+      scroll.scrollTop=top+3000;await scroll.emit('scroll');frames();
+      assert.equal(content(),descent,'the extent stays while the reader scrolls down');assert(covered(),'the drawn rows cover the viewport on the way down');assert(contiguous(numbers()));
+    }
+    assert(output.children.at(-1).textContent.includes('fixture tall'),'the end of the extent shows the end of the transcript');
+    await scroll.emit('scrollend');frames(2);
+    assert(content()>descent,'rows measured on the way down grew the transcript');
+    assert.equal(top,content()-viewport,'a scroll down to the end of the extent lands on the end of the transcript');
+    const quiet=()=>frames(20);
+    scroll.scrollTop=top-2000;await scroll.emit('scroll');quiet();
+    scroll.scrollTop=content()-viewport-20;await scroll.emit('scroll');quiet();
     assert.equal(top,content()-viewport,'a scroll down that ends within reach of the end lands on it');
-    scroll.scrollTop=top-20;await scroll.emit('scroll');await quiet();
+    scroll.scrollTop=top-20;await scroll.emit('scroll');quiet();
     assert.equal(top,content()-viewport-20,'a scroll up from the end is never pulled back, even once it settles');
     await get('latest').click();await settle();
     Node.prototype.getBoundingClientRect=rect;delete scroll.getBoundingClientRect;delete output.getBoundingClientRect;

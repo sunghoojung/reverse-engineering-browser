@@ -120,12 +120,13 @@
     let position = 0, shift = 0, compressed = false, jump = null;
     // A scroll the layout did not make is the reader's. While one goes on,
     // the layout never moves the scroll offset, since that would stop a
-    // keyboard scroll animation or momentum part way: a row measured above
-    // the viewport moves the space above the drawn rows instead, and the
-    // scroll offset takes that up once the scroll settles. placed is the
-    // offset the layout last left; pull asks to follow the end because
-    // entries arrived or Latest was chosen.
-    let placed = 0, scrolling = false, settling = 0, pull = false;
+    // keyboard scroll animation or momentum part way, and keeps the extent
+    // it laid out, laid, so the scroll keeps the destination it was aimed
+    // at: a row measured on the way moves the space around the drawn rows
+    // instead, and the scroll offset and extent take that up once the scroll
+    // settles. placed is the offset the layout last left; pull asks to
+    // follow the end because entries arrived or Latest was chosen.
+    let placed = 0, laid = 0, scrolling = false, pull = false;
     // Drawn beyond each edge of the viewport, so a scroll step rarely reaches
     // an edge that is not drawn yet.
     const overscan = 800;
@@ -206,10 +207,11 @@
     }
     // Draws the rows around position until their measured heights settle.
     // Anchored, the first visible entry stays where the reader sees it while
-    // the entries above it are measured.
-    function fill(viewport, end, anchored) {
+    // the entries above it are measured. With below, the bottom of the
+    // viewport stays that far above the end of the transcript instead.
+    function fill(viewport, below, anchored) {
       for (let pass = 0; pass < 8; ++pass) {
-        if (end) position = tops[shown.length] - viewport;
+        if (below != null) position = tops[shown.length] - viewport - below;
         position = Math.max(0, Math.min(position, tops[shown.length] - viewport));
         const anchor = at(position), offset = tops[anchor] - position;
         render(shown.length ? at(position - overscan) : 0, shown.length ? Math.min(shown.length, at(position + viewport + overscan) + 1) : 0);
@@ -241,10 +243,10 @@
           ? scrolled / (transcriptExtent - viewport) * (tops[shown.length] - viewport) : position + moved;
       }
       jump = null;
-      fill(viewport, end, true);
+      fill(viewport, end ? 0 : null, true);
       let height = tops[shown.length], drawn = tops[to] - tops[from];
       compressed = height > transcriptExtent;
-      let extent = compressed ? transcriptExtent : height;
+      let extent = compressed ? transcriptExtent : writable ? height : laid;
       const range = extent - viewport, last = height - viewport;
       // The drawn rows sit wherever the reader is scrolled, so any measured
       // difference above them moves the space before them, not the reader.
@@ -259,10 +261,16 @@
         }
       } else if (writable) { target = position; before = tops[from]; }
       else if (!placeable) {
-        // A reader scrolling to an edge reaches it: the position is the
-        // scroll offset, and whatever was measured on the way moves the rows.
-        position = scrolled; fill(viewport, false, false);
-        extent = height = tops[shown.length]; drawn = tops[to] - tops[from]; before = tops[from]; target = position;
+        // A reader scrolling to either end of the extent reaches that end of
+        // the transcript, and whatever was measured on the way moves the rows.
+        if (before < 0) { position = scrolled; fill(viewport, null, false); }
+        else fill(viewport, extent - scrolled - viewport, false);
+        height = tops[shown.length]; drawn = tops[to] - tops[from]; before = scrolled - (position - tops[from]);
+        // Rows that no longer fit the extent at all are laid out at their height.
+        if (before < 0 || before + drawn > extent) {
+          position = scrolled; fill(viewport, null, false);
+          extent = height = tops[shown.length]; drawn = tops[to] - tops[from]; before = tops[from]; target = position;
+        }
       }
       controls.output.style.paddingTop = `${before}px`;
       controls.output.style.paddingBottom = `${extent - before - drawn}px`;
@@ -271,41 +279,54 @@
       if (end) controls.scroll.scrollTop = controls.scroll.scrollHeight;
       else if (Math.abs(scrolled - target) >= 1) controls.scroll.scrollTop = base + target;
       if (writable) pull = false;
-      placed = controls.scroll.scrollTop; shift = placed - base;
+      placed = controls.scroll.scrollTop; shift = placed - base; laid = extent;
       updateOutputState();
     }
     function schedule() {
       if (scheduled) return;
       scheduled = true; Promise.resolve().then(layout);
     }
+    // A new filter is a new transcript, laid out at its own extent.
     function refilter() {
       detach(from, to); from = to = 0;
-      shown = entries.filter(matches); stale = true; schedule();
+      shown = entries.filter(matches); stale = true; scrolling = false; schedule();
     }
     // Only the reader's own scrolls start or stop following the end. One the
     // layout made can arrive after more entries did, when it no longer looks
     // like the end, so it leaves following as it was.
-    // scrollend, where the engine has it, says exactly when a keyboard scroll
-    // animation or momentum is over. Elsewhere a quiet interval stands in.
+    // A reader's scroll is over once it has stood still: three frames after
+    // a scrollend, or 300 ms where none comes. A scrollend alone does not say
+    // so, since WebKit fires one for an animation that a newer scroll cancels,
+    // such as a PageDown that Home interrupts, and one for the layout's own
+    // write, after the newer scroll has begun. Frames count the stillness,
+    // not a timer: a frame dispatches the scrolls that arrived before it runs
+    // its callbacks, so a page that was busy never settles under a scroll
+    // that is still moving.
     // A scroll down that ends within reach of the end lands on it, since rows
     // measured on the way can grow the transcript past where it was aimed.
     // A scroll up is never pulled back.
-    const ends = 'onscrollend' in controls.scroll;
-    let descending = false;
-    function settle() {
-      if (!scrolling) return;
-      scrolling = false; if (follow && descending) pull = true;
-      layout();
+    let descending = false, ended = false, still = 0, since = 0, watching = false;
+    function watch() {
+      if (watching) return;
+      watching = true;
+      requestAnimationFrame(function frame(now) {
+        if (!scrolling) { watching = false; return; }
+        if (!still++) since = now;
+        if (ended ? still < 3 : now - since < 300) { requestAnimationFrame(frame); return; }
+        watching = scrolling = false;
+        if (follow && descending) pull = true;
+        layout();
+      });
     }
     controls.scroll.addEventListener('scroll', () => {
       if (controls.scroll.scrollTop !== placed) {
         follow = atBottom(); if (follow) unread = 0;
-        descending = controls.scroll.scrollTop > placed; scrolling = true;
-        if (!ends) { clearTimeout(settling); settling = setTimeout(settle, 300); }
+        descending = controls.scroll.scrollTop > placed; scrolling = true; ended = false; still = 0;
+        watch();
       }
       layout(); updateOutputState();
     });
-    if (ends) controls.scroll.addEventListener('scrollend', settle);
+    controls.scroll.addEventListener('scrollend', () => { if (scrolling) ended = true; });
     new ResizeObserver(schedule).observe(controls.scroll);
     return {
       size: () => entries.length,
@@ -331,12 +352,12 @@
       clear() {
         detach(from, to); from = to = 0;
         entries.length = 0; shown = []; tops = [0]; stale = false; heights.clear(); measured = 0; typical = 24; typicalStale = false;
-        follow = true; unread = 0; position = shift = 0; compressed = false; jump = null;
-        pull = scrolling = false; clearTimeout(settling);
+        follow = true; unread = 0; position = shift = laid = 0; compressed = false; jump = null;
+        pull = scrolling = false;
         controls.output.style.paddingTop = controls.output.style.paddingBottom = '0px';
       },
       // Choosing Latest ends any scroll the reader was making.
-      latest() { follow = pull = true; unread = 0; scrolling = false; clearTimeout(settling); layout(); updateOutputState(); },
+      latest() { follow = pull = true; unread = 0; scrolling = false; layout(); updateOutputState(); },
       // Live rows that match, rendered or not.
       find: predicate => entries.filter(entry => !entry.build && predicate(entry.node)),
       // Scrolls one entry to the middle of the viewport and returns its row.

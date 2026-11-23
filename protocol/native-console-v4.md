@@ -123,11 +123,16 @@ compressed into that extent: a wheel, key or touch scroll moves the content by
 exactly its own distance, a scrollbar drag maps proportionally onto the whole
 transcript, and both ends stay reachable. The layout never moves a scroll the
 reader is making, which would stop momentum or a keyboard scroll animation
-part way: a row measured during that scroll moves the space above the drawn
-rows, and the scroll offset takes it up at `scrollend`, or after 300 ms
-without a scroll where the engine has no `scrollend`. The end is followed when
-entries arrive or **Latest** is chosen, never against the reader's scroll, and
-a scroll down that ends within 40 px of the end, such as **End**, lands on it.
+part way, or the extent it scrolls through, which would leave it short of
+where it was aimed: a row measured during that scroll moves the space around
+the drawn rows, and a scroll that reaches either end of the extent shows that
+end of the transcript. The scroll offset and extent take up the difference
+once the scroll has stood still, for three frames after `scrollend` or for
+300 ms. A `scrollend` alone does not end it, because WebKit also fires one for
+an animation that a newer scroll cancels, such as a PageDown that Home
+interrupts. The end is followed when entries arrive or **Latest** is chosen,
+never against the reader's scroll, and a scroll down that ends within 40 px of
+the end, such as **End**, lands on it.
 Search and level filters run over every entry, including rows that are not in
 the document, and an evaluation link reveals its command wherever it is. A
 command is shown whole in the transcript. History keeps every command, a
@@ -169,7 +174,9 @@ silently loses data.
 - `node tools/check-console-workspace.mjs` and the two Console DOM fixtures
   cover the windowed transcript with 12,000 entries, search over rows that are
   not rendered, a tall row that does not stretch the estimate, a compressed
-  transcript scrolled step by step and by drag to both ends, a reader's scroll that the layout never moves, a command past 64 MiB sent whole, the incremental completion
+  transcript scrolled step by step and by drag to both ends, a reader's scroll
+  whose offset and extent the layout never moves, even past a `scrollend` from a
+  cancelled animation, a command past 64 MiB sent whole, the incremental completion
   lexer against a fresh lex, and the document-start panel's add, remove and
   paged reads.
 

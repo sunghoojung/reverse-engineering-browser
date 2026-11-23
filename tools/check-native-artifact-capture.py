@@ -448,37 +448,33 @@ def check_receiver_stop(receiver: str) -> None:
     receiver is consuming an artifact, rather than blocked in a read, must
     still end that wait: a handler that only set a flag lost it, and the
     receiver waited for a next frame that an idle browser never sends.
+
+    That window runs from the frame's last byte to the answer, a few
+    milliseconds, and a loaded machine often answers before the check can stop
+    it. An attempt that missed the window stops a receiver blocked in a read,
+    which a flag alone also does, so the check repeats until one lands in it.
     """
-    # The stop must land between the receiver reading the whole frame and
-    # answering it. On a loaded machine this process can be descheduled for
-    # that whole window, so an attempt where the answer came first proves
-    # nothing and runs again; it must still stop.
-    attempts = 5
-    for attempt in range(1, attempts + 1):
-        unanswered, stopped = receiver_stop_attempt(receiver)
-        if unanswered:
+    frame = artifact_frame(1, b"stop();" * (5 * 1024 * 1024))
+    for attempt in range(1, 21):
+        stopped = receiver_stop_attempt(receiver, frame)
+        if stopped is not None:
             break
     else:
-        raise AssertionError(
-            f"the artifact was answered before the stop in all {attempts} attempts, "
-            "so nothing raced"
-        )
+        raise AssertionError("the receiver answered before each of 20 stops, so nothing raced")
     print(
         "PASS artifact receiver stop: SIGTERM while it consumes an artifact ends it in "
-        f"{stopped * 1000:.0f} ms with the browser's connection open and idle "
-        f"(attempt {attempt} of {attempts})"
+        f"{stopped * 1000:.0f} ms with the browser's connection open and idle (attempt {attempt})"
     )
 
 
-def receiver_stop_attempt(receiver: str) -> tuple[bool, float]:
-    """One SIGTERM sent right after a whole artifact frame; whether it came before the answer."""
+def receiver_stop_attempt(receiver: str, frame: bytes) -> float | None:
+    """Seconds a stop delivered before the answer took to end the receiver, or None."""
     with tempfile.TemporaryDirectory(prefix="reb-stop-", dir="/tmp") as temporary:
         root = Path(temporary)
         token = root / "token"
         token.write_text("a" * 64)
         token.chmod(0o600)
         socket_path = root / "artifact.sock"
-        content = b"stop();" * (5 * 1024 * 1024)
         child = subprocess.Popen(
             [
                 receiver,
@@ -509,12 +505,17 @@ def receiver_stop_attempt(receiver: str) -> tuple[bool, float]:
                     struct.pack("<IHHQ32s16s", HELLO_MAGIC, 1, 64, 7, TEST_TOKEN, bytes(16))
                 )
                 # Once the whole frame is written the receiver never blocks
-                # in a read until it has answered, so the signal lands while
-                # it works. The browser then sends nothing more.
-                connection.sendall(artifact_frame(1, content))
-                unanswered = not select.select([connection], [], [], 0)[0]
+                # in a read until it has answered. Freeze it at once: with no
+                # answer written yet, the stop is delivered on continue where
+                # it froze, while it works. The browser then sends nothing more.
+                connection.sendall(frame)
+                child.send_signal(signal.SIGSTOP)
+                _, status = os.waitpid(child.pid, os.WUNTRACED)
+                assert os.WIFSTOPPED(status), f"the receiver ended before the stop: status {status}"
+                raced = not select.select([connection], [], [], 0)[0]
                 started = time.monotonic()
                 child.send_signal(signal.SIGTERM)
+                child.send_signal(signal.SIGCONT)
                 try:
                     _, errors = child.communicate(timeout=10)
                 except subprocess.TimeoutExpired:
@@ -529,7 +530,7 @@ def receiver_stop_attempt(receiver: str) -> tuple[bool, float]:
                 child.communicate()
         assert child.returncode == 0, errors.decode()
         assert "Artifact receiver stopped:" in errors.decode(), errors.decode()
-    return unanswered, stopped
+    return stopped if raced else None
 
 
 def check_broker_stop(broker: str) -> None:

@@ -85,7 +85,7 @@ recording each body's length, type and SHA-256 (see
 [Native network v2](../../protocol/native-network-v2.md)).
 
 It also retains complete Canvas data URLs by default. The output is sensitive
-local evidence, limited to 2 MiB, and linked to the exact readback event. With
+local evidence, kept at any size, and linked to the exact readback event. With
 `REB_CAPTURE_CANVAS_IMAGES=0`, Canvas drawing and readback operation names
 remain visible but image bytes are not retained.
 
@@ -376,17 +376,17 @@ native helper built by `make debugger-transport`. Native quiet mode deliberately
 omits both options and does not start the helper.
 
 Pass `--trace-store /path/to/origin-trace.jsonl` when the edge sidecar is not
-next to the default demo store. The origin-trace endpoint reads at most 10,000
-events, 30,000 edges, and 10,000 artifact records, rejects oversized or
-malformed records, traverses at most 32 steps, and supports entity-tag
-revalidation. The native application
-uses the same limits and contract without a localhost server.
+next to the default demo store. The origin-trace endpoint reads the whole
+session through disk-backed indexes it keeps beside the event, edge and
+artifact stores, rejects oversized or malformed records, traverses at most 32
+steps, and supports entity-tag revalidation. The native application answers
+the same route through its bundled backend.
 
 Pass `--signal-store /path/to/request-signals.jsonl` when the request signal
 profile sidecar is not next to the default demo store. The endpoint selects an
-exact session, request, process, and sequence root, reads at most 10,000
-profiles, rejects records larger than 8 KiB, and supports entity-tag
-revalidation. Observed parent chains and correlated same-context activity stay
+exact session, request, process, and sequence root, finds its profile of any
+age through the store's disk index, rejects records larger than 16 KiB, and
+supports entity-tag revalidation. Observed parent chains and correlated same-context activity stay
 visibly distinct.
 
 Captured JavaScript and WebAssembly artifacts are analyzed automatically on

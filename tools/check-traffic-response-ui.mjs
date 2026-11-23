@@ -138,13 +138,21 @@ assert.match(capture({responseBody: {malformed: true}}, true), /malformed/);
 assert.match(capture({responseStarted: {monotonicTimeNs: '1000000000'}, responseBody: record(null,
   {state: 'partial', partialIndex: 3, bodyLength: '1200', capturedLength: '1200', monotonicTimeNs: '3500000000'})}, true),
 /^Still arriving: 1,200 bytes had arrived 2\.5 s after the response started, at snapshot 3\. All of them are retained/);
-assert.match(capture({responseBody: record(null, {state: 'partial', partialIndex: 1, bodyLength: String(17 * 1024 * 1024),
-  capturedLength: String(16 * 1024 * 1024)})}, true), /The first 16,777,216 bytes reached the 16 MiB capture limit .*later bytes are only counted/);
-// A seal recorded by the chunk that reached exactly 16 MiB is still a seal.
-assert.match(capture({responseBody: record(null, {state: 'partial', partialIndex: 1, bodyLength: String(16 * 1024 * 1024),
-  capturedLength: String(16 * 1024 * 1024)})}, true), /reached the 16 MiB capture limit .*may still be arriving/);
-assert.doesNotMatch(capture({responseBody: record(null, {state: 'partial', partialIndex: 1, bodyLength: String(16 * 1024 * 1024),
+assert.match(capture({responseBody: record(null, {version: 2, state: 'partial', partialIndex: 1, bodyLength: String(17 * 1024 * 1024),
+  capturedLength: String(16 * 1024 * 1024)})}, true),
+/The first 16,777,216 bytes reached the 16 MiB limit of the browser that recorded this session .*later bytes are only counted/);
+// An older seal recorded by the chunk that reached exactly 16 MiB is still a seal.
+assert.match(capture({responseBody: record(null, {version: 2, state: 'partial', partialIndex: 1, bodyLength: String(16 * 1024 * 1024),
+  capturedLength: String(16 * 1024 * 1024)})}, true), /reached the 16 MiB limit .*may still be arriving/);
+assert.doesNotMatch(capture({responseBody: record(null, {version: 2, state: 'partial', partialIndex: 1, bodyLength: String(16 * 1024 * 1024),
   capturedLength: String(16 * 1024 * 1024)})}, true), /All of them are retained in this snapshot/);
+// Version 3 keeps every body whole: a snapshot at or past 16 MiB holds all of it.
+for (const length of [16 * 1024 * 1024, 80 * 1024 * 1024]) {
+  const whole = capture({responseBody: record(null, {version: 3, state: 'partial', partialIndex: 1, bodyLength: String(length),
+    capturedLength: String(length)})}, true);
+  assert.match(whole, /All of them are retained in this snapshot/, `version 3 partial of ${length}`);
+  assert.doesNotMatch(whole, /16 MiB/, `version 3 partial of ${length}`);
+}
 // A live row whose response_started left the retained window takes the index's answer.
 const indexBody = {case: 'captured', artifact_id: '77', body_length: '9', captured_length: '9', partial_index: 0, shared: false,
   sha256: 'a'.repeat(64), record_sequence: '31', record_time_ns: '100', response_started: {session_id: '7', process_id: 42, sequence_number: '30'}};
@@ -153,13 +161,14 @@ assert.equal(api.responseBodyCase(leftWindow), 'captured', 'the index answers wh
 assert.match(capture(leftWindow, true), /^Retained in full\./);
 assert.equal(api.responseBodyCase({...leftWindow, responseStarted: {sequenceNumber: '30'}, responseBody: record(null, {state: 'empty',
   bodyLength: '0', capturedLength: '0'})}), 'empty', 'loaded records that hold the body record decide');
-const states = {captured_truncated: /16 MiB capture limit/, partial: /had arrived, at snapshot 2\. All of them are retained/,
+const states = {captured_truncated: /truncated at 16 MiB, a limit of the browser that recorded this session/, partial: /had arrived, at snapshot 2\. All of them are retained/,
   aborted: /network failed mid-body/, cancelled: /stopped reading/, empty: /Empty body/, not_modified: /304/,
   redirected: /discards redirect bodies/,
-  // The remedy is the start panel control for the next session, never an environment variable.
-  not_captured_type: /^Not retained: images, audio, video and fonts that page elements load are kept only when Capture media and fonts is on in New Live Session…, for the next session\.$/,
+  // An older browser's limit names no control to raise: current capture has none.
+  not_captured_type: /^Not retained: the browser that recorded this session skipped images, audio, video and fonts that page elements load\. Current content sessions keep them\.$/,
   not_captured_artifact_unavailable: /artifact channel/, not_captured_transfer_refused: /in-flight memory/,
-  not_captured_session_budget: /^Not retained: this session had used its response body budget\. Raise Response body budget in New Live Session… for the next session\.$/};
+  not_captured_session_budget: /^Not retained: it arrived after the response body budget was used, a limit of the browser that recorded this session\. Current capture keeps every body whole\.$/,
+  not_captured_disk_reserve: /^Not retained: storing it would have left less free disk than the artifact receiver's reserve\. Free disk space to keep later bodies\.$/};
 for (const [name, pattern] of Object.entries(states)) {
   assert.match(capture({responseBody: record(null, {state: name, partialIndex: 2, bodyLength: '9', capturedLength: '9'})}, true), pattern, name);
 }
@@ -512,7 +521,7 @@ panel.querySelector('.traffic-response-open').click();
 assert.deepEqual(opened, ['S7:R42:41'], 'the reuse opens the request it names');
 await showLinked(reuse({id: 'S7:R42:41', found: true, path: '/r/41', type: 'img',
   response_body: {case: 'not_captured_type', artifact_id: null, response_started: sourceBody.response_started}}));
-assert.match(panel.textContent, /Its body was not retained: media or a font, not asked for/);
+assert.match(panel.textContent, /Its body was not retained: media or a font the recording browser skipped/);
 assert(!panel.querySelector('.traffic-response-code'), 'nothing stands in for bytes that were not retained');
 await showLinked(reuse({id: 'S7:R42:41', found: false, response_body: null}));
 assert.match(panel.textContent, /names request S7:R42:41 of this renderer .*did not record/);
@@ -565,9 +574,9 @@ await showLinked({...answered, id: 'S7:R42:954', target: undefined, hostOnly: tr
 assert.match(panel.textContent, /has no path to match \(a metadata-only session records the host alone\)/);
 assert.deepEqual(searches, [], 'nothing is searched without a path');
 
-// Response bodies version 2 bit 7: a byte bound withheld a snapshot the spacing allowed.
+// Response bodies bit 7 (version 2 and later): a byte bound withheld a snapshot the spacing allowed.
 await showLinked(request(record(snapshotBytesFor(), {state: 'partial', partialIndex: 2, snapshotsWithheld: true})));
-assert.match(panel.textContent, /Snapshots.*A snapshot the schedule allowed was withheld: this body's snapshot allowance/s);
+assert.match(panel.textContent, /Snapshots.*A snapshot the schedule allowed was withheld: this body's snapshots had copied four times what it kept plus 64 MiB/s);
 await showLinked(request(record(snapshotBytesFor(), {state: 'partial', partialIndex: 2})));
 assert.doesNotMatch(panel.textContent, /was withheld/);
 // A refused end does not hide a snapshot of the same response that is retained.
@@ -575,7 +584,7 @@ const snapshotBytes = retain('data: kept\n\n', 'text/event-stream');
 const refusedEnd = request(record(null, {state: 'not_captured_session_budget', bodyLength: '90', capturedLength: '0', artifactId: '0'}),
   {responseBodyEarlier: record(snapshotBytes, {state: 'partial', partialIndex: 4, bodyLength: '40'})});
 await showLinked(refusedEnd);
-assert.match(panel.textContent, /Not retained: this session had used its response body budget/);
+assert.match(panel.textContent, /Not retained: it arrived after the response body budget was used/);
 assert.match(panel.textContent, /Earlier snapshot.*Snapshot 4: 12 bytes of the 40 bytes that had arrived\. The receiver retains it, and it is shown below\./);
 assert.match(panel.querySelector('.traffic-response-code').textContent, /data: kept/, 'the earlier snapshot opens');
 assert.match(panel.textContent, /Artifact \(earlier snapshot\)/);

@@ -44,12 +44,31 @@ with the same identity are both excluded and reported. Native transport `gap`
 markers deliberately repeat the preceding event identity, so they are handled
 separately and never invalidate retained signals. A `capture-gap` omission counts
 markers only, not lost events; overlapping queue/sequence losses are not summed.
-The 1,024-edge graph
-bound includes the artifact-to-finding edge. Scoring representatives are retained
-first, then correlated request edges, then individual browser-signal events.
-Excluded graph records produce an explicit `runtime-graph-edge-limit`
-omission and partial coverage. Request roots also keep composite event identity,
-while `related_request_ids` remains a legacy ID-only summary.
+The analysis reads the whole artifact manifest and event store, streamed up to
+the length each had when the read began, and keeps only the records it uses.
+Frame correlation is a count, not a copied list: every artifact of a frame
+shares its request and browser-signal records, so producer `1.11.0` folds them
+once into per-frame counts. The graph keeps one scoring representative per
+rule, the attributed record if there is one; `runtime_context` counts the
+frame's request records and each rule's observed and correlated records, and
+names the `get_events` parameters (`events_filter`) that list them. Producers
+before `1.11.0` copied up to 1,024 records into each artifact's graph and
+`related_request_ids`, and read only the newest 10,000 manifest and 100,000
+event records. Input omissions are counted per reason with the first line each
+was seen on. A session reloads the same scripts in navigation after
+navigation, so the pass reads, verifies and analyzes each content (kind,
+SHA-256, content path and size) once and names the result for every artifact
+that shares it. An artifact with an opcode workspace is analyzed on its own,
+because the workspace joins that artifact's samples under its own work meter.
+The pass keeps the 1,024 most recent contents for reuse; an older one is
+analyzed again if it reappears. Each result is spooled in canonical form to an
+unnamed private file in the artifact store as it is produced. Memory then holds
+the document's other fields, a byte range per result, and the indexes of
+findings and exact request links. The document is digested, published and
+served as a stream. VM Lab reads the `view=findings` projection, which lists
+failures and candidate or likely-vm tiers and counts the rest. It is streamed
+from the spool too, because every failure is listed, and VM Lab counts the
+failures by error code in its notice.
 
 Runtime evidence profile version `2`, introduced in producer `1.1.0`, binds the
 relevance weights and identity semantics. The HTTP analysis cache tracks changes to both
@@ -57,6 +76,10 @@ the artifact manifest and event store, including event-only appends, replacement
 and clearing. On Unix the cache key includes file identity, change time, and a
 content hash, so a same-size replacement or rewrite with a restored modification
 time cannot reuse stale analysis when the filesystem does not advance change time.
+The hash is read again whenever identity, size or either time moves, and is
+reused only once its read began 3 seconds after the file's change time, longer
+than any supported filesystem's change-time tick, so a long session is not
+rehashed on every request.
 A symlink is identified as a link and is not hashed through. Other platforms
 recompute before deciding whether to return 304. The same bounded analyzer powers the HTTP API and offline CLI.
 This increment does not implement the broader stack, semantic VM, or exact value
@@ -250,7 +273,7 @@ a syntactic loop. A region whose table re-enters itself this way can
 therefore rise from `candidate` to `likely-vm` when recovery finds handlers.
 Version 2 documents remain valid.
 
-Producer `1.11.0` analyzes an artifact of any size. It reads every byte,
+Producer `1.12.0` analyzes an artifact of any size. It reads every byte,
 scores every function region and counts every rule match, so
 `matches_truncated` is always false. A Wasm module is no longer refused for
 its section, function or instruction count. The scan stays linear: each

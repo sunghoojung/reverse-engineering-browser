@@ -41,11 +41,11 @@ const trafficCookieSameSite = [null, 'Unspecified', 'None', 'Lax', 'Strict'];
 const trafficCookiePriority = [null, 'Low', 'Medium', 'High'];
 const trafficCookieStateNotes = {
   empty: 'No cookies.',
-  not_captured_block_limit: 'Longer than the 2 MiB list limit, so only its counts and size were recorded.',
+  not_captured_block_limit: 'Longer than its record can describe (4 GiB), or than the 2 MiB list limit of the browser that recorded this session, so only its counts and size were recorded.',
   not_captured_artifact_unavailable: 'Not retained: the artifact channel was unavailable.',
   not_captured_transfer_refused: 'Not retained: the bounded artifact queue refused it.',
-  not_captured_session_budget: 'Not retained: this session already retained 64 MiB of header blocks and cookie lists.',
-  not_captured_url: 'Not retained: not an HTTP(S) URL, longer than 8 KiB, or its hop was not tracked.'
+  not_captured_session_budget: 'Not retained: it arrived after 64 MiB of header blocks and cookie lists were retained, a limit of the browser that recorded this session.',
+  not_captured_url: 'Not retained: not an HTTP(S) URL, or its hop was not tracked. Older captures also used this for URLs longer than 8 KiB.'
 };
 
 function trafficCookieReasons(bits, names) {
@@ -181,7 +181,7 @@ function trafficCookieProvenanceRead(sessionId, name, rerender, storeRevision = 
         unread: answer.lists_unread ?? 0, malformed: Array.isArray(malformed) ? malformed.length : Number(malformed) || 0,
         stacksUnresolved: answer.stacks_unresolved ?? 0, readCoverage: answer.read_coverage ?? null,
         complete: answer.coverage?.complete === true && !answer.lists_unread,
-        // Script calls are located across the session, apart from the newest-record window.
+        // Script calls are located across the session, as are the lists of indexed requests.
         scriptComplete: answer.script_coverage?.complete === true, storeRevision, readAt: Date.now()};
     } catch {
       entry = previous ? {...previous, readAt: Date.now()} : {status: 'error', failedAt: Date.now()};
@@ -349,8 +349,8 @@ function trafficCookieHops(request) {
 
 // Everything the evidence says about one name: Set-Cookie responses, script calls and
 // the requests that sent it. Loaded lists read on demand, at most
-// TRAFFIC_COOKIE_PROVENANCE_LISTS distinct ones; get_cookie_provenance adds what the
-// session's newest records hold beyond them, so absence names the range that was read.
+// TRAFFIC_COOKIE_PROVENANCE_LISTS distinct ones, until get_cookie_provenance answers
+// with every list and call of the session; absence names what was read.
 function trafficCookieProvenance(name, {requests = [], events = [], selectRequest, openFrame, sessionId: selectedSession = null, storeRevision = null} = {}, rerender) {
   const section = trafficNode('section', 'traffic-cookie-provenance');
   section.setAttribute('aria-label', `Provenance of ${name}`);
@@ -412,7 +412,7 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
   const sessionId = scripts.find(record => record.frame)?.sessionId ?? selectedSession;
   const read = sessionId ? trafficCookieProvenanceRead(sessionId, name, rerender, storeRevision) : {status: 'unavailable'};
   const answered = read.status === 'ready';
-  const outsideWindow = 'Not in the scanned range: the backend reads the newest retained network records, so older records were not read.';
+  const outsideWindow = 'Not in the records read so far: the request index is still catching up with the store.';
   const unknownAbsence = (what, complete = read.complete, unread = outsideWindow) => !answered ? `Not in the loaded requests; ${read.status === 'error' ? 'the store could not be asked' : read.status === 'loading' ? 'asking the store' : 'the store cannot be asked here'}.`
     : complete ? what : unread;
   const backendWhere = item => `request ${item.request_id}${item.hop ? ` · hop ${item.hop}` : ''}`;
@@ -475,10 +475,11 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
   }).concat(beyond(read.sentWith ?? []).map(item => entry(`${backendWhere(item)}${item.blocked ? ` — ${trafficCookieBlockedText({exclusions: item.exclusion_reasons ?? []}, false)}` : ''}`))),
   unknownAbsence('No retained request sent it.'));
   const notes = [loading ? `Loading ${loading} cookie list${loading === 1 ? '' : 's'}…` : '',
-    unread ? `${unread} cookie list${unread === 1 ? ' was' : 's were'} not read past the ${TRAFFIC_COOKIE_PROVENANCE_LISTS}-list limit.` : '',
-    answered && read.unread ? `The store left ${read.unread} retained cookie list${read.unread === 1 ? '' : 's'} unread past its 256-list limit.` : '',
+    // The store's answer reads every list, so the loaded ones left here are in it.
+    unread && !(answered && read.complete) ? `${unread} loaded cookie list${unread === 1 ? ' was' : 's were'} not read here past ${TRAFFIC_COOKIE_PROVENANCE_LISTS}; the store's answer reads them.` : '',
+    answered && read.unread ? `The store could not read ${read.unread} retained cookie list${read.unread === 1 ? '' : 's'} yet; the next refresh asks again.` : '',
     answered && read.malformed ? `${read.malformed} malformed record${read.malformed === 1 ? ' was' : 's were'} skipped.` : '',
-    answered && read.stacksUnresolved ? `${read.stacksUnresolved} script call${read.stacksUnresolved === 1 ? ' was' : 's were'} not resolved to source past the 64-position limit.` : '',
+    answered && read.stacksUnresolved ? `${read.stacksUnresolved} script call${read.stacksUnresolved === 1 ? ' was' : 's were'} not resolved to source: the artifact manifest could not be read in time.` : '',
     unnamedNote]
     .filter(Boolean);
   if (notes.length) section.append(trafficNode('p', 'traffic-headers-note', notes.join(' ')));

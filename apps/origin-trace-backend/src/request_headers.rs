@@ -1,9 +1,9 @@
 //! One request's header blocks per hop (protocol/native-network-v3.md), for
 //! `get_request_headers`. Records are validated again here and joined only to
 //! an exact lifecycle parent of the request. Values of headers named as
-//! credentials stay in the binary artifact, which MCP never inlines, like
-//! request bodies. Withholding goes by name: a value under any other name, such
-//! as a `Location` query, is returned as captured.
+//! credentials are withheld unless the caller asks for them (`Credentials`).
+//! Withholding goes by name: a value under any other name, such as a
+//! `Location` query, is returned as captured.
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -13,7 +13,22 @@ use sha2::{Digest, Sha256};
 use crate::event_window;
 use crate::evidence;
 
-const BLOCK_LIMIT: usize = 320 * 1024;
+/// Version 1's block limit. Version 2 retains a block of any length, so its
+/// not_captured_block_limit is only a length past the 32-bit field.
+const BLOCK_LIMIT_V1: u32 = 320 * 1024;
+/// Version 2's not_captured_block_limit length, for header blocks and cookie
+/// lists alike.
+pub(crate) const LENGTH_UNREPRESENTABLE: u32 = u32::MAX;
+
+/// Whether a header block or cookie list record of `version` is too long to
+/// have been retained.
+pub(crate) fn too_long(version: u64, length: u32, v1_limit: u32) -> bool {
+    if version == 1 {
+        length > v1_limit
+    } else {
+        length == LENGTH_UNREPRESENTABLE
+    }
+}
 /// Substrings that mark a header name as a credential even inside a compound
 /// such as `X-AuthToken`, `AccessToken` or `X-Amzn-Remapped-Set-Cookie`. Each is
 /// long or distinctive enough that an ordinary name does not contain it.
@@ -324,7 +339,9 @@ pub(crate) fn child_payload(event: &Value, kind: &str) -> Option<Vec<u8>> {
         return None;
     }
     let bytes = hex::decode(event["payload"].as_str()?).ok()?;
-    (bytes.len() == 128 && le(&bytes[0..2]) == 1 && le(&bytes[2..4]) == 128).then_some(bytes)
+    // Header blocks and cookie lists: version 2 retains one of any length.
+    (bytes.len() == 128 && matches!(le(&bytes[0..2]), 1 | 2) && le(&bytes[2..4]) == 128)
+        .then_some(bytes)
 }
 
 /// The C++ core's rules for the record, envelope included.
@@ -384,7 +401,7 @@ fn decode(event: &Value) -> Option<Block> {
         && (block.count == 0) == empty
         && (block.length == 0) == empty
         && u64::from(block.length) >= 5 * u64::from(block.count)
-        && limited == (block.length as usize > BLOCK_LIMIT)
+        && limited == too_long(le(&bytes[0..2]), block.length, BLOCK_LIMIT_V1)
         && zero(&block.digest) == limited
         && (event["artifact_id"] != "0") == matches!(block.state, 1 | 2);
     valid.then_some(block)
@@ -428,6 +445,25 @@ fn parse(bytes: &[u8], count: u32) -> Option<Vec<(String, String)>> {
     (lines.len() == count as usize).then_some(lines)
 }
 
+/// Whether credential header values, cookie values and received cookie lines
+/// are returned. A caller asks with `credential_values=1`, which `reb-api mcp`
+/// passes only with `--allow-content` (`x-reb-mcp.credential_values`), so a
+/// model below Full access never sees them; they stay in the binary artifact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Credentials {
+    Withheld,
+    Returned,
+}
+
+impl Credentials {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Withheld => "withheld",
+            Self::Returned => "returned",
+        }
+    }
+}
+
 fn address(block: &Block) -> Value {
     match block.family {
         4 => json!(format!(
@@ -439,8 +475,9 @@ fn address(block: &Block) -> Value {
     }
 }
 
-/// Whether a header's value is withheld. Decided from the name alone. A
-/// false match only keeps a value out of JSON; the binary artifact still has it.
+/// Whether a header's value is a credential, withheld unless the caller asks.
+/// Decided from the name alone. A false match only keeps a value out of JSON;
+/// the binary artifact still has it.
 fn credential_name(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     if READABLE_NAMES.contains(&name.as_str()) {
@@ -453,20 +490,30 @@ fn credential_name(name: &str) -> bool {
             .any(|word| CREDENTIAL_WORDS.contains(&word) || word.ends_with("key"))
 }
 
-fn headers(lines: Vec<(String, String)>) -> Vec<Value> {
+fn headers(lines: Vec<(String, String)>, credentials: Credentials) -> Vec<Value> {
     lines
         .into_iter()
-        .map(|(name, value)| {
-            if credential_name(&name) {
-                json!({"name": name, "value_withheld": true, "value_bytes": value.len()})
-            } else {
-                json!({"name": name, "value": value})
-            }
-        })
+        .map(
+            |(name, value)| match (credential_name(&name), credentials) {
+                (false, _) => json!({"name": name, "value": value}),
+                (true, Credentials::Returned) => {
+                    json!({"name": name, "value": value, "credential": true})
+                }
+                (true, Credentials::Withheld) => {
+                    json!({"name": name, "value_withheld": true, "value_bytes": value.len()})
+                }
+            },
+        )
         .collect()
 }
 
-fn describe(event: &Value, block: &Block, artifacts: &[Value], root: &Path) -> Value {
+fn describe(
+    event: &Value,
+    block: &Block,
+    artifacts: &[Value],
+    root: &Path,
+    credentials: Credentials,
+) -> Value {
     let kind = if block.response {
         "response_headers"
     } else {
@@ -513,7 +560,7 @@ fn describe(event: &Value, block: &Block, artifacts: &[Value], root: &Path) -> V
             return value;
         }
     };
-    match evidence::content(root, artifact, BLOCK_LIMIT) {
+    match evidence::content(root, artifact, block.length as usize) {
         Ok(bytes)
             if bytes.len() == block.length as usize
                 && Sha256::digest(&bytes).as_slice() == block.digest =>
@@ -521,7 +568,7 @@ fn describe(event: &Value, block: &Block, artifacts: &[Value], root: &Path) -> V
             match parse(&bytes, block.count) {
                 Some(lines) => {
                     value["artifact"] = json!("verified");
-                    value["headers"] = json!(headers(lines));
+                    value["headers"] = json!(headers(lines, credentials));
                 }
                 None => value["artifact"] = json!("malformed"),
             }
@@ -585,6 +632,7 @@ pub fn build(
     root: &Path,
     session: &str,
     request: &str,
+    credentials: Credentials,
 ) -> Value {
     let ours = |event: &Value| {
         event["session_id"] == session
@@ -643,7 +691,7 @@ pub fn build(
             malformed.push(event["sequence_number"].clone());
             continue;
         };
-        let described = describe(event, &block, artifacts, root);
+        let described = describe(event, &block, artifacts, root, credentials);
         let entry = hops.entry(block.hop).or_default();
         if block.response {
             entry.1.push(described);
@@ -686,6 +734,7 @@ pub fn build(
         "hops": hops,
         "malformed_records": malformed,
         "unattached_records": unattached,
+        "credential_values": credentials.name(),
     })
 }
 
@@ -725,6 +774,30 @@ mod tests {
         out[20..22].copy_from_slice(&status.to_le_bytes());
         out[48..80].copy_from_slice(&Sha256::digest(block));
         out
+    }
+
+    // Version 2 retains a block of any length; version 1 limited it to 320 KiB.
+    #[test]
+    fn a_version_two_block_past_320_kib_is_captured() {
+        let line = format!("X-Long: {}\r\n", "v".repeat(400 * 1024));
+        let mut long = payload(1, 1, 4, line.as_bytes(), 1, 0);
+        long[0] = 2;
+        assert!(decode(&record("request_headers", 12, 11, long, "5")).is_some());
+        long[0] = 1;
+        assert!(decode(&record("request_headers", 12, 11, long, "5")).is_none());
+        long[0] = 3;
+        assert!(decode(&record("request_headers", 12, 11, long, "5")).is_none());
+        // Only a length the field cannot hold is not_captured_block_limit.
+        let mut limited = [0u8; 128];
+        limited[..48].copy_from_slice(&long[..48]);
+        limited[0] = 2;
+        limited[5] = 4;
+        limited[12..16].copy_from_slice(&LENGTH_UNREPRESENTABLE.to_le_bytes());
+        assert!(decode(&record("request_headers", 12, 11, limited, "0")).is_some());
+        limited[12..16].copy_from_slice(&(400u32 * 1024).to_le_bytes());
+        assert!(decode(&record("request_headers", 12, 11, limited, "0")).is_none());
+        limited[0] = 1;
+        assert!(decode(&record("request_headers", 12, 11, limited, "0")).is_some());
     }
 
     #[test]
@@ -779,7 +852,15 @@ mod tests {
                 "6",
             ),
         ];
-        let result = build(&events, &Drops::default(), &artifacts, &root, "7", "17");
+        let result = build(
+            &events,
+            &Drops::default(),
+            &artifacts,
+            &root,
+            "7",
+            "17",
+            Credentials::Withheld,
+        );
         assert_eq!(result["unattached_records"], 1);
         assert_eq!(result["malformed_records"], json!(["24", "26"]));
         let hop0 = &result["hops"][0];
@@ -801,6 +882,26 @@ mod tests {
         assert_eq!(hop1["request"][0]["state"], "captured_shared");
         assert_eq!(hop1["request"][0]["artifact"], "verified");
         assert!(!result.to_string().contains("secret"));
+        assert_eq!(result["credential_values"], "withheld");
+        // Asked for, the same blocks carry every captured value.
+        let returned = build(
+            &events,
+            &Drops::default(),
+            &artifacts,
+            &root,
+            "7",
+            "17",
+            Credentials::Returned,
+        );
+        assert_eq!(returned["credential_values"], "returned");
+        assert_eq!(
+            returned["hops"][0]["request"][0]["headers"][1],
+            json!({"name":"Cookie","value":"sid=secret","credential":true})
+        );
+        assert_eq!(
+            returned["hops"][0]["response"][0]["headers"][0],
+            json!({"name":"Set-Cookie","value":"a=b","credential":true})
+        );
         // Hops the network never reported say why, from the request's records.
         assert_eq!(hop0["network_block_missing"], "not_reported");
         assert_eq!(hop1["network_block_missing"], "in_progress");
@@ -818,7 +919,15 @@ mod tests {
             json!({"session_id":"7","request_id":"17","category":"network",
             "type":"request_failed","process_id":43,"sequence_number":"32","flags":0}),
         );
-        let cached = build(&ended, &Drops::default(), &artifacts, &root, "7", "17");
+        let cached = build(
+            &ended,
+            &Drops::default(),
+            &artifacts,
+            &root,
+            "7",
+            "17",
+            Credentials::Withheld,
+        );
         assert_eq!(cached["hops"][1]["network_block_missing"], "from_cache");
         assert_eq!(cached["hops"][0]["network_block_missing"], "not_reported");
         let lifecycle = |kinds: &[(&str, u64)], loader: u64| {
@@ -866,7 +975,15 @@ mod tests {
             payload(2, 3, 0, b"", 1, 0),
             "0",
         ));
-        let reported = build(&redirected, &Drops::default(), &artifacts, &root, "7", "17");
+        let reported = build(
+            &redirected,
+            &Drops::default(),
+            &artifacts,
+            &root,
+            "7",
+            "17",
+            Credentials::Withheld,
+        );
         assert_eq!(
             reported["hops"][0]["network_block_missing"],
             "redirect_not_sent"
@@ -888,6 +1005,7 @@ mod tests {
             &root,
             "7",
             "17",
+            Credentials::Withheld,
         );
         assert_eq!(lossy["hops"][0]["network_block_missing"], "record_dropped");
         let cached_lossy = build(
@@ -897,6 +1015,7 @@ mod tests {
             &root,
             "7",
             "17",
+            Credentials::Withheld,
         );
         assert_eq!(
             cached_lossy["hops"][0]["network_block_missing"],
@@ -913,6 +1032,7 @@ mod tests {
             &root,
             "7",
             "17",
+            Credentials::Withheld,
         );
         assert_eq!(late["hops"][0]["network_block_missing"], "not_reported");
         assert!(
@@ -991,14 +1111,24 @@ mod tests {
         ] {
             assert!(!credential_name(name), "{name}");
         }
-        let shown = headers(vec![
-            ("X-Api-Key".into(), "secret-value".into()),
-            ("Accept".into(), "*/*".into()),
-        ]);
+        let lines = || {
+            vec![
+                ("X-Api-Key".into(), "secret-value".into()),
+                ("Accept".into(), "*/*".into()),
+            ]
+        };
         assert_eq!(
-            shown,
+            headers(lines(), Credentials::Withheld),
             vec![
                 json!({"name": "X-Api-Key", "value_withheld": true, "value_bytes": 12}),
+                json!({"name": "Accept", "value": "*/*"})
+            ]
+        );
+        // Asked for, a credential keeps its mark beside the captured value.
+        assert_eq!(
+            headers(lines(), Credentials::Returned),
+            vec![
+                json!({"name": "X-Api-Key", "value": "secret-value", "credential": true}),
                 json!({"name": "Accept", "value": "*/*"})
             ]
         );

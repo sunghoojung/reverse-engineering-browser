@@ -1541,29 +1541,36 @@ fn stored_export(
     let mut artifact_file = None;
     if let Some(store) = &artifacts_store {
         let mut file = store.root.file("manifest.jsonl", false)?;
-        file.lines(16 * 1024 * 1024, 8192, 10_000, &budget.cancelled, |line| {
-            let mut value = parse(line, budget).map_err(|e| export_failure(e, budget))?;
-            let digest: [u8; 32] =
-                Sha256::digest(serde_json::to_vec(&value).map_err(|_| frozen::limit())?).into();
-            let (k, projected) = source_artifact(&mut value)?;
-            if let Some(previous) = seen.get(&k) {
-                return Err(Error::conflict(if *previous == digest {
-                    "The evidence source contains a duplicate identity"
-                } else {
-                    "The evidence source contains a conflicting identity"
-                }));
-            }
-            memory.charge(256)?;
-            seen.insert(k, digest);
-            if artifacts_selected.contains(&k) {
-                memory.charge(8 * 1024)?;
-                package["records"]["artifacts"]
-                    .as_array_mut()
-                    .unwrap()
-                    .push(projected);
-            }
-            Ok(())
-        })?;
+        let record = crate::artifact_query::MANIFEST_RECORD_BYTES;
+        file.lines(
+            16 * 1024 * 1024,
+            record,
+            10_000,
+            &budget.cancelled,
+            |line| {
+                let mut value = parse(line, budget).map_err(|e| export_failure(e, budget))?;
+                let digest: [u8; 32] =
+                    Sha256::digest(serde_json::to_vec(&value).map_err(|_| frozen::limit())?).into();
+                let (k, projected) = source_artifact(&mut value)?;
+                if let Some(previous) = seen.get(&k) {
+                    return Err(Error::conflict(if *previous == digest {
+                        "The evidence source contains a duplicate identity"
+                    } else {
+                        "The evidence source contains a conflicting identity"
+                    }));
+                }
+                memory.charge(256)?;
+                seen.insert(k, digest);
+                if artifacts_selected.contains(&k) {
+                    memory.charge(8 * 1024)?;
+                    package["records"]["artifacts"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(projected);
+                }
+                Ok(())
+            },
+        )?;
         artifact_file = Some(file);
     }
     if events_selected

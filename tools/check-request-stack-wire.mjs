@@ -169,20 +169,20 @@ assert.deepEqual([...tree.querySelectorAll('li')].map(item => item.textContent).
   'Microtask',
   'the call that registered it is not recorded: promise registration stacks were on, but this thread remembered no registration for it (a builtin such as Promise.all registered it, capture was off when it was registered, or 2,048 later registrations replaced it)',
   'setTimeout',
-  'frames not retained: this thread already sent 1,024 scheduling stacks in this capture',
+  'frames not retained: the browser that recorded this capture sent at most 1,024 scheduling stacks per thread; current builds send every one',
   'Promise.then',
-  'frames not retained: this thread already sent 1,024 promise registration stacks in this capture',
+  'frames not retained: the browser that recorded this capture sent at most 1,024 promise registration stacks per thread; current builds send every one',
   'BroadcastChannel.postMessage',
   'its task origin did not validate (forged, damaged or longer than 1,544 bytes), so the sender is not known; the chain ends here'
 ]);
-// A request stack over its thread's budget names that budget's owner.
+// A request stack an older build left over its thread's budget says so.
 const overBudget = structuredClone(workerEvent);
 overBudget.payload = `${overBudget.payload.slice(0, 8)}05${overBudget.payload.slice(10)}`;
 assert.equal(decodeRequestStackRecord(overBudget)?.state, 'not_retained_budget');
 panel.render(tree, {events: [initiated], details: [overBudget]}, [chain]);
-assert.match(tree.textContent, /this thread already sent 1,024 stacks for requests, navigations, cookie writes and debugger observations in this capture/);
+assert.match(tree.textContent, /the browser that recorded this capture sent at most 1,024 stacks per thread\. Current builds retain every stack\./);
 assert.doesNotMatch(tree.textContent, /this renderer already sent/);
-// A worker past the renderer's table limit: named, nothing walked or read.
+// A worker an older build left past its renderer's table limit: named, nothing walked or read.
 const limitCase = cases.find(item => item.name === 'stack record thread limit');
 assert(limitCase?.valid, 'golden thread-limit record');
 const limited = {...limitCase.event, parent_event_id: initiated.sequence_number, session_id: initiated.session_id,
@@ -191,7 +191,7 @@ assert.equal(decodeRequestStackRecord(limited)?.state, 'not_walked_thread_limit'
 let limitReads = 0;
 createRequestStackPanel({load: () => { limitReads += 1; return new Promise(() => {}); }, refresh: () => {}, open: () => {}})
   .render(tree, {events: [initiated], details: [limited]}, [chain]);
-assert.match(tree.textContent, /Started in a dedicated worker\.\s*No stack was walked: 32 workers in this renderer already had stack tables/);
+assert.match(tree.textContent, /Started in a dedicated worker\.\s*No stack was walked: the browser that recorded this capture gave stack tables to at most 32 workers per renderer/);
 assert.equal(limitReads, 0, 'nothing is read for a stack that was not walked');
 
 const workerLoader = structuredClone(workerEvent);

@@ -129,13 +129,15 @@ Patch 0016 adds the separately armed document-start script experiment. It needs
 browser never advertises support, the registry refuses to bind a renderer, and
 arming fails closed. The switch alone arms nothing.
 
-The browser process owns the armed set and the bounded output ring. It pushes
+The browser process owns the armed set and its byte-bounded output. It pushes
 the set over a process-wide Mojo interface bound in
-`BindHostReceiverForRenderer`, so a renderer created after arming holds the set
-before its first document commits, and it only counts a renderer as ready once
-that renderer acknowledges the exact generation it can run. It binds at most 64
-renderers; a renderer refused beyond that is reported, never silently counted
-as ready.
+`BindHostReceiverForRenderer`, as one read-only shared memory region every
+renderer maps, so a renderer created after arming holds the set before its
+first document commits without a per-process copy. It only counts a renderer as
+ready once that renderer acknowledges the exact generation it can run, and it
+binds every live renderer. A snippet runs until it returns; Clear, a new arm or
+the end of the session sends Stop for the old generation over each renderer's
+IO-thread control pipe.
 
 The renderer injects at main-world script-context creation, which Blink performs
 before any script can run in that context. A same-origin commit from an initial
@@ -144,8 +146,8 @@ Blink clears the window object for the commit instead. Matching is the dependenc
 `common/native_console_document_start.h` decision shared with the browser and
 the offline check: one exact serialized origin, exactly one frame kind, and an
 optional literal path prefix. Workers, non-main worlds and non-HTTP(S)
-documents are never reached. Snippet output is bounded page-JavaScript
-observation, never evidence. See
+documents are never reached. Snippet output is page-JavaScript observation,
+never evidence. See
 [Native Console v3](../../../protocol/native-console-v3.md).
 
 ## Pre-initialization patches
@@ -259,7 +261,7 @@ Canvas drawing metadata does not contain text, pixel data, or drawing
 arguments. When `--reb-capture-canvas-images` is explicitly present for an
 authorized session, the renderer may also submit the complete data URL returned
 by `HTMLCanvasElement.toDataURL()`. That output is marked sensitive, linked to
-the exact readback event, limited to 2 MiB, and sent through the separate
+the exact readback event, kept at any size, and sent through the separate
 artifact channel. It is disabled by default and never enters the renderer event
 ring.
 
@@ -267,9 +269,8 @@ Native network records keep the v1 host-only start payload. Each admitted
 request also gets a `request_body` summary record (length, normalized content
 type, SHA-256, kind and capture state). When `--reb-capture-request-content` is
 explicitly present, the browser also records the raw path and query as
-`request_target` children, retains targets past their 116-byte prefix and at
-most 16 MiB of body bytes per request through the artifact channel, within a
-per-session byte budget. Patch `0019` hands bodies with file, blob or stream
+`request_target` children, and retains targets past their 116-byte prefix and
+every body whole through the artifact channel, at any length. Patch `0019` hands bodies with file, blob or stream
 parts to the overlay reader, which reads them off the UI sequence; a stream
 part's getter is replaced by one that forwards every byte unchanged. See
 [Native network v2](../../../protocol/native-network-v2.md) and
@@ -295,11 +296,18 @@ gives each reason, and such a request says why on its Headers tab. Chromium patc
 `document.cookie` and Cookie Store API calls in the renderer for the same
 sessions, naming each cookie a read returns.
 Renderer events use a bounded shared-memory queue with Mojo lifecycle control
-and coalesced wake-ups. The browser process
+and coalesced wake-ups. A wake-up leaves on the renderer's IO thread, so the
+browser drains the queue while a long synchronous script still holds the main
+thread. The browser process
 authenticates to the event broker with a session identifier and a mode-0600
-token file, then sends exact fixed-size records over a Unix socket. A bounded
-browser-process queue keeps those socket writes off the capture paths.
-Both event queues hold 8,192 records. Full queues still drop rather than block
+token file, then sends exact fixed-size records over a Unix socket. A
+browser-process queue keeps those socket writes off the capture paths: an
+8,192-record lock-free ring and, behind it, a spill for a burst the broker
+cannot take as fast as renderers produce it. The spill is allocated only while
+a burst outruns the writer and freed once sent. It keeps each thread's records
+in order and is bounded at 256 MiB, about 800,000 records, which bounds the
+browser's memory when a page outruns the broker for longer than a burst. The
+renderer queue holds 8,192 records. Full queues still drop rather than block
 the renderer; a dropped gap report carries the number of source records it
 represents into the next queue's drop counter. Queue-wide gap reports remain
 unattributed because both queues can mix tabs and frames. Sequence discontinuities
@@ -331,33 +339,36 @@ capture policy.
 When the Artifact category is authorized, the browser process recognizes
 JavaScript and WebAssembly responses, preserves the observed source URL
 (including credentials, queries and fragments) in local artifact metadata, and
-asynchronously tees at most 16 MiB per response, holding only the bytes it has
-within a shared 32 MiB in-flight pool. The original response pipe remains the page's source of bytes. A
-separate queue permits at most 16 pending artifacts and 32 MiB of queued
-content, then transfers frames over an authenticated user-only socket. Brave
-emits `artifact_captured` only after a durable receiver acknowledgment and
-emits `artifact_capture_failed` for limits, incomplete bodies, queue pressure,
-disconnects, and receiver rejection. A receiver rejection keeps the
+asynchronously tees every response whole, holding only the bytes it has within
+a shared 32 MiB in-flight pool, which is also the writer queue's only bound. The
+original response pipe remains the page's source of bytes. The writer transfers
+frames over an authenticated user-only socket. Brave emits `artifact_captured`
+only after a durable receiver acknowledgment and emits
+`artifact_capture_failed` for incomplete bodies, pool pressure, disconnects,
+and receiver rejection, including the receiver's free-disk reserve. A receiver rejection keeps the
 connection, and a failed connection is replaced within a bounded retry budget.
 If the receiver stays unreachable, Brave emits one `artifact_channel_lost`
 gap; later artifacts are not attempted.
 
 The same category enables runtime-generated source capture. V8 reports every
 script it compiles, including `eval` and `Function` text on pages with no CSP and
-in workers, as described in [native compiled scripts](../../../protocol/native-compiled-scripts-v1.md).
+in workers, as described in [native compiled scripts](../../../protocol/native-compiled-scripts-v2.md).
 V8 also exposes copied byte buffers used by
 `WebAssembly.compile`, `WebAssembly.Module`, and `WebAssembly.instantiate`.
-Renderer hooks perform one inactive atomic check, cap each submission at 16
-MiB, and send bytes one way to the browser process. The browser copies shared
+Renderer hooks perform one inactive atomic check, charge each module to the
+renderer's 256 MiB artifact credit, and send bytes one way to the browser
+process. The browser copies shared
 memory before validation, preserves the bounded context URL, assigns the artifact ID,
 and remains the only process that owns the authenticated artifact socket.
 
 The VM category separately enables runtime-buffer snapshots for `ArrayBuffer`,
 `Uint8Array`, `Uint16Array`, and `Uint32Array` constructor results. V8 invokes
 an embedder callback after initialization; no JavaScript constructor or host
-builtin is wrapped. Buffers from 32 bytes through 16 MiB are copied into
-`bytecode_buffer` artifacts, with at most 16 snapshots per session sharing the
-existing 16-artifact, 32-MiB transfer queue.
+builtin is wrapped. Buffers of 32 bytes or more, of any size, are copied into
+`bytecode_buffer` artifacts, with at most 16 snapshots per session. A buffer
+and its allocating script's source are charged to the renderer's 256 MiB
+artifact credit until the browser has copied them out; one that the credit
+cannot take records `runtime_typed_array_backlog`.
 
 Runtime snapshots now carry exact allocating-script provenance. After the VM
 capture gate, V8 exposes the innermost JavaScript frame's native script identity,
@@ -458,9 +469,10 @@ it, and no arbitrary write/guest tracing or page API wrappers are installed.
 The allocator identity is captured at allocation and survives writes by another
 script. The currently executing mutator never becomes the source parent.
 
-Pending storage is separately capped at 16 objects and 32 MiB including whole
-backing-buffer lengths and source UTF-8 sizes (a tiny view cannot retain a giant
-backing buffer). Rejected pending entries name `runtime_buffer_checkpoint_limit`.
+Pending storage is separately capped at 16 objects, of any size: each keeps its
+buffer and source alive for the rest of one task, and its bytes are read once,
+at the checkpoint, into the artifact transfer. Rejected pending entries name
+`runtime_buffer_checkpoint_limit`.
 Disable, expiry or generation changes stop the drain before retained handle
 access or byte copying. Context destruction, detach, shared/resizable backing,
 and changed lengths fail closed at the checkpoint with named omissions. Isolate
@@ -502,8 +514,8 @@ V8 initialization names the main thread's isolate and `WorkerThread` each
 worker's when its global scope starts, with or without the flag (two
 thread-local stores, nothing allocated under `WorkerThread::lock_`); a
 thread's tables and V8 frame buffer come from its first walk or message
-receipt while capture is active, at most 32 workers per renderer, and are
-freed at shutdown.
+receipt while capture is active, every worker its own, and are freed at
+shutdown.
 Chromium `0047` carries a task origin beside `sender_stack_trace_id` in
 `CloneableMessage` (mojom, both struct variants and their traits, and
 `ShallowClone` for the browser's `BroadcastChannel` relay), bounds it to 1,544
@@ -624,7 +636,7 @@ All CDP capture/transport functionality has been removed from the companion.
 
 ## Native JavaScript dispatch (opt-in)
 
-Rebuilt browsers can record live dispatch at up to 8 static interpreter-candidate
+Rebuilt browsers can record live dispatch at up to 256 static interpreter-candidate
 JavaScript sites (`switch` and `t[k](...)`) named in an analyzer-written site
 file. Launch with `REB_NATIVE_JS_DISPATCH_SITES=/absolute/path/sites.json`; the
 launcher adds `--js-flags=--reb-js-dispatch-capture` and
@@ -632,21 +644,25 @@ launcher adds `--js-flags=--reb-js-dispatch-capture` and
 browser validates the canonical file once per session, refuses a changed file
 until restart, and sends the renderer fixed 44-byte site records. Chromium patch
 `0020` installs the V8 callbacks for the main-thread isolate only, so workers
-are never armed. Records use the ordinary renderer ring (256 per configuration,
-64 per site) and every refusal is a coalesced `gap`.
+are never armed. Every dispatch is recorded through the ordinary renderer ring
+with its site's ordinal, and every refusal is a coalesced `gap`. V8 patch
+`0023` and Chromium patch `0066` removed the earlier 8-site limit and the 256
+and 64 sample budgets.
 
-The V8 flag turns off code caching, script streaming and the in-memory
-compilation cache browser-wide and never optimizes an armed function, so this
-mode is not performance-neutral. See the
+The V8 flag sends only a script that an armed site names through the capture
+compile path (no code cache, no compilation cache, a main-thread recompile of a
+streamed result and eager source positions) and never optimizes an armed
+function. Every other script keeps its caches and streaming, so the cost falls
+on the tracked scripts. See the
 [wire contract and limits](../../../protocol/native-js-dispatch-v1.md) and the
 [design review](../../../docs/product/native-js-dispatch-v1.md).
-`./tools/check-native-probe-admission.sh` covers the renderer budgets, expiry
+`./tools/check-native-probe-admission.sh` covers the renderer ordinals, expiry
 and gaps; `native_js_dispatch_sites_unittests` covers the site-file parser and
 needs the pinned Chromium build.
 
 ## Native JavaScript invocation identity (opt-in)
 
-Rebuilt browsers can give each call of up to 8 armed functions (for example
+Rebuilt browsers can give each call of up to 256 armed functions (for example
 the hCaptcha challenge frame's `window.hsw`) an invocation identity that V8
 carries across the call's awaits and promise jobs. Write the site file with
 `tools/native-js-invocation-site.py` and launch with
@@ -660,9 +676,20 @@ continuation-preserved embedder data slot without changing what Blink's task
 attribution reads; Chromium patch `0021` installs the callbacks for the
 main-thread isolate only and records `js_invocation_request` beside
 `request_initiated`. Wasm `br_table`, `call_indirect` and guest invocation
-records carry the current context. Workers are unsupported. See the
+records carry the current context. V8 patch `0023` and Chromium patch `0066`
+record every call: V8 carries and settles only the starts the renderer
+recorded, and each start takes its site's ordinal. With
+`REB_NATIVE_JS_INVOCATION_LIVE=1` the launcher also passes
+`--reb-js-invocation-sites-generation=<path>`: the broker writer polls that
+generation, rereads the site file as a version 2 slot table, and the browser
+sends it to every renderer with `UpdateJsInvocationSites`, so the running
+capture follows the saved set. A slot keeps its site for the browser's
+lifetime; a table that renumbers one is refused with a gap. V8 patch `0025`
+and Chromium patch `0067` add the revision callback, which copies the sites
+again without ending calls in flight. Workers are unsupported.
+See the
 [wire contract](../../../protocol/native-js-invocation-v1.md) and the
 [design](../../../docs/product/native-js-invocation-v1.md).
-`./tools/check-native-probe-admission.sh` covers the renderer budgets, digest
+`./tools/check-native-probe-admission.sh` covers the renderer ordinals, digest
 gating and request states; the `RebNativeJsInvocation*` cctests run in the
 native V8 runtime workflow.

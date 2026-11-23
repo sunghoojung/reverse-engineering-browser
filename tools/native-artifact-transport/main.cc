@@ -19,6 +19,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -28,6 +29,7 @@
 
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_socket_client.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_socket_client.h"
+#include "brave/components/reverse_engineering_browser/common/native_js_invocation.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_ipc.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 
@@ -92,7 +94,8 @@ std::unique_ptr<reb::NativeArtifactTransfer> MakeTransfer(const std::uint64_t ar
                                                           const std::size_t size,
                                                           const bool canvas = false) {
   auto transfer = std::make_unique<reb::NativeArtifactTransfer>();
-  transfer->reservation = reb::NativeArtifactReservation::Acquire(g_pool, size);
+  transfer->reservation =
+      reb::NativeArtifactReservation::Acquire(g_pool, size, reb::NativeArtifactPoolUse::kWhole);
   Require(transfer->reservation.is_valid(), "transfer pool share");
   transfer->header.session_id = kSessionId;
   transfer->header.artifact_id = artifact_id;
@@ -114,8 +117,9 @@ std::unique_ptr<reb::NativeArtifactTransfer> MakeTransfer(const std::uint64_t ar
   return transfer;
 }
 
-std::unique_ptr<reb::NativeArtifactTransfer> OpenStream(const std::uint64_t artifact_id) {
-  auto transfer = MakeTransfer(artifact_id, 0);
+std::unique_ptr<reb::NativeArtifactTransfer> OpenStream(const std::uint64_t artifact_id,
+                                                        const bool sensitive = false) {
+  auto transfer = MakeTransfer(artifact_id, 0, sensitive);
   transfer->op = reb::NativeArtifactTransferOp::kOpen;
   transfer->header.protocol_version = reb::kNativeArtifactStreamProtocolVersion;
   transfer->header.content_size = 0;
@@ -133,7 +137,8 @@ std::unique_ptr<reb::NativeArtifactTransfer> StreamFrame(const reb::NativeArtifa
   transfer->frame.artifact_id = artifact_id;
   transfer->frame.content_size = content_size;
   if (size != 0) {
-    transfer->reservation = reb::NativeArtifactReservation::Acquire(g_pool, size);
+    transfer->reservation =
+        reb::NativeArtifactReservation::Acquire(g_pool, size, reb::NativeArtifactPoolUse::kStream);
     Require(transfer->reservation.is_valid(), "stream frame pool share");
     transfer->content.assign(size, 's');
     transfer->frame.data_size = static_cast<std::uint32_t>(size);
@@ -154,11 +159,6 @@ void WriteToken(const std::string& path) {
   Require(write(descriptor, encoded.data(), encoded.size()) == static_cast<ssize_t>(encoded.size()),
           "token write");
   Require(close(descriptor) == 0, "token close");
-}
-
-bool IsSocket(const std::string& path) {
-  struct stat metadata {};
-  return stat(path.c_str(), &metadata) == 0 && S_ISSOCK(metadata.st_mode);
 }
 
 bool WaitFor(const std::function<bool()>& done) {
@@ -191,22 +191,15 @@ std::size_t CountOf(const std::string& text, const std::string& needle) {
 pid_t SpawnReceiver(const std::string& binary,
                     const std::string& root,
                     const std::string& socket_path,
-                    const std::string& log_path) {
-  const std::string store = root + "/artifacts";
+                    const std::string& log_path,
+                    const std::string& store_name = "artifacts",
+                    const std::vector<std::string>& extra = {}) {
+  const std::string store = root + "/" + store_name;
   const std::string token = root + "/token";
-  std::vector<std::string> arguments = {binary,
-                                        "--store",
-                                        store,
-                                        "--socket",
-                                        socket_path,
-                                        "--token-file",
-                                        token,
-                                        "--session-id",
-                                        std::to_string(kSessionId),
-                                        "--max-artifact-bytes",
-                                        "65536",
-                                        "--max-store-bytes",
-                                        "1048576"};
+  std::vector<std::string> arguments = {binary,     "--store",      store,
+                                        "--socket", socket_path,    "--token-file",
+                                        token,      "--session-id", std::to_string(kSessionId)};
+  arguments.insert(arguments.end(), extra.begin(), extra.end());
   std::vector<char*> argv;
   for (std::string& argument : arguments) {
     argv.push_back(argument.data());
@@ -221,7 +214,12 @@ pid_t SpawnReceiver(const std::string& binary,
   Require(posix_spawn(&pid, binary.c_str(), &actions, nullptr, argv.data(), environ) == 0,
           "spawn receiver");
   posix_spawn_file_actions_destroy(&actions);
-  Require(WaitFor([&] { return IsSocket(socket_path); }), "receiver socket did not appear");
+  // The socket file appears at bind(), before the receiver listens, so a
+  // connection then is refused; the receiver reports once it listens.
+  Require(WaitFor([&] {
+            return ReadFile(log_path).find("Artifact receiver listening on ") != std::string::npos;
+          }),
+          "receiver did not listen");
   return pid;
 }
 
@@ -332,10 +330,11 @@ void CheckProductionReceiver(const std::string& receiver, const std::string& roo
   Require(Enqueue(MakeTransfer(2, 32 * 1024, true)), "enqueue sensitive artifact");
   Require(StatusOf(2) == NativeArtifactReceiveStatus::kSensitiveCaptureDisabled,
           "sensitive rejection keeps its status");
-  // 256 KiB against a 64 KiB receiver limit: the body is larger than any
-  // socket buffer, so this fails as an I/O error unless the receiver reads it.
-  Require(Enqueue(MakeTransfer(3, 256 * 1024)), "enqueue oversize artifact");
-  Require(StatusOf(3) == NativeArtifactReceiveStatus::kTooLarge, "oversize keeps its status");
+  // A refused 256 KiB body is larger than any socket buffer, so this fails as
+  // an I/O error unless the receiver reads it.
+  Require(Enqueue(MakeTransfer(3, 256 * 1024, true)), "enqueue large sensitive artifact");
+  Require(StatusOf(3) == NativeArtifactReceiveStatus::kSensitiveCaptureDisabled,
+          "a refused body past the socket buffers keeps its status");
   Require(Enqueue(MakeTransfer(1, 12)), "enqueue duplicate artifact");
   Require(StatusOf(1) == NativeArtifactReceiveStatus::kConflict, "duplicate keeps its status");
   Require(Enqueue(MakeTransfer(4, 20)), "enqueue after rejections");
@@ -351,23 +350,23 @@ void CheckProductionReceiver(const std::string& receiver, const std::string& roo
           "only the accepted artifacts are in the manifest");
   Require(WaitFor([] { return g_pool.used() == 0; }),
           "written and rejected transfers return their pool share");
-  std::cout << "PASS artifact writer: sensitive, oversize and duplicate rejections answered on one "
-               "connection with their real status; the next artifact is accepted\n";
+  std::cout << "PASS artifact writer: sensitive, large sensitive and duplicate rejections answered "
+               "on one connection with their real status; the next artifact is accepted\n";
 
-  // Streams interleave on the same connection. A refusal mid-stream is
-  // reported once and the stream's later frames are dropped; an abort is
-  // silent; a stream still open when the receiver goes is reported lost.
+  // Streams interleave on the same connection. A refused stream is reported
+  // once and its later frames are dropped; an abort is silent; a stream still
+  // open when the receiver goes is reported lost.
   using Op = reb::NativeArtifactStreamOp;
   Require(
-      Enqueue(OpenStream(20)) && Enqueue(OpenStream(21)) && Enqueue(OpenStream(22)) &&
+      Enqueue(OpenStream(20)) && Enqueue(OpenStream(21, true)) && Enqueue(OpenStream(22)) &&
           Enqueue(StreamFrame(Op::kData, 20, 1000)) && Enqueue(StreamFrame(Op::kData, 21, 60000)) &&
           Enqueue(StreamFrame(Op::kData, 22, 10)) && Enqueue(StreamFrame(Op::kData, 20, 2000)) &&
           Enqueue(StreamFrame(Op::kData, 21, 10000)) && Enqueue(StreamFrame(Op::kData, 21, 5)) &&
           Enqueue(StreamFrame(Op::kAbort, 22)) && Enqueue(StreamFrame(Op::kEnd, 21, 0, 60005)) &&
           Enqueue(StreamFrame(Op::kEnd, 20, 0, 3000)),
       "enqueue interleaved streams");
-  Require(StatusOf(21) == NativeArtifactReceiveStatus::kTooLarge,
-          "a stream refused mid-body reports the receiver's status");
+  Require(StatusOf(21) == NativeArtifactReceiveStatus::kSensitiveCaptureDisabled,
+          "a refused stream reports the receiver's status");
   Require(StatusOf(20) == NativeArtifactReceiveStatus::kAccepted, "an ended stream is accepted");
   Require(Enqueue(OpenStream(23)) && Enqueue(StreamFrame(Op::kData, 23, 7)) &&
               Enqueue(MakeTransfer(24, 4)) &&
@@ -387,9 +386,8 @@ void CheckProductionReceiver(const std::string& receiver, const std::string& roo
 
   StopReceiver(pid);
   const std::string stats = ReadFile(log_path);
-  Require(CountOf(stats, "accepted=4 ") == 1 && CountOf(stats, "too_large=2 ") == 1 &&
-              CountOf(stats, "streams_abandoned=1 ") == 1 &&
-              CountOf(stats, "sensitive_rejected=1 ") == 1 && CountOf(stats, "conflicts=1 ") == 1,
+  Require(CountOf(stats, "accepted=4 ") == 1 && CountOf(stats, "streams_abandoned=1 ") == 1 &&
+              CountOf(stats, "sensitive_rejected=3 ") == 1 && CountOf(stats, "conflicts=1 ") == 1,
           "receiver counted every rejection");
   const auto lost_started = Clock::now();
   Require(Enqueue(MakeTransfer(5, 8)), "enqueue to a vanished receiver");
@@ -410,6 +408,47 @@ void CheckProductionReceiver(const std::string& receiver, const std::string& roo
   Require(g_channel_lost == 1 && Completions().empty(), "loss announced exactly once");
   std::cout << "PASS artifact writer: a vanished receiver reports queued transfers, retries within "
                "a bounded budget, announces the loss once and refuses later transfers\n";
+}
+
+// A receiver whose disk reserve exceeds the volume's free space refuses every
+// artifact with status 7. The writer reports that status, once per artifact,
+// on the same connection, as it does any other refusal.
+void CheckDiskReserve(const std::string& receiver, const std::string& root) {
+  const std::string socket_path = root + "/reserve.sock";
+  const std::string log_path = root + "/reserve.log";
+  // 1 EiB, more than any volume has free.
+  const pid_t pid = SpawnReceiver(receiver, root, socket_path, log_path, "reserve-artifacts",
+                                  {"--disk-reserve-bytes", "1152921504606846976"});
+  Require(CountOf(ReadFile(log_path), "disk reserve 1152921504606846976 bytes") == 1,
+          "the receiver names its disk reserve at start");
+  ConfigureArtifactSwitches(socket_path, root + "/token");
+  const int lost_before = g_channel_lost;
+  auto& client = reb::NativeArtifactSocketClient::Get();
+  Require(client.StartFromCommandLine(
+              kSessionId, &reb::NativeArtifactCaptureSink::TransferCompleted, &ChannelLost),
+          "start against a receiver past its disk reserve");
+  using Op = reb::NativeArtifactStreamOp;
+  Require(
+      Enqueue(MakeTransfer(40, 12)) && StatusOf(40) == NativeArtifactReceiveStatus::kDiskReserve,
+      "a whole artifact past the reserve reports disk_reserve");
+  Require(Enqueue(OpenStream(41)) && Enqueue(StreamFrame(Op::kData, 41, 100)) &&
+              Enqueue(StreamFrame(Op::kEnd, 41, 0, 100)) && Enqueue(MakeTransfer(42, 4)) &&
+              StatusOf(42) == NativeArtifactReceiveStatus::kDiskReserve &&
+              StatusOf(41) == NativeArtifactReceiveStatus::kDiskReserve && !Reported(41),
+          "a stream past the reserve reports disk_reserve once and drops its later frames");
+  Require(client.state() == NativeArtifactChannelState::kConnected &&
+              g_channel_lost == lost_before &&
+              CountOf(ReadFile(log_path), "accepted authenticated connection") == 1,
+          "disk reserve refusals keep the channel and its connection");
+  Require(WaitFor([] { return g_pool.used() == 0; }), "refused transfers return their pool share");
+  StopArtifactClient();
+  StopReceiver(pid);
+  Require(CountOf(ReadFile(log_path), "disk_reserve=3 ") == 1 &&
+              CountOf(ReadFile(log_path), "stopped: accepted=0 ") == 1,
+          "the receiver counted every disk reserve refusal");
+  Require(g_channel_lost == lost_before, "a stopped client after refusals announces no loss");
+  std::cout << "PASS artifact writer: disk reserve refusals reported with status 7 on one "
+               "connection; a refused stream is reported once\n";
 }
 
 // An older receiver acknowledges a rejection before reading the body and
@@ -516,14 +555,27 @@ class ScriptedBroker {
     reader_ = std::thread([this] {
       reb::NativeProbeEvent event;
       while (ReadExact(connection_, &event, sizeof(event))) {
-        std::lock_guard lock(mutex_);
-        events_.push_back(event);
+        {
+          std::lock_guard lock(mutex_);
+          events_.push_back(event);
+        }
+        while (paused_.load()) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
       }
     });
   }
-  std::vector<reb::NativeProbeEvent> Events() {
+  // Stops reading after at most one more record, so the writer stalls again.
+  void Pause() { paused_.store(true); }
+  void Resume() { paused_.store(false); }
+  std::vector<reb::NativeProbeEvent> Events(const std::size_t from = 0) {
     std::lock_guard lock(mutex_);
-    return events_;
+    return {events_.begin() + static_cast<std::ptrdiff_t>(std::min(from, events_.size())),
+            events_.end()};
+  }
+  std::size_t Count() {
+    std::lock_guard lock(mutex_);
+    return events_.size();
   }
   void Disconnect() { shutdown(connection_, SHUT_RDWR); }
   void CloseAccepted() { close(connection_); }
@@ -532,6 +584,7 @@ class ScriptedBroker {
   std::string path_;
   int listener_;
   int connection_ = -1;
+  std::atomic<bool> paused_{false};
   std::mutex mutex_;
   std::vector<reb::NativeProbeEvent> events_;
   std::thread reader_;
@@ -570,8 +623,130 @@ void CheckRefusedSession(const std::string& root) {
                "connection\n";
 }
 
-// Drops in the browser's mixed queue are reported as browser records, and the
-// end of artifact delivery is a named gap in the same stream.
+// Replaced by rename, as the backend does, so a poll never reads half a file.
+void ReplaceFile(const std::string& path, const std::string& text) {
+  const std::string temporary = path + ".tmp";
+  {
+    std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
+    file << text;
+    Require(static_cast<bool>(file), "write " + temporary);
+  }
+  Require(std::rename(temporary.c_str(), path.c_str()) == 0, "rename " + path);
+}
+
+// The startup site file of a following capture and its generation, before
+// the session starts.
+void ConfigureLiveInvocationSites(const std::string& root) {
+  const std::string sites = root + "/js-invocation-sites.json";
+  const std::string generation = root + "/js-invocation-sites-generation";
+  ReplaceFile(sites, R"({"sites":[],"version":2})");
+  ReplaceFile(generation, "0\n");
+  auto& switches = base::CommandLine::ForCurrentProcess()->switches;
+  switches["reb-js-invocation-sites"] = sites;
+  switches["reb-js-invocation-sites-generation"] = generation;
+  reb::NativeProbeSession::Get().site_revisions.clear();
+}
+
+// A following capture's writer rereads the site file each time the backend
+// advances the generation, never for the startup, an unchanged or an older
+// generation, and hands a file it cannot read to the session as an empty
+// revision, which the session refuses with its gap.
+void CheckLiveInvocationSites(const std::string& root) {
+  const std::string sites = root + "/js-invocation-sites.json";
+  const std::string generation = root + "/js-invocation-sites-generation";
+  auto& session = reb::NativeProbeSession::Get();
+  const auto settle = [] {
+    base::SequencedTaskRunner::GetCurrentDefault()->RunUntil([] { return false; },
+                                                             std::chrono::milliseconds(800));
+  };
+  settle();
+  Require(session.site_revisions.empty(), "the startup generation is not a revision");
+  ReplaceFile(sites, "revision one");
+  ReplaceFile(generation, "1\n");
+  Require(RunBrowserUntil([&] { return session.site_revisions.size() == 1; }),
+          "an advanced generation rereads the site file");
+  Require(session.site_revisions[0] == "revision one", "the revision is the file as written");
+  ReplaceFile(sites, "not applied");
+  ReplaceFile(generation, "1\n");
+  settle();
+  ReplaceFile(generation, "0\n");
+  settle();
+  Require(session.site_revisions.size() == 1, "an unchanged or older generation rereads nothing");
+  ReplaceFile(sites, std::string(reb::kNativeJsInvocationSitesFileLimit + 1, ' '));
+  ReplaceFile(generation, "3\n");
+  Require(RunBrowserUntil([&] { return session.site_revisions.size() == 2; }),
+          "an over-limit site file is still a revision");
+  Require(session.site_revisions[1].empty(), "a file the writer cannot read is an empty revision");
+  ReplaceFile(sites, "revision four");
+  ReplaceFile(generation, "4\n");
+  Require(RunBrowserUntil([&] { return session.site_revisions.size() == 3; }) &&
+              session.site_revisions[2] == "revision four",
+          "the next generation reads again");
+  auto& switches = base::CommandLine::ForCurrentProcess()->switches;
+  switches.erase("reb-js-invocation-sites");
+  switches.erase("reb-js-invocation-sites-generation");
+  std::cout << "PASS broker writer: a following capture rereads the site file only for a newer "
+               "generation and hands an unreadable one to the session as an empty revision\n";
+}
+
+reb::NativeProbeEvent RendererRecord(const std::uint32_t process, const std::uint64_t sequence) {
+  reb::NativeProbeEvent event;
+  event.header.category = reb::NativeProbeCategory::kCanvas;
+  event.header.type = reb::NativeProbeType::kApiCall;
+  event.header.session_id = kSessionId;
+  event.header.process_id = process;
+  event.header.sequence_number = sequence;
+  return event;
+}
+
+// A burst far past the ring, queued by several threads at once as the
+// browser's UI and IO threads do, waits in the spill while the broker reads
+// nothing. It reaches the broker whole, each thread's records in the order
+// that thread queued them, and the spill is freed once it has been sent.
+void CheckSpilledBurst(ScriptedBroker& broker, const reb::NativeProbeEmitter emit) {
+  constexpr std::uint32_t kProducers = 4;
+  constexpr std::uint32_t kFirstProcess = 80;
+  constexpr std::uint64_t kRecords = 25'000;
+  std::vector<std::thread> producers;
+  for (std::uint32_t producer = 0; producer < kProducers; ++producer) {
+    producers.emplace_back([emit, producer] {
+      for (std::uint64_t sequence = 1; sequence <= kRecords; ++sequence) {
+        emit(RendererRecord(kFirstProcess + producer, sequence));
+      }
+    });
+  }
+  for (auto& producer : producers) {
+    producer.join();
+  }
+  auto& client = reb::NativeProbeSocketClient::Get();
+  const std::size_t spilled_chunks = client.SpillChunkCountForTesting();
+  Require(spilled_chunks > 0, "a burst past the ring spills");
+  broker.StartReading();
+  Require(WaitFor([&] { return broker.Count() >= kProducers * kRecords; }),
+          "every record of the burst reaches the broker");
+  std::map<std::uint32_t, std::uint64_t> last;
+  for (const auto& event : broker.Events()) {
+    Require(event.header.type != reb::NativeProbeType::kGap, "a spilled burst loses nothing");
+    std::uint64_t& previous = last[event.header.process_id];
+    Require(event.header.sequence_number == previous + 1,
+            "each thread's records arrive in the order it queued them");
+    previous = event.header.sequence_number;
+  }
+  Require(last.size() == kProducers, "every thread's records arrive");
+  for (const auto& [process, sequence] : last) {
+    Require(process >= kFirstProcess && sequence == kRecords, "every thread's records arrive");
+  }
+  Require(WaitFor([&] { return client.SpillChunkCountForTesting() == 0; }),
+          "the writer frees the spill once it is sent");
+  std::cout << "PASS broker writer: " << kProducers * kRecords << " records from " << kProducers
+            << " threads, " << spilled_chunks
+            << " chunks spilled past the ring, reach a stalled broker whole and in each thread's "
+               "order, and the spill is freed\n";
+}
+
+// Records the spill's bound refuses, and only those, are reported as browser
+// records in the mixed stream, and the end of artifact delivery is a named
+// gap in the same stream.
 void CheckTransportGaps(const std::string& root) {
   const std::string broker_path = root + "/broker.sock";
   ScriptedBroker broker(broker_path);
@@ -581,42 +756,48 @@ void CheckTransportGaps(const std::string& root) {
                           reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kCanvas) |
                               reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kArtifact));
   ConfigureArtifactSwitches(artifact_path, root + "/token");
+  ConfigureLiveInvocationSites(root);
   Require(reb::NativeProbeSocketClient::Get().StartFromCommandLine(), "session start");
   const int artifact_connection = AcceptHello(artifact_listener);
   broker.Accept();
   const reb::NativeProbeEmitter emit = reb::NativeProbeSession::Get().downstream();
   Require(emit != nullptr, "session emitter");
+  CheckSpilledBurst(broker, emit);
 
-  // The broker reads nothing yet, so the writer blocks and the queue fills.
+  // With the bound lowered to two chunks and the broker stalled again, the
+  // ring and the spill fill and the spill refuses the rest.
+  auto& client = reb::NativeProbeSocketClient::Get();
+  const std::size_t spill_limit = client.SetSpillChunkLimitForTesting(2);
+  broker.Pause();
+  const std::size_t first_event = broker.Count();
   constexpr std::uint64_t kRendererEvents = 20'000;
   for (std::uint64_t sequence = 1; sequence <= kRendererEvents; ++sequence) {
-    reb::NativeProbeEvent event;
-    event.header.category = reb::NativeProbeCategory::kCanvas;
-    event.header.type = reb::NativeProbeType::kApiCall;
-    event.header.session_id = kSessionId;
-    event.header.process_id = 77;
-    event.header.sequence_number = sequence;
-    emit(event);
+    emit(RendererRecord(77, sequence));
   }
-  broker.StartReading();
+  broker.Resume();
   std::uint64_t retained = 0;
   std::uint64_t reported = 0;
   std::vector<reb::NativeProbeEvent> gaps;
   Require(WaitFor([&] {
             retained = reported = 0;
             gaps.clear();
-            for (const auto& event : broker.Events()) {
+            std::uint64_t previous = 0;
+            for (const auto& event : broker.Events(first_event)) {
               if (event.header.type == reb::NativeProbeType::kGap) {
                 gaps.push_back(event);
                 reported += reb::NativeProbeDropWeight(event);
               } else if (event.header.process_id == 77) {
+                Require(event.header.sequence_number > previous,
+                        "records kept around a refusal stay in order");
+                previous = event.header.sequence_number;
                 ++retained;
               }
             }
             return retained + reported == kRendererEvents;
           }),
-          "every dropped record is counted by a gap");
-  Require(!gaps.empty() && reported > 0, "the queue dropped and said so");
+          "every refused record is counted by a gap");
+  Require(!gaps.empty() && reported > 0, "the spill refused past its bound and said so");
+  Require(client.SetSpillChunkLimitForTesting(spill_limit) == 2, "the lowered bound was in force");
   for (const auto& gap : gaps) {
     Require(gap.header.process_id == static_cast<std::uint32_t>(base::kTestBrowserProcessId) &&
                 gap.header.session_id == kSessionId &&
@@ -624,8 +805,8 @@ void CheckTransportGaps(const std::string& root) {
                 gap.header.sequence_number >= reb::NativeProbeSession::kFirstBrowserSequence,
             "a transport gap is a browser record with its own browser sequence");
   }
-  std::cout << "PASS broker writer: " << reported << " dropped of " << kRendererEvents
-            << " mixed-queue records reported by browser-sequenced gaps\n";
+  std::cout << "PASS broker writer: " << reported << " refused past a two-chunk spill of "
+            << kRendererEvents << " mixed-queue records reported by browser-sequenced gaps\n";
 
   close(artifact_connection);
   close(artifact_listener);
@@ -649,6 +830,7 @@ void CheckTransportGaps(const std::string& root) {
       }),
       "a lost artifact channel is a named gap in the event stream");
   std::cout << "PASS broker writer: a lost artifact channel becomes an artifact_channel_lost gap\n";
+  CheckLiveInvocationSites(root);
 
   broker.Disconnect();
   Require(RunBrowserUntil([] { return reb::NativeProbeSession::Get().stop_calls.load() == 1; }),
@@ -672,6 +854,7 @@ int main(const int argc, char** argv) {
   const std::string root = argv[2];
   WriteToken(root + "/token");
   CheckProductionReceiver(receiver, root);
+  CheckDiskReserve(receiver, root);
   CheckOlderReceiver(root);
   CheckStopWhileReconnecting(root);
   CheckRefusedSession(root);

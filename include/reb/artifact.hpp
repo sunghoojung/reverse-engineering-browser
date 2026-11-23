@@ -21,23 +21,23 @@ inline constexpr std::uint16_t kArtifactProtocolVersion = 1;
 inline constexpr std::size_t kArtifactHeaderSize = 128;
 inline constexpr std::uint32_t kArtifactAckMagic = 0x4b414252U;
 inline constexpr std::size_t kArtifactAckSize = 32;
-inline constexpr std::uint32_t kMaxArtifactUrlBytes = 8'192;
+// url::kMaxURLChars, the longest URL Chromium carries between processes; the
+// overlay's kNativeArtifactMaxUrlBytes. Every URL the browser can name fits.
+inline constexpr std::uint32_t kMaxArtifactUrlBytes = 2U * 1024U * 1024U;
 inline constexpr std::uint32_t kMaxArtifactMimeTypeBytes = 255;
 inline constexpr std::uint16_t kArtifactFlagSensitive = 1U << 0U;
-inline constexpr std::uint64_t kDefaultMaxStoredArtifacts = 4'096;
-inline constexpr std::uint64_t kDefaultMaxManifestBytes = 64ULL * 1024ULL * 1024ULL;
-// A rejected frame whose header was valid is read and discarded so the socket
-// connection can carry the next frame. This covers the browser's 16 MiB
-// per-artifact cap; a larger declared size than this and the configured
-// artifact limit cannot come from a supported sender, so it closes instead.
-inline constexpr std::uint64_t kMaxDiscardedArtifactBytes = 16ULL * 1024ULL * 1024ULL;
+// Free space the store's volume keeps. The store has no byte, artifact count
+// or manifest size limit: an admission that would leave less free space than
+// this is refused as kDiskReserve, a status of its own that the browser
+// records as such (services/artifact-receiver/README.md#disk-reserve).
+inline constexpr std::uint64_t kDefaultArtifactDiskReserveBytes =
+    4ULL * 1024ULL * 1024ULL * 1024ULL;
 // Version 2 streams an artifact: an open header, then stream frames
 // (docs/architecture/artifact-transfer-channel.md).
 inline constexpr std::uint16_t kArtifactStreamProtocolVersion = 2;
 inline constexpr std::uint32_t kArtifactStreamMagic = 0x53424552U;
 inline constexpr std::size_t kArtifactStreamFrameSize = 80;
 inline constexpr std::uint32_t kMaxArtifactStreamChunkBytes = 64U * 1024U;
-inline constexpr std::size_t kMaxOpenArtifactStreams = 128;
 
 enum class ArtifactKind : std::uint16_t {
   kUnknown = 0,
@@ -147,10 +147,14 @@ enum class ArtifactReceiveStatus : std::uint32_t {
   kAccepted,
   kEndOfStream,
   kInvalid,
+  // No longer sent: the receiver has no size, count or stream limit. The value
+  // keeps its number so later statuses keep theirs.
   kTooLarge,
   kSensitiveCaptureDisabled,
   kConflict,
   kIoError,
+  // The store's volume would keep less free space than the receiver's reserve.
+  kDiskReserve,
 };
 
 // Where ReceiveOne left its input stream. Only a frame boundary can carry
@@ -158,8 +162,8 @@ enum class ArtifactReceiveStatus : std::uint32_t {
 enum class ArtifactStreamPosition : std::uint8_t {
   // The whole frame was consumed, whether it was accepted or rejected.
   kFrameBoundary,
-  // The header was invalid, the stream ended early, or a declared length was
-  // too large to discard, so the next byte's meaning is unknown.
+  // The header was invalid or the stream ended early, so the next byte's
+  // meaning is unknown.
   kUnsynchronized,
 };
 
@@ -183,19 +187,16 @@ struct ArtifactReceiverStats final {
   std::uint64_t accepted = 0;
   std::uint64_t bytes_accepted = 0;
   std::uint64_t invalid = 0;
-  std::uint64_t too_large = 0;
   std::uint64_t sensitive_rejected = 0;
   std::uint64_t conflicts = 0;
   std::uint64_t io_errors = 0;
+  std::uint64_t disk_reserve = 0;
   // Streams still open when their connection closed.
   std::uint64_t streams_abandoned = 0;
 };
 
 struct ArtifactReceiverLimits final {
-  std::uint64_t max_artifact_bytes = 0;
-  std::uint64_t max_store_bytes = 0;
-  std::uint64_t max_artifacts = kDefaultMaxStoredArtifacts;
-  std::uint64_t max_manifest_bytes = kDefaultMaxManifestBytes;
+  std::uint64_t disk_reserve_bytes = kDefaultArtifactDiskReserveBytes;
   std::uint64_t expected_session_id = 0;
   bool allow_sensitive = false;
 };
@@ -241,6 +242,11 @@ class ArtifactReceiver final {
   [[nodiscard]] ArtifactReceiveStatus Checkpoint(Stream& stream, const ArtifactStreamFrame& frame);
   [[nodiscard]] ArtifactReceiveStatus End(std::uint64_t artifact_id,
                                           const ArtifactStreamFrame& frame);
+  // Null when the store's volume keeps its reserve after `bytes` more are
+  // written. Otherwise the refusal message, with `status` kDiskReserve, or
+  // kIoError when the volume's free space cannot be read.
+  [[nodiscard]] const char* DiskReserveRefusal(std::uint64_t bytes,
+                                               ArtifactReceiveStatus& status) const noexcept;
   // Moves a durable temporary file into blobs/ and appends its manifest record.
   [[nodiscard]] ArtifactReceiveStatus Publish(const ArtifactHeader& header,
                                               const std::string& url,
@@ -275,8 +281,6 @@ class ArtifactReceiver final {
   StoreState store_state_ = StoreState::kConsistent;
   std::uint16_t protocol_version_ = kArtifactProtocolVersion;
   std::map<std::uint64_t, std::unique_ptr<Stream>> streams_;
-  // Bytes in open streams, charged against the store limit before they publish.
-  std::uint64_t streaming_bytes_ = 0;
 };
 
 [[nodiscard]] bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept;

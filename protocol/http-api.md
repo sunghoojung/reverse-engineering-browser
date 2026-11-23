@@ -87,7 +87,11 @@ content requires `--output PATH` (or explicit `--output -` for stdout), and a
 file path is never overwritten: an existing path is refused before any request
 is sent, exiting 2. JSON also accepts optional `--output`; file publication
 uses a synced mode-0600 temporary and atomic no-clobber persistence, which
-still refuses a file created while the request ran.
+still refuses a file created while the request ran. A successful body of any
+size streams into that temporary, or for stdout into an unnamed private file,
+and is published only once it is complete and, unless binary, valid JSON; the
+printed form is reindented as it streams. Memory stays constant: a 477 MB VM
+analysis document saves in about 2 s within 20 MB.
 Exported evidence packages must validate before publication. The CLI does not provide additional permissions
 on its own.
 
@@ -173,8 +177,8 @@ from an older configuration is accepted and ignored. None of these flags is
 authorization.
 
 `x-reb-mcp.content_reads` names the operations whose purpose is captured
-content, `get_artifact_text`, `search_artifact_text` and
-`search_wasm_inspection`, and the offline Wasm runs `run_wasm_function` and
+content, `get_artifact_text`, `search_artifact_text`, `search_wasm_inspection`
+and `export_requests_har`, and the offline Wasm runs `run_wasm_function` and
 `get_wasm_runs`, since running captured code discloses what it computes. They are listed only
 with `--allow-content` (which `full` sets, and which conflicts with
 `--omit-content`), and a call without it is refused before any request. With
@@ -193,7 +197,10 @@ Strings longer than `summary_string_chars` are replaced with character and byte
 counts. Fields that carry source, bytecode, derived text, or disassembly
 (`original_source`, `representation`, `text`, `body`, `raw`, `value`, and the
 other content names in the adapter) are omitted even when short. The summary is
-not the OpenAPI response document.
+not the OpenAPI response document. The projection parses a result whole to omit
+content and summarize it, so a success body over 64 MiB is a tool error that
+names the narrower read: the operation's view, filter, limit or paging
+parameters, such as `get_vm_analysis` with `view` `findings`.
 
 Each tool `inputSchema` is a closed JSON Schema. Component `$ref` values are
 inlined, and OpenAPI extension keywords are omitted, so a client does not need
@@ -434,13 +441,14 @@ Both are read-only and refuse unknown or repeated parameters. `text` and
 a connected agent. It returns bounded current session discovery without fetching
 source or bytecode. It includes `live_admission`, the same process-lifetime
 `instance_id` as `/api/health` (also sent as `X-REB-Expected-Instance`), endpoint,
-capture mode, `capture_options`, and a retained Wasm artifact inventory (16
-entries from a 256 KiB manifest tail). Use this route's own ETag for
+capture mode, `capture_options`, and a retained Wasm artifact inventory (the 16
+newest Wasm artifacts of the whole manifest, from the artifact lookup index, and
+a count of the rest). Use this route's own ETag for
 conditional reads. No target/session join is inferred from URL or timing.
 
 `capture_options` labels what this session's launcher passed to Brave, for
 every live session (agent, app or `make live`): `request_content`,
-`content_limits`, `canvas_images`, `request_stacks`, `document_start`
+`canvas_images`, `request_stacks`, `document_start`
 (`permitted` or `not_permitted`; whether
 this Brave honors it is `document_start_supported` in `get_native_console`),
 and `js_invocation` with `state` (`not_armed`, `armed`, `browser_unsupported`
@@ -451,17 +459,27 @@ enable nothing. Idle and demo
 backends report `source: not_live` with everything off. Site labels and
 source URLs stay in `get_js_invocation_sites`.
 
-`content_limits` is a versioned addition to `capture_options`: for a session
-with `request_content` it is `{"version": 1, "request_content_budget_mib",
-"response_body_budget_mib", "response_media"}`, the limits the session runs
-with, named as the start options are, whichever of the app's start panel, the
-start options or the launcher environment set them. Otherwise it is null. The
-launcher passes them as `--session-request-content-budget-mib`,
-`--session-response-body-budget-mib` and `--session-response-media` (`0` or
-`1`), which the backend accepts only with `--session-request-content` and
-within the launcher's bounds; a value no launcher named is null, never a
-guessed default. The schema does not require `content_limits`: a backend from
-before the addition omits it, and a reader treats that as not reported.
+A content session keeps every request and response body whole, media and
+fonts included, so `capture_options` has no limits to report. The
+`content_limits` object that earlier backends added there named the removed
+per-session budgets and media choice; no backend reports it now.
+
+`wasm_sampling` is a second versioned addition: for a session that records
+Wasm `br_table` or `call_indirect` it is `{"version": 1, "streams",
+"window_ms", "records_per_window", "samples_per_function",
+"samples_per_indirect_site", "function_allow_count", "function_deny_count",
+"module_allowlist", "reset"}`. Each renderer keeps at most
+`records_per_window` (1024) full records per stream in each `window_ms`
+(1000) window, and the next window records again. An allowance the launcher
+did not name is null, and the browser's default then applies (64 per
+function). `reset` is `available` when `reset_wasm_sample_budgets` has a reset
+file to write. The launcher passes `--session-wasm-dispatch`,
+`--session-wasm-call-indirect`, `--session-wasm-samples-per-function`,
+`--session-wasm-samples-per-indirect-site`,
+`--session-wasm-function-allow-count`, `--session-wasm-function-deny-count`
+and `--session-wasm-module-allowlist`; they are labels only. Otherwise it is
+null, and a backend from before the addition omits it. The VM view shows it
+beside its sample-window reset control.
 
 CDP was removed. Version 1 keeps its debugger fields with fixed retirement
 values so existing clients still parse it: `debugger_state` is `unavailable`,
@@ -496,8 +514,10 @@ backend belongs to. Both actions refuse with 409 `idle_backend` unless
   was recorded, for example because the configured browser is not a capture
   build. It never runs page JavaScript.
 - `{"action":"reset_wasm_sample_budgets"}` increments the session's Wasm
-  sample-budget reset file. The capture browser restarts both sample indexes
-  at 0 without closing the profile or replacing the capture configuration.
+  sample-budget reset file. The capture browser closes the current one-second
+  sample window of both streams at once, as if its second had passed, without
+  closing the profile or replacing the capture configuration. Sample indexes
+  keep counting.
   It needs recording capture, `--wasm-budget-reset-file`, and a live process
   holding the profile, and otherwise returns 409. The browser applies the new
   generation on its writer wake, about 250ms later. A rebuilt Brave is
@@ -544,21 +564,21 @@ returns 409 `dependency_unavailable` for these actions.
 `LiveSessionStart` options: `url`, `wasm_dispatch`, `wasm_call_indirect`,
 `guest_adapter`, `js_dispatch_sites`, `quiet`, `category_mask`,
 `duration_seconds`, `localhost_only`, `canvas_images`, `request_content`,
-`request_content_budget_mib`, `response_body_budget_mib`, `response_media`,
-`request_stacks`, `document_start`, `browser_internal`, `extension_traffic`,
-`fresh_profile`, `js_invocation_sites`, `js_invocation_saved_sites`,
+`request_stacks`, `promise_stacks`, `document_start`, `browser_internal`,
+`extension_traffic`, `fresh_profile`, `js_invocation_sites`, `js_invocation_saved_sites`,
 `js_invocation_digests`, `confirm_sensitive_capture`,
 `publish_canonical_endpoint`, `brave_binary`, `timeout_seconds`,
 `wasm_samples_per_function`, `wasm_samples_per_indirect_site`,
 `wasm_function_allow`, `wasm_function_deny` and `wasm_module_allowlist`.
-The Wasm budget options require `wasm_dispatch` or `wasm_call_indirect` and
-do not raise the 16-record cap. A switch left unset takes the Origin Trace
-app's default, and `false` turns it off: `wasm_dispatch` and
+The Wasm budget options require `wasm_dispatch` or `wasm_call_indirect`. They
+pace within the one-second window, which keeps at most 1024 full records per
+stream; without them a function keeps 64 per window. A switch left unset takes
+the Origin Trace app's default, and `false` turns it off: `wasm_dispatch` and
 `wasm_call_indirect` (mask bits 512 and 1024), `quiet`, `request_stacks`
 (bits 256 and 1024, and only where the browser has `--reb-request-stacks`) and
 `document_start` are on; with the consent, `request_content` (bits 256 and
 1024), `canvas_images` (bits 1 and 1024) and, with named sites and request
-content, `js_invocation_digests` are on; `browser_internal`,
+content, `js_invocation_digests` are on; `promise_stacks`, `browser_internal`,
 `extension_traffic` and `fresh_profile` are off. A switch whose bits the mask
 lacks stays off. `duration_seconds` left unset runs the session until it is
 ended. Sessions use one persistent agent research profile,
@@ -569,28 +589,25 @@ refused with a cause that names it. Defaults come from the start request
 alone; an inherited capture switch, site file,
 browser profile or embedded-session variable is ignored, so an inherited
 `REB_CAPTURE_REQUEST_CONTENT`, `REB_CONSOLE_DOCUMENT_START`,
-`REB_NATIVE_JS_INVOCATION_SITES`, `REB_NATIVE_JS_INVOCATION_DIGESTS` or
-`REB_NATIVE_REQUEST_STACKS` never reaches an agent session, and neither do
-`REB_REQUEST_CONTENT_BUDGET_MIB`, `REB_RESPONSE_BODY_BUDGET_MIB` or
-`REB_CAPTURE_RESPONSE_MEDIA`.
+`REB_NATIVE_JS_INVOCATION_SITES`, `REB_NATIVE_JS_INVOCATION_DIGESTS`,
+`REB_NATIVE_REQUEST_STACKS` or `REB_NATIVE_PROMISE_STACKS` never reaches an
+agent session.
 
 | Option | Launcher switch | Rule |
 | --- | --- | --- |
-| `request_content` | `REB_CAPTURE_REQUEST_CONTENT=1` | Sensitive: on by default with the consent (`confirm_sensitive_capture` for `reb-api session start`, session start through MCP) and category bits 256 and 1024. Off, request body length, type and digest are still recorded, but no path, query or body bytes. |
-| `request_content_budget_mib` | `REB_REQUEST_CONTENT_BUDGET_MIB` | 1..4096 MiB of unique request bodies and full targets, default 256. Needs `request_content`, so it is behind the same confirmation. |
-| `response_body_budget_mib` | `REB_RESPONSE_BODY_BUDGET_MIB` | 1..16384 MiB of unique response bodies, default 512. Needs `request_content`. |
-| `response_media` | `REB_CAPTURE_RESPONSE_MEDIA=1` | Also keeps the images, audio, video and fonts that page elements load. Needs `request_content`, so it is behind the same confirmation. |
+| `request_content` | `REB_CAPTURE_REQUEST_CONTENT=1` | Sensitive: on by default with the consent (`confirm_sensitive_capture` for `reb-api session start`, session start through MCP) and category bits 256 and 1024. Keeps every request and response body whole, media and fonts included; the artifact receiver refuses only what would leave less free disk than its reserve. Off, request body length, type and digest are still recorded, but no path, query or body bytes. |
 | `request_stacks` | `REB_NATIVE_REQUEST_STACKS=1` | The stack that started each renderer request, read with `get_request_stack`. Needs category bits 256 and 1024. Left unset, it is on with `REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED=1`, so a Brave without `--reb-request-stacks` starts without it; named `true`, it is strict and such a Brave refuses the start. |
+| `promise_stacks` | `REB_NATIVE_PROMISE_STACKS=1` | Also records the stack that registered each Promise reaction a request is later made in, as the app's start panel offers. Needs `request_stacks` and follows its strictness: with the default request stacks a Brave without `--reb-promise-stacks` starts without them. |
 | `document_start` | `REB_CONSOLE_DOCUMENT_START=1` | Permits document-start Console scripts in this capture browser. Arms nothing: a rule still needs a live Console connection and a confirmed `arm_document_start`. |
 | `browser_internal` | `REB_CAPTURE_BROWSER_INTERNAL=1` | Records requests of browser pages such as `brave://settings` and DevTools, which are otherwise counted and not recorded. |
 | `extension_traffic` | `REB_CAPTURE_EXTENSION_TRAFFIC=1` | Records requests of extension workers, which are otherwise counted and not recorded. |
 | `fresh_profile` | `REB_FRESH_PROFILE=1` | A new, empty browser profile for this session, in its session folder, instead of the shared agent research profile. |
 | `js_invocation_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Absolute path of a `native-js-invocation-sites-v1` file. Checked, then armed from a private copy under the agent session directory. Needs category bit 512. |
-| `js_invocation_saved_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Arms the agent sessions' own saved set, `~/.config/origin-trace/agent-sessions/js-invocation-sites-v1.json`, which `js_invocation_site_action` edits in an agent session. Never the app's set. Refused when empty. Not with `js_invocation_sites`. |
+| `js_invocation_saved_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Arms the agent sessions' own saved set, `~/.config/origin-trace/agent-sessions/js-invocation-sites-v1.json`, which `js_invocation_site_action` edits in an agent session, and follows it while the session runs: an empty set starts with nothing armed. Never the app's set. Not with `js_invocation_sites`. |
 | `js_invocation_digests` | `REB_NATIVE_JS_INVOCATION_DIGESTS=1` | Sensitive: needs named sites and the consent; on by default with both and request content. |
 | `canvas_images` | `REB_CAPTURE_CANVAS_IMAGES=1` | Sensitive: on by default with the consent and category bits 1 and 1024. |
-| `wasm_samples_per_function` | `REB_NATIVE_WASM_SAMPLES_PER_FUNCTION` | 1..16 retained samples of each function on each Wasm stream. Needs `wasm_dispatch` or `wasm_call_indirect`. |
-| `wasm_samples_per_indirect_site` | `REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE` | 1..16 retained `call_indirect` samples of each caller and module offset. |
+| `wasm_samples_per_function` | `REB_NATIVE_WASM_SAMPLES_PER_FUNCTION` | 1..1024 retained samples of each function on each Wasm stream per one-second window (default 64). Needs `wasm_dispatch` or `wasm_call_indirect`. |
+| `wasm_samples_per_indirect_site` | `REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE` | 1..1024 retained `call_indirect` samples of each caller and module offset per window. |
 | `wasm_function_allow` | `REB_NATIVE_WASM_FUNCTION_ALLOW` | Up to 32 function indexes. Other functions do not consume either sample index. Deny wins. |
 | `wasm_function_deny` | `REB_NATIVE_WASM_FUNCTION_DENY` | Up to 32 function indexes to exclude. |
 | `wasm_module_allowlist` | `REB_NATIVE_WASM_MODULE_ALLOWLIST` | Up to 8 SHA-256 digests, written to a private file. Other modules do not advance either sample index. |
@@ -666,7 +683,12 @@ state lasts until `stop` or the next `connect_live`. A command for any other
 `status: stale_target`, `code: target_unavailable` and text that names the next
 step, and nothing is sent to the browser. A second `connect_live` while one is
 open, a stale `session_id` and a stale `binding_id` are 409 refusals that say
-what to read or send next. Document-start rules for a child frame name that
+what to read or send next. A command runs until it returns, with no execution
+budget, and its request waits that long; a client that stops waiting leaves it
+running. Meanwhile `get_native_console` answers at once with `command`, other
+actions are 409 refusals, and `interrupt` (`session_id`) stops it: the command
+answers `status: stopped`, `code: cancelled`, and keeps the changes it already
+made. Document-start rules for a child frame name that
 frame's exact origin with `frame: child`; see
 [Native Console v3](native-console-v3.md).
 
@@ -676,8 +698,12 @@ frame's exact origin with `frame: child`; see
 work?" in one read. It reports capture state, event counts by category and
 type, first and last event time, up to 16 sessions, the 32 busiest frames with
 their top event types, gap counts with named gap reasons, artifact counts by
-kind with the 32 newest artifact identities and digests, and `checks`. Each
-check has a `code`, a `severity` of `info` or `warning`, and a plain message:
+kind with the 32 newest artifact identities and digests, and `checks`, over
+the whole session (`protocol_version` 2; version 1 summarized the newest
+64 MiB). Each list says how many it leaves out (`sessions_omitted`,
+`frames_omitted`, `types_omitted`, `items_omitted`, `unresolved_omitted`).
+Each check has a `code`, a `severity` of `info`, `warning` or `error`, and a
+plain message:
 
 | Code | Meaning |
 | --- | --- |
@@ -687,25 +713,28 @@ check has a `code`, a `severity` of `info` or `warning`, and a plain message:
 | `artifact_receiver_disconnected` | New scripts and Wasm modules are not stored. |
 | `no_events` | The store is empty. |
 | `wasm_without_artifacts` | Wasm compiled, but no Wasm module was stored. |
-| `artifact_capture_failed` | Some artifact bodies were not stored. |
-| `request_content_not_retained` | A content session kept less than the whole of some request bodies, full targets, response bodies, header blocks or cookie lists; `category` names which (`request_headers`, `response_headers` and `cookie_list` among them), `reason` the state and `count` how many. A request content or response body budget reason (`not_captured_session_budget` for `request_body` or `response_body`, `not_retained_session_budget` for `request_target`) adds `budget_mib`, the budget in force or null when this backend does not know it, `retained_bytes`, the unique bytes of that budget's artifacts in the scanned manifest, and `retained_complete`, and its message names the remedy for the next session: the start panel's **Request content budget** or **Response body budget**, or the start option. Header blocks and cookie lists have their own fixed budget. `not_captured_type` names **Capture media and fonts** or `response_media`. |
+| `artifact_capture_failed` | Some artifact bodies were not stored; `reason` names why. `disk_reserve` is the artifact receiver's free-disk reserve, and `compiled_script_source_backlog`, `stack_script_source_backlog`, `wasm_module_backlog`, `runtime_typed_array_backlog`, `canvas_data_url_backlog` and `generated_artifact_backlog` a renderer whose 256 MiB of earlier sources, modules, buffers and canvas images the browser had not yet copied out. |
+| `request_content_not_retained` | A content session kept less than the whole of some request bodies, full targets, response bodies, header blocks or cookie lists; `category` names which (`request_headers`, `response_headers` and `cookie_list` among them), `reason` the state and `count` how many. `not_captured_disk_reserve` means the artifact receiver's free-disk reserve refused the content. The budget reasons (`not_captured_session_budget`, `not_retained_session_budget`), `captured_truncated` and `not_captured_type` appear only in records an older browser wrote, and their messages say so; current capture has no budget, size limit or media exception. |
 | `network_headers_unattributed` | Severity `warning`: `blocks` network header blocks and `lists` cookie lists arrived for requests the capture no longer tracked, so no row shows them. |
 | `final_headers_missing` | `count` requests of a content session ended with provisional headers and no cookie lists, one check per `reason`: `download`, `service_worker`, `from_cache` or `failed` (`info`, no request reached the network or it failed first), `not_reported` (`warning`, no observer or an untracked block) and `record_dropped` (`warning`, a full queue dropped records while it ran, so the block may have been lost). See [missing final blocks](native-network-v3.md#missing-final-blocks). |
-| `final_headers_untracked` | Header records of requests past the 131,072 the summary follows; their final blocks are not counted. Never raised for a metadata-only session, which records no header. |
 | `queue_drops` | Records lost to a full queue, beyond named gap markers. |
-| `sequence_gaps` | Sequence numbers missing inside the scanned events. |
+| `sequence_gaps` | Sequence numbers missing inside the stored events. |
 | `named_gap` | A producer named why it stopped, with `category`, `reason` and `count`. A reason containing `budget` or `limit` means a sampling budget filled. A Wasm reason ending in `filtered` is a sample-policy exclusion: that execution was not sampled and did not take a slot. |
 | `browser_internal_excluded` | Capture counted `chrome:`, `devtools:` and other browser-internal requests, requests WebUI renderers sent (`webui_request`), or WebUI renderers, instead of recording them; `count` is the requests. Not a gap. |
 | `no_tab_traffic_excluded` | Capture counted extension-worker requests, DevTools loads, requests of service workers no page used in this browser, and browser-initiated prefetches with no page, instead of recording them; `count` is the requests. Not a gap. `REB_CAPTURE_EXTENSION_TRAFFIC=1` records the extension requests instead. |
-| `memory_cache_reuse_not_recorded` | Renderers counted memory-cache reuses past their 4,096 records per capture configuration instead of recording them; `count` is the reuses. Not a gap. Reuses in pages that are not ordinary (an SVG image's own document or a page popup), which no tab owns, are the separate `non_ordinary_page_reuse` exclusion. |
+| `memory_cache_reuse_not_recorded` | Renderers from an earlier build counted memory-cache reuses past their 4,096 records per capture configuration instead of recording them; `count` is the reuses. Not a gap. Current renderers record every reuse, so it appears only for such evidence. Reuses in pages that are not ordinary (an SVG image's own document or a page popup), which no tab owns, are the separate `non_ordinary_page_reuse` exclusion. |
 | `response_bodies_not_observed` | `count` responses never reached the browser proxy, so their bodies are not retained under their own request: the message counts those a service worker served, those reused from the memory cache and those answered in the renderer. Traffic links a reuse to the request whose response it reused, and a service worker answer to the worker's own fetch of the same URL, where those were retained. |
-| `response_snapshots_withheld` | `count` response bodies had a snapshot withheld while they arrived: their snapshot allowance, the session's snapshot quarter of the response body budget, or the budget was used, so their newest snapshot is older than the schedule would make it ([partial bodies](native-network-v3.md#partial-bodies)). |
+| `response_snapshots_withheld` | `count` response bodies had a snapshot withheld while they arrived: one body's snapshots together copy at most four times what it kept plus 64 MiB, so their newest snapshot is older than the schedule would make it ([partial bodies](native-network-v3.md#partial-bodies)). Older sessions also withheld snapshots at their response body budget's shares. The body itself is retained whole when it ends. |
 | `network_tab_unresolved` | Severity `error`: `count` request rows have no tab, and the message counts them by reason. A capture bug; `request_tabs.unresolved_requests` names up to 16 by `process_id` and `request_id`, each with its `reason`. |
 | `network_tab_no_document` | Severity `warning`: `count` request rows come from a context with no parent document (a shared storage worklet), which the capture does not link; their reason is `no_document`. |
-| `bounded_scope` | Only the newest 64 MiB of events were summarized. |
+| `malformed_lines` | Severity `warning`: `count` stored lines are not valid events, so no count includes them. |
+| `events_unreadable` | Severity `error`: the event index cannot read a record (one longer than any record can be), so the counts cover the store before it and `events.scope` is `stopped`. |
+| `artifact_manifest_unreadable` | Severity `error`: the same for the artifact manifest; `artifacts.scope` is `stopped`. |
+| `artifact_manifest_damaged` | Severity `warning`: a malformed or duplicate manifest record, which no count includes and which makes artifact reads by ID fail until the manifest is replaced. |
+| `summary_indexing` | The backend is still indexing a long session, so the counts cover the bytes `events.scan_end` and `artifacts.scan_end` name of `store_end`; read again shortly. |
 
 `response_bodies` counts every request's response body case from the request
-index's rows ([request index v1](request-index-v1.md)): `cases` lists each case
+index's rows ([request index v2](request-index-v2.md)): `cases` lists each case
 with its `count` and `meaning`, such as `captured`, `partial`, `not_modified`,
 `redirected`, `aborted`, `cancelled`, `empty`, `service_worker`, `memory_cache`,
 `failed_before_response` and `cancelled_before_response`
@@ -713,12 +742,9 @@ with its `count` and `meaning`, such as `captured`, `partial`, `not_modified`,
 A refused or malformed body can still name an earlier snapshot of the same
 response that the receiver holds; each case's `earlier_snapshots`, and the
 total beside `cases`, count those rows, which Traffic opens.
-`complete` is false while the index is still reading the store. The route's
-ETag names the store as it was before the index read and the index's progress
-after it, the point the counts were read at, so an answer counted mid-store
-never revalidates as the complete one. When the index cannot answer,
-`available` is false with a `reason`, the rest of the summary stands, and the
-answer has no ETag, so the next request reads the index again.
+`complete` is false while the index is still reading the store. When the
+index cannot answer, `available` is false with a `reason` and the rest of the
+summary stands.
 
 `exclusions` lists those counts by class and unit; see
 [native network v3](native-network-v3.md#browser-internal-exclusion).
@@ -728,17 +754,30 @@ answer has no ETag, so the next request reads the index again.
 `browser_factory`, `no_loader_kind` or `no_start`); see
 [request owners and tabs](native-network-v3.md#request-owners-and-tabs) and
 [unresolved requests](native-network-v3.md#unresolved-requests).
-The summary scans the same newest 64 MiB as the polling window and the newest
-64 MiB of the manifest. It contains counts, identifiers and origin or
-`wasm://wasm/<hex>` labels only: no payloads, URL paths or queries, source or
-bodies. Identifiers and origins can still be sensitive. It has its own ETag.
+The counts are folded as records arrive into the event index beside the store
+(`events.jsonl.events-v1`, which also keeps the gap totals) and the artifact
+lookup index beside the manifest (`manifest.jsonl.lookup-v1`), so a summary of
+a session of any length reads a few rows. A read folds what was appended for
+up to a second and answers from what is indexed; the background indexer folds
+the rest. `events.scope` and `artifacts.scope` are `store` when every complete
+record is counted, `indexing` while the index catches up (a `summary_indexing`
+check says how far) and `stopped` at a record it cannot read. The summary
+contains counts, identifiers and origin or `wasm://wasm/<hex>` labels only: no
+payloads, URL paths or queries, source or bodies. Identifiers and origins can
+still be sensitive. Its ETag is the digest of the answer's bytes, so an answer
+read mid-store never revalidates as the complete one.
 
 ## Saved JavaScript invocation sites
 
-The Origin Trace app keeps one saved set of at most 8
+The Origin Trace app keeps one saved set of at most 256
 [native JavaScript invocation sites](native-js-invocation-v1.md#site-file)
-and arms it in the next capture it starts. These routes name, save and list
-those sites; none of them changes the open page or a running capture.
+and arms it in every capture it starts. A capture whose `session.live` is
+true follows the set while it runs
+([revisions](native-js-invocation-v1.md#revisions)): a saved site arms at
+once and a removed one disarms. Otherwise a change applies from the next
+capture. These routes name, save and list those sites; none of them changes
+the open page, and a function the page compiled before its site was armed is
+tracked only after a reload.
 
 - `GET /api/js-invocation-sites/resolve` (`resolve_js_invocation_site`) takes
   an exact `session_id` and `artifact_id` and exactly one of `name` (a dotted
@@ -751,15 +790,19 @@ those sites; none of them changes the open page or a running capture.
 - `GET /api/js-invocation-sites` (`get_js_invocation_sites`) returns the saved
   set with each site's label, source URL and session, whether this session
   retained the saved script version (`retained.state`: `matches`,
-  `other_version` or `not_retained`), and what this session's launcher armed
+  `other_version` or `not_retained`, over every JavaScript artifact of the
+  manifest with the saved bytes or URL, through its index) and whether this
+  capture arms it now (`armed_in_capture`), and what this capture arms
   (`session.state`: `not_armed`, `armed`, `browser_unsupported` or
-  `unreadable`, with `digests`).
+  `unreadable`, with `live`, `digests`, its slot table in `sites` with each
+  slot's `armed` flag, `revision` and `revision_error`). Reading the set is
+  also when a following capture publishes a change made by another writer.
 - `POST /api/js-invocation-sites/actions` (`js_invocation_site_action`) takes
   `add` (the resolve inputs and an optional `label`), `remove`
   (`source_sha256` and `anchor_offset`) or `clear` with `confirm: true`. `add`
   resolves the artifact again on the server and never accepts a site from the
   caller. A refused resolution returns HTTP 200 with `added: false` and the
-  resolution; a duplicate `(source_sha256, anchor_offset)` or a ninth site is
+  resolution; a duplicate `(source_sha256, anchor_offset)` or a 257th site is
   a 409. Every action returns the updated set.
 
 A name matches only syntax that binds it: an assignment to that identifier or
@@ -842,7 +885,8 @@ safe JSON diagnostic and keep exit 2. Preflight/connection failures before
 headers retain ordinary CLI diagnostics and exit 2, with no invented status.
 The flag conflicts with `--show-headers`; neither headers nor arbitrary body
 fields are included. HTTP 200 application failures still use stdout and exit 0.
-Response reads remain capped at 64 MiB; commands are never automatically retried.
+Error bodies are read up to 64 MiB, and successful bodies stream whole;
+commands are never automatically retried.
 
 ## Analysis definitions and reviewed sources
 
@@ -911,7 +955,8 @@ body-size ceilings, conditional responses and known application errors. Trace,
 request-signal and VM schemas are embedded from their versioned protocol files
 so the OpenAPI document is portable. Update embedded schemas whenever their
 versioned source changes.
-The VM HTTP response additionally allows its actual optional `selection` field.
+The VM HTTP response additionally allows its actual optional `selection` and
+`results_view` fields.
 
 The action routes are multiplexed, not invented REST resources:
 
@@ -1129,19 +1174,36 @@ arrival order, not numeric sequence order. Network selection includes
 `network`. General event churn cannot displace this second window within the
 scan budget. Neither array promises a complete request lifecycle.
 
-The reader scans at most the newest 67,108,864 bytes, plus one boundary byte.
+The windows read at most the newest 67,108,864 bytes, plus one boundary byte.
 `event_window` reports `scan_start` and `scan_end` as canonical unsigned byte
-offsets (end exclusive), `scan_limit`, and separate `events_limited` and
-`network_events_limited` flags. A cut-through record prefix is omitted, not
-parsed as a new record. `scope: "store"` means the scan starts at byte zero;
-`"bounded_tail"` excludes an older prefix, even if fewer than 5,000 rows remain.
+offsets (end exclusive) of the summaries' scope, `scan_limit`, separate
+`events_limited` and `network_events_limited` flags, and `next_before`. A
+cut-through record prefix is omitted, not parsed as a new record.
+
+The summaries cover the whole store. The event index
+(`events.jsonl.events-v1`, layout `reb-event-index-v1/2`) folds every appended
+record into per-stream sequence bounds, the drop total, every named gap pair
+and the unreadable-line count, so a poll reads them without scanning the
+store. Once the index has caught up, `scope` is `"store"`, `scan_start` is
+`"0"` and `scan_end` is where the index ends, which can be far past
+`scan_limit`; both windows then end at that same record boundary, so a record
+counted is a record the windows could show. The index reads only complete
+lines, as the request list does, so a final record without its newline is
+still being written and appears once the newline is. While the index catches up, the
+summaries cover the scanned tail: `"bounded_tail"` excludes an older prefix, even
+if fewer than 5,000 rows remain. A store no larger than `scan_limit` is
+`"store"` either way. `next_before` is the start of the oldest event the answer
+holds, or of the scanned tail, when older records exist: `before=next_before`
+reads them, newest first, with the filtered-read cursor below. It is null when
+the events reach the start of the store.
+
 A stored line that is not a valid event is skipped and counted in
 `malformed_lines`, so one damaged record cannot fail every poll. A tail still
 being written is omitted and not counted.
 
 `sequence_gaps` and `queue_drops` are canonical unsigned decimal strings over
-validated records in this declared scope. They are not session totals.
-Sequence gaps count absent IDs between the minimum and maximum observed sequence
+validated records in this declared scope; with `scope: "store"` they are
+session totals. Sequence gaps count absent IDs between the minimum and maximum observed sequence
 within each session/process in the stated scope. Late ACK-delayed arrivals close
 holes; duplicates do not create gaps. Unknown prefixes and tails are not counted.
 The native broker retains bounded missing intervals independently of its event
@@ -1154,9 +1216,14 @@ The respective `_saturated` flags distinguish clamping at u64 maximum.
 Malformed or incomplete JSON in the scanned records fails the refresh; the UI
 retains its last valid data. A complete final record without a newline is valid.
 The cache verifies exact overlap/boundary bytes and file identity before reuse.
-The Rust endpoint and the Swift stored-evidence reader both support this
-contract, including the separate network window, scan coverage, and saturated
-gap and drop totals. A response that omits the fields is still accepted, and
+The ETag of this poll, and of a filtered or paged read, is the SHA-256 of the
+answer's own bytes (for a page, with what its sites depend on), so `304` means
+the same bytes would be sent, however the store changed, and costs the answer
+rather than a pass over the store. A record still being written does not change
+the answer, so it does not change the tag.
+The Rust endpoint answers this poll in every mode; stored-evidence native mode
+forwards it to the bundled backend and sets only `broker_connected` and
+`capture_mode`, which it folds into the ETag. A response that omits the fields is still accepted, and
 the UI then resets old summaries and labels fallback counts as
 visible-window-only.
 
@@ -1201,7 +1268,7 @@ include `js_invocation` beside the hex `payload`, decoded with the rules of
 
 | `kind` | Fields |
 | --- | --- |
-| `start` | `site_slot`, `invocation_id`, `parent_invocation_id` (0 for none), `parent_unknown`, `argument_count`, `script_id`, `anchor_offset` (UTF-16), `source_sha256`, `site_sample_index`, `sample_index`, `document_id` |
+| `start` | `site_slot`, `invocation_id`, `parent_invocation_id` (0 for none), `parent_unknown`, `argument_count`, `script_id`, `anchor_offset` (UTF-16), `source_sha256`, `site_sample_index` (the call's ordinal among its site's calls; a version 1 record's budget index), `sample_index` (null for version 2), `document_id` |
 | `settle` | `site_slot`, `invocation_id`, `fulfilled`, `via` (`sync_return`, `sync_throw` or `promise`), `value_kind`, `value_length`, `digest_state` (`not_requested`, `present`, `not_digestible`, `too_large` or `unavailable`), `document_id` |
 | `request` | `inside`, `invocation_id` (0 exactly when `inside` is false), `request_id` |
 
@@ -1292,8 +1359,49 @@ timeline. Each row names its root event and the
 `get_events` with `category=network`, `after=first_offset` and the member's
 `records` as `limit` reads them. The
 contract, bounds and invalidation rules are in
-[request-index-v1.md](request-index-v1.md). The `reb://` stored-evidence
+[request-index-v2.md](request-index-v2.md). The `reb://` stored-evidence
 workspace answers it through the bundled backend.
+
+### Request HAR export
+
+`GET /api/requests/har` (`export_requests_har`) writes every row a
+`get_requests` selection holds, in its order and with no row limit, as one HAR
+1.2 archive (format `reb-request-har-v1` in `log._reb`). It takes the same
+filter and sort parameters and no page, or `rows` with the exact row IDs to
+export in their order (Traffic's selected request); `limit`, `offset`,
+`since` and `locate` are refused. The rows are fixed when
+the export starts. The archive is streamed while each batch of 64 rows and
+then each row's byte range of the event store is read, so memory holds one
+batch and one row's records however long the session is. At most two exports
+run at once; a third is refused with 429.
+
+- Each hop is one entry. A redirect keeps its own entry with the redirect
+  status and `redirectURL`, the next hop's URL. A request that failed, was
+  interrupted or is still open keeps its entry with status 0. `_reb.outcome`
+  says which: `redirect`, `failed`, `incomplete`, `pending`, `complete`, or
+  `unlinked` for a row with no request start to join hops to, such as a
+  memory-cache reuse.
+- A hop's URL is its `request_target` child, read whole from its verified
+  artifact past 116 bytes. Without request content the session kept only the
+  host, and `_reb.url_complete` is false.
+- Headers come from the hop's header blocks (`get_request_headers`): the
+  `network` block that was sent, else the browser's provisional block,
+  named in `_reb.request_headers`. Credential values are written only with
+  `credential_values=1`. Below it such a header has an empty value,
+  `_reb_withheld` and its byte length, and its cookies are left out.
+- The request body and the final response body are written when their
+  artifacts were retained whole and verify. A response body that is not
+  UTF-8 is base64 (`content.encoding`), and a request body that is not is in
+  `postData._reb_base64`. `_reb.response_body` keeps the body's case.
+- Native capture keeps a monotonic clock only. `startedDateTime` is that
+  clock written as an offset from the Unix epoch, exact in order and spacing
+  and not a calendar date, and `log.comment` says so.
+- The status line is sent before the rows are read. A failure after it closes
+  the archive as valid JSON with `log._reb.complete` false and the error.
+
+Through MCP it is a content read, listed only with `--allow-content`, which
+also passes `credential_values=1`. A large archive returns a structural
+summary, so a model narrows it with `rows` or the filters.
 
 ## Cross-references
 
@@ -1434,10 +1542,12 @@ inside a character begins at the next one (`offset` is where it began), a
 character cut by `length` is finished from the next bytes, and invalid bytes
 become U+FFFD, counted in `replacements`. Each page re-verifies the artifact's
 SHA-256, as `get_artifact_content` does. Header blocks and cookie lists
-(`request_headers`, `response_headers`, `cookie_list`) are refused with 400 at
-every level, because they hold `Cookie`, `Set-Cookie`, `Authorization` and
-cookie values; `get_request_headers` and `get_request_cookies` read them with
-those values withheld.
+(`request_headers`, `response_headers`, `cookie_list`) are refused with 400
+unless the read passes `credential_values=1`, because they hold `Cookie`,
+`Set-Cookie`, `Authorization` and cookie values; `get_request_headers` and
+`get_request_cookies` read them with those values withheld unless they get the
+same parameter. `reb-api mcp` never lets a model pass it and passes it only
+with `--allow-content` (`x-reb-mcp.credential_values`).
 
 `GET /api/artifacts/search` (`search_artifact_text`,
 `reb-artifact-search-v2`) finds `q` on one line in every selected artifact, as
@@ -1446,7 +1556,8 @@ in the Rust `regex` syntax. That engine's matching time is linear in the text
 whatever the pattern, so captured text cannot make a search backtrack; `^`
 and `$` match at line breaks and an empty match is not counted. Without
 `match_case` (default false), letters fold by Unicode simple case folding, as
-Find in Sources folds them. Header blocks and cookie lists are never searched.
+Find in Sources folds them. Header blocks and cookie lists are searched only
+with `credential_values=1`.
 `kind`, `artifact_id`, `session_id`, `navigation_id`, `frame_id`,
 `execution_context_id`, `sha256` and `host` select artifacts as
 [`get_artifacts` filters](#filtered-and-paged-reads) do, oldest first.
@@ -1494,7 +1605,17 @@ sources and the error statuses.
 
 ## Exact native Traffic to VM selection
 
-`GET /api/analysis/vm` without selectors remains session analysis. A request
+`GET /api/analysis/vm` without selectors remains session analysis. It lists
+every analyzed artifact. The backend spools each result to an unnamed private
+file in the artifact store as it is produced and streams the published canonical
+bytes, so memory holds the document's other fields and a byte range per result,
+however long the session. `view=findings` lists only failed results and those
+with a candidate or likely-vm tier, and `results_view` counts the tier-none
+results it leaves out. Every failure is listed, so the session view is streamed
+from the spool like the whole document. VM Lab reads this view and counts the
+failures by error code in its notice, because a failure is never a finding.
+The view combines with a request
+selection, and both are in the ETag. A request
 selection must supply all four nonzero canonical fields: `request_id`,
 `session_id`, `root_process_id` (32-bit), and `root_sequence_number` (64-bit).
 Incomplete, malformed, or repeated selectors return 400. The selector and ETag
@@ -1518,8 +1639,9 @@ that native response, not that the source ran, dispatched a guest VM, or caused
 an outgoing request. Native redirects are one chain-level request, not an exact
 CDP redirect-hop claim. Mixed hypotheses, generated source, allocating-script
 snapshots, missing ACK/creator records, and historical captures without the new
-parent link are excluded from exact selection. `related_request_ids` remains
-legacy correlated context for unfiltered analysis and is never an exact filter.
+parent link are excluded from exact selection. `runtime_context` counts the
+artifact's frame records and names the `get_events` filter that lists them; it
+is correlated context for unfiltered analysis and is never an exact filter.
 
 Host/method/time correlations and incomplete roots stay in Traffic with an
 explanation. Use the VM workspace navigation explicitly for unfiltered session

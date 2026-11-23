@@ -28,10 +28,11 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
-from live_acceptance import (baseline, bodies, budget, cookies, debugger, driver, headers, limits, metadata,
-                             nostacks, stacks, tabs)
+from live_acceptance import (baseline, bodies, cookies, debugger, driver, headers, limits, metadata,
+                             nostacks, reserve, stacks, tabs, volume, wasm)
 from live_acceptance.evidence import Api, ApiError, Session, decode_request_body, decode_request_target, parse_header_block
 from live_acceptance.fixture import POLL_SECONDS, payload, sha256
 from live_acceptance.pages import line_of, locate
@@ -105,7 +106,8 @@ class FixtureRoutes(unittest.TestCase):
     def test_index_links_every_page_area(self):
         status, _, body = self.get("/")
         self.assertEqual(status, 200)
-        for name in ("baseline", "stacks", "headers", "cookies", "bodies", "limits", "debugger", "tabs", "budget"):
+        for name in ("baseline", "stacks", "headers", "cookies", "bodies", "limits", "debugger", "tabs", "volume",
+                     "reserve", "wasm"):
             self.assertIn(f"/{name}/index.html".encode(), body)
 
     def test_header_hops_redirect_twice_with_repeated_headers(self):
@@ -291,17 +293,20 @@ class FixtureRoutes(unittest.TestCase):
     def test_wasm_modules_validate_and_run(self):
         from live_acceptance.binary import wasm_dispatch, wasm_import_caller
         script = """
-const [dispatch, caller] = process.argv.slice(1).map(hex => Buffer.from(hex, 'hex'));
+const [dispatch, caller, paced] = process.argv.slice(1).map(hex => Buffer.from(hex, 'hex'));
 const {pick} = new WebAssembly.Instance(new WebAssembly.Module(dispatch)).exports;
 let stack = '';
 const imports = {env: {f: () => { stack = new Error().stack; }}};
 new WebAssembly.Instance(new WebAssembly.Module(caller), imports).exports.run();
-console.log(JSON.stringify({picks: [0, 1, 2, 3].map(pick), stack}));
+const {run} = new WebAssembly.Instance(new WebAssembly.Module(paced)).exports;
+console.log(JSON.stringify({picks: [0, 1, 2, 3].map(pick), stack, runs: [0, 1, 39, 40, 41].map(run)}));
 """
-        out = subprocess.run([NODE, "-e", script, wasm_dispatch().hex(), wasm_import_caller().hex()],
+        out = subprocess.run([NODE, "-e", script, wasm_dispatch().hex(), wasm_import_caller().hex(), wasm.MODULE.hex()],
                              capture_output=True, text=True, check=True).stdout
         result = json.loads(out)
         self.assertEqual(result["picks"], baseline.PICKS)
+        # Selector 0 takes the br_table's first arm in every function; any other its default.
+        self.assertEqual(result["runs"], [1, 2, 2, 2, 2])
         self.assertRegex(result["stack"], r"reb_inner[\s\S]*reb_run")
 
 
@@ -455,7 +460,7 @@ class FakeBackend:
             limit, offset = int(query.get("limit", "100")), int(query.get("offset", "0"))
             through = int(query.get("through", len(self.rows)))
             chosen = self.rows[offset:min(offset + limit, through)]
-            return 200, {"format": "reb-request-index-v1", "total": len(self.rows), "through": through,
+            return 200, {"format": "reb-request-index-v2", "total": len(self.rows), "through": through,
                          "offset": offset, "limit": limit, "returned": len(chosen),
                          "next_offset": offset + limit if offset + limit < through else None, "requests": chosen}
         if path in ("/api/events", "/api/events/wait"):
@@ -526,7 +531,8 @@ class Builder:
         self.backend.answers[("/api/request-stack", row["root"]["request_id"])] = {
             "status": "recorded", "state": "captured", "frames": frames, **fields}
 
-    def request_body(self, row: dict, state: int, data: bytes, kind: int = 1, flags: int = 0x13) -> None:
+    def request_body(self, row: dict, state: int, data: bytes, kind: int = 1, flags: int = 0x13,
+                     version: int = 2) -> None:
         """A request_body record (native network v2 and v3); flag bit 1 carries the digest."""
         artifact = "0"
         captured = 0
@@ -534,7 +540,8 @@ class Builder:
             captured = len(data) if state == 4 else 16 * 1024 * 1024
             artifact = self.backend.artifact("request_body", data[:captured])
         digest = bytes.fromhex(sha256(data)) if flags & 0x02 else bytes(32)
-        record = (b"\x01\x00\x80\x00" + bytes([kind, state, flags, 0]) + len(data).to_bytes(8, "little")
+        record = (version.to_bytes(2, "little") + b"\x80\x00" + bytes([kind, state, flags, 0])
+                  + len(data).to_bytes(8, "little")
                   + captured.to_bytes(8, "little") + bytes(8) + digest + bytes(64))
         self.event("request_body", row, record, artifact)
 
@@ -749,66 +756,175 @@ class Evidence(unittest.TestCase):
         bodies.kept(self.run_, "/bodies/json?r=1", bodies.JSON_BODY, problems)
         self.assertEqual(len(problems), 1, problems)
 
+    def test_web_font_load_after_its_cache_probe(self):
+        # Blink first asks only the cache for a web font and loads it again on a miss.
+        self.build.row("/bodies/font.woff2?r=1", failed=True, error_code=bodies.CACHE_MISS,
+                       response_body={"case": "failed_before_response"})
+        self.build.kept_body(self.build.row("/bodies/font.woff2?r=1"), bodies.FONT)
+        problems = []
+        bodies.kept(self.run_, "/bodies/font.woff2?r=1", bodies.FONT, problems, cache_probe=True)
+        self.assertEqual(problems, [])
+        bodies.kept(self.run_, "/bodies/font.woff2?r=1", bodies.FONT, problems)
+        self.assertEqual(problems, ["/bodies/font.woff2?r=1: 2 rows"])
+
     def test_limits_long_target_and_password_form(self):
         target = "/limits/graphql?query=" + "f" * 8200
         self.get(target)
         row = self.build.row(target)
         self.build.request_target(row, target.encode())
+        form = b"user=reb&secret=not-a-real-password"
+        self.get("/limits/password", method="POST", body=form)
         password = self.build.row("/limits/password", "POST")
-        self.build.request_body(password, 11, b"user=reb&secret=x", flags=0x11)
+        # A content session reads a password form post whole, keeps it and marks it.
+        self.build.request_body(password, 4, form, flags=0xD3)
         limits.verify(self.run_)
         self.assertEqual(self.statuses()["8 KB GraphQL GET URL"], "PASS", self.report.lines)
         self.assertEqual(self.statuses()["password form post"], "PASS", self.report.lines)
         self.assertEqual(self.statuses()["page step limits:json"], "FAIL")
-        self.report.lines.clear()
-        self.backend.events.clear()
-        self.build.request_body(password, 11, b"user=reb&secret=x")
-        self.run_.records(refresh=True)
-        limits.verify(self.run_)
+        # An older browser's credential-form refusal, or a kept body without the
+        # mark or the read flag, fails.
+        for state, flags, version in ((11, 0x11, 1), (4, 0x53, 2), (4, 0x93, 2), (4, 0xD3, 1)):
+            self.report.lines.clear()
+            self.backend.events.clear()
+            self.build.request_body(password, state, form, flags=flags, version=version)
+            self.run_.records(refresh=True)
+            limits.verify(self.run_)
+            self.assertEqual(self.statuses()["password form post"], "FAIL", (state, flags, version))
+        # The cleared events took the full target with them.
         self.assertEqual(self.statuses()["8 KB GraphQL GET URL"], "FAIL")
-        self.assertEqual(self.statuses()["password form post"], "FAIL")
 
-    def test_budget_order_and_summary(self):
-        self.assertEqual(budget.ordered(["captured", "captured", budget.BUDGET_CASE], "captured"), [])
-        self.assertTrue(budget.ordered(["captured", budget.BUDGET_CASE, "captured"], "captured"))
-        self.assertTrue(budget.ordered(["captured"], "captured"))
-        self.assertTrue(budget.ordered(["captured", "malformed", budget.BUDGET_CASE], "captured"))
-        refused = (budget.TRANSFER_REFUSED,)
-        self.assertEqual(budget.ordered(["captured", budget.TRANSFER_REFUSED, "captured", budget.BUDGET_CASE],
-                                        "captured", refused), [])
-        self.assertTrue(budget.ordered(["captured", budget.TRANSFER_REFUSED, budget.BUDGET_CASE], "captured"))
-        self.assertTrue(budget.ordered(["captured", budget.BUDGET_CASE, budget.TRANSFER_REFUSED],
-                                       "captured", refused))
-        for index in range(budget.RESPONSES):
-            row = self.build.row(f"/budget/response?i={index}")
-            if index < 7:
-                self.build.kept_body(row, payload(f"budget-response-{index}", budget.RESPONSE_SIZE))
-            else:
-                row["response_body"] = {"case": budget.BUDGET_CASE}
+    def volume_evidence(self, memory=(100_000, 120_000)):
+        """Rows, records and artifacts a correct capture keeps for the volume page, at small sizes."""
         connection = http.client.HTTPConnection("127.0.0.1", self.fx.port, timeout=20)
-        for index in range(budget.POSTS):
+
+        def send(method, target, body=None):
+            connection.request(method, target, body=body)
+            return connection.getresponse().read()
+
+        for index in range(volume.RESPONSES):
+            target = f"/volume/response?i={index}"
+            self.build.kept_body(self.build.row(target), send("GET", target))
+        for index in range(volume.REQUESTS):
+            data = payload(f"request-{index}", volume.REQUEST_SIZE)
+            target = f"/volume/request?i={index}"
+            send("POST", target, data)
+            self.build.request_body(self.build.row(target, "POST"), 4, data, flags=0x53)
+        source = send("GET", "/volume/script.js")
+        self.backend.artifact("javascript", source)
+        self.build.row("/volume/script.js", response_body={"case": "source_artifact"})
+        self.fx._beacons.update({name: [{"ok": True, "value": volume.REQUESTS}] for name in volume.RESULTS})
+        self.fx._beacons["volume:script"] = [{"ok": True, "value": volume.SCRIPT_BYTES * 2}]
+        for index in range(volume.POSTS):
             data = f"reb-post-{index}-".encode() + b"p" * 400
-            connection.request("POST", "/budget/post", body=data)
-            connection.getresponse().read()
-            # Two bodies the artifact queue refused before the budget ran out.
-            state = 8 if index in (100, 101) else 4 if index < 2000 else 10
-            self.build.request_body(self.build.row("/budget/post", "POST"), state, data)
+            send("POST", "/volume/post", data)
+            # Two bodies the artifact queue refused.
+            self.build.request_body(self.build.row("/volume/post", "POST"), 8 if index in (3, 4) else 4, data,
+                                    flags=0x53)
         connection.close()
-        self.backend.summary = {"checks": [
-            {"code": "request_content_not_retained", "category": category, "reason": budget.BUDGET_CASE,
-             "budget_mib": 1, "retained_bytes": "1000000", "count": "3"}
-            for category in ("response_body", "request_body")] + [
-            {"code": "request_content_not_retained", "category": "request_body",
-             "reason": budget.TRANSFER_REFUSED, "count": "2"}]}
-        budget.verify(self.run_)
-        posts = f"{budget.POSTS} small POSTs until the request budget runs out"
-        self.assertEqual(self.statuses(), {"response budget shown when it runs out": "PASS", posts: "PASS"},
-                         self.report.lines)
-        # A refusal the summary does not count was lost from view.
-        self.backend.summary["checks"][-1]["count"] = "1"
-        self.report.lines.clear()
-        budget.verify(self.run_)
-        self.assertEqual(self.statuses()[posts], "FAIL", self.report.lines)
+        self.backend.summary = {"checks": [{"code": "request_content_not_retained", "category": "request_body",
+                                            "reason": volume.TRANSFER_REFUSED, "count": "2"}]}
+        rest, peak = memory
+        self.run_.measurements[volume.NAME] = volume.Memory(
+            4242, [rest] * 8, {"responses": [rest, peak, rest], "requests": [rest, peak], "script": [rest]})
+        # The same Brave without a session grows by half as much.
+        alone = rest + (peak - rest) // 2
+        self.run_.measurements[volume.REFERENCE] = volume.Memory(
+            4343, [rest] * 8, {"responses": [rest, alone], "requests": [alone], "script": [rest]})
+
+    def test_volume_bodies_script_posts_and_memory(self):
+        sizes = {"RESPONSE_SIZE": 64 * 1024, "REQUEST_SIZE": 48 * 1024, "SCRIPT_BYTES": 4096, "POSTS": 40,
+                 "RESPONSE_TOTAL_MIN": 256 * 1024, "REQUEST_TOTAL_MIN": 128 * 1024}
+        with contextlib.ExitStack() as patches:
+            for name, value in sizes.items():
+                patches.enter_context(mock.patch.object(volume, name, value))
+            self.volume_evidence()
+            volume.verify(self.run_)
+            cases = ["response bodies past 512 MiB", "request bodies past 256 MiB", "compiled script past 16 MiB",
+                     "40 small POSTs", "no content budget or size limit", "browser memory while the bodies pass"]
+            self.assertEqual(self.statuses(), {case: "PASS" for case in cases}, self.report.lines)
+            self.assertIn("responses (0 MiB) +20 MiB with capture, +10 MiB without, capture's share +10 MiB",
+                          self.report.lines[-1].detail)
+            self.assertTrue(any(note.startswith("volume memory: ") for note in self.run_.notes), self.run_.notes)
+
+            # A body cut at an older browser's 16 MiB, a summary naming a budget, an
+            # uncounted refusal and a browser that held a whole body each fail.
+            self.backend.rows[0]["response_body"]["captured_length"] = "16"
+            self.backend.summary["checks"][0]["count"] = "1"
+            self.backend.summary["checks"].append({"code": "request_content_not_retained", "category": "response_body",
+                                                   "reason": "not_captured_session_budget", "count": "1"})
+            self.run_.measurements[volume.NAME].phases["responses"].append(
+                110_000 + volume.SHARE_LIMITS["responses"] // 1024)
+            self.report.lines.clear()
+            self.run_.rows(refresh=True)
+            volume.verify(self.run_)
+            failed = {"response bodies past 512 MiB", "40 small POSTs", "no content budget or size limit",
+                      "browser memory while the bodies pass"}
+            self.assertEqual({case for case, status in self.statuses().items() if status == "FAIL"}, failed,
+                             self.report.lines)
+
+    def test_volume_needs_the_browser_process(self):
+        self.run_.measurements[volume.NAME] = None
+        volume.check_memory(self.run_)
+        self.assertEqual(self.report.lines[-1].status, "FAIL")
+        self.assertIn("not found", self.report.lines[-1].detail)
+
+    def test_volume_memory_samples_every_phase_at_its_end(self):
+        # Phases that end before the first interval sample still have one.
+        with mock.patch.object(volume, "footprint_kib", return_value=100_000), \
+                mock.patch.object(volume, "BASELINE_SECONDS", 0), \
+                mock.patch.object(volume, "SAMPLE_SECONDS", 3600), \
+                mock.patch.object(self.run_, "wait", return_value=True), \
+                mock.patch.object(self.run_.fixture, "wait_beacons"), \
+                mock.patch.object(self.run_.fixture, "release"):
+            memory = volume.measure(self.run_, volume.NAME, 4242)
+        self.assertTrue(all(memory.phases.get(phase) for phase in volume.PHASES), memory.phases)
+
+    def test_volume_memory_needs_the_page_without_a_session(self):
+        self.run_.measurements[volume.NAME] = volume.Memory(4242, [100_000] * 8, {"responses": [120_000]})
+        self.run_.measurements[volume.REFERENCE] = "no Brave executable to run the page without a session"
+        volume.check_memory(self.run_)
+        self.assertEqual(self.report.lines[-1].status, "FAIL")
+        self.assertIn("without a session: no Brave executable", self.report.lines[-1].detail)
+
+    def test_reserve_refusals_are_named_and_counted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.run_.session.document["session_dir"] = directory
+            stats = os.statvfs(directory)
+            above = stats.f_bavail * stats.f_frsize + 2**40
+            log = Path(directory) / "artifact-receiver.log"
+            log.write_text(f"Artifact store ready\nArtifact store: disk reserve {above} bytes; an artifact ...\n")
+            response = self.build.row("/reserve/response", response_body={"case": reserve.REFUSED})
+            request_row = self.build.row("/reserve/request", "POST")
+            self.build.request_body(request_row, 13, b"x" * 1000, flags=0x51)
+            self.fx._beacons.update({name: [{"ok": True, "value": 1}] for name in reserve.RESULTS})
+            self.backend.summary = {"checks": [{"code": "request_content_not_retained", "category": category,
+                                                "reason": reserve.REFUSED, "count": "1"}
+                                               for category in ("request_body", "response_body")]}
+            reserve.verify(self.run_)
+            cases = {"receiver disk reserve": "PASS", "bodies refused for the disk reserve": "PASS"}
+            self.assertEqual(self.statuses(), cases, self.report.lines)
+
+            # A stored body, a reserve below the free space or an uncounted refusal fails.
+            response["response_body"] = {"case": "captured", "artifact_id": "9"}
+            self.backend.artifact("response_body", b"kept")
+            log.write_text("Artifact store: disk reserve 1 bytes; an artifact ...\n")
+            self.backend.summary["checks"].pop()
+            self.report.lines.clear()
+            self.run_.rows(refresh=True)
+            reserve.verify(self.run_)
+            self.assertEqual(self.statuses(), {case: "FAIL" for case in cases}, self.report.lines)
+            detail = self.report.lines[-1].detail
+            for problem in ("response case captured", "1 request or response bodies were stored",
+                            "counts no response_body"):
+                self.assertIn(problem, detail)
+
+    def test_reserve_environment_is_above_the_free_space(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stats = os.statvfs(directory)
+            free = stats.f_bavail * stats.f_frsize // 2**20
+            reserved = int(reserve.environment(Path(directory))["REB_ARTIFACT_DISK_RESERVE_MIB"])
+            self.assertGreaterEqual(reserved, free + reserve.ABOVE_FREE_MIB - 64)
+            self.assertLessEqual(len(str(reserved)), 10, "the launcher takes at most ten digits")
 
     def test_tabs_unresolved_fails_and_nothing_passes_without_rows(self):
         self.backend.summary = {"checks": [], "request_tabs": {"unresolved": "2", "unresolved_reasons": {"worker": "2"}}}
@@ -849,11 +965,11 @@ class Evidence(unittest.TestCase):
         for target in nostacks.TARGETS:
             self.build.row(target)
         nostacks.verify(self.run_)
-        self.assertEqual(self.statuses(), {"no stack walk without --request-stacks": "PASS"}, self.report.lines)
+        self.assertEqual(self.statuses(), {"no stack walk with --request-stacks=false": "PASS"}, self.report.lines)
         self.report.lines.clear()
         self.backend.events.append({"type": "request_initiator_stack", "process_id": 7, "request_id": "101"})
         nostacks.verify(self.run_)
-        self.assertEqual(self.statuses()["no stack walk without --request-stacks"], "FAIL")
+        self.assertEqual(self.statuses()["no stack walk with --request-stacks=false"], "FAIL")
 
     def test_session_context_matches_each_kind(self):
         with tempfile.NamedTemporaryFile("w", suffix=".log") as log:
@@ -867,9 +983,14 @@ class Evidence(unittest.TestCase):
             self.run_.kind = "metadata"
             driver.check_context(self.run_)
             self.assertEqual(self.report.lines[-1].status, "FAIL")
-            self.run_.kind = "budget"
+            for kind in ("volume", "reserve"):
+                self.run_.kind = kind
+                driver.check_context(self.run_)
+                self.assertEqual(self.report.lines[-1].status, "PASS", kind)
+            # A backend that still reports content limits is stale.
+            self.backend.context["capture_options"]["content_limits"] = {"request_content_budget_mib": 256}
             driver.check_context(self.run_)
-            self.assertIn("content_limits.request_content_budget_mib", self.report.lines[-1].detail)
+            self.assertIn("capture_options.content_limits", self.report.lines[-1].detail)
 
     def test_debugger_observations(self):
         page = debugger.index_page(self.fx.cross_site_origin)
@@ -881,14 +1002,76 @@ class Evidence(unittest.TestCase):
             "csp_violation": {"debugger_observation": {"detail": {"directive": "img-src", "blocked_host": "localhost"}}},
         }
         debugger.STATE.stack = {"frames": [frame(0, "/debugger/index.html", line_of(page, "fetch('/api/x"))]}
+        self.keep(debugger.STATE)
         debugger.verify(self.run_)
         self.assertEqual(set(self.statuses().values()), {"PASS"}, self.report.lines)
-        self.assertEqual(len(self.report.lines), 3)
+        self.assertEqual(len(self.report.lines), 6)
         self.report.lines.clear()
         debugger.STATE = debugger.State()
         debugger.STATE.error = "get_native_console never listed the page"
         debugger.verify(self.run_)
         self.assertEqual(self.statuses(), {"arm a watch": "FAIL"})
+
+    def keep(self, state):
+        """Kept-rule evidence that matches the kept page."""
+        state.kept_reply = {"origin": self.fx.origin, "frame": "top"}
+        state.kept_state = {"session_id": "5", "target_id": "22", "origin": self.fx.origin, "frame": "top",
+                            "rules": {"requests": [{"url_contains": "/api/kept"}], "events": ["click"]}}
+        state.kept_records = [
+            ("request_watch_match", frame(0, "/debugger/kept.html?n=1",
+                                          line_of(debugger.KEPT_PAGE, "fetch('/api/kept"))["resolution"]),
+            ("listener_dispatch", frame(0, "/debugger/kept.html?n=1",
+                                        line_of(debugger.KEPT_PAGE, "function onKeptClick"))["resolution"])]
+        state.cleared_state = None
+        state.after_clear = []
+
+    def test_debugger_kept_rules_fail_on_each_difference(self):
+        page = debugger.index_page(self.fx.cross_site_origin)
+        cases = {
+            "keep the rules for later documents of the origin": [
+                lambda s: setattr(s, "kept_reply", None),
+                lambda s: setattr(s, "kept_reply", {"origin": self.fx.origin, "frame": "child"}),
+                lambda s: s.kept_state["rules"].update(dom=[{"element": 1}]),
+                lambda s: setattr(s, "kept_error", "watch with keep was not armed")],
+            "kept rules arm a new tab's document before its own scripts": [
+                lambda s: s.kept_records.pop(0),
+                lambda s: s.kept_records.append(("request_watch_match", frame(
+                    0, "/debugger/kept-child.html", line_of(debugger.KEPT_CHILD, "fetch('/api/kept"))["resolution"])),
+                lambda s: s.kept_records.append(("listener_dispatch", {"status": "unresolved",
+                                                                       "reason": "source_artifact_missing"})),
+                lambda s: s.kept_records.append(s.kept_records[0][:1] + ({**s.kept_records[0][1], "line": 1},))],
+            "unwatch forgets the kept rules": [
+                lambda s: setattr(s, "cleared_state", {"origin": self.fx.origin, "frame": "top"}),
+                lambda s: setattr(s, "cleared_state", "not read"),
+                lambda s: s.after_clear.append({"type": "listener_dispatch"})],
+        }
+        for case, changes in cases.items():
+            for change in changes:
+                self.report.lines.clear()
+                debugger.STATE = debugger.State()
+                debugger.STATE.observed = {
+                    "request_watch_match": {"debugger_observation": {"status": "decoded"}},
+                    "listener_dispatch": {"debugger_observation": {"detail": {"event_type": "click"}, "site": {
+                        "resolution": {"status": "resolved", "line": line_of(page, "function onWatchedClick")}}}},
+                    "csp_violation": {"debugger_observation": {"detail": {"directive": "img-src",
+                                                                          "blocked_host": "localhost"}}},
+                }
+                debugger.STATE.stack = {"frames": [frame(0, "/debugger/index.html", line_of(page, "fetch('/api/x"))]}
+                self.keep(debugger.STATE)
+                change(debugger.STATE)
+                debugger.verify(self.run_)
+                failed = {name for name, status in self.statuses().items() if status != "PASS"}
+                self.assertEqual(failed, {case}, self.report.lines)
+
+    def test_kept_pages_trigger_their_rules_from_the_first_script(self):
+        for name, text in (("/debugger/kept.html", debugger.KEPT_PAGE),
+                           ("/debugger/kept-child.html", debugger.KEPT_CHILD)):
+            status, _, body = self.get(name)
+            self.assertEqual((status, body.decode()), (200, text))
+            first = text.index("<script>\n")
+            self.assertLess(first, text.index(".click();"))
+            self.assertLess(first, text.index("fetch('/api/kept"))
+        self.assertIn('<iframe src="/debugger/kept-child.html">', debugger.KEPT_PAGE)
 
     def test_debugger_settle_waits_only_for_a_pending_source(self):
         waiting = {"frames": [{"resolution": {"status": "unresolved", "reason": "source_artifact_missing"}}]}
@@ -902,6 +1085,67 @@ class Evidence(unittest.TestCase):
         self.assertIs(debugger.settle(lambda: waiting, debugger.top_frame, 0, 0), waiting)
         site = {"debugger_observation": {"site": {"resolution": {"status": "resolved", "line": 7}}}}
         self.assertEqual(debugger.listener_site(site), {"status": "resolved", "line": 7})
+
+    WASM_SAMPLING = {"version": 1, "streams": ["br_table", "call_indirect"], "window_ms": 1000,
+                     "records_per_window": 1024, "samples_per_function": None, "samples_per_indirect_site": None,
+                     "function_allow_count": 0, "function_deny_count": 0, "module_allowlist": False,
+                     "reset": "available"}
+
+    def wasm_evidence(self, records=3000, indirect=200, seconds=3.4, function=None, gap=True, generation=3):
+        """A paced capture of the hot loop: records spread over the loop, every function, one ordinal."""
+        module = self.backend.artifact("wasm_module", wasm.MODULE)
+        other = self.backend.artifact("wasm_module", b"another module")
+        self.get("/__beacon?m=wasm:hot", method="POST", body=json.dumps({"ok": True, "value": 900000}).encode())
+        self.backend.context = {"capture_options": {"wasm_sampling": dict(self.WASM_SAMPLING)}}
+
+        def observation(kind, artifact, index, count, function_index):
+            time = 10**9 + index * int(seconds * wasm.SECOND_NS) // max(count, 1)
+            return {"type": kind, "artifact_id": artifact, "process_id": 7, "monotonic_time_ns": str(time),
+                    "wasm_observation": {"status": "decoded", "function_index": function_index, "sample_index": index}}
+        events = [observation("wasm_dispatch_observation", module, index, records,
+                              index % wasm.FUNCTIONS if function is None else function) for index in range(records)]
+        events += [observation("wasm_indirect_observation", module, index, indirect, wasm.RUN_INDEX)
+                   for index in range(indirect)]
+        # Another page's module never counts toward this loop.
+        events.append(observation("wasm_dispatch_observation", other, 0, 1, 0))
+        events.append({"type": "wasm_dispatch_overflow", "artifact_id": "0", "process_id": 7})
+        self.backend.events = events
+        if gap:
+            self.backend.summary["checks"] = [{"code": "named_gap", "category": "vm", "count": "9",
+                                               "reason": "native_wasm_dispatch_budget_incomplete"}]
+        wasm.STATE = wasm.State()
+        wasm.STATE.reset = {"ok": True, "action": "reset_wasm_sample_budgets", "generation": generation}
+
+    def test_wasm_pacing_passes_on_a_paced_capture(self):
+        self.wasm_evidence()
+        wasm.verify(self.run_)
+        self.assertEqual(self.statuses(), {"session context wasm_sampling": "PASS", "br_table paced per window": "PASS",
+                                           "call_indirect paced per window": "PASS",
+                                           "paced remainder is named": "PASS",
+                                           "reset_wasm_sample_budgets mid-loop": "PASS"}, self.report.lines)
+
+    def test_wasm_pacing_fails_on_each_difference(self):
+        cases = [
+            ("a 16-record cap", {"records": 16, "indirect": 16},
+             {"br_table paced per window", "call_indirect paced per window"}),
+            ("a session-wide stop after one second", {"seconds": 0.9},
+             {"br_table paced per window", "call_indirect paced per window"}),
+            ("one function past its allowance", {"function": 3, "seconds": 2.5}, {"br_table paced per window"}),
+            ("a silent remainder", {"gap": False}, {"paced remainder is named"}),
+            ("a refused reset", {"generation": 0}, {"reset_wasm_sample_budgets mid-loop"}),
+        ]
+        for name, changes, failing in cases:
+            with self.subTest(name):
+                self.setUp()
+                self.wasm_evidence(**changes)
+                wasm.verify(self.run_)
+                self.assertEqual({case for case, status in self.statuses().items() if status == "FAIL"}, failing,
+                                 self.report.lines)
+        self.setUp()
+        self.wasm_evidence()
+        self.backend.context["capture_options"]["wasm_sampling"]["records_per_window"] = 16
+        wasm.verify(self.run_)
+        self.assertEqual(self.statuses()["session context wasm_sampling"], "FAIL")
 
     def test_report_never_passes_a_manual_or_skipped_case(self):
         report = Report("x")

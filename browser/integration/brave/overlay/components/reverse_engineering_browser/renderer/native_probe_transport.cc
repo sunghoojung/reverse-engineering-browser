@@ -9,6 +9,7 @@
 #include <atomic>
 #include <bit>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h"
@@ -18,10 +19,12 @@
 #include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_script_cookie_sink.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_script_position.h"
 #include "mojo/public/cpp/base/big_buffer.h"
+#include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/public/web/web_local_frame.h"
 
 namespace reb {
@@ -60,7 +63,11 @@ void NativeProbeTransport::Connect(mojo::PendingRemote<mojom::NativeProbeHost> p
     return;
   }
 
-  host_.Bind(std::move(pending_host), base::SequencedTaskRunner::GetCurrentDefault());
+  // A SharedRemote sends every message, EventsAvailable among them, from the
+  // sequence it is bound to. The IO thread keeps running while a main-thread
+  // task runs page script, so the browser hears that the ring is filling and
+  // drains it during a synchronous burst, not after the task ends.
+  host_.Bind(std::move(pending_host), blink::Platform::Current()->GetIOTaskRunner());
   host_.set_disconnect_handler(
       base::BindOnce(&NativeProbeTransport::Disable, base::Unretained(this)),
       base::SequencedTaskRunner::GetCurrentDefault());
@@ -72,18 +79,19 @@ void NativeProbeTransport::BindClient(
   receiver_.Bind(std::move(receiver));
 }
 
-void NativeProbeTransport::Configure(const std::uint64_t session_id,
-                                     const std::uint64_t category_mask,
-                                     const std::uint64_t expires_at_monotonic_ns,
-                                     const bool capture_canvas_images,
-                                     base::UnsafeSharedMemoryRegion queue_region,
-                                     const std::uint64_t wasm_capture_epoch,
-                                     const std::string& guest_adapter_json,
-                                     const std::vector<std::uint8_t>& js_dispatch_sites,
-                                     const std::vector<std::uint8_t>& js_invocation_sites,
-                                     const bool js_invocation_digests,
-                                     const bool capture_request_content,
-                                     const bool capture_browser_internal) {
+void NativeProbeTransport::Configure(
+    const std::uint64_t session_id,
+    const std::uint64_t category_mask,
+    const std::uint64_t expires_at_monotonic_ns,
+    const bool capture_canvas_images,
+    base::UnsafeSharedMemoryRegion queue_region,
+    const std::uint64_t wasm_capture_epoch,
+    const std::string& guest_adapter_json,
+    const std::vector<std::uint8_t>& js_dispatch_sites,
+    const std::optional<std::vector<std::uint8_t>>& js_invocation_sites,
+    const bool js_invocation_digests,
+    const bool capture_request_content,
+    const bool capture_browser_internal) {
   Disable();
   const std::uint64_t now =
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
@@ -114,7 +122,8 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
       category_mask, expires_at_monotonic_ns, capture_canvas_images, &CurrentFrameId,
       {.capture_request_content = capture_request_content,
        .capture_browser_internal = capture_browser_internal,
-       .exclusion_counter = &NativeProbeTransport::CountExclusion});
+       .exclusion_counter = &NativeProbeTransport::CountExclusion,
+       .target_emitter = &NativeProbeTransport::EmitRendererTarget});
   NativeScriptCookieSink::Get().Configure(capture_request_content, &CurrentNativeScriptFrame);
   if (!guest_adapter_json.empty())
     NativeProbeSink::Get().ConfigureNativeWasmGuest(ParseNativeWasmGuestAdapter(guest_adapter_json),
@@ -127,13 +136,14 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
     NativeProbeSink::Get().ConfigureNativeJsDispatch(
         std::span<const NativeJsDispatchSite>(sites.data(), count ? count : 1));
   }
-  if (!js_invocation_sites.empty()) {
-    // As above: a malformed list is one input gap and arms nothing.
+  if (js_invocation_sites) {
+    // A malformed list arms nothing and is the configuration's input gap. An
+    // empty one tracks functions that later revisions arm.
     std::array<NativeJsInvocationSite, kNativeJsInvocationSiteLimit> sites{};
-    const std::size_t count = DecodeNativeJsInvocationSites(js_invocation_sites, sites);
+    const auto count = DecodeNativeJsInvocationSites(*js_invocation_sites, sites);
     NativeProbeSink::Get().ConfigureNativeJsInvocation(
-        std::span<const NativeJsInvocationSite>(sites.data(), count ? count : 1),
-        js_invocation_digests);
+        std::span<const NativeJsInvocationSite>(sites.data(), count.value_or(0)),
+        js_invocation_digests, count.has_value());
   }
   // After emitters, so a jitless notice can be admitted.
   NativeProbeSink::Get().ProbeNativeWasmLimits();
@@ -150,6 +160,40 @@ void NativeProbeTransport::ResetWasmSampleBudgets() {
   NativeProbeSink::Get().ResetNativeWasmSampleBudgets();
 }
 
+void NativeProbeTransport::UpdateJsInvocationSites(
+    const std::vector<std::uint8_t>& js_invocation_sites) {
+  std::array<NativeJsInvocationSite, kNativeJsInvocationSiteLimit> sites{};
+  const auto count = DecodeNativeJsInvocationSites(js_invocation_sites, sites);
+  NativeProbeSink::Get().UpdateNativeJsInvocationSites(
+      std::span<const NativeJsInvocationSite>(sites.data(), count.value_or(0)), count.has_value());
+}
+
+void NativeProbeTransport::SetDebuggerWatchScope(mojom::NativeWatchScopePtr scope) {
+  std::optional<NativeWatchScope> kept;
+  if (scope) {
+    NativeWatchScope rebuilt;
+    rebuilt.serial = scope->serial;
+    rebuilt.origin = scope->origin;
+    rebuilt.top_frame = scope->top_frame;
+    // A rule this renderer cannot hold exactly refuses the whole scope.
+    bool held = true;
+    for (const auto& rule : scope->requests) {
+      held = held && rule && rebuilt.rules.AddRequest(rule->url_contains, rule->method);
+    }
+    for (const auto& type : scope->events) {
+      held = held && rebuilt.rules.AddEvent(type);
+    }
+    rebuilt.rules.timers = scope->timers;
+    rebuilt.rules.csp = scope->csp;
+    rebuilt.rules.uncaught = scope->uncaught || scope->caught;
+    rebuilt.rules.caught = scope->caught;
+    if (held) {
+      kept = std::move(rebuilt);
+    }
+  }
+  NativeDebuggerWatch::SetScope(std::move(kept));
+}
+
 void NativeProbeTransport::Disable() {
   NativeScriptCookieSink::Get().Flush();
   wasm_capture_epoch_.store(0, std::memory_order_release);
@@ -163,6 +207,10 @@ void NativeProbeTransport::Disable() {
 
 void NativeProbeTransport::NativeStackArtifactRefused(const std::uint64_t creator_event_id) {
   NativeRequestStackWalk::StackArtifactRefused(creator_event_id);
+}
+
+void NativeProbeTransport::ReleaseArtifactCredit(const std::uint64_t bytes) {
+  NativeProbeSink::Get().ReleaseArtifactCredit(bytes);
 }
 
 void NativeProbeTransport::NativeGuestModuleStatus(const std::uint64_t wasm_capture_epoch,
@@ -201,7 +249,8 @@ bool NativeProbeTransport::EmitWasmDispatch(const NativeWasmDispatchObservation&
       observation.selector, observation.table_count, observation.caller_observed,
       observation.caller_kind, observation.caller_function_index, observation.sample_index,
       observation.js_invocation_state, observation.js_invocation_id,
-      std::string(observation.source_url), mojo_base::BigBuffer(observation.module_bytes));
+      std::string(observation.source_url), observation.module_token,
+      mojo_base::BigBuffer(observation.module_bytes), observation.module_bytes.size());
   return true;
 }
 
@@ -225,7 +274,8 @@ bool NativeProbeTransport::EmitWasmIndirect(const NativeWasmIndirectObservation&
       observation.table_index, observation.slot, observation.callee_function_index,
       static_cast<std::uint32_t>(observation.resolution), observation.sample_index,
       observation.js_invocation_state, observation.js_invocation_id,
-      std::string(observation.source_url), mojo_base::BigBuffer(observation.module_bytes));
+      std::string(observation.source_url), observation.module_token,
+      mojo_base::BigBuffer(observation.module_bytes), observation.module_bytes.size());
   return true;
 }
 
@@ -250,8 +300,8 @@ bool NativeProbeTransport::EmitWasmExecution(const NativeWasmExecutionObservatio
       static_cast<std::uint8_t>(observation.kind), static_cast<std::uint8_t>(observation.reason),
       static_cast<std::uint8_t>(observation.bounds), observation.known,
       static_cast<std::uint8_t>(observation.related_stream), observation.js_invocation_state,
-      observation.js_invocation_id, std::string(observation.source_url),
-      mojo_base::BigBuffer(observation.module_bytes));
+      observation.js_invocation_id, std::string(observation.source_url), observation.module_token,
+      mojo_base::BigBuffer(observation.module_bytes), observation.module_bytes.size());
   return true;
 }
 
@@ -260,7 +310,6 @@ bool NativeProbeTransport::EmitNativeGuest(const NativeGuestCapture& capture,
   auto& transport = Get();
   const auto epoch = transport.wasm_capture_epoch_.load(std::memory_order_acquire);
   if (!epoch || !NativeProbeSink::Get().CanAdmitEvent(capture.dispatch, generation) ||
-      capture.module_bytes.size() > kNativeArtifactMaxContentBytes ||
       capture.bytecode_bytes.size() > kNativeGuestSnapshotLimit ||
       capture.adapter_json.size() > kNativeGuestAdapterLimit)
     return false;
@@ -270,11 +319,11 @@ bool NativeProbeTransport::EmitNativeGuest(const NativeGuestCapture& capture,
     return false;
   const auto invocation = EventRecordBytes(capture.invocation);
   const auto dispatch = EventRecordBytes(capture.dispatch);
-  (*host)->CaptureNativeGuest(epoch, invocation, dispatch, capture.execution_context_id,
-                              capture.document_token_high, capture.document_token_low,
-                              std::string(capture.source_url), std::string(capture.adapter_json),
-                              mojo_base::BigBuffer(capture.module_bytes),
-                              mojo_base::BigBuffer(capture.bytecode_bytes));
+  (*host)->CaptureNativeGuest(
+      epoch, invocation, dispatch, capture.execution_context_id, capture.document_token_high,
+      capture.document_token_low, std::string(capture.source_url),
+      std::string(capture.adapter_json), mojo_base::BigBuffer(capture.module_bytes),
+      mojo_base::BigBuffer(capture.bytecode_bytes), capture.module_bytes.size());
   return true;
 }
 bool NativeProbeTransport::EmitNativeGuestHost(const NativeProbeEvent& event,
@@ -292,6 +341,25 @@ bool NativeProbeTransport::EmitNativeGuestHost(const NativeProbeEvent& event,
   return true;
 }
 
+// The renderer took the child's sequence; the browser emits the record with
+// its target artifact after draining the parent from the ring.
+bool NativeProbeTransport::EmitRendererTarget(const NativeProbeEvent& child,
+                                              const std::string_view origin,
+                                              const std::string_view target,
+                                              const std::uint64_t generation) noexcept {
+  auto& transport = Get();
+  if (!transport.queue_.load(std::memory_order_acquire) ||
+      !NativeProbeSink::Get().CanAdmitEvent(child, generation)) {
+    return false;
+  }
+  auto* host = transport.HostForCurrentSequence();
+  if (!*host) {
+    return false;
+  }
+  (*host)->CaptureRendererTarget(EventRecordBytes(child), std::string(origin), std::string(target));
+  return true;
+}
+
 void NativeProbeTransport::EmitArtifact(const NativeArtifactKind kind,
                                         const NativeArtifactCaptureOrigin capture_origin,
                                         const std::uint64_t creator_event_id,
@@ -299,9 +367,10 @@ void NativeProbeTransport::EmitArtifact(const NativeArtifactKind kind,
                                         const std::uint64_t frame_id,
                                         const std::string_view source_url,
                                         const std::span<const std::uint8_t> content,
-                                        const NativeRuntimeScript& script) noexcept {
+                                        const NativeRuntimeScript& script,
+                                        const std::uint64_t credit_bytes) noexcept {
   Get().EmitGeneratedArtifact(kind, capture_origin, creator_event_id, execution_context_id,
-                              frame_id, source_url, content, script);
+                              frame_id, source_url, content, script, credit_bytes);
 }
 
 NativeProbeEmitStatus NativeProbeTransport::EmitEvent(
@@ -361,20 +430,23 @@ void NativeProbeTransport::EmitGeneratedArtifact(const NativeArtifactKind kind,
                                                  const std::uint64_t frame_id,
                                                  const std::string_view source_url,
                                                  const std::span<const std::uint8_t> content,
-                                                 const NativeRuntimeScript& script) noexcept {
-  if (script.capture_generation != 0 &&
-      script.capture_generation != NativeProbeSink::Get().RuntimeCaptureGeneration()) {
+                                                 const NativeRuntimeScript& script,
+                                                 const std::uint64_t credit_bytes) noexcept {
+  auto* const thread_host = HostForCurrentSequence();
+  if ((script.capture_generation != 0 &&
+       script.capture_generation != NativeProbeSink::Get().RuntimeCaptureGeneration()) ||
+      !*thread_host) {
+    NativeProbeSink::Get().ReleaseArtifactCredit(credit_bytes);
     return;
   }
-  auto* const thread_host = HostForCurrentSequence();
-  if (*thread_host) {
-    (*thread_host)
-        ->CaptureGeneratedArtifact(static_cast<std::uint16_t>(kind),
-                                   static_cast<std::uint16_t>(capture_origin), creator_event_id,
-                                   execution_context_id, frame_id, std::string(source_url),
-                                   mojo_base::BigBuffer(content), script.script_id, script.is_eval,
-                                   mojo_base::BigBuffer(script.source), script.session_id);
-  }
+  // The browser releases credit_bytes once it has copied the content out, on
+  // every path, including a buffer it could not map.
+  (*thread_host)
+      ->CaptureGeneratedArtifact(
+          static_cast<std::uint16_t>(kind), static_cast<std::uint16_t>(capture_origin),
+          creator_event_id, execution_context_id, frame_id, std::string(source_url),
+          mojo_base::BigBuffer(content), script.script_id, script.is_eval,
+          mojo_base::BigBuffer(script.source), script.session_id, credit_bytes);
 }
 
 mojo::SharedRemote<mojom::NativeProbeHost>* NativeProbeTransport::HostForCurrentSequence() {

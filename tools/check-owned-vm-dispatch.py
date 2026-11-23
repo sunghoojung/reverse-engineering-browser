@@ -192,7 +192,11 @@ def main():
                 assert link["guest_position"]["sample_event"]["sequence_number"] == "4"
                 without_samples = [event for event in host_events if event["type"] != "vm_dispatch_sample"]
                 missing = analyze(without_samples)
-                assert missing["links"][0]["guest_position"] is None
+                # With its parent sample gone no guest position is possible,
+                # so the host event is counted and named by the filter.
+                assert missing["links"] == [] and missing["attributed_host_records"] == 1
+                assert missing["events_filter"] == {key: artifact[key] for key in (
+                    "session_id", "navigation_id", "frame_id")}
                 assert "dispatch-samples-unavailable" in missing["omissions"]
                 unproven = dict(host, parent_event_id="1")
                 records = [unproven if event is host else event for event in host_events]

@@ -271,7 +271,7 @@ site, and `omitted_site_count` names the classified sites that are not listed.
 Every site of an artifact of any size is classified. Each selector query has
 a fixed step budget, so a site's work is constant and classification stays
 linear in the sites found; there is no per-artifact work, memory or site
-budget. Producers before VM detector 1.11.0 stopped at one billion work units,
+budget. Producers before VM detector 1.12.0 stopped at one billion work units,
 128 MiB of retained index and trace memory, 4096 JavaScript sites, an 8 MiB
 JavaScript source and one million symbolic nodes per Wasm function.
 

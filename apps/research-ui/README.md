@@ -287,10 +287,15 @@ Each section is a collapsible pane:
   retried. Without a live connection the section says how to get one and
   shows no form. The form and the armed set say what a rule cannot observe,
   because a wait for it would then find nothing with nothing missing: only
-  the armed document's main thread records, never its workers, other frames
-  or same-process iframes; its navigation clears the rules; and they cannot
-  be armed ahead of a page load, so what a page does while it loads is not
-  observed.
+  the main thread of the documents a rule is armed on records, never their
+  workers or other documents; and this document's navigation clears its
+  rules. **Keep for every later** *origin frame kind* **document**, which
+  names this document's origin and frame kind, also keeps the rules other
+  than DOM ones for every later such document, in any tab: each one is armed
+  from its first script, so a reload is observed
+  while it loads, but documents that are already open are not armed. The
+  armed set names the kept origin and frame kind and lists the kept rules,
+  and Clear rules forgets them, even after this document navigated.
 - **Observations**: the newest records, 128 at a time and up to 4,096 with
   **Show older records**, filtered by kind. A note says how much of the store
   the rows were read from: the whole store, or its newest bytes and why the
@@ -316,7 +321,7 @@ Each section is a collapsible pane:
   **Show newest** returns to the newest page. Past 4,096 rows the oldest are
   dropped, and the list says how many. A failed read changes neither the rows
   nor their note. Malformed
-  records, a renderer's `debugger_observation_budget` gap and store sequence
+  records, an earlier build's `debugger_observation_budget` gap and store sequence
   gaps are stated above the list, which is as tall as its rows up to a cap.
   Traffic's **Show in debugger** on a watched request calls
   `RebDebuggerSidebar.showObservation`: the sidebar opens on the Requests
@@ -407,15 +412,37 @@ so Origin Trace has no in-app report. See
 [Passive security report v1](../../docs/product/passive-security-report-v1.md)
 for the schema, rules, bounds and commands.
 
-## Captured request exports
+## Traffic exports and copies
 
-Live native Traffic has no CDP exchange to replay, so Traffic has no capture
-actions. **Export…** in the Traffic toolbar converts a local
-introspection JSON file (`__schema` or `data.__schema`, up to 1 MiB) to GraphQL
-SDL; duplicate keys, invalid UTF-8, partial/error schemas and unsafe SDL
-literals are refused. Export never queries an introspection endpoint or sends a
-request. SDL is a raw schema export: descriptions and identifiers can be
-sensitive.
+**Export…** in the Traffic toolbar saves the request index's HAR
+(`export_requests_har`, see
+[Request HAR export](../../protocol/http-api.md#request-har-export)): the
+selected request, or the list as shown, with its filters, sort and the index
+position it was read at, so rows indexed later are not added. Every hop is an
+entry, redirects and failures included. **Raw** is the default and asks for
+credential header and cookie values; **Credential values withheld** leaves
+them out. A redacted copy is not offered: the backend withholds credentials but
+does not rewrite URLs or bodies. The browser development UI downloads the
+archive; the native app streams it from the backend to the file chosen in a
+macOS Save panel without passing it through the page, and reports how many
+entries it holds and whether `log._reb.complete` is true. One request can also
+be copied to the clipboard.
+
+The selection strip's **Copy**, a right-click on a row, or the context-menu key
+or Shift+F10 on a focused row, opens the row menu: **Copy URL**, **Copy as
+cURL**, **Copy as fetch** and **Export HAR…**. cURL and fetch are built from
+the first hop of the row's HAR entry, with the headers and body the capture
+kept, credentials included; pseudo-headers, Host, Content-Length, Connection
+and Transfer-Encoding are left to the client. A binary body is decoded from
+base64 by the shell for cURL and by `atob` for fetch. When the capture did not
+keep the body whole, or the URL is not the whole captured target, the copy says
+so. Copying sends nothing.
+
+The same dialog converts a local introspection JSON file (`__schema` or
+`data.__schema`, up to 1 MiB) to GraphQL SDL; duplicate keys, invalid UTF-8,
+partial/error schemas and unsafe SDL literals are refused. Export never queries
+an introspection endpoint or sends a request. SDL is a raw schema export:
+descriptions and identifiers can be sensitive.
 
 Saved `reb-network-request-v1` documents remain usable through offline
 commands: `tools/export-captured-client.mjs` (client projects, see
@@ -423,7 +450,9 @@ commands: `tools/export-captured-client.mjs` (client projects, see
 `tools/export-captured-har.mjs` and `tools/export-graphql-sdl.mjs`. They read
 local files only and never send captured requests.
 `node tools/check-captured-export-ui.mjs` exercises the dialog handlers with an
-in-memory DOM; native Save-panel testing remains a macOS gate.
+in-memory DOM, and `node tools/check-traffic-copy.mjs` runs each generated cURL
+command and fetch call against a loopback server. The packaged native Save-panel
+test saves a Traffic HAR from the bundled backend.
 
 ## Saved investigation notebook
 
@@ -536,7 +565,7 @@ client connected through `scripts/reb-api-mcp.sh` can run at the same level
 | **Read only** (default) | Structural reads | Nothing | Question, pins, structural results |
 | **Ask for actions** | Reads and actions | **Allow once** per action | The same |
 | **Auto-approve actions** | Reads and actions | Nothing; every call and result is in the transcript | The same |
-| **Full access** | Also content reads (`get_artifact_text`, `search_artifact_text`, `search_wasm_inspection`), offline runs of captured Wasm (`run_wasm_function`, `get_wasm_runs`), store-path and draft reads, and its own live sessions (`start_live_session`, `session_action`) | Nothing | Also source, Wasm bytes and disassembly, VM bytecode, request and response bodies and every content field of results |
+| **Full access** | Also content reads (`get_artifact_text`, `search_artifact_text`, `search_wasm_inspection`, `export_requests_har`), offline runs of captured Wasm (`run_wasm_function`, `get_wasm_runs`), store-path and draft reads, and its own live sessions (`start_live_session`, `session_action`) | Nothing | Also source, Wasm bytes and disassembly, VM bytecode, request and response bodies, cookie values and credential headers, and every content field of results |
 
 Below Full access the tool server omits captured content from every result,
 and reads that return local store paths (`get_health`) or the researcher's own
@@ -870,7 +899,13 @@ Each submitted command has a numbered running/completed/error state. A transport
 failure marks its outcome unavailable, preserves the next draft and delivered
 output, and never automatically retries the command. Use Session settings to
 refresh documents explicitly, or disconnect and start a fresh disposable session.
-The Run button and Enter both submit; the composer also shows its UTF-8 byte count.
+The Run button and Enter both submit; the composer also shows its UTF-8 size.
+A command runs until it returns: while it runs, Run becomes **Stop**, which ends
+it in the page and marks it Stopped, keeping the changes it already made. Input
+of any size up to the 64 MiB command record is accepted. The transcript shows a
+long command's first 4096 characters with its full size, and history keeps the
+newest command whole however large; inputs over 64 KiB are shown uncolored so
+typing stays fast.
 An empty prompt has no placeholder text. Fully typed built-in names do not open
 automatic suggestions, so Enter runs them unchanged; Ctrl+Space can still request
 their completions explicitly.
@@ -908,11 +943,13 @@ unchanged; Ctrl+Space explicitly requests completion.
 
 Results expand into property pages, DOM element previews, function source and
 source locations. Getters remain labeled, proxies are opaque, and retained values
-expire after 60 seconds. Explicit actions copy bounded property previews, store a
+stay until they are released, the output is cleared or the page navigates.
+Explicit actions copy bounded property previews, store a
 value as `window.tempN`, or release it. `$_` reads the previous result. `copy(value)`,
 `inspect(value)`, `getEventListeners(element)`, `monitorEvents(element)` and
 `unmonitorEvents(element)` are standalone console utilities. They evaluate their
-argument once. Event monitoring is explicit and lasts at most 60 seconds.
+argument once. Event monitoring is explicit and lasts until
+`unmonitorEvents(element)` or the page navigates.
 `getEventListeners` also takes `window` and `document`, and an element, `window`
 or `document` result offers **Event listeners** among its value actions. The
 runtime describes `window` and `document` as a plain `Object`, so a plain
@@ -1011,8 +1048,9 @@ the native app accepts a choice only from the document it loaded and only
 while that decision is open, checks it, and starts the session itself
 ([`SessionPanel.swift`](macos/SessionPanel.swift)). A Dock reopen while the
 panel shows a decision starts nothing behind it. **Content (default)** sets `REB_CAPTURE_REQUEST_CONTENT=1`,
-which retains request paths, queries and request bodies up to 16 MiB each, and
-retains Canvas images. While a live session has either turned on, the titlebar
+which retains request paths, queries and bodies, every response body whole
+with media and fonts, request and response headers, cookies, and Canvas
+images. While a live session has either turned on, the titlebar
 shows **Content capture** and its tooltip names which; a browser built before
 that capture ignores the switch, and each Traffic row and Payload tab still shows what
 was actually captured. **Metadata only** is the
@@ -1029,43 +1067,26 @@ launcher gets `REB_CAPTURE_REQUEST_CONTENT=0`, `REB_CAPTURE_CANVAS_IMAGES=0`
 and `REB_NATIVE_JS_INVOCATION_DIGESTS=0` whatever the environment holds
 ([`LiveCaptureContent`](macos/LiveSessionCoordinator.swift)).
 
-With Content chosen, the panel also shows the session's **Content limits**:
-
-| Control | Range and default | What it means |
-| --- | --- | --- |
-| **Request content budget** | 1 to 4,096 MiB, default 256 | How much of the request bodies and full URLs the session keeps, counting identical content once |
-| **Response body budget** | 1 to 16,384 MiB, default 512 | How much of the response bodies the session keeps, counting identical bodies once |
-| **Capture media and fonts** | Off by default | Also keep the images, audio, video and fonts that pages load; they count against the response body budget |
-
-Past a budget the browser still lists each later body or URL and names it as
-not kept, never silently. The budgets stay on this Mac with the session, and
-the launcher grows the session's artifact store by both, so a raised budget can
-use that much more disk. A value outside its range, or not a whole number, is
-named at its field with the rule, and nothing starts. The native side checks a
-Content start again ([`ContentLimits`](macos/LiveSessionCoordinator.swift)) with
-the rules the agent path applies to `request_content_budget_mib`,
-`response_body_budget_mib` and `response_media`, and passes the values to the
-launcher as `REB_REQUEST_CONTENT_BUDGET_MIB`, `REB_RESPONSE_BODY_BUDGET_MIB`
-and `REB_CAPTURE_RESPONSE_MEDIA`, replacing any inherited value. The panel
-first shows those variables when the launcher would accept them, else the
-defaults; the limits it starts with hold for later Content sessions in the same
-app run, including Retry and a Dock reopen, as the mode does. Until the panel
-starts a Content session, the automatic launch takes the variables as they are.
-**Metadata only** keeps no content, so the panel shows none of the limits, and
-a session that keeps no request content, whatever started it, is given none of
-the three variables, inherited ones included, as the agent path removes them.
-The starting and failed panels name the limits the session runs with, and
-only for a session that keeps request content; the launch log's `Request content capture` and
-`Response body capture` lines record them, and `get_session_context` reports
-them as `capture_options.content_limits`, so a researcher or an agent can tell
-which budgets the session ran with.
+A Content session keeps every body whole: there is no size, count or budget
+to choose, so the panel offers no content limit, and images, audio, video and
+fonts are always kept. Content stays on this Mac with the session. With
+Content chosen the panel names the one bound: the artifact receiver keeps
+4 GiB of disk free by default, and names each body it could not store
+([disk reserve](../../services/artifact-receiver/README.md#disk-reserve)).
+`REB_ARTIFACT_DISK_RESERVE_MIB` in the app's environment sets another reserve;
+like the other session switches, the panel does not name it. Metadata only
+keeps no content and names no reserve. Besides the session options below, the
+native side accepts a start that names only the mode
+([`LivePanelStart`](macos/LiveSessionCoordinator.swift)), and refuses any other
+key, the removed `request_content_budget_mib`, `response_body_budget_mib` and
+`response_media` included, so a stale page starts nothing. The starting and
+failed panels name the mode.
 
 The start panel saves its capture mode and Advanced options for later app runs
 in `~/Library/Application Support/Origin Trace/live-session-preferences-v1.json`
 (user-only; `REB_LIVE_SESSION_PREFERENCES` names another path), and opens with
-them. The content limits are not saved, and neither is **Fresh profile**: it
-holds for the rest of that app run, and the next run's automatic session opens
-the research profile again. While any choice differs from its
+them. **Fresh profile** is not saved: it holds for the rest of that app run,
+and the next run's automatic session opens the research profile again. While any choice differs from its
 default, **Advanced options** says how many (for example **2 changed**).
 `REB_AUTOMATIC_CAPTURE_MODE=metadata`
 selects Metadata for the automatic launch and preselects it in the start panel.
@@ -1271,16 +1292,15 @@ that fails or gets an error status keeps the last read copy and its reason
 and is read again on the next refresh; a size or SHA-256 mismatch, whether the
 bytes differ, the store reports `artifact_integrity`, or the request record's digest
 differs from the artifact's, shows no bytes and is not reread. A path and query past the 116-byte row prefix is loaded from
-its retained full target for General's Request URL and Copy URL, or General
+its retained full target for General's Request URL and the row menu's Copy URL, or General
 says why it was not retained. Sources never lists or opens request bodies or
 full targets.
 
 Canvas image capture is on in Content sessions and `make live`, and off in
 Metadata sessions, because rendered output can contain page content. Retained
-output stays in the local session artifact store, is
-limited to 2 MiB per image, and is joined to its exact `toDataURL` event. The UI
-continues to show operation names when image capture is off or an image exceeds
-the limit.
+output stays in the local session artifact store, is kept whole at any size,
+and is joined to its exact `toDataURL` event. The UI continues to show
+operation names when image capture is off or an image was not kept.
 
 The packaged app and `make live` ignore page `debugger;` statements by
 default. To let pages pause a development live capture:
@@ -1421,9 +1441,10 @@ Hex shows 256 KiB at a time with **Previous** and **Next**, paged to the end of
 the retained body, and Copy copies the window shown. Find counts every match of
 the whole text, its layout or every hex row in the background, as Sources does
 (`N of M+ · finding X%` until the exact count), marks only the rows on screen,
-and opens the hex window of a match. A body
-still arriving says how many bytes had arrived, when, and whether it was sealed
-at the 16 MiB limit, and a body whose snapshot a byte bound withheld says so. Text that is
+and opens the hex window of a match. A body still arriving says how many bytes
+had arrived, when, and, in a session an older browser recorded, whether it was
+sealed at that browser's 16 MiB limit, and a body whose snapshot a byte bound
+withheld says so. Text that is
 not valid UTF-8 shows with replacement characters and a notice, and a cut,
 partial, aborted or cancelled body may end inside a character without reading
 as binary. Preview shows the
@@ -1438,7 +1459,8 @@ still pending, and the rest
 A memory-cache reuse that names the request whose response it reused shows
 that request's retained bytes, labelled as the reused request's, with
 **Open the request it reused** and the source's state (complete, cut at
-16 MiB, a snapshot and when it was recorded, stopped, or not retained); a
+16 MiB by an older browser, a snapshot and when it was recorded, stopped, or
+not retained); a
 named row on another host or started after the reuse is not its source, and
 one not recorded says so. A service worker's answer lists the worker's own
 requests for the same URL made while it was open, from the request index, each
@@ -1488,7 +1510,7 @@ The layout follows familiar [network inspection conventions](https://developer.c
 while keeping Origin Trace's own controls and Rosé Pine Moon palette.
 
 Traffic lists every request of the session from the backend request index
-(`get_requests`, [request index v1](../../protocol/request-index-v1.md)). The
+(`get_requests`, [request index v2](../../protocol/request-index-v2.md)). The
 ledger reads one 500-row page of the index around the view and mounts only
 the fixed-height rows in view plus 8 on each side, with spacers for the rest,
 so every request is reachable. Each row names its place in the whole list
@@ -1527,9 +1549,21 @@ categories in Fingerprinting. The configured sampling budgets
 sampled. That includes the per-function and per-call-site Wasm budgets. A
 function, module, call-site, or stream refusal also keeps a compact overflow
 identity up to a ring of 32, and identities past the ring are a count; those
-records are not full observations. `reset_wasm_sample_budgets` publishes that
-count and starts both rings again. See
+records are not full observations. Each one-second window has its own ring
+and count, and starts the Wasm budgets again; `reset_wasm_sample_budgets`
+closes the window at once. See
 [overflow identities](../../protocol/native-wasm-dispatch-v1.md#overflow-identities).
+For a live session that records a Wasm stream, VM Lab shows the session
+context's `capture_options.wasm_sampling` under its notice: the streams, the
+records each window keeps, the per-function and per-call-site allowances (an
+unnamed per-function allowance is the browser's 64), and the function and
+module filters. Its Reset sample budgets button posts
+`reset_wasm_sample_budgets` and shows the new reset generation or the
+backend's refusal, for example while capture is stopped, under the policy;
+the button keeps its place at the end of the first line, and a narrow strip
+wraps only between the policy's parts. It is disabled when the session has no
+reset file, and a malformed label is named rather than shown. The strip is
+hidden for every other session.
 Filter reasons (`native_wasm_dispatch_filtered`, `native_wasm_indirect_filtered`,
 and their `_browser_` counterparts) are sample-policy exclusions: the
 execution was not sampled and did not consume a sample slot. The notice and
@@ -1537,8 +1571,9 @@ footer count them separately from sampling budgets and from reported losses.
 Every other reason, including transport, input, document, module, expiry,
 compiled-before-arming, capacity and parent-link reasons and any reason this
 build does not know, reads as reported lost evidence with its raw reason as text.
-The Swift stored-evidence reader uses the same newest-general and
-newest-network windows, 64 MiB tail, and summary scope as the Rust endpoint.
+Stored-evidence native mode forwards the event poll to the bundled Rust
+backend, so its windows and whole-store counts are the same answer; the app
+adds only its own broker state and capture mode.
 A response that omits those fields is still labeled visible-window-only, and
 no whole-capture count is inferred for it. Filtering
 and sorting cover the whole session through the index. Rows and capture-tab controls are
@@ -1554,7 +1589,7 @@ Arrow keys select adjacent request rows; inspector tabs use Left/Right and
 Home/End. Escape closes the inspector and returns focus to the ledger. The close
 button has the same behavior. A dismissed inspector stays closed across
 refreshes; selecting a request reopens it. Full URLs remain available in General
-and Copy URL, and host-only metadata never implies a captured path or query.
+and the row menu's Copy URL, and host-only metadata never implies a captured path or query.
 
 Collection uses a saved-request library and a template editor; it never sends
 a request. Headers, Body, and Variables are keyboard-accessible request
@@ -1714,34 +1749,33 @@ selects or moves a bucket, Shift+Arrow grows or shrinks the range, and Escape
 or **Clear range** removes it. The footer reads `N / M requests · X transferred
 · Y resources` for the matching requests of the whole session.
 
-When a content session's budget runs out, the browser lists each later body or
-URL and names it as not kept. The footer then adds a line naming each used
-budget, for example `Response body budget (512 MiB) used, 511.8 MiB kept: 2,400
-response bodies not kept · Raise it in New Live Session… for the next session.`
+A content session keeps every body whole. When the artifact receiver refuses a
+body to keep its free-disk reserve, the browser still lists it and names it as
+not kept, and the footer adds a line, for example `Disk reserve reached: 2,400
+bodies not stored, to keep the free-disk reserve. Free disk space to keep later
+bodies.` A session an older browser recorded may name that browser's content
+budgets instead, as `Older content budget: N bodies or URLs not kept by the
+browser that recorded this session. Current capture keeps every body whole.`
 
-- The counts are the whole session's, from `get_session_summary`'s budget
-  checks, like the `N / M requests` beside them. Traffic reads the summary once
-  in every session, a stored one included, so a budget met outside the loaded
-  rows still shows, and again at most every 30 s while it shows in a content
-  session or while a budget shows as used.
+- The counts are the whole session's, from `get_session_summary`'s
+  `request_content_not_retained` checks, like the `N / M requests` beside
+  them. Traffic reads the summary once in every session, a stored one
+  included, so a refusal outside the loaded rows still shows, and again at
+  most every 30 s while it shows in a content session or while a refusal
+  shows.
 - A count is exact only while nothing has arrived since the summary was read:
   it records the event poll's tag then, and in a live session a later change
   of that tag makes it `at least N` until the next read. So do a failed re-read
   (which keeps the last figure), a summary whose scan stopped at its 64 MiB
   bound, and the loaded rows before the first read answers.
-- The size is the session context's `capture_options.content_limits`
-  (`get_session_context`), read once after the first valid poll; a session that
-  is not live, or keeps no content, names the budget without a size. The bytes
-  kept are the unique bytes of that budget's artifacts, from the summary.
-- The Payload tab and the Request URL row name the request content budget the
-  same way, and the Response tab names **Response body budget** and **Capture
-  media and fonts**; each remedy applies to the next session.
+- The Payload and Response tabs and the Request URL row name the same reason
+  for one body; no line asks to raise a setting, since none exists.
 - In the short stacked layout (at most 1,100 by 650 px) with a request open, the
-  line becomes a one-line **Budgets used** button (or the one budget's name)
-  beside the footer's own, so the ledger keeps its rows. Return or Space opens
-  the whole sentence above the footer; Escape, focus leaving it, a press
-  anywhere else or closing the request closes it, so it never stays over the
-  rows unasked.
+  line becomes a one-line **Bodies not kept** button (or the one reason's
+  label) beside the footer's own, so the ledger keeps its rows. Return or
+  Space opens the whole sentence above the footer; Escape, focus leaving it, a
+  press anywhere else or closing the request closes it, so it never stays over
+  the rows unasked.
 
 The filter box matches the method, URL or host and status as literal,
 case-insensitive text. `-text` excludes rows that contain it. `domain:` (with
@@ -1786,6 +1820,7 @@ capture, fetch anything or change a row.
 | `traffic_filter.js` | The filter grammar, Invert, Hide internal, 3rd-party, Failed and the time range over the newest window, mirroring the request index |
 | `traffic_columns.js` | Column widths, hidden columns, the header menu, saved layout and fitting columns to the table width |
 | `traffic_overview.js` | The timing strip and its pointer and keyboard time-range selection |
+| `traffic_copy.js` | The row menu (right-click, Shift+F10 and the strip's Copy): Copy URL, Copy as cURL and Copy as fetch from the row's HAR entry, and Export HAR… |
 | `evidence_names.js` | Researcher names: exact identities, the closed names document, its Analyst-library store, the inline rename editor and the command palette provider |
 | `wasm_function_names.js` | Wasm function names in Inspect, the Graph and its function list, Flow cards, Initiator frames and cross-references: inert name spans, the F2 and Rename entry points, and in-place refresh after a rename |
 | `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |
@@ -1826,7 +1861,7 @@ session budget, queue, channel or URL), network blocks that arrived after
 their request ended ("late header records on no row"), and requests that
 ended with only provisional headers, by reason (HTTP cache, service worker,
 download, failed, not reported); `get_session_summary` has the same counts
-over the newest 64 MiB. Sources reads retained artifact bytes only. A failed
+over the whole session. Sources reads retained artifact bytes only. A failed
 refresh preserves the last valid catalog, and a detached pending load is
 cancelled and cannot restore obsolete source text. Artifact loads, including
 Canvas previews, have no deadline: they show bytes read so far and can be
@@ -2376,8 +2411,8 @@ worker makes AST operations unavailable with an explicit error. Deob stays insid
 
 ## Track calls to a function
 
-To follow calls of a page function such as `window.hsw` in the next capture,
-open its captured script in **Sources** and either type the name in the
+To follow calls of a page function such as `window.hsw`, open its captured
+script in **Sources** and either type the name in the
 **Track function calls** pane of **Details** and press Return, or put the
 cursor in the function (click it, or use **Go to line**) and
 choose **Track calls** in **More**. The position must be in the original
@@ -2389,18 +2424,24 @@ bare-parameter or `async` arrow, a generator, a class constructor or a class
 initializer is refused with its reason, as is top-level code. Context lines
 and labels are captured text, inserted as text.
 
-Saving changes nothing in the open page or the running capture. The pane says
-tracking starts with the next capture: the start panel that **New Live
-Session…** opens shows "Tracking N functions" with each label and
-script URL, a Remove for each and Clear All (which asks once more), and the
-capture it starts arms a private copy of the set. The native app reads and
+Saving changes nothing in the open page. A capture the app started follows the
+saved set: the pane says it tracks a saved function at once, and a removed one
+stops recording new calls while a call already running still settles. A
+function the page compiled before it was saved is tracked after the page
+reloads. A function saved once the capture has used all 256 site slots waits
+for the next capture, and the pane says so. With a Brave built before site
+revisions the pane says tracking starts with the next capture. The start panel
+that **New Live Session…** opens shows "Tracking N functions" with each label
+and script URL, a Remove for each and Clear All (which asks once more), and
+the capture it starts arms a private copy of the set, which its backend
+rewrites as a slot table when the set changes. The native app reads and
 rewrites the saved file for the panel; a Remove names the list the panel
 showed, so a list that changed since is refused rather than edited. Content mode also records
 the calls' settled-value digests; Metadata mode does not. The titlebar names
 what the running capture tracks, says when its Brave predates invocation
 capture and started without the sites, and warns when this session retained
 another version of a saved script, which the saved site will not match. At
-most 8 functions are saved, in
+most 256 functions are saved, the most one capture can arm, in
 `~/Library/Application Support/Origin Trace/js-invocation-sites-v1.json` with a
 label sidecar; `REB_JS_INVOCATION_SITE_STORE` names another file. Stored-evidence
 native mode has no backend for these routes and says so. The routes and
@@ -3288,7 +3329,7 @@ supply arguments, return values, exceptions or Promise settlement. Observer,
 placement, producer and historical build remain unknown. IDs and original hashes
 are available in **Provenance & exact identifiers**; they do not crowd every row.
 **Coverage & gaps** separates missing parent references, queue markers, sequence
-holes, arrival discontinuities, unavailable request records and the retained-window limit without adding
+holes, arrival discontinuities and which range of the store is in view without adding
 them into a loss total or inventing capture completeness. Numeric holes are counted
 from sorted unique session/process IDs, so a later-arriving record can fill one;
 absent numbers alone do not prove capture loss. Long request headings ellipsize
@@ -3297,9 +3338,19 @@ scrollable disclosure above the workspace and never consumes the pane height;
 Escape closes it and restores the summary focus. Records remain in retained
 order within relationship groups, not a cross-process execution timeline.
 
-The view inspects at most 5,000 events and 500 artifact descriptors, renders 50
-observations per page, bounds each parent lookup to 32 links and does not fetch
-missing evidence. Search filters existing observations only. Arrow keys, Home and
+The view holds one range of up to 5,000 stored records at a time: the newest,
+which each poll replaces, or an older one. When the store holds more, the range
+bar above the list says where the range lies in the stored session, by byte
+position, and **Oldest**, **Earlier**, **Later** and **Newest** move through it
+with the event route's `after` and `before` cursors (`GET /api/events`), one read
+at a time; a newer move supersedes a read still running, a failed read keeps the
+view and says why, and a read that reaches the end of the store is the live newest
+range again. A clear or another store returns to the newest range, since cursors
+do not survive it. The selected request's own lifecycle records, read by ID from
+the request index, stay in view in every range. Artifact references resolve
+against the whole catalog. The view renders 50 observations per page, bounds each
+parent lookup to 32 links and does not fetch a missing parent; the range that holds
+it shows it. Search filters existing observations only. Arrow keys, Home and
 End move through the displayed order. At 760 px and below, **Observations / Selected
 record** switches between full-width panes. Unchanged refreshes preserve inspector
 DOM, disclosures, focus and scroll. Eviction explicitly clears the selected record

@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import signal
 import socket
 import struct
@@ -27,9 +28,11 @@ ROOT = Path(__file__).resolve().parent.parent
 OVERLAY = ROOT / "browser/integration/brave/overlay"
 HEADERS = (
     "base/containers/span.h",
+    "base/thread_annotations.h",
     "base/no_destructor.h",
     "base/location.h",
     "base/task/sequenced_task_runner.h",
+    "base/task/bind_post_task.h",
     "base/files/file_path.h",
     "base/functional/bind.h",
     "base/process/process_handle.h",
@@ -62,6 +65,7 @@ HEADERS = (
     "brave/components/reverse_engineering_browser/browser/native_probe_session.h",
     "brave/components/reverse_engineering_browser/common/native_probe_transport.mojom.h",
     "base/functional/callback.h",
+    "base/functional/callback_helpers.h",
     "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h",
     "base/memory/raw_ref.h",
     "base/memory/scoped_refptr.h",
@@ -129,11 +133,8 @@ def check_schedule_table(replays: list[dict]) -> None:
         actual = (replay["snapshots"], replay["copied_bytes"] // mib, replay["stale_ns"] // second)
         if expected != actual:
             raise SystemExit(f"native-network-v3.md sizing row {replay['name']} says {expected}, the replay {actual}")
-        sealed = re.search(r"sealed after (\d+) s", row[4])
-        if (replay["sealed_ns"] is None) != (sealed is None) or (
-            sealed and int(sealed[1]) != replay["sealed_ns"] // second
-        ):
-            raise SystemExit(f"native-network-v3.md sizing row {replay['name']} names the seal wrongly")
+        if replay["withheld"] != ("snapshots withheld" in row[4]):
+            raise SystemExit(f"native-network-v3.md sizing row {replay['name']} names withheld snapshots wrongly")
     print(f"PASS partial body sizing table matches the replay of {len(replays)} streams")
 
 
@@ -176,6 +177,10 @@ def compile_driver(build: Path) -> Path:
         f"-I{ROOT / 'tools/native-test-support'}",
         f"-I{include}",
         f"-I{ROOT / 'include'}",
+        # The adapter includes native_artifact_stream.h after the base types
+        # it needs, so every unit reads it first, even the stream's own.
+        "-include",
+        str(fixture / "chromium_stubs.h"),
         str(fixture / "main.cc"),
         str(sources / "browser/native_network_capture_sink.cc"),
         str(sources / "common/native_network_headers_hook.cc"),
@@ -235,23 +240,27 @@ ARTIFACT_MAGIC = 0x41424552
 ACK_MAGIC = 0x4B414252
 HELLO_MAGIC = 0x52454249
 KIND_JAVASCRIPT = 1
+KIND_RESPONSE_BODY = 4
 STATUS_ACCEPTED = 0
 STATUS_INVALID = 2
-STATUS_TOO_LARGE = 3
+STATUS_SENSITIVE_DISABLED = 4
+STATUS_CONFLICT = 5
+FLAG_SENSITIVE = 1
 TEST_TOKEN = bytes([0xAA]) * 32
 
 
 def artifact_frame(
-    artifact_id: int, content: bytes, *, session_id: int = 7, declared: int | None = None
+    artifact_id: int, content: bytes, *, session_id: int = 7, flags: int = 0,
+    kind: int = KIND_JAVASCRIPT,
 ) -> bytes:
     url = f"https://fixture.test/{artifact_id}.js".encode()
     mime = b"text/javascript"
-    size = len(content) if declared is None else declared
+    size = len(content)
     # magic, version, header size, kind, flags, reserved; six identifiers and
     # the content size; metadata sizes, digest, context, origin, reserved.
     header = struct.pack(
         "<IHHHHI7QII32sQHHI",
-        *(ARTIFACT_MAGIC, 1, 128, KIND_JAVASCRIPT, 0, 0),
+        *(ARTIFACT_MAGIC, 1, 128, kind, flags, 0),
         *(session_id, 0, 0, artifact_id, 0, 0, size),
         *(len(url), len(mime), bytes(32), 0, 0, 0, 0),
     )
@@ -309,6 +318,8 @@ def check_receiver_socket(receiver: str) -> None:
         token.write_text("a" * 64)
         token.chmod(0o600)
         socket_path = root / "artifact.sock"
+        large = bytes(range(256)) * (20 * 4096)
+        tail_digest = hashlib.sha256(b"x" * 70000).digest()
         child = subprocess.Popen(
             [
                 receiver,
@@ -320,8 +331,10 @@ def check_receiver_socket(receiver: str) -> None:
                 str(token),
                 "--session-id",
                 "7",
-                "--max-artifact-bytes",
-                "65536",
+                # The reserve is not under test here; keep the check
+                # independent of the volume's free space.
+                "--disk-reserve-bytes",
+                "1",
             ],
             stderr=subprocess.PIPE,
         )
@@ -343,17 +356,20 @@ def check_receiver_socket(receiver: str) -> None:
             with connect() as connection:
                 connection.sendall(artifact_frame(1, b"one();"))
                 assert read_ack(connection) == (STATUS_ACCEPTED, 1)
-                # Over the 64 KiB limit but within the discard bound: the
-                # receiver reads the body, answers, and keeps the connection.
-                connection.sendall(artifact_frame(2, b"x" * (256 * 1024)))
-                assert read_ack(connection) == (STATUS_TOO_LARGE, 2)
+                # A refused frame: the receiver reads the body, answers, and
+                # keeps the connection.
+                connection.sendall(
+                    artifact_frame(
+                        2, b"x" * (256 * 1024), flags=FLAG_SENSITIVE, kind=KIND_RESPONSE_BODY
+                    )
+                )
+                assert read_ack(connection) == (STATUS_SENSITIVE_DISABLED, 2)
                 connection.sendall(artifact_frame(3, b"three();"))
                 assert read_ack(connection) == (STATUS_ACCEPTED, 3)
-                # A declared body past the discard bound cannot come from a
-                # supported sender; the receiver answers and closes.
-                connection.sendall(artifact_frame(4, b"", declared=32 * 1024 * 1024)[:128])
-                assert read_ack(connection) == (STATUS_TOO_LARGE, 4)
-                assert read_ack(connection) is None, "an undiscardable frame closes"
+                # The store has no artifact size limit: a whole frame past the
+                # 16 MiB older receivers refused is kept.
+                connection.sendall(artifact_frame(4, large))
+                assert read_ack(connection) == (STATUS_ACCEPTED, 4)
             with connect() as connection:
                 connection.sendall(bytes(128))
                 assert read_ack(connection) == (STATUS_INVALID, 0)
@@ -365,8 +381,9 @@ def check_receiver_socket(receiver: str) -> None:
             with connect() as connection:
                 connection.sendall(artifact_frame(6, b"six();"))
                 assert read_ack(connection) == (STATUS_ACCEPTED, 6)
-                # Two interleaved streams and a checkpoint, a refused end and an
-                # oversize stream on the same connection, and one left open.
+                # Two interleaved streams and a checkpoint, a refused end, a
+                # conflicting open and an unknown stream on the same
+                # connection, and one left open.
                 head = b"head();" * 9000
                 digest = hashlib.sha256(head).digest()
                 for frame, expected in (
@@ -380,7 +397,12 @@ def check_receiver_socket(receiver: str) -> None:
                     (stream_frame(OP_END, 11, size=9, digest=bytes([1]) * 32), (STATUS_INVALID, 11)),
                     (open_frame(13), (STATUS_ACCEPTED, 13)),
                     (stream_frame(OP_DATA, 13, b"x" * 60000), (STATUS_ACCEPTED, 13)),
-                    (stream_frame(OP_DATA, 13, b"x" * 10000), (STATUS_TOO_LARGE, 13)),
+                    (open_frame(13), (STATUS_CONFLICT, 13)),
+                    (stream_frame(OP_DATA, 13, b"x" * 10000), (STATUS_ACCEPTED, 13)),
+                    (
+                        stream_frame(OP_END, 13, size=70000, digest=tail_digest),
+                        (STATUS_ACCEPTED, 13),
+                    ),
                     (stream_frame(OP_DATA, 13, b"y"), (STATUS_INVALID, 13)),
                     (open_frame(14), (STATUS_ACCEPTED, 14)),
                     (stream_frame(OP_DATA, 14, b"open();"), (STATUS_ACCEPTED, 14)),
@@ -393,23 +415,181 @@ def check_receiver_socket(receiver: str) -> None:
         assert child.returncode == 0, errors.decode()
         log = errors.decode()
         assert log.count("rejected; connection kept") == 4, log
-        assert log.count("closed after an unsynchronized frame") == 3, log
-        assert "accepted=5 " in log and "too_large=3 " in log and "invalid=4 " in log, log
+        assert log.count("closed after an unsynchronized frame") == 2, log
+        assert "accepted=7 " in log and "invalid=4 " in log, log
+        assert "sensitive_rejected=1 " in log and "conflicts=1 " in log, log
         assert "streams_abandoned=1 " in log, log
         manifest = [
             json.loads(line)
             for line in (root / "artifacts/manifest.jsonl").read_text().splitlines()
         ]
-        assert [item["artifact_id"] for item in manifest] == ["1", "3", "6", "12", "10"]
-        assert manifest[3]["byte_size"] == 40000 and manifest[4]["byte_size"] == len(head)
-        assert manifest[3]["sha256"] == hashlib.sha256(head[:40000]).hexdigest()
-        assert manifest[4]["sha256"] == digest.hex()
+        assert [item["artifact_id"] for item in manifest] == ["1", "3", "4", "6", "12", "10", "13"]
+        assert manifest[2]["byte_size"] == len(large)
+        assert manifest[2]["sha256"] == hashlib.sha256(large).hexdigest()
+        assert manifest[4]["byte_size"] == 40000 and manifest[5]["byte_size"] == len(head)
+        assert manifest[4]["sha256"] == hashlib.sha256(head[:40000]).hexdigest()
+        assert manifest[5]["sha256"] == digest.hex()
+        assert manifest[6]["byte_size"] == 70000 and manifest[6]["sha256"] == tail_digest.hex()
         assert not list((root / "artifacts").glob("*.part")), "no stream outlives its connection"
     print(
         "PASS artifact receiver socket: a valid rejected frame is discarded and answered on the "
-        "same connection; invalid, mismatched and undiscardable frames close it; interleaved "
-        "version 2 streams publish a checkpoint and an end with exact digests, stream refusals "
-        "keep the connection, and a stream open at disconnect is abandoned"
+        "same connection; invalid and mismatched frames close it; a 20 MiB whole frame is "
+        "kept; interleaved version 2 streams publish a checkpoint and ends with exact "
+        "digests, stream refusals keep the connection, and a stream open at disconnect is "
+        "abandoned"
+    )
+
+
+def check_receiver_stop(receiver: str) -> None:
+    """SIGTERM stops the receiver while the browser's connection stays open and idle.
+
+    The browser holds one authenticated connection for the whole session, and
+    the receiver waits on it with no timeout. A stop that lands while the
+    receiver is consuming an artifact, rather than blocked in a read, must
+    still end that wait: a handler that only set a flag lost it, and the
+    receiver waited for a next frame that an idle browser never sends.
+
+    That window runs from the frame's last byte to the answer, a few
+    milliseconds, and a loaded machine often answers before the check can stop
+    it. An attempt that missed the window stops a receiver blocked in a read,
+    which a flag alone also does, so the check repeats until one lands in it.
+    """
+    frame = artifact_frame(1, b"stop();" * (5 * 1024 * 1024))
+    for attempt in range(1, 21):
+        stopped = receiver_stop_attempt(receiver, frame)
+        if stopped is not None:
+            break
+    else:
+        raise AssertionError("the receiver answered before each of 20 stops, so nothing raced")
+    print(
+        "PASS artifact receiver stop: SIGTERM while it consumes an artifact ends it in "
+        f"{stopped * 1000:.0f} ms with the browser's connection open and idle (attempt {attempt})"
+    )
+
+
+def receiver_stop_attempt(receiver: str, frame: bytes) -> float | None:
+    """Seconds a stop delivered before the answer took to end the receiver, or None."""
+    with tempfile.TemporaryDirectory(prefix="reb-stop-", dir="/tmp") as temporary:
+        root = Path(temporary)
+        token = root / "token"
+        token.write_text("a" * 64)
+        token.chmod(0o600)
+        socket_path = root / "artifact.sock"
+        child = subprocess.Popen(
+            [
+                receiver,
+                "--store",
+                str(root / "artifacts"),
+                "--socket",
+                str(socket_path),
+                "--token-file",
+                str(token),
+                "--session-id",
+                "7",
+                # The reserve is not under test here; keep the check
+                # independent of the volume's free space.
+                "--disk-reserve-bytes",
+                "1",
+            ],
+            stderr=subprocess.PIPE,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                connection.settimeout(30)
+                # The socket file exists from bind(), before the receiver listens.
+                while connection.connect_ex(str(socket_path)) != 0:
+                    assert child.poll() is None and time.monotonic() < deadline, "receiver socket"
+                    time.sleep(0.01)
+                connection.sendall(
+                    struct.pack("<IHHQ32s16s", HELLO_MAGIC, 1, 64, 7, TEST_TOKEN, bytes(16))
+                )
+                # Once the whole frame is written the receiver never blocks
+                # in a read until it has answered. Freeze it at once: with no
+                # answer written yet, the stop is delivered on continue where
+                # it froze, while it works. The browser then sends nothing more.
+                connection.sendall(frame)
+                child.send_signal(signal.SIGSTOP)
+                _, status = os.waitpid(child.pid, os.WUNTRACED)
+                assert os.WIFSTOPPED(status), f"the receiver ended before the stop: status {status}"
+                raced = not select.select([connection], [], [], 0)[0]
+                started = time.monotonic()
+                child.send_signal(signal.SIGTERM)
+                child.send_signal(signal.SIGCONT)
+                try:
+                    _, errors = child.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    raise AssertionError(
+                        "SIGTERM while the receiver consumed an artifact did not stop it; it "
+                        "waits for a frame the idle browser never sends"
+                    ) from None
+                stopped = time.monotonic() - started
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.communicate()
+        assert child.returncode == 0, errors.decode()
+        assert "Artifact receiver stopped:" in errors.decode(), errors.decode()
+    return stopped if raced else None
+
+
+def check_broker_stop(broker: str) -> None:
+    """SIGUSR1 stops the socket broker at each wait, with the browser connected or not."""
+    for phase in ("connection", "authentication", "events"):
+        with tempfile.TemporaryDirectory(prefix="reb-bstop-", dir="/tmp") as temporary:
+            root = Path(temporary)
+            token = root / "token"
+            token.write_text("a" * 64)
+            token.chmod(0o600)
+            socket_path = root / "broker.sock"
+            child = subprocess.Popen(
+                [
+                    broker,
+                    "--store",
+                    str(root / "events.jsonl"),
+                    "--socket",
+                    str(socket_path),
+                    "--token-file",
+                    str(token),
+                    "--session-id",
+                    "7",
+                    "--category-mask",
+                    "1",
+                    "--duration-seconds",
+                    "3600",
+                ],
+                stderr=subprocess.PIPE,
+            )
+            connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                deadline = time.monotonic() + 10
+                while not socket_path.is_socket():
+                    assert child.poll() is None and time.monotonic() < deadline, "broker socket"
+                    time.sleep(0.01)
+                if phase != "connection":
+                    while connection.connect_ex(str(socket_path)) != 0:
+                        assert child.poll() is None and time.monotonic() < deadline, "listen"
+                        time.sleep(0.01)
+                if phase == "events":
+                    connection.sendall(
+                        struct.pack("<IHHQ32s16s", HELLO_MAGIC, 1, 64, 7, TEST_TOKEN, bytes(16))
+                    )
+                time.sleep(0.1)
+                child.send_signal(signal.SIGUSR1)
+                try:
+                    _, errors = child.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    raise AssertionError(f"SIGUSR1 awaiting {phase} did not stop the broker") from None
+            finally:
+                connection.close()
+                if child.poll() is None:
+                    child.kill()
+                    child.communicate()
+            assert child.returncode == 0, errors.decode()
+            assert "Broker stopped:" in errors.decode(), errors.decode()
+    print(
+        "PASS event broker stop: SIGUSR1 ends the socket broker awaiting a connection, its "
+        "authentication or the next event"
     )
 
 
@@ -623,19 +803,17 @@ def check_request_bodies(output: Path, artifacts: list[dict], events: list[dict]
         assert item["url"] == body["url"] and item["mime_type"] == body["mime_type"]
         assert item["creator_event_id"] == body["body_sequence"]
         data = (output / "artifacts" / item["content_path"]).read_bytes()
-        assert len(data) == body["captured_length"] == item["byte_size"]
-        truncated = body["captured_length"] < body["body_length"]
-        assert body["state"] == (5 if truncated else 4)
-        if not truncated:
-            assert hashlib.sha256(data).hexdigest() == body["sha256"]
+        # Every body is kept whole, and its record carries the digest.
+        assert len(data) == body["captured_length"] == body["body_length"] == item["byte_size"]
+        assert body["state"] == 4
+        assert hashlib.sha256(data).hexdigest() == body["sha256"]
         record = by_sequence[body["body_sequence"]]
         assert record["type"] == "request_body" and record["category"] == "network"
         assert record["artifact_id"] == body["artifact_id"]
         assert record["parent_event_id"] == body["start_sequence"]
         payload = bytes.fromhex(record["payload"])
-        # Past 4 MiB the record carries no digest; the artifact's is checked above.
-        hashed = body["body_length"] <= 4 * 1024 * 1024
-        assert payload[32:64].hex() == (body["sha256"] if hashed else "00" * 32)
+        assert int.from_bytes(payload[0:2], "little") == 2
+        assert payload[32:64].hex() == body["sha256"]
         assert int.from_bytes(payload[8:16], "little") == body["body_length"]
         target = next(
             e
@@ -787,11 +965,13 @@ def main() -> None:
                 )
             check_stores(output, cases)
             check_receiver_socket(args.receiver)
+            check_receiver_stop(args.receiver)
+            check_broker_stop(args.broker)
             check_receiver_recovery(args.receiver)
             check_transport(args.receiver)
         else:
             print(
-                "SKIPPED production service stdio replay, receiver socket/recovery and socket "
+                "SKIPPED production service stdio replay, receiver socket/stop/recovery and socket "
                 "writer transport: --receiver/--broker not supplied"
             )
         if args.analyzer:

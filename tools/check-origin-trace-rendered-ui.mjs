@@ -14,7 +14,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {buildEvidence, HOSTILE_BYTECODE_MARKUP, HOSTILE_SOURCE_MARKER, HOSTILE_SOURCE_URL, HOSTILE_URL, HOSTILE_URL_MARKER, NAMED_GAP_REASONS, SOURCE_LINE_COUNT,
-  SYNTHETIC_REQUEST_COUNT, REQUEST_BODY_HOST, REQUEST_BODY_TARGET, REQUEST_BODY_MARKER, METADATA_BODY_HOST, RESPONSE_BODY_HOST, RESPONSE_BODY_MARKER, BUDGET_HOST, HEADER_VALUE_MARKER, COOKIE_VALUE_MARKER, INVOCATION_ARTIFACT_ID, MINIFIED_ARTIFACT_ID,
+  SYNTHETIC_REQUEST_COUNT, REQUEST_BODY_HOST, REQUEST_BODY_TARGET, REQUEST_BODY_MARKER, METADATA_BODY_HOST, RESPONSE_BODY_HOST, RESPONSE_BODY_MARKER, BUDGET_HOST, DISK_RESERVE_HOST, HEADER_VALUE_MARKER, COOKIE_VALUE_MARKER, INVOCATION_ARTIFACT_ID, MINIFIED_ARTIFACT_ID,
   MEMORY_CACHE_HOST, MEMORY_CACHE_TARGET, SERVICE_WORKER_FAILED_HOST, SERVICE_WORKER_LOST_HOST,
   WORKER_STACK_HOST, WORKER_STACK_PROCESSES, REGISTRANT_HOST, DEBUGGER_PROCESS, DEBUGGER_FRAME, DEBUGGER_ARTIFACT_ID,
   BODY_CASE_PROCESS, REUSED_HOST, REUSED_MARKER, WORKER_ANSWER_HOST, PARTIAL_HOST, HEX_BODY_HOST, HEX_BODY_BYTES,
@@ -125,13 +125,20 @@ try {
   }
 
   const endpointFile = join(temporary, 'endpoint');
+  // The app's captures follow the saved set: each starts from a private copy,
+  // an empty slot table when nothing is saved, that the backend rewrites.
+  const sessionSites = join(temporary, 'js-invocation-session-sites.json');
+  const sessionGeneration = join(temporary, 'js-invocation-sites-generation');
+  await writeFile(sessionSites, '{"sites":[],"version":2}', {mode: 0o600});
+  await writeFile(sessionGeneration, '0\n', {mode: 0o600});
   backend = spawn(join(host, 'Contents/MacOS/OriginTraceBackend'), ['--host', '127.0.0.1', '--port', '0',
     '--endpoint-file', endpointFile, '--store', stores.store, '--trace-store', stores.traceStore,
     '--signal-store', stores.signalStore, '--artifacts', stores.artifacts, '--api-collection', stores.apiCollection,
     '--local-analyst', stores.localAnalyst, '--decoder', join(host, 'Contents/MacOS/OriginTraceDecoder'),
     // Sources and the app's start panel share one saved site set here, as
     // they share Application Support in a real app run.
-    '--js-invocation-site-store', stores.invocationSites],
+    '--js-invocation-site-store', stores.invocationSites,
+    '--js-invocation-session-sites', sessionSites, '--js-invocation-session-generation', sessionGeneration],
   {cwd: temporary, stdio: ['ignore', 'pipe', 'pipe']});
   let backendLog = '';
   for (const stream of [backend.stdout, backend.stderr]) stream.on('data', chunk => { backendLog = (backendLog + chunk).slice(-256 * 1024); });
@@ -266,7 +273,7 @@ fetch("/getcaptcha");
         hostileSourceMarker: HOSTILE_SOURCE_MARKER, hostileBytecodeMarkup: HOSTILE_BYTECODE_MARKUP,
         requestCount: SYNTHETIC_REQUEST_COUNT, sourceLines: SOURCE_LINE_COUNT, namedGapReasons: NAMED_GAP_REASONS,
         requestBodyHost: REQUEST_BODY_HOST, requestBodyTarget: REQUEST_BODY_TARGET, requestBodyMarker: REQUEST_BODY_MARKER,
-        metadataBodyHost: METADATA_BODY_HOST, responseBodyHost: RESPONSE_BODY_HOST, responseBodyMarker: RESPONSE_BODY_MARKER, budgetHost: BUDGET_HOST,
+        metadataBodyHost: METADATA_BODY_HOST, responseBodyHost: RESPONSE_BODY_HOST, responseBodyMarker: RESPONSE_BODY_MARKER, budgetHost: BUDGET_HOST, diskReserveHost: DISK_RESERVE_HOST,
         headerValueMarker: HEADER_VALUE_MARKER, cookieValueMarker: COOKIE_VALUE_MARKER, cachedHeadersHost: CACHED_HEADERS_HOST,
         invocationArtifactId: INVOCATION_ARTIFACT_ID, minifiedArtifactId: MINIFIED_ARTIFACT_ID,
         memoryCacheHost: MEMORY_CACHE_HOST, memoryCacheTarget: MEMORY_CACHE_TARGET, serviceWorkerFailedHost: SERVICE_WORKER_FAILED_HOST,

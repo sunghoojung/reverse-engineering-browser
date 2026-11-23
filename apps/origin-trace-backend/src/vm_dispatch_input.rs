@@ -278,11 +278,17 @@ mod tests {
         );
         assert!(has_omission(&document, "sampler-unavailable"));
         assert!(has_omission(&document, "caller-samples-unverified"));
-        assert_eq!(
-            links["workspaces"][0]["links"][0]["reason"],
-            "dispatch-samples-unavailable"
+        // A caller report in process 0 is no parent of a process 7 host
+        // event, so the host event is counted and no row claims a position.
+        let row = &links["workspaces"][0];
+        assert!(row["links"].as_array().unwrap().is_empty());
+        assert_eq!(row["attributed_host_records"], 1);
+        assert!(
+            row["omissions"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("dispatch-samples-unavailable"))
         );
-        assert!(links["workspaces"][0]["links"][0]["guest_position"].is_null());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

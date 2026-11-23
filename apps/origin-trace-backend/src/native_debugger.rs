@@ -15,19 +15,19 @@ use crate::validation;
 
 pub const LEASE_LIMIT_MS: u64 = 60_000;
 
-/// `console` is the Console listing; `watch` is None while a Console action
-/// holds the session. `query` selects which observation records are listed,
+/// `console` is the Console listing; `watch` is the Console's `armed` and
+/// `kept` rules, or None while a Console action holds the session. `query` selects which observation records are listed,
 /// and `pause` owns every pausing field.
 pub fn state(
     store: &Path,
+    indexes: &std::sync::Mutex<crate::event_index::Indexes>,
     console: &Value,
     watch: Option<Value>,
     query: &debugger_observation::Query,
     pause: &NativeDebuggerPause,
 ) -> Result<Value> {
-    let scan = debugger_observation::scan(store)?;
-    let recent = debugger_observation::recent(store, query, &scan)?;
-    let (observed, budget_gaps) = scan.observed();
+    let recent = debugger_observation::recent(store, query)?;
+    let threads = debugger_observation::threads(indexes)?;
     let frames: Vec<Value> = console["targets"]
         .as_array()
         .into_iter()
@@ -38,10 +38,15 @@ pub fn state(
                 "out_of_process": target.get("out_of_process").cloned().unwrap_or(json!(false))})
         })
         .collect();
+    // `state` is the Console's own arm; `kept` is the scope the browser arms
+    // later documents with, which outlives that arm's document.
     let watch = match watch {
-        None => json!({"state": "busy", "armed": null}),
-        Some(Value::Null) => json!({"state": "none", "armed": null}),
-        Some(armed) => json!({"state": "armed", "armed": armed}),
+        None => json!({"state": "busy", "armed": null, "kept": null}),
+        Some(watch) => json!({
+            "state": if watch["armed"].is_null() { "none" } else { "armed" },
+            "armed": watch["armed"],
+            "kept": watch["kept"],
+        }),
     };
     let mut value = json!({
         "contract_version": 1,
@@ -52,14 +57,15 @@ pub fn state(
         "threads": {
             "console": console["binding_state"].as_str().or(console["state"].as_str()).unwrap_or("idle"),
             "frames": frames,
-            "workers": debugger_observation::workers(store)?,
-            "observed": observed,
+            "workers": threads.workers,
+            "observed": threads.observed,
+            "coverage": threads.coverage,
         },
         "watch": watch,
         "observations": recent.records,
         "observations_malformed": recent.malformed,
         "observations_query": recent.query,
-        "observation_budget_gaps": budget_gaps,
+        "observation_budget_gaps": threads.budget_gaps,
     });
     // The peer owns every pausing field, so an unreadable peer cannot leave a
     // stale document, breakpoint or lease behind in this view.
@@ -81,6 +87,55 @@ pub fn action(value: &Value, pause: &NativeDebuggerPause) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn threads_list_a_frame_and_worker_behind_more_than_a_scan_budget() {
+        let store = tempfile::tempdir().unwrap();
+        let path = store.path().join("events.jsonl");
+        let record = |kind: &str, category: &str, sequence: u64, frame: &str, payload: &[u8]| {
+            json!({"protocol_version":3,"category":category,"type":kind,"session_id":"1",
+                "sequence_number":sequence.to_string(),"monotonic_time_ns":"1","navigation_id":"0",
+                "frame_id":frame,"artifact_id":"0","request_id":"0","parent_event_id":"0","process_id":2,
+                "payload_encoding":"hex","payload":hex::encode(payload),"payload_size":payload.len(),
+                "loader_kind":18})
+        };
+        let mut thrown = vec![1, 0, 128, 0, 2, 8];
+        thrown.resize(80, 0);
+        thrown.push(1);
+        thrown.resize(128, 0);
+        let mut text = format!(
+            "{}\n{}\n",
+            record("exception_observation", "runtime", 1, "5", &thrown),
+            record("request_initiated", "network", 2, "88", &[])
+        );
+        let mut sequence = 2;
+        while text.len() as u64 <= crate::event_query::SCAN_BYTES + (1 << 20) {
+            sequence += 1;
+            let mut filler = record("api_call", "wasm", sequence, "6", &[]);
+            filler["pad"] = json!("x".repeat(3000));
+            text.push_str(&format!("{filler}\n"));
+        }
+        std::fs::write(&path, text).unwrap();
+        let indexes = std::sync::Mutex::new(crate::event_index::Indexes::new(
+            &path,
+            &store.path().join("origin-trace.jsonl"),
+            &store.path().join("request-signals.jsonl"),
+        ));
+        indexes
+            .lock()
+            .unwrap()
+            .catch_up(std::time::Instant::now() + std::time::Duration::from_secs(120))
+            .unwrap();
+        let every = debugger_observation::Query::default();
+        let pause = NativeDebuggerPause::new(None);
+        let current = state(&path, &indexes, &json!({}), None, &every, &pause).unwrap();
+        let threads = &current["threads"];
+        assert_eq!(threads["coverage"]["scope"], "store", "{threads}");
+        assert_eq!(threads["observed"][0]["frame_id"], "5", "{threads}");
+        assert_eq!(threads["observed"][0]["last_sequence"], "1");
+        assert_eq!(threads["workers"][0]["kind"], "shared_worker");
+        assert_eq!(threads["workers"][0]["context_id"], "88");
+    }
 
     #[test]
     fn state_is_unsupported_and_actions_send_nothing() {
@@ -123,7 +178,20 @@ mod tests {
             {"id":"23","label":"frame #23","origin":"https://b.test","frame":"child","out_of_process":true}]});
         let every = debugger_observation::Query::default();
         let pause = NativeDebuggerPause::new(None);
-        let current = state(&path, &console, Some(Value::Null), &every, &pause).unwrap();
+        let indexes = std::sync::Mutex::new(crate::event_index::Indexes::new(
+            &path,
+            &store.path().join("origin-trace.jsonl"),
+            &store.path().join("request-signals.jsonl"),
+        ));
+        // A read folds the index for at most 100 ms; a loaded test run must
+        // not leave the listing partial.
+        indexes
+            .lock()
+            .unwrap()
+            .catch_up(std::time::Instant::now() + std::time::Duration::from_secs(120))
+            .unwrap();
+        let current = state(&path, &indexes, &console, Some(Value::Null), &every, &pause).unwrap();
+        assert_eq!(current["threads"]["coverage"]["scope"], "store");
         assert_eq!(current["availability"], "unsupported");
         assert_eq!(current["lease"], Value::Null);
         assert_eq!(current["threads"]["frames"][1]["out_of_process"], true);
@@ -158,7 +226,8 @@ mod tests {
             before,
             limit,
         };
-        let read = |query| state(&path, &console, Some(Value::Null), &query, &pause).unwrap();
+        let read =
+            |query| state(&path, &indexes, &console, Some(Value::Null), &query, &pause).unwrap();
         let exceptions = read(query(Some("exception_observation"), None, None, 32));
         assert_eq!(exceptions["observations"].as_array().unwrap().len(), 1);
         assert_eq!(
@@ -184,8 +253,23 @@ mod tests {
             "the next older record is refused"
         );
         assert_eq!(page["observations_malformed"], 1);
-        let busy = state(&path, &json!({}), None, &every, &pause).unwrap();
+        // A kept scope outlives the document it was armed from.
+        let kept = json!({"session_id":"4","target_id":"22","origin":"https://a.test",
+            "frame":"top","rules":{"events":["click"]}});
+        let keeping = state(
+            &path,
+            &indexes,
+            &console,
+            Some(json!({"armed":null,"kept":kept})),
+            &every,
+            &pause,
+        )
+        .unwrap();
+        assert_eq!(keeping["watch"]["state"], "none");
+        assert_eq!(keeping["watch"]["kept"], kept);
+        let busy = state(&path, &indexes, &json!({}), None, &every, &pause).unwrap();
         assert_eq!(busy["watch"]["state"], "busy");
+        assert_eq!(busy["watch"]["kept"], Value::Null);
         assert_eq!(busy["threads"]["console"], "idle");
         let error = action(
             &json!({"action":"resume","target_id":"22","lease_id":"1"}),

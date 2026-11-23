@@ -68,7 +68,7 @@ a workstation build from pinned sources, not a Brave Software release.
 
 | In Origin Trace | You get |
 | --- | --- |
-| **Traffic** | Each request by tab, host, and type. The default session keeps the method, full path and query, request body and response body, up to 16 MiB each, with Response and Preview tabs. It also keeps request and response headers, including `Cookie`, `Set-Cookie` and `Authorization`, and cookie lists. All of it stays on this machine. |
+| **Traffic** | Each request by tab, host, and type. The default session keeps the method, full path and query, request body and response body, each kept whole with media and fonts, with Response and Preview tabs. It also keeps request and response headers, including `Cookie`, `Set-Cookie` and `Authorization`, and cookie lists. All of it stays on this machine. |
 | **Fingerprints** | Calls and property reads for Canvas, WebGL, Web Audio, device and layout, Permissions, Storage, WebRTC, and runtime checks. Canvas images are optional. |
 | **Sources** | Hashed copies of the JavaScript and Wasm the page loaded or generated, with search and deobfuscation that keeps the original bytes. |
 | **VM** | Where Wasm and JavaScript dispatched, set next to static analysis, including nested VMs. A row is the dispatch the engine performed. |
@@ -114,8 +114,8 @@ make live
 
 Browse in that Brave window. Evidence is under `build/sessions/live/`. Close
 Brave to end the session. Like the packaged app, `make live` keeps request
-paths, queries, and bodies, and `HTMLCanvasElement.toDataURL()` output up to
-2 MiB an image, in the local store; `REB_CAPTURE_REQUEST_CONTENT=0` or
+paths, queries, and bodies, and `HTMLCanvasElement.toDataURL()` output, whole,
+in the local store; `REB_CAPTURE_REQUEST_CONTENT=0` or
 `REB_CAPTURE_CANVAS_IMAGES=0` turns either off for that session.
 
 Building Brave needs macOS, full Xcode, Node.js, pnpm, Python 3, and at

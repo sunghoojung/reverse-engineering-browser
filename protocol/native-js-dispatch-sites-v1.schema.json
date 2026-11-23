@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://origin-trace.local/protocol/native-js-dispatch-sites-v1.schema.json",
   "title": "Native JavaScript dispatch site file v1",
-  "description": "Researcher-supplied armed sites for the native JavaScript dispatch probe, written by the analyzer from static interpreter-candidate sites. The file must also be exact compact canonical JSON (keys sorted, no whitespace, no trailing newline) of at most 4096 bytes, each (source_sha256, anchor_offset) pair must be unique, and anchor_offset must be below source_length. Those rules are outside JSON Schema and are checked by every reader. Matching uses only source_sha256, source_length, anchor_offset and shape; artifact_id, artifact_sha256 and byte_offset record provenance. See native-js-dispatch-v1.md.",
+  "description": "Researcher-supplied armed sites for the native JavaScript dispatch probe, written by the analyzer from static interpreter-candidate sites. The file must also be exact compact canonical JSON (keys sorted, no whitespace, no trailing newline) of at most 128 KiB, each (source_sha256, anchor_offset) pair must be unique, and anchor_offset must be below source_length. Those rules are outside JSON Schema and are checked by every reader. Matching uses only source_sha256, source_length, anchor_offset and shape; artifact_id, artifact_sha256 and byte_offset record provenance. See native-js-dispatch-v1.md.",
   "type": "object",
   "additionalProperties": false,
   "required": ["sites", "version"],
@@ -13,7 +13,7 @@
     "sites": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 8,
+      "maxItems": 256,
       "items": {
         "$ref": "#/$defs/site"
       }

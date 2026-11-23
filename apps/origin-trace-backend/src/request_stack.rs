@@ -4,7 +4,7 @@
 //! retained bytes: an unresolved frame keeps its raw identity and a reason.
 use crate::{
     error::Result,
-    event_query::{self, EventFilter},
+    event_query::{self, EventFilter, RecordRange},
     evidence,
     request_index::RequestIndex,
 };
@@ -27,14 +27,13 @@ const FRAME: usize = 16;
 const SEGMENT: usize = 48;
 pub(crate) const MAX_ARTIFACT: usize =
     SCOPED_HEADER + FRAME * (SYNC_LIMIT + ASYNC_LIMIT) as usize + SEGMENT * TASK_LIMIT as usize;
-/// The renderer hashes a script's source for its identity record only up to
-/// this length; a longer source's identity sets retention bit 0x04 and names
-/// no digest. A digest of any length is accepted, and a matched source is
-/// read whole.
 pub(crate) const MAX_SOURCE: usize = 16 * 1024 * 1024;
 /// Source bytes one answer keeps across its rows. Past it the cache starts
 /// over, so a source of any size is still read once for consecutive rows.
 const CACHED_SOURCE_BYTES: usize = 64 * 1024 * 1024;
+/// `script_identity` versions 1 and 2 digest only a source of at most this
+/// length; version 3 digests one of any length.
+const IDENTITY_V2_SOURCE_LIMIT: u64 = 16 * 1024 * 1024;
 const IDENTITY_SCAN: usize = 4096;
 /// Version 1 records captured no task-attributed callers.
 const ASYNC_NOT_SHOWN_V1: [&str; 4] = [
@@ -536,6 +535,9 @@ pub struct Identity {
     pub(crate) wasm: bool,
     pub(crate) eval: bool,
     pub(crate) retained: bool,
+    /// The source was to be retained, but the renderer's artifact transfer
+    /// was backlogged, so its text was not sent.
+    pub(crate) backlog: bool,
     pub(crate) start_line: u32,
     pub(crate) start_column: u32,
     /// The execution context ID of the script's realm: one per document,
@@ -568,6 +570,8 @@ pub(crate) fn find_source<'a, T>(
     let sha = identity.sha256.as_ref().ok_or("source_unavailable")?;
     let found = find(identity, sha).ok_or(if identity.wasm || identity.retained {
         "source_artifact_missing"
+    } else if identity.backlog {
+        "source_backlog"
     } else {
         "source_not_retained"
     })?;
@@ -575,16 +579,19 @@ pub(crate) fn find_source<'a, T>(
 }
 
 /// A script identity's isolate key (zero on the document main thread), its
-/// script ID and what it says about the source. Version 2 names the isolate.
+/// script ID and what it says about the source. Version 2 names the isolate;
+/// version 3 digests a source of any length, so it never sets
+/// source_too_large (0x04), and adds source_backlog (0x20).
 pub fn decode_identity(payload: &[u8]) -> Option<(u64, u32, Identity)> {
     if payload.len() != 128
-        || !matches!(payload[..4], [1 | 2, 0, 128, 0])
+        || !matches!(payload[..4], [1..=3, 0, 128, 0])
         || payload[6..8] != [0, 0]
         || payload[20..24] != [0; 4]
     {
         return None;
     }
-    let scope = if payload[0] == 2 {
+    let any_length = payload[0] == 3;
+    let scope = if payload[0] >= 2 {
         if payload[88..].iter().any(|b| *b != 0) {
             return None;
         }
@@ -599,18 +606,23 @@ pub fn decode_identity(payload: &[u8]) -> Option<(u64, u32, Identity)> {
     let script = u32_at(payload, 8);
     let length = u64_at(payload, 32);
     let digest = &payload[40..72];
-    let retention = flags & 0x1e;
+    let retention = flags & 0x3e;
     let shape = script != 0
         && u64_at(payload, 24) != 0
-        && flags & !0x1f == 0
+        && flags & !0x3f == 0
+        && flags & if any_length { 0x04 } else { 0x20 } == 0
         && retention & retention.wrapping_sub(1) == 0
         && matches!(kind, 1 | 2)
         && (kind != 2 || flags & !0x0c == 0)
         && (kind != 1 || retention != 0);
     let digested = match retention {
         0x08 => length == 0 && digest.iter().all(|b| *b == 0),
-        0x04 => length > MAX_SOURCE as u64 && digest.iter().all(|b| *b == 0),
-        _ => length != 0 && digest.iter().any(|b| *b != 0),
+        0x04 => length > IDENTITY_V2_SOURCE_LIMIT && digest.iter().all(|b| *b == 0),
+        _ => {
+            length != 0
+                && (any_length || length <= IDENTITY_V2_SOURCE_LIMIT)
+                && digest.iter().any(|b| *b != 0)
+        }
     };
     (shape && digested).then(|| {
         (
@@ -620,10 +632,12 @@ pub fn decode_identity(payload: &[u8]) -> Option<(u64, u32, Identity)> {
                 wasm: kind == 2,
                 eval: flags & 0x01 != 0,
                 retained: flags & 0x02 != 0,
+                backlog: flags & 0x20 != 0,
                 start_line: u32_at(payload, 12),
                 start_column: u32_at(payload, 16),
                 realm: u64_at(payload, 24),
-                sha256: matches!(retention, 0x00 | 0x02 | 0x10).then(|| digest.try_into().unwrap()),
+                sha256: matches!(retention, 0x00 | 0x02 | 0x10 | 0x20)
+                    .then(|| digest.try_into().unwrap()),
             },
         )
     })
@@ -1190,7 +1204,7 @@ pub fn resolve_call(
     document
 }
 
-/// Resolves `get_requests` rows' innermost frames, keeping settled outcomes (protocol/request-index-v1.md).
+/// Resolves `get_requests` rows' innermost frames, keeping settled outcomes (protocol/request-index-v2.md).
 #[derive(Default)]
 pub struct InitiatorFrames(HashMap<String, Value>);
 
@@ -1570,28 +1584,85 @@ pub fn document(
     Ok(document)
 }
 
+/// The record `(session, process, sequence)` of one of `types`, wherever it
+/// sits in the store: the event index locates it by identity. None with
+/// complete coverage when the index has caught up and holds no such record,
+/// and whether the index was still behind the store.
+fn located_record(
+    store: &Path,
+    events: &std::sync::Mutex<crate::event_index::Indexes>,
+    session_id: Option<u64>,
+    process_id: u64,
+    sequence: u64,
+    types: &[&str],
+) -> Result<(Option<Value>, event_query::Coverage, bool)> {
+    let located = events
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .locate(
+            session_id,
+            process_id as u32,
+            sequence,
+            std::time::Instant::now() + crate::event_index::LOCATE_DEADLINE,
+        )?;
+    let Some(located) = located else {
+        return Ok((None, event_query::Coverage::located(0, 0, true, 0), false));
+    };
+    let mut ids = vec![("process_id", process_id), ("sequence_number", sequence)];
+    if let Some(session) = session_id {
+        ids.push(("session_id", session));
+    }
+    let filter = EventFilter::exact(types, ids);
+    let mut found = None;
+    let malformed = match located.range {
+        Some((first, end)) => event_query::visit_records_at(
+            store,
+            &[RecordRange {
+                first,
+                end,
+                indexed: true,
+            }],
+            |event| {
+                if filter.matches(&event) {
+                    found = Some(event);
+                }
+            },
+        )?,
+        None => 0,
+    };
+    let coverage = event_query::Coverage::located(
+        located.indexed_to,
+        located.store_end,
+        located.caught_up,
+        malformed,
+    );
+    Ok((found, coverage, !located.caught_up))
+}
+
 /// The `navigation_initiator_stack` a browser `navigation_initiator_link` names.
 pub fn navigation_document(
     store: &Path,
     artifacts_root: &Path,
     requests: &Mutex<RequestIndex>,
+    events: &std::sync::Mutex<crate::event_index::Indexes>,
     session_id: Option<u64>,
     process_id: u64,
     sequence: u64,
 ) -> Result<Value> {
-    let mut ids = vec![("process_id", process_id), ("sequence_number", sequence)];
-    if let Some(session) = session_id {
-        ids.push(("session_id", session));
-    }
-    let filter = EventFilter::exact(&["navigation_initiator_stack"], ids);
-    // Navigation stacks have no row, so only the newest bytes are read.
-    let detail = event_query::read_newest_record(store, None, &filter)?;
-    let coverage = detail.coverage;
-    let Some(stack) = detail.records.into_iter().next_back() else {
+    let (stack, coverage, index_behind) = located_record(
+        store,
+        events,
+        session_id,
+        process_id,
+        sequence,
+        &["navigation_initiator_stack"],
+    )?;
+    let Some(stack) = stack else {
         return Ok(json!({
             "status": absent_status(coverage),
             "request": {"process_id": process_id, "sequence_number": sequence.to_string()},
             "coverage": coverage.to_json(),
+            "index_behind": index_behind,
         }));
     };
     let Some((record, kind, target)) = payload(&stack).as_deref().and_then(decode_navigation)
@@ -1633,23 +1704,25 @@ pub fn observation_document(
     store: &Path,
     artifacts_root: &Path,
     requests: &Mutex<RequestIndex>,
+    events: &std::sync::Mutex<crate::event_index::Indexes>,
     session_id: Option<u64>,
     process_id: u64,
     sequence: u64,
 ) -> Result<Value> {
-    let mut ids = vec![("process_id", process_id), ("sequence_number", sequence)];
-    if let Some(session) = session_id {
-        ids.push(("session_id", session));
-    }
-    let filter = EventFilter::exact(&crate::debugger_observation::TYPES, ids);
-    // Observations have no row, so only the newest bytes are read.
-    let detail = event_query::read_newest_record(store, None, &filter)?;
-    let coverage = detail.coverage;
-    let Some(event) = detail.records.into_iter().next_back() else {
+    let (event, coverage, index_behind) = located_record(
+        store,
+        events,
+        session_id,
+        process_id,
+        sequence,
+        &crate::debugger_observation::TYPES,
+    )?;
+    let Some(event) = event else {
         return Ok(json!({
             "status": absent_status(coverage),
             "request": {"process_id": process_id, "sequence_number": sequence.to_string()},
             "coverage": coverage.to_json(),
+            "index_behind": index_behind,
         }));
     };
     let decoded = crate::debugger_observation::decode(&event);
@@ -2416,13 +2489,13 @@ pub(crate) mod tests {
         assert_eq!(frames.0.len(), 1);
     }
 
-    /// A source past the 16 MiB the renderer hashes today, from a producer
-    /// that hashes it, resolves a frame beyond 16 MiB from the whole source.
+    /// A version 3 identity digests a source past 16 MiB, so a frame beyond
+    /// 16 MiB resolves from the whole source.
     #[test]
     fn a_hashed_source_of_any_size_resolves_its_frames() {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("blobs")).unwrap();
-        let padding = format!("{}\n", "/".repeat(MAX_SOURCE + 1024));
+        let padding = format!("{}\n", "/".repeat(IDENTITY_V2_SOURCE_LIMIT as usize + 1024));
         let source = format!("{padding}function load() {{\n  fetch('/x');\n}}\n");
         let hash = hex::encode(Sha256::digest(&source));
         std::fs::write(root.path().join(format!("blobs/{hash}.bin")), &source).unwrap();
@@ -2431,7 +2504,10 @@ pub(crate) mod tests {
         script["content_path"] = json!(format!("blobs/{hash}.bin"));
         let at = source.find("fetch").unwrap() as u32;
         let start = source.find("() {").unwrap() as u32;
-        let identity = identity_bytes(1, 0x02, 7, (0, 0), 99, source.as_bytes());
+        let mut identity = identity_bytes(1, 0x02, 7, (0, 0), 99, source.as_bytes());
+        // Version 3, on the document thread.
+        identity[0] = 3;
+        identity[72] = 1;
         let mut document = json!({"requests": [{"initiator_frame": {"session_id": "9",
             "process_id": 41, "frame": hex::encode(frame(1, 0, 7, at, start)),
             "identity": hex::encode(identity)}}]});
@@ -2486,9 +2562,27 @@ pub(crate) mod tests {
         root
     }
 
+    /// The event identity index of `store`, which a record read locates
+    /// through, caught up: a read folds it for at most a second, which a
+    /// loaded test run must not depend on.
+    fn event_indexes(store: &Path) -> std::sync::Mutex<crate::event_index::Indexes> {
+        let mut indexes = crate::event_index::Indexes::new(
+            store,
+            &store.with_file_name("origin-trace.jsonl"),
+            &store.with_file_name("request-signals.jsonl"),
+        );
+        indexes
+            .catch_up(std::time::Instant::now() + std::time::Duration::from_secs(120))
+            .unwrap();
+        std::sync::Mutex::new(indexes)
+    }
+
     fn caught_up(index: &Mutex<RequestIndex>) {
         for _ in 0..4 {
-            index.blocking_lock().refresh().unwrap();
+            index
+                .blocking_lock()
+                .refresh(std::time::Instant::now() + std::time::Duration::from_secs(60))
+                .unwrap();
         }
     }
 
@@ -2528,7 +2622,7 @@ pub(crate) mod tests {
         assert_eq!(unknown["coverage"]["budget_exhausted"], true);
     }
 
-    /// Compiled script capture (protocol/native-compiled-scripts-v1.md) keeps
+    /// Compiled script capture (protocol/native-compiled-scripts-v2.md) keeps
     /// inline text as `compiled_script` and eval text as `dynamic_javascript`.
     /// They hash the same UTF-8 source as the script identity, so a stored
     /// frame resolves to them when the walk kept no `stack_script` copy.
@@ -2740,8 +2834,10 @@ pub(crate) mod tests {
         std::fs::write(artifacts.join("manifest.jsonl"), format!("{entry}\n")).unwrap();
         let index = Mutex::new(RequestIndex::new(&store));
         caught_up(&index);
+        let events = event_indexes(&store);
         let read = |sequence| {
-            observation_document(&store, &artifacts, &index, Some(9), 42, sequence).unwrap()
+            observation_document(&store, &artifacts, &index, &events, Some(9), 42, sequence)
+                .unwrap()
         };
 
         let tap = read(2);
@@ -2917,6 +3013,48 @@ pub(crate) mod tests {
     }
 
     /// A listener record of renderer 42 naming `script` at `start`.
+    #[test]
+    fn an_observation_behind_more_than_a_scan_budget_is_found_by_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("events.jsonl");
+        let mut text = format!("{}\n", listener_record(1, 7, 0));
+        let mut sequence = 1;
+        while text.len() as u64 <= event_query::SCAN_BYTES + (1 << 20) {
+            sequence += 1;
+            let mut filler = store_event(sequence, "wasm", "api_call", &[]);
+            filler["process_id"] = json!(1000);
+            filler["pad"] = json!("x".repeat(3000));
+            text.push_str(&format!("{filler}\n"));
+        }
+        std::fs::write(&store, text).unwrap();
+        let artifacts = root.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        std::fs::write(artifacts.join("manifest.jsonl"), "").unwrap();
+        let index = Mutex::new(RequestIndex::new(&store));
+        caught_up(&index);
+        let events = event_indexes(&store);
+        let read = |sequence| {
+            observation_document(&store, &artifacts, &index, &events, Some(9), 42, sequence)
+                .unwrap()
+        };
+        let found = read(1);
+        assert_eq!(found["status"], "recorded", "{found}");
+        assert_eq!(found["observation"]["type"], "listener_dispatch");
+        assert_eq!(found["coverage"]["scope"], "store");
+        // Without a session, the renderer's streams name it.
+        let unscoped =
+            observation_document(&store, &artifacts, &index, &events, None, 42, 1).unwrap();
+        assert_eq!(unscoped["status"], "recorded", "{unscoped}");
+        // Another renderer's record and an identity never written are absent
+        // from the whole store, not outside a window.
+        for sequence in [2, sequence + 1] {
+            let absent = read(sequence);
+            assert_eq!(absent["status"], "not_recorded", "{absent}");
+            assert_eq!(absent["coverage"]["complete"], true);
+            assert_eq!(absent["index_behind"], false);
+        }
+    }
+
     fn listener_record(sequence: u64, script: u32, start: u32) -> Value {
         let mut payload = vec![1, 0, 128, 0, 2, 0x08, 0, 0];
         payload.resize(80, 0);
@@ -3074,11 +3212,12 @@ pub(crate) mod tests {
         assert_eq!(read().0, SiteWork::default(), "settled");
     }
 
-    /// Review round 2, A: past the index's identity cap, a site whose identity
-    /// it does not hold is answered from the index alone, never by a 64 MiB
-    /// store scan per read, and kept until the index moves.
+    /// Review round 2, A: among more identities than version 1 of the index
+    /// held, a site whose identity the store does not hold is answered from
+    /// the index alone as missing, never by a store scan per read, and kept
+    /// until the index moves.
     #[test]
-    fn an_identity_past_the_index_cap_costs_no_store_scan() {
+    fn an_identity_missing_from_a_long_index_costs_no_store_scan() {
         let root = tempfile::tempdir().unwrap();
         let (store, artifacts) = (
             root.path().join("events.jsonl"),
@@ -3114,7 +3253,7 @@ pub(crate) mod tests {
         let (work, site) = read();
         assert_eq!(
             site,
-            json!({"status": "unresolved", "reason": "script_identity_outside_scan"})
+            json!({"status": "unresolved", "reason": "script_identity_missing"})
         );
         assert_eq!(
             work,
@@ -3186,6 +3325,7 @@ pub(crate) mod tests {
             &manifest,
             &source_artifact(&artifacts, "900", "https://app.test/bundle0.js?v=2", &b),
         );
+        caught_up(&index);
         // A page whose only site is kept, then one with a kept and a new site.
         for mut page in [
             vec![listener_record(2, 7, start)],
@@ -3204,7 +3344,9 @@ pub(crate) mod tests {
                 );
             }
         }
-        let direct = observation_document(&store, &artifacts, &index, Some(9), 42, 2).unwrap();
+        let events = event_indexes(&store);
+        let direct =
+            observation_document(&store, &artifacts, &index, &events, Some(9), 42, 2).unwrap();
         assert_eq!(
             direct["observation"]["site"]["resolution"]["function_name"],
             "renameBB"
@@ -3329,6 +3471,7 @@ pub(crate) mod tests {
                 &two.b,
             ),
         );
+        caught_up(&index);
         assert_eq!(
             named(&two.site(&sites, &index)),
             (
@@ -4101,6 +4244,52 @@ pub(crate) mod tests {
             let at = text.rfind(anchor).unwrap();
             assert_eq!(function_name(text, at).as_deref(), expected, "{text}");
         }
+    }
+
+    #[test]
+    fn version_3_identity_digests_any_length_and_names_its_backlog() {
+        let source = b"function f(){}";
+        let version_3 = |flags: u8, length: u64| {
+            let mut payload = identity_bytes(1, flags, 7, (0, 0), 99, source);
+            payload[0] = 3;
+            payload[72] = 1;
+            payload[32..40].copy_from_slice(&length.to_le_bytes());
+            payload
+        };
+        let long = IDENTITY_V2_SOURCE_LIMIT + 1;
+        let (_, _, queued) = decode_identity(&version_3(0x02, long)).expect("past 16 MiB");
+        assert!(queued.retained && queued.sha256.is_some());
+        let mut version_1 = version_3(0x02, long);
+        version_1[0] = 1;
+        version_1[72] = 0;
+        assert!(
+            decode_identity(&version_1).is_none(),
+            "version 1 digests at most 16 MiB"
+        );
+        let (_, _, backlog) = decode_identity(&version_3(0x20, 14)).expect("backlog");
+        assert!(backlog.backlog && !backlog.retained && backlog.sha256.is_some());
+        assert_eq!(
+            find_source(Some(&backlog), |_, _| None::<()>).unwrap_err(),
+            "source_backlog"
+        );
+        let mut version_2 = version_3(0x20, 14);
+        version_2[0] = 2;
+        assert!(
+            decode_identity(&version_2).is_none(),
+            "version 2 names no backlog"
+        );
+        let mut too_large = version_3(0x04, long);
+        too_large[40..72].fill(0);
+        assert!(
+            decode_identity(&too_large).is_none(),
+            "version 3 never sets source_too_large"
+        );
+        let mut wasm = version_3(0x20, 14);
+        wasm[4] = 2;
+        assert!(
+            decode_identity(&wasm).is_none(),
+            "a Wasm identity names no backlog"
+        );
     }
 
     #[test]

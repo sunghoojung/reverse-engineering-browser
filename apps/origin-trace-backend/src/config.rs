@@ -28,7 +28,9 @@ pub struct Options {
     /// app-started capture arms. A label sidecar is kept beside it.
     #[arg(long, default_value = "build/sessions/js-invocation-sites-v1.json")]
     pub js_invocation_site_store: PathBuf,
-    /// The site file this session's launcher was asked to arm, read once.
+    /// The site file this session's launcher was asked to arm. With
+    /// `js_invocation_session_generation` this backend rewrites it as the
+    /// saved set changes; otherwise it is read once.
     #[arg(long)]
     pub js_invocation_session_sites: Option<PathBuf>,
     /// `armed`, or `browser_unsupported` when the launcher started without
@@ -38,27 +40,37 @@ pub struct Options {
     /// This session records settled-value digests of armed calls.
     #[arg(long, requires = "js_invocation_session_sites")]
     pub js_invocation_session_digests: bool,
+    /// The generation file Brave polls. Present only when this Brave follows
+    /// site revisions; then the capture follows the saved set.
+    #[arg(long, requires = "js_invocation_session_sites")]
+    pub js_invocation_session_generation: Option<PathBuf>,
     /// Labels for session context: what this session's launcher passed to
     /// Brave. They grant and enable nothing here.
     #[arg(long, requires = "socket")]
     pub session_request_content: bool,
-    /// The content session's budgets in MiB and whether it keeps element
-    /// media, as the launcher passed them to Brave. They mean nothing without
-    /// request content, so each requires it.
-    #[arg(long, requires = "session_request_content", value_parser = clap::value_parser!(u32).range(1..=4096))]
-    pub session_request_content_budget_mib: Option<u32>,
-    #[arg(long, requires = "session_request_content", value_parser = clap::value_parser!(u32).range(1..=16384))]
-    pub session_response_body_budget_mib: Option<u32>,
-    /// `1` when the content session keeps element media, `0` when it does
-    /// not. Unnamed, the session context reports the choice as unknown.
-    #[arg(long, requires = "session_request_content", value_parser = ["0", "1"])]
-    pub session_response_media: Option<String>,
     #[arg(long, requires = "socket")]
     pub session_canvas_images: bool,
     #[arg(long, requires = "socket")]
     pub session_document_start: bool,
     #[arg(long, requires = "socket")]
     pub session_request_stacks: bool,
+    /// The Wasm sampling the launcher passed to Brave: each stream that
+    /// records, the per-function and per-site allowances it named, and how
+    /// many functions its filters list. Counts and switches only.
+    #[arg(long, requires = "socket")]
+    pub session_wasm_dispatch: bool,
+    #[arg(long, requires = "socket")]
+    pub session_wasm_call_indirect: bool,
+    #[arg(long, requires = "socket", value_parser = clap::value_parser!(u32).range(1..=1024))]
+    pub session_wasm_samples_per_function: Option<u32>,
+    #[arg(long, requires = "socket", value_parser = clap::value_parser!(u32).range(1..=1024))]
+    pub session_wasm_samples_per_indirect_site: Option<u32>,
+    #[arg(long, requires = "socket", value_parser = clap::value_parser!(u32).range(1..=32))]
+    pub session_wasm_function_allow_count: Option<u32>,
+    #[arg(long, requires = "socket", value_parser = clap::value_parser!(u32).range(1..=32))]
+    pub session_wasm_function_deny_count: Option<u32>,
+    #[arg(long, requires = "socket")]
+    pub session_wasm_module_allowlist: bool,
     #[arg(long)]
     pub decoder: Option<PathBuf>,
     #[arg(long)]
@@ -171,6 +183,7 @@ impl Options {
             &mut self.endpoint_file,
             &mut self.active_endpoint_file,
             &mut self.js_invocation_session_sites,
+            &mut self.js_invocation_session_generation,
             &mut self.wasm_budget_reset_file,
         ]
         .into_iter()

@@ -201,15 +201,18 @@ Every case runs on an owned loopback fixture in a visibly labeled session, per
 [SAFETY.md](../../SAFETY.md). `REB_BRAVE_BINARY="$BRAVE" make live-acceptance-check`
 serves the fixtures in `tools/live_acceptance/`, runs every session below and
 prints PASS, FAIL or the exact MANUAL steps per case
-([tools README](../../tools/README.md#live-acceptance)). The budget cases run in
-their own session with 1 MiB budgets, so they do not cut the content cases
-short. One content session covers most cases:
+([tools README](../../tools/README.md#live-acceptance)). The volume cases run in
+their own content session, which moves more than 768 MiB of bodies and
+measures the browser's memory, and the disk reserve case in another whose
+receiver reserve is above the free space. Each session starts in a fresh
+profile, so no case reads an earlier run's HTTP cache or cookies. One content
+session covers most cases:
 
 ```sh
-REB_NATIVE_PROMISE_STACKS=1 "$REB_API" session start \
-  --url http://127.0.0.1:<port>/ --localhost-only \
+"$REB_API" session start \
+  --url http://127.0.0.1:<port>/ --localhost-only --fresh-profile \
   --request-content --confirm-sensitive-capture --canvas-images \
-  --request-stacks --document-start --wasm-dispatch --wasm-call-indirect \
+  --request-stacks --promise-stacks --document-start --wasm-dispatch --wasm-call-indirect \
   --brave-binary "$BRAVE" --sessions-root "$(mktemp -d)" \
   --duration-seconds 3600 > session.json
 EP="$(python3 -c 'import json; print(json.load(open("session.json"))["endpoint_file"])')"
@@ -220,7 +223,7 @@ EP="$(python3 -c 'import json; print(json.load(open("session.json"))["endpoint_f
 `get_session_context` must report `request_stacks` and promise stacks on. Open
 each fixture page with `session_action` (`open_url`), then read the evidence:
 `get_session_summary` for checks, unresolved tabs and every refusal count;
-`get_requests` for each row's tab, body case and budget state;
+`get_requests` for each row's tab and body case;
 `get_request_headers`, `get_request_cookies`, `get_cookie_provenance` and
 `get_request_stack` for one request; `get_events` and `wait_for_events` for
 debugger observations. An agent connected with
@@ -233,19 +236,26 @@ debugger observations. An agent connected with
 | Content session | Baseline: Wasm `br_table` and `call_indirect`, the Canvas readback image, network and fingerprint surfaces | release notes |
 | Content session | Every request on its tab: parser, fetch and XHR loads; `sendBeacon` and keepalive at unload; a removed iframe; dedicated, nested and shared workers (one and two tabs); a service worker's install fetches, passthrough, `respondWith(fetch())`, cache answer and a fetch after its last tab closed; speculation-rules prefetch and prerender; `window.open`, a download and a redirect chain. `get_session_summary` reports zero unresolved | #425 |
 | Content session | Request and response headers equal what the echo server saw and sent across two redirect hops; a 200 KiB response header block kept whole; DevTools opened on the same page shows the same headers as without capture | #427 |
-| Content session | JSON, HTML, image, gzip and brotli, chunked and streamed bodies kept with exact bytes and digest; an aborted download, a 304, a redirect and a service-worker answer each carry their reason; 50 parallel responses all kept; a navigation answered from `preloadResponse`; a burst then silence; the response budget shown when it runs out | #428 |
+| Content session | JSON, HTML, fetched and element images, a web font, an audio element, gzip and brotli, chunked and streamed bodies kept with exact bytes and digest; an aborted download, a 304, a redirect and a service-worker answer each carry their reason; 50 parallel responses all kept; a navigation answered from `preloadResponse`; a burst then silence | #428 |
 | Content session | A 150-frame stack through wrappers matches DevTools frame for frame; 5,000-deep recursion keeps 1,024 frames and the omitted count; inline, `eval` and network script frames resolve; `fetch` from a Wasm import shows Wasm frames; an `await` chain shows async frames; one call site's stack is sent once | #429 |
 | Content session | A JS-set cookie and server `Set-Cookie` with SameSite and Secure variants: sent, received and blocked cookies match the server, and the JS write links to its script position | #430 |
-| Content session | An 8 KB GraphQL GET URL; a 5 MiB JSON POST, a multipart upload with a file and a stream-body `fetch` with exact bytes and digest; 40 parallel scripts all kept; 5,000 small POSTs kept until the request budget runs out, which is shown, and any body the artifact queue refused before then counted in `get_session_summary` | #436 |
-| Content session | An agent waits for the next fetch to `/api/x` and reads its stack, the next click handler and its position, and the next CSP violation | #434 phase 1 |
+| Content session | An 8 KB GraphQL GET URL; a 5 MiB JSON POST, a multipart upload with a file, a 17 MiB POST and a password form post kept whole with exact bytes and digest, the password form marked `credential_form`; a stream-body `fetch`; 40 parallel scripts all kept | #436 |
+| Volume session (the content start, in a session of its own) | Four 72 MiB POSTs (288 MiB) and six 96 MiB responses (576 MiB) kept whole with the server's digests; a 24 MiB script kept whole as its compiled source; 5,000 small POSTs kept, any the artifact queue refused counted in `get_session_summary`; no budget or truncation named; capture adds less than one body to the browser process's footprint while they pass, against the same page in the same Brave without a session | #428, #436 |
+| Disk reserve session (the content start with `REB_ARTIFACT_DISK_RESERVE_MIB` above the free space) | A request and a response body are `not_captured_disk_reserve`, none is stored, and `get_session_summary` counts them under that reason | #436 |
+| Content session | An agent waits for the next fetch to `/api/x` and reads its stack, the next click handler and its position, and the next CSP violation; then it keeps the rules for the origin, a new tab's top document records from its first script while its same-origin iframe records nothing, and after `unwatch` a new document records nothing | #434 phase 1 |
 | Metadata session (the same start without `--request-content`, `--confirm-sensitive-capture` and `--canvas-images`) | No header, cookie or body value is recorded; an `eval` frame reports `source_not_retained` | #427, #429, #430 |
-| Session without `--request-stacks` | No stack walk runs | #429 |
+| Session with `--request-stacks=false` in place of `--request-stacks` (request stacks are on unless a start turns them off) | No stack walk runs | #429 |
 | Not runnable from Origin Trace | The pausing debugger: conditional breakpoint, scopes, step, resume, navigation and idle disarm, the lease deadline and the review cases in [native-debugger-v1.md](../product/native-debugger-v1.md#acceptance-still-required) | #434 phase 3 |
 
-Two acceptance items need a profiler rather than a fixture: "the inactive probe
-path costs one atomic load and allocates nothing" (#425, #427, #434, #436) and
-"browser memory stays bounded by the in-flight pool" (#428, #436). Record how
-each was measured.
+One acceptance item needs a profiler rather than a fixture: "the inactive probe
+path costs one atomic load and allocates nothing" (#425, #427, #434, #436).
+Record how it was measured. The volume session measures the browser process's
+physical footprint (`footprint -p`) itself: first through the same page in the
+same Brave without a session, then in the session, and reports each phase's
+growth and capture's share, the difference. Resident size would also count
+pages the allocator freed but had not returned, and Brave without a session
+already keeps hundreds of MiB after the uploads, so neither alone measures
+capture.
 
 The pausing debugger has no launch path: nothing in `run-live-session.sh` or the
 app passes `--reb-native-debugger` to Brave or `--native-debugger-socket` to the

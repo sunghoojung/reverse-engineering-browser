@@ -59,10 +59,7 @@ Every option is off unless the start names it, and none is inherited.
 | Request call stacks | `request_stacks` | F | Covered |
 | Document-start Console permission | `document_start` | F | Covered |
 | Invocation sites from a file, or the agent's saved set | `js_invocation_sites`, `js_invocation_saved_sites` | F | Covered |
-| Request content (paths, queries, bodies, headers, cookies, response bodies) | `request_content` | F + sensitive | Covered; on by default, as in the app, and `false` turns it off |
-| Request content budget | `request_content_budget_mib` | F + sensitive | Covered |
-| Response body budget | `response_body_budget_mib` | F + sensitive | Added |
-| Element images, audio, video and fonts | `response_media` | F + sensitive | Added |
+| Request content (paths, queries, bodies, headers, cookies, every response body whole with media and fonts) | `request_content` | F + sensitive | Covered; on by default, as in the app, and `false` turns it off |
 | Canvas images | `canvas_images` | F + sensitive | Covered; on by default, as in the app |
 | Invocation value digests | `js_invocation_digests` | F + sensitive | Covered; on by default with named sites and request content |
 | Publish the canonical endpoint, Brave binary, start timeout | `publish_canonical_endpoint`, `brave_binary`, `timeout_seconds` | F | Covered |
@@ -78,13 +75,14 @@ Every option is off unless the start names it, and none is inherited.
 | Browser tabs and request owners | `get_requests` `tab_id`; `get_events` | R | Covered |
 | Timing strip (request starts over time) and its range filter | `get_requests` (`since`, start times in rows) | R | Covered; the chart itself is drawn by the page |
 | General tab | `get_requests`, `get_events` per member | R | Covered |
-| Headers tab | `get_request_headers` | R | Covered; credential header values are withheld at every level, and the text reads never return header blocks |
+| Headers tab | `get_request_headers` | R | Covered; credential header values are returned at Full access and withheld below it, and the text reads return header blocks only at Full |
 | Payload tab (request body) | `get_artifact_text` on the `request_body` artifact | F | Added (before: binary only, refused by MCP) |
 | Preview and Response tabs (response body) | `get_artifact_text` on the `response_body` artifact; `get_source_format` for JSON and JavaScript bodies | F | Added; Preview's rendered image or page is drawn by the page and stays there |
-| Cookies tab and cookie provenance | `get_request_cookies`, `get_cookie_provenance` | R | Covered; cookie values are withheld at every level, and the text reads never return cookie lists |
+| Cookies tab and cookie provenance | `get_request_cookies`, `get_cookie_provenance` | R | Covered; cookie values and received lines are returned at Full access and withheld below it, and the text reads return cookie lists only at Full |
 | Initiator tab (call stack) | `get_request_stack` | R | Covered |
 | Timing tab | `get_events` for the request's records | R | Covered |
 | Signals tab | `get_request_signal_profile` | R | Covered |
+| Export… → HAR (selected request or filtered list), Copy as cURL and Copy as fetch | `export_requests_har` (`rows`, or the list's filters and `through`) | F | Added; Full access only, because the archive holds headers, credential values and bodies. A large archive returns a structural summary, so narrow it with `rows` |
 | Evidence tab and Inspect observations & artifacts | `get_events`, `get_artifacts` with filters | R | Covered |
 | Trace origin | `get_origin_trace` | R | Covered |
 | Decode value | `decoder_action` `transform` with the value | A, or F to read the value | Partial: below Full access captured values are omitted, so the agent can decode only values it can see or the researcher pinned |

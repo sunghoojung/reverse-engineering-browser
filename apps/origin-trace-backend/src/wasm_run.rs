@@ -1645,10 +1645,7 @@ fn instantiation_failure(error: &wasmi::Error, store: &Store<HostState>) -> Outc
 /// Reads the artifact, verifies it, runs it, and builds the derived record.
 fn run_blocking(root: &Path, request: &Request, limits: Limits) -> Result<Value> {
     let started = Instant::now();
-    let artifact = evidence::artifacts(root, 10000)?
-        .into_iter()
-        .find(|a| a["artifact_id"] == request.artifact_id.as_str())
-        .ok_or_else(|| Error::new(404, "Artifact not found"))?;
+    let artifact = evidence::find_artifact(root, &request.artifact_id)?;
     if artifact["kind"] != "wasm" {
         return Err(Error::bad("Artifact is not WebAssembly"));
     }

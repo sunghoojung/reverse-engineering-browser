@@ -137,7 +137,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private var forwarded: [ObjectIdentifier: StoredEvidenceBackend.Forwarding] = [:]
   private let decoderService: NativeDecoderService
   private let brokerSocketURL: URL?
-  private let storedEvents = StoredEventWindowCache()
   private let storedBackend: StoredEvidenceBackend
   private let demoEvidenceEnabled: Bool
   private let analystRunnerLock = NSLock()
@@ -202,7 +201,10 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       return
     }
     if StoredEvidenceBackend.serves(urlSchemeTask.request) {
-      forwarded[ObjectIdentifier(urlSchemeTask)] = storedBackend.forward(urlSchemeTask.request) { body, status, contentType, headers in
+      // The idle backend reads the stores; this app names the broker and mode.
+      let overlay = StoredEvidenceBackend.isEventPoll(urlSchemeTask.request)
+        ? eventPollOverlay() : nil
+      forwarded[ObjectIdentifier(urlSchemeTask)] = storedBackend.forward(urlSchemeTask.request, overlay: overlay) { body, status, contentType, headers in
         self.send(body, contentType: contentType, status: status, headers: headers, to: urlSchemeTask)
       }
       return
@@ -218,7 +220,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(String(requestURL.path.dropFirst()))),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/block_graph.js", "/wasm_readable.js", "/block_graph_layout.js", "/wasm_diff_view.js", "/graph_layout_client.js", "/flow_graph.js", "/flow_graph_layout.js", "/flow_timeline.js", "/flow_workspace.js", "/pane_layout.js", "/app.js", "/agent_panel.js", "/session_panel.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_format.js", "/code_view.js", "/source_facts.js", "/source_search.js", "/source_tree.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/wasm_function_names.js", "/invocation_sites.js", "/entropy_map.js", "/wasm_identification.js", "/wasm_inspection.js", "/request_stack.js", "/traffic_view.js", "/traffic_payload.js", "/traffic_index.js", "/traffic_filter.js", "/traffic_columns.js", "/traffic_overview.js", "/network_scope.js", "/request_tabs.js", "/traffic_response.js", "/traffic_headers.js", "/traffic_cookies.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/value_flow_view.js", "/wasm_runner.js", "/native_console_completion.js", "/native_console.js", "/debugger_sidebar.js", "/debugger_pause.js":
+      case "/block_graph.js", "/wasm_readable.js", "/block_graph_layout.js", "/wasm_diff_view.js", "/graph_layout_client.js", "/flow_graph.js", "/flow_graph_layout.js", "/flow_timeline.js", "/flow_workspace.js", "/pane_layout.js", "/app.js", "/agent_panel.js", "/session_panel.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_format.js", "/code_view.js", "/source_facts.js", "/source_search.js", "/source_tree.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/wasm_function_names.js", "/invocation_sites.js", "/entropy_map.js", "/wasm_identification.js", "/wasm_inspection.js", "/request_stack.js", "/traffic_view.js", "/traffic_payload.js", "/traffic_index.js", "/traffic_filter.js", "/traffic_columns.js", "/traffic_overview.js", "/traffic_copy.js", "/network_scope.js", "/request_tabs.js", "/traffic_response.js", "/traffic_headers.js", "/traffic_cookies.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/value_flow_view.js", "/wasm_runner.js", "/native_console_completion.js", "/native_console.js", "/debugger_sidebar.js", "/debugger_pause.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
@@ -308,10 +310,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         }
         handleLocalAnalystAction(urlSchemeTask.request, to: urlSchemeTask)
         return
-      case "/api/events":
-        response = (try eventsResponse(for: requestURL), "application/json; charset=utf-8", 200, [:])
-      case "/api/origin-trace":
-        response = (try originTraceResponse(for: requestURL), "application/json; charset=utf-8", 200, [:])
       case "/api/request-signal-profile":
         let profileResponse = try requestSignalProfileResponse(
           for: requestURL,
@@ -510,12 +508,13 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     guard let values = value as? [[String: Any]], values.count <= 64 else {
       throw LocalHTTPError(status: 400, message: "API Collection request headers are invalid")
     }
-    let forbidden = Set([
-      "authorization", "connection", "content-length", "cookie", "host",
-      "proxy-authorization", "set-cookie", "transfer-encoding",
+    // The HTTP client computes framing and connection headers; credentials and
+    // cookies are kept as the researcher wrote them.
+    let framing = Set([
+      "connection", "content-length", "host", "keep-alive", "proxy-connection",
+      "te", "trailer", "transfer-encoding", "upgrade",
     ])
     var names = Set<String>()
-    var totalBytes = 0
     var normalized: [[String: Any]] = []
     normalized.reserveCapacity(values.count)
     for header in values {
@@ -530,18 +529,14 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       let headerValue = try apiCollectionText(
         header["value"],
         label: "API Collection request header value",
-        maximumBytes: 2 * 1_024,
+        maximumBytes: 64 * 1_024,
         allowEmpty: true
       )
       let lowerName = name.lowercased()
       guard name.range(of: #"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"#, options: .regularExpression) != nil,
-        !forbidden.contains(lowerName), names.insert(lowerName).inserted
+        !framing.contains(lowerName), names.insert(lowerName).inserted
       else {
-        throw LocalHTTPError(status: 400, message: "API Collection request header is forbidden or invalid")
-      }
-      totalBytes += name.utf8.count + headerValue.utf8.count
-      guard totalBytes <= 16 * 1_024 else {
-        throw LocalHTTPError(status: 400, message: "API Collection request headers exceed 16 KiB")
+        throw LocalHTTPError(status: 400, message: "API Collection request header is a framing header or invalid")
       }
       normalized.append(["name": name, "value": headerValue])
     }
@@ -1782,35 +1777,14 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     }
   }
 
-  private func eventsResponse(for requestURL: URL) throws -> Data {
-    let requestedLimit = URLComponents(url: requestURL, resolvingAgainstBaseURL: false)?
-      .queryItems?
-      .first(where: { $0.name == "limit" })?
-      .value
-      .flatMap(Int.init) ?? 500
-    let limit = min(max(requestedLimit, 1), 5000)
-
-    let window = try storedEvents.read(path: eventStoreURL.path, limit: limit)
-    return try JSONSerialization.data(
-      withJSONObject: [
-        "count": window.events.count,
-        "events": window.events,
-        "network_events": window.networkEvents,
-        "sequence_gaps": String(window.sequenceGaps),
-        "sequence_gaps_saturated": window.sequenceGapsSaturated,
-        "queue_drops": String(window.queueDrops),
-        "queue_drops_saturated": window.queueDropsSaturated,
-        "named_gaps": window.namedGaps.map {
-          ["category": $0.category, "reason": $0.reason, "count": String($0.count)]
-        },
-        "event_window": window.coverage,
-        "broker_connected": brokerConnected(),
-        "capture_mode": captureMode(),
-        // An ended session opened for review captures nothing more.
-        "session_ended": stores.endedSession != nil,
-      ],
-      options: []
-    )
+  private func eventPollOverlay() -> StoredEvidenceBackend.Overlay {
+    let connected = brokerConnected()
+    let mode = captureMode()
+    // An ended session opened for review captures nothing more.
+    let ended = stores.endedSession != nil
+    return StoredEvidenceBackend.Overlay(
+      fields: ["broker_connected": connected, "capture_mode": mode, "session_ended": ended],
+      tag: "\(mode)-\(connected ? 1 : 0)-\(ended ? 1 : 0)")
   }
 
   private func artifactEntries() throws -> [[String: Any]] {
@@ -2096,66 +2070,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     return try JSONSerialization.data(withJSONObject: document, options: [])
   }
 
-  private func originTraceResponse(for requestURL: URL) throws -> Data {
-    let items = URLComponents(url: requestURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
-    for name in ["request_id", "session_id", "root_process_id", "root_sequence_number"] {
-      let matches = items.filter { $0.name == name }
-      guard matches.count <= 1, matches.allSatisfy({ $0.value != nil }) else {
-        throw artifactError("Specify \(name) only once with a value")
-      }
-    }
-    let sessionID = items.first(where: { $0.name == "session_id" })?.value
-    if let sessionID, !isCanonicalUInt64(sessionID, nonzero: true) {
-      throw artifactError("Session ID must be a canonical nonzero unsigned 64-bit integer")
-    }
-    guard let requestID = items.first(where: { $0.name == "request_id" })?.value,
-      requestID.range(of: #"^(?:0|[1-9][0-9]*)$"#, options: .regularExpression) != nil,
-      UInt64(requestID) != nil
-    else {
-      throw artifactError("Request ID must be a canonical unsigned 64-bit integer")
-    }
-    let processText = items.first(where: { $0.name == "root_process_id" })?.value
-    let rootSequence = items.first(where: { $0.name == "root_sequence_number" })?.value
-    let rootProcessID: UInt32?
-    if let processText {
-      guard processText.range(of: #"^(?:0|[1-9][0-9]*)$"#, options: .regularExpression) != nil,
-        let value = UInt32(processText)
-      else {
-        throw artifactError("Root process ID must be a canonical unsigned 32-bit integer")
-      }
-      rootProcessID = value
-    } else {
-      rootProcessID = nil
-    }
-
-    let events = try recentJSONObjects(
-      at: eventStoreURL,
-      limit: 10_000,
-      maxRecordBytes: 4 * 1024,
-      recordName: "event"
-    )
-    let edges = try recentJSONObjects(
-      at: traceStoreURL,
-      limit: 30_000,
-      maxRecordBytes: 2 * 1024,
-      recordName: "origin trace edge"
-    )
-    let artifacts = try recentArtifactEntries()
-    let document = try OriginTraceDocumentBuilder.build(
-      events: events,
-      edges: edges,
-      artifacts: artifacts,
-      requestID: requestID,
-      sessionID: sessionID,
-      rootProcessID: rootProcessID,
-      rootSequenceNumber: rootSequence,
-      requestBodies: OriginTraceDocumentBuilder.retainedRequestBodies(
-        events: events, artifacts: artifacts, requestID: requestID,
-        read: verifiedRequestBodyBytes)
-    )
-    return try JSONSerialization.data(withJSONObject: document, options: [])
-  }
-
   private func requestSignalProfileResponse(
     for requestURL: URL,
     ifNoneMatch: String?
@@ -2339,40 +2253,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       !parentDepthLimited || parsedParentDepth == 32
     else { return false }
     return true
-  }
-
-  // The verified bytes of a retained request-body artifact, at most 1 MiB, or
-  // nil: the manifest's size and SHA-256 must both match the stored file.
-  private func verifiedRequestBodyBytes(_ artifact: [String: Any]) -> [UInt8]? {
-    guard let relativePath = artifact["content_path"] as? String,
-      let byteSize = artifact["byte_size"] as? Int, byteSize >= 0,
-      let sha256 = artifact["sha256"] as? String
-    else { return nil }
-    let root = artifactStoreURL.resolvingSymlinksInPath().standardizedFileURL
-    let contentURL = root.appendingPathComponent(relativePath).resolvingSymlinksInPath()
-      .standardizedFileURL
-    guard contentURL.path.hasPrefix(root.path + "/"),
-      let data = try? Data(contentsOf: contentURL), data.count == byteSize,
-      SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == sha256
-    else { return nil }
-    return [UInt8](data)
-  }
-
-  private func recentArtifactEntries() throws -> [[String: Any]] {
-    let artifacts = try recentJSONObjects(
-      at: artifactStoreURL.appendingPathComponent("manifest.jsonl"),
-      limit: 10_000,
-      maxRecordBytes: 8 * 1024,
-      recordName: "artifact"
-    )
-    guard artifacts.allSatisfy(isValidArtifact) else {
-      throw artifactError("The artifact manifest contains a malformed record")
-    }
-    let identifiers = artifacts.compactMap { $0["artifact_id"] as? String }
-    guard identifiers.count == artifacts.count, Set(identifiers).count == identifiers.count else {
-      throw artifactError("The artifact manifest contains a duplicate artifact ID")
-    }
-    return artifacts
   }
 
   private func recentJSONObjects(
@@ -2616,6 +2496,28 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     configuration.userContentController.addScriptMessageHandler(
       clientProjectExport, contentWorld: .page, name: NativeClientProjectExport.handlerName
     )
+    configuration.userContentController.addScriptMessageHandler(
+      clientProjectExport, contentWorld: .page, name: NativeClientProjectExport.requestHandlerName
+    )
+    // The stored-evidence document reads the bundled backend; a live workspace
+    // document is served by its own loopback backend, which answers it directly.
+    let liveDownloads = StoredEvidenceBackend.loopbackSession()
+    clientProjectExport.download = { document, path, query, destination, done in
+      let reply: (StoredEvidenceBackend.Failure?) -> Void = { done($0?.message) }
+      guard document.scheme == "http" else {
+        storedBackend.download(path: path, query: query, to: destination, done: reply)
+        return
+      }
+      guard var target = URLComponents(url: document, resolvingAgainstBaseURL: false) else {
+        done("Invalid application URL")
+        return
+      }
+      target.percentEncodedPath = path
+      target.percentEncodedQuery = query
+      target.fragment = nil
+      guard let url = target.url else { done("Invalid application URL"); return }
+      StoredEvidenceBackend.download(url, to: destination, session: liveDownloads, done: reply)
+    }
     self.clientProjectExport = clientProjectExport
     let agentBridge = NativeAgentBridge(webView: webView, window: window)
     configuration.userContentController.addScriptMessageHandler(

@@ -17,7 +17,8 @@ const fixture = JSON.parse(await readFile(join(root, 'tests/research_ui/fixtures
 const hostWorkspace = structuredClone(fixture), hostSource = hostWorkspace.workspaces[0], sample = hostSource.samples[0];
 const hostLinks = {contract_version: 1, document_kind: 'vm-host-links', workspace_document_digest: hostWorkspace.document_digest,
   document_digest: 'e'.repeat(64), workspaces: [{interpreter_artifact_id: hostSource.interpreter_artifact_id,
-    source_artifact_sha256: hostSource.source_artifact_sha256, omissions: [], links: [{
+    source_artifact_sha256: hostSource.source_artifact_sha256, omissions: [], frame_host_records: 1, attributed_host_records: 1,
+    events_filter: {session_id: sample.event.session_id, navigation_id: '1', frame_id: '1'}, links: [{
       host_event: {...sample.event, sequence_number: '50'}, category: 'runtime', type: 'api_call', state: 'observed',
       reason: 'direct-dispatch-parent', guest_position: {sample_event: sample.event, invocation_event: sample.invocation_event,
         invocation_id: sample.invocation_id, instruction_pointer: sample.instruction_pointer,
@@ -166,9 +167,19 @@ assert(capturedAlongsideRuntime.textContent.includes('0e 01'));
 assert(capturedAlongsideRuntime.textContent.includes('module byte offset45'));
 assert.equal(many.snapshots.length,2,'Rendering must not mutate runtime snapshots');
 const originalLinks=hostLinks.workspaces[0].links;hostLinks.workspaces[0].links=Array.from({length:65},(_,index)=>({...originalLinks[0],host_event:{...originalLinks[0].host_event,sequence_number:String(50+index)}}));
-const hostView=renderApi.renderVmHostLinks(hostSource);findButton(hostView,'Next host links').click();findButton(hostView,'Next host links').click();assert(hostView.textContent.includes('event 1:1:114'));assert(hostView.textContent.includes('guest_position PC'));assert(findButton(hostView,'Next host links').disabled);hostLinks.workspaces[0].links=originalLinks;
+Object.assign(hostLinks.workspaces[0],{frame_host_records:70,attributed_host_records:65});
+assert(runInNewContext(`${model}\nisVmHostLinksDocument(hostLinks, hostWorkspace)`, {hostLinks, hostWorkspace, TextEncoder}),'every listed host link is valid however many there are');
+const hostView=renderApi.renderVmHostLinks(hostSource);findButton(hostView,'Next host links').click();findButton(hostView,'Next host links').click();assert(hostView.textContent.includes('event 1:1:114'));assert(hostView.textContent.includes('guest_position PC'));assert(findButton(hostView,'Next host links').disabled);
+assert(hostView.textContent.includes('70 host events share this frame and 65 name this interpreter. 65 with a VM-record parent are listed'));
+hostLinks.workspaces[0].links=originalLinks;Object.assign(hostLinks.workspaces[0],{frame_host_records:1,attributed_host_records:1});
+for (const mutate of [row => {row.attributed_host_records = 2;}, row => {row.links.push(row.links[0]); row.links[1] = {...row.links[0], host_event: {...row.links[0].host_event, sequence_number: '51'}};},
+  row => {delete row.events_filter;}, row => {row.frame_host_records = -1;}, row => {row.omissions = ['host-link-limit'];}]) {
+  const mutated = structuredClone(hostLinks); mutate(mutated.workspaces[0]);
+  assert(!runInNewContext(`${model}\nisVmHostLinksDocument(mutated, hostWorkspace)`, {mutated, hostWorkspace, TextEncoder}), 'host link counts must cover the listed rows');
+}
 const staticLinks=structuredClone(hostLinks);
 staticLinks.workspaces[0].omissions=['dispatch-samples-unavailable'];
+Object.assign(staticLinks.workspaces[0],{frame_host_records:3,attributed_host_records:2});
 staticLinks.workspaces[0].links=[{host_event:{...sample.event,sequence_number:'50'},category:'network',type:'request_initiated',state:'unknown',reason:'dispatch-samples-unavailable',guest_position:null}];
 renderApiState.vmHostLinks=staticLinks;
 const staticHost=renderApi.renderVmHostLinks(hostSource);
@@ -178,6 +189,7 @@ assert(staticHost.textContent.includes('guest_position null'));
 assert(staticHost.textContent.includes('not an empty workspace'));
 assert(staticHost.textContent.includes('correlation'));
 assert(!staticHost.textContent.includes('guest_position PC'));
+assert(staticHost.textContent.includes('3 host events share this frame and 2 name this interpreter. 1 with a VM-record parent is listed'));
 renderApiState.vmHostLinks={...hostLinks, workspace_document_digest:'f'.repeat(64)};
 const staleHost=renderApi.renderVmHostLinks(hostSource);
 assert(staleHost.textContent.includes('Guest position unknown'));

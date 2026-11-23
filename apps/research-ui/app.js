@@ -27,6 +27,7 @@ const sourceFactsPanel = createSourceFactsPanel({
 });
 const capturedExportPanel = installCapturedExportDialog({
   getRun: () => null, contextKey: () => null, getRunCapture: () => null,
+  getTrafficExport: id => trafficExportSnapshot(id),
   notice: message => investigationNotice(message)
 });
 const invocationSitesPanel = createInvocationSitesPanel({
@@ -206,6 +207,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       const evidenceWorkspace = createEvidenceWorkspace({
         getContext: () => ({request: state.requests.find(request => request.id === state.selectedRequestId),
           events: state.events, artifacts: state.artifacts, eventsLimited: state.eventsLimited,
+          nextBefore: state.eventNextBefore, storeEnd: state.eventStoreEnd,
           error: state.eventFailureKind, mode: state.sessionMode}),
         packagePanel: evidencePackagePanel,
         onTrace: () => typeof openInvestigation === 'function'
@@ -332,9 +334,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           state.vmHostLinksGeneration += 1;
           state.selectedVmHandlerKey = null;
         }
-        const query = selection ? `?${new URLSearchParams({request_id: selection.request_id,
+        // The lab lists findings, so a session of many plain scripts reads as
+        // a count rather than one result per artifact.
+        const query = `?${new URLSearchParams({...(selection ? {request_id: selection.request_id,
           session_id: selection.root_event.session_id, root_process_id: String(selection.root_event.process_id),
-          root_sequence_number: selection.root_event.sequence_number})}` : '';
+          root_sequence_number: selection.root_event.sequence_number} : {}), view: 'findings'})}`;
         const headers = state.vmAnalysisEtag ? {'If-None-Match': state.vmAnalysisEtag} : {};
         state.vmAnalysisStatus = 'loading';
         state.vmAnalysisError = null;
@@ -404,13 +408,14 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const indexed = state.trafficIndex?.answer?.() ?? null;
         if (state.eventsLimited && !indexed) {
           if (kind === 'empty') kind = 'gap';
-          messages.push('Showing the last 5,000 evidence events; older events remain recorded on disk.');
+          messages.push('Traffic shows requests from the newest 5,000 evidence events until the request index answers. Older events remain on disk, and Evidence reads them with Earlier and Oldest.');
         }
         if (state.networkEventsLimited && !indexed) messages.push('The network event window is capped; older request lifecycle evidence may be incomplete.');
         if (state.eventCountScope === 'bounded_tail') {
           if (kind === 'empty') kind = 'gap';
-          messages.push(indexed ? 'Gap and drop counts cover only the newest 64 MiB of stored evidence; the request list covers the whole session.'
-            : 'Only the newest 64 MiB of stored evidence is scanned; counts and both windows exclude the older prefix.');
+          // The event index counts the whole store once it catches up (scope store).
+          messages.push(indexed ? 'Gap and drop counts cover only the newest 64 MiB of stored evidence until the event index catches up; the request list covers the whole session.'
+            : 'Only the newest 64 MiB of stored evidence is scanned until the event index catches up; counts and both windows exclude the older prefix.');
         }
         if (gapCount > 0n) {
           if (kind === 'empty') kind = 'gap';
@@ -1537,7 +1542,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
 
       // The index alone knows End lost, every row's body answer (a window row
       // can lack its response_started), the row a reuse names with its body,
-      // and a store copy's tabs (protocol/request-index-v1.md). Copied in
+      // and a store copy's tabs (protocol/request-index-v2.md). Copied in
       // place; the row is then checked against the index.
       function copyTrafficIndexFacts(request, indexed) {
         if (!indexed) return;
@@ -1721,6 +1726,17 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const field = document.createElement('div'); field.className = 'vm-field';
         field.append(textElement('span', '', label), textElement('strong', '', value));
         return field;
+      }
+
+      function vmRuntimeContextText(result) {
+        const context = result.runtime_context;
+        if (!context) return result.runtime === 'mixed' ? 'see each linked artifact' : 'not recorded';
+        const count = (value, word) => `${value.toLocaleString('en-US')} ${word}${value === 1 ? '' : 's'}`;
+        const total = key => context.signal_records.reduce((sum, signal) => sum + signal[key], 0);
+        const own = `${count(total('observed'), 'browser-signal record')} naming this artifact`;
+        if (context.frame_attribution === 'unavailable') return `frame unknown · ${own}`;
+        return `frame ${context.frame_id} · ${count(context.request_records, 'request record')} · ` +
+          `${own} · ${count(total('correlated'), 'other signal record')}`;
       }
 
       function vmSessionPresentation(targetState) {
@@ -2384,6 +2400,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         banner.textContent = view.headline;
         section.append(banner);
+        if (view.countLine) section.append(textElement('p', 'vm-workspace-empty', view.countLine));
         if (row) {
           for (const omission of view.omissionLines) {
             const item = document.createElement('p');
@@ -2868,7 +2885,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           fields.append(
             vmField('tier', selected.confidence),
             vmField('source artifact', selected.sourceArtifactId),
-            vmField('correlated requests (session context only)', result.related_request_ids?.join(', ') || 'none observed'),
+            vmField('frame context (correlation only)', vmRuntimeContextText(result)),
             vmField('exact response-body links', result.exact_request_links?.map(link =>
               `${link.request_id} · session ${link.root_event.session_id} · process ${link.root_event.process_id} · root ${link.root_event.sequence_number} → response ${link.response_event.sequence_number} → capture ${link.capture_event.sequence_number}`).join('; ') || 'unlinked'),
             vmField('evidence families', result.evidence_families?.join(', ') || 'none'),
@@ -3112,6 +3129,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         renderVmWasmSampling();
         const gapCount = shownSequenceGaps();
         const vmLimits = namedGapNotice(namedGapsIn(shownNamedGaps(), vmGapCategories), eventCountScopeLabel());
+        const failures = state.vmAnalysisStatus === 'ready' ? vmAnalysisFailureNotice(state.vmAnalysisDocument) : '';
+        const withFailures = message => failures ? `${message} ${failures}` : message;
         if (state.broker === 'connecting') {
           setVmNotice('loading', 'Waiting for VM findings from the local evidence broker.');
         } else if (state.vmAnalysisStatus === 'loading' && state.vmAnalysisSelection) {
@@ -3121,16 +3140,20 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         } else if (state.vmAnalysisStatus === 'unavailable') {
           setVmNotice('disconnected', `The cold analyzer is unavailable. ${state.vmAnalysisError ? `${state.vmAnalysisError} ` : ''}${state.vmFindings.length ? 'Last valid VM evidence remains visible.' : 'No VM evidence is available.'}`);
         } else if (state.broker === 'unavailable') {
-          setVmNotice('disconnected', state.vmFindings.length ? 'Broker disconnected. Last valid VM findings remain visible.' : 'Broker disconnected. No VM findings are available.');
+          setVmNotice('disconnected', withFailures(state.vmFindings.length ? 'Broker disconnected. Last valid VM findings remain visible.' : 'Broker disconnected. No VM findings are available.'));
         } else if (state.malformedVmFindings > 0) {
-          setVmNotice('malformed', `${state.malformedVmFindings} malformed VM ${state.malformedVmFindings === 1 ? 'finding was' : 'findings were'} rejected.`);
+          setVmNotice('malformed', withFailures(`${state.malformedVmFindings} malformed VM ${state.malformedVmFindings === 1 ? 'finding was' : 'findings were'} rejected.`));
         } else if (state.vmFindings.length === 0) {
-          const empty = state.vmAnalysisSelection ? 'No VM candidates are linked to this exact captured response body. Unlinked, legacy and session-wide findings are not shown.' : 'No VM findings yet. The lab waits for observed or explicitly inferred evidence.';
-          setVmNotice(vmLimits ? 'gap' : 'empty', vmLimits ? `${empty} ${vmLimits}` : empty);
-        } else if (gapCount > 0n || vmLimits) {
+          const omitted = state.vmAnalysisDocument?.results_view?.omitted_results ?? 0;
+          const plain = omitted > 0 ? ` ${omitted.toLocaleString('en-US')} analyzed ${omitted === 1 ? 'artifact shows' : 'artifacts show'} no VM structure.` : '';
+          const failed = failures ? ` ${failures}` : '';
+          const empty = state.vmAnalysisSelection ? `No VM candidates are linked to this exact captured response body.${plain}${failed} Unlinked, legacy and session-wide findings are not shown.` : `No VM findings yet.${plain}${failed} The lab waits for observed or explicitly inferred evidence.`;
+          setVmNotice(vmLimits || failures ? 'gap' : 'empty', vmLimits ? `${empty} ${vmLimits}` : empty);
+        } else if (gapCount > 0n || vmLimits || failures) {
           setVmNotice('gap', [
             gapCount > 0n ? `${gapCount} event ${gapCount === 1n ? 'gap may' : 'gaps may'} make VM coverage incomplete (observed sequence jumps in ${eventCountScopeLabel()}).` : '',
-            vmLimits
+            vmLimits,
+            failures
           ].filter(Boolean).join(' '));
         } else if (state.vmAnalysisSelection) {
           const selection = state.vmAnalysisSelection;
@@ -3476,11 +3499,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         line.style.top = `${Math.max(edge, Math.min(top, innerHeight - height - edge))}px`;
       }
 
-      // The summary's counts of bodies not kept, whether its event scan
-      // stopped at its bound, and the event poll's tag when it was read
-      // (`marker`), so a later store change is known. Read at most every 30 s
-      // while Traffic shows; a refused or malformed read keeps the last answer,
-      // marked stale.
+      // The summary's counts of bodies not kept, whether they cover less than
+      // the whole store (still indexing, or stopped at a record it cannot
+      // read), and the event poll's tag when it was read (`marker`), so a later
+      // store change is known. Read at most every 30 s while Traffic shows; a
+      // refused or malformed read keeps the last answer, marked stale.
       function refreshTrafficNotKept() {
         const use = state.trafficNotKept;
         if (typeof fetch !== 'function' || use?.pending || (use && Date.now() - use.at < 30000)) return;
@@ -3493,7 +3516,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           .then(summary => {
             if (!Array.isArray(summary?.checks)) throw new Error('No session summary');
             const next = {counts: {}, marker, stale: false,
-              bounded: summary.checks.some(check => check?.code === 'bounded_scope')};
+              bounded: summary.events?.scope !== 'store'};
             for (const entry of TRAFFIC_NOT_KEPT) {
               for (const check of summary.checks) {
                 if (check?.code !== 'request_content_not_retained' ||
@@ -3723,7 +3746,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           const end = Number(coverage.store_end);
           notes.push(`indexing ${end ? Math.floor(Number(coverage.indexed_end) * 100 / end) : 0}%`);
         }
-        if (coverage.unindexed_records !== '0') notes.push(`${coverage.unindexed_records} records past the ${coverage.request_limit.toLocaleString('en-US')}-request limit`);
         if (coverage.malformed_records !== '0') notes.push(`${coverage.malformed_records} unreadable records`);
         return notes.join(' · ');
       }
@@ -3880,8 +3902,72 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           : request.hostOnly ? `${request.path} (host only metadata)`
             : fullUrl ?? (request.urlTruncated ? `${request.path}… (truncated)` : request.path);
         elements.selectedUrl.title = elements.selectedUrl.textContent;
-        // A truncated or scheme-less target is not a URL to copy until its full target is loaded.
-        elements.requestCopyUrl.disabled = request.hostOnly || (Boolean(request.urlTruncated) && !fullUrl) || request.targetKind === 'path';
+        // The menu says which of its copies this row allows.
+        elements.requestCopyUrl.disabled = false;
+      }
+
+      // A truncated or scheme-less target is not a URL to copy until its full target is loaded.
+      function trafficCopyUrl(request) {
+        const fullUrl = request?.urlTruncated ? requestFullUrl(request) : null;
+        if (!request || request.hostOnly || (request.urlTruncated && !fullUrl) || request.targetKind === 'path') return null;
+        return request.origin === 'sample' ? `https://checkout.acme.test${request.path}` : fullUrl ?? request.path;
+      }
+
+      // What Export offers for Traffic: one exact row and the list as the index
+      // last answered it, pinned to that answer's position. Null without an index.
+      function trafficExportSnapshot(id = null) {
+        if (!trafficIndexActive() || state.sessionMode === 'preview') return null;
+        const origin = state.sessionMode === 'demo' ? 'demo' : 'live';
+        const query = trafficIndexQuery(origin);
+        const answer = state.trafficIndex.answer();
+        const listed = answer?.query === query && answer.origin === origin ? answer.document : null;
+        const chosen = id ?? state.selectedRequestId;
+        const request = chosen === null ? null : state.requests.find(candidate => candidate.id === chosen) ?? state.trafficIndex.row(chosen);
+        const target = request ? trafficCopyUrl(request) ?? request.path ?? '' : '';
+        const label = request ? `${request.method} ${target.length > 140 ? `${target.slice(0, 139)}…` : target}` : '';
+        const selected = request && request.origin !== 'sample' ? {id: request.id, label} : null;
+        const list = listed ? {query, through: listed.through ?? null, matching: Number(listed.matching),
+          filtered: [...new URLSearchParams(query).keys()].some(key => key !== 'sort' && key !== 'order')} : null;
+        return selected || list ? {selected, list} : null;
+      }
+
+      // The row menu's actions. cURL and fetch read the row's HAR entry, so they
+      // need the request index; a sample row has none.
+      function trafficRowActions(id) {
+        const request = state.requests.find(candidate => candidate.id === id) ?? state.trafficIndex?.row(id) ?? null;
+        if (!request) return [];
+        const url = trafficCopyUrl(request);
+        const indexed = trafficIndexActive() && request.origin !== 'sample';
+        const unindexed = 'This row has no request index entry to read its headers and body from.';
+        const copy = (label, build) => async () => {
+          const button = elements.requestCopyUrl;
+          let gaps = [];
+          try {
+            await trafficClipboardWrite((async () => {
+              const result = await build();
+              gaps = result.gaps ?? [];
+              return result.text;
+            })());
+            button.textContent = 'Copied';
+            if (gaps.length) investigationNotice(`Copied the ${label}, but ${gaps.join(' and ')}.`);
+          } catch (error) {
+            button.textContent = 'Copy failed';
+            investigationNotice(`The ${label} was not copied: ${error?.message ?? error}.`, 'ambiguous');
+          }
+          clearTimeout(state.trafficCopyTimer);
+          state.trafficCopyTimer = setTimeout(() => { button.textContent = 'Copy'; }, 1800);
+        };
+        const fromHar = render => async () => {
+          const entry = await trafficHarEntry(id);
+          return {text: render(entry), gaps: trafficCopyGaps(entry)};
+        };
+        return [
+          {label: 'Copy URL', disabled: !url, title: url ? '' : 'This row has no complete URL to copy.', run: copy('URL', async () => ({text: url}))},
+          {label: 'Copy as cURL', disabled: !indexed, title: indexed ? '' : unindexed, run: copy('cURL command', fromHar(trafficCurl))},
+          {label: 'Copy as fetch', disabled: !indexed, title: indexed ? '' : unindexed, run: copy('fetch call', fromHar(trafficFetch))},
+          {label: 'Export HAR…', separated: true, disabled: !indexed, title: indexed ? '' : unindexed,
+            run: () => capturedExportPanel.openTraffic(state.trafficRowMenuOpener, id)}
+        ];
       }
 
       function selectRequest(id, expectedIdentity = null) {
@@ -3999,10 +4085,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         state.trafficLoadingId = id;
         const row = [...elements.requestRows.querySelectorAll('.request-row')].find(node => node.dataset.requestId === id);
         row?.setAttribute('aria-busy', 'true');
-        // WebKit rejects a timed-out fetch with AbortError; the deadline says whether it was reached.
-        const deadline = AbortSignal.timeout(10000);
         try {
-          const {events, partial} = await state.trafficIndex.events(indexed.indexRow, AbortSignal.any([controller.signal, deadline]));
+          const {events, partial} = await state.trafficIndex.events(indexed.indexRow, controller.signal);
           if (controller.signal.aborted) return;
           const request = requestsFromEvents(events, indexed.origin).find(candidate => candidate.id === id);
           if (!request) throw new Error('its stored records no longer form this request');
@@ -4024,8 +4108,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         } catch (error) {
           if (controller.signal.aborted) return;
           if (select) {
-            const reason = deadline.aborted ? 'the backend did not answer within 10 seconds' : error.message;
-            const message = trafficUnreadSelectionText(indexed, reason, state.selectedRequestId !== null);
+            const message = trafficUnreadSelectionText(indexed, error.message, state.selectedRequestId !== null);
             const bar = document.querySelector('#investigation-navigation');
             // A later valid poll reads it again (retryTrafficUnreadSelection).
             state.trafficUnreadSelection = {id, indexed, message,
@@ -4194,7 +4277,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             state.signalProfileKey = selection.key;
             state.signalProfileEtag = response.headers.get('ETag');
           } else {
-            if (!response.ok) throw new Error(`Request signal profile store returned ${response.status}`);
+            if (!response.ok) {
+              // A 503 says how far the profile index has got; the next refresh asks again.
+              const failure = response.status === 503 ? await response.json().catch(() => null) : null;
+              throw new Error(typeof failure?.error === 'string' ? failure.error.slice(0, 1024)
+                : `Request signal profile store returned ${response.status}`);
+            }
             const body = await response.json();
             if (!ownsSelection()) return;
             if (!isRequestSignalProfile(body)) throw new TypeError('Malformed request signal profile');
@@ -5140,16 +5228,16 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           throw new TypeError('Request headers must map names to text values.');
         }
 
-        const forbidden = new Set(['authorization', 'connection', 'content-length', 'cookie', 'host',
-          'proxy-authorization', 'set-cookie', 'transfer-encoding']);
+        // The HTTP client computes framing and connection headers; credentials,
+        // cookies and browser headers are kept as the researcher wrote them.
+        const framing = new Set(['connection', 'content-length', 'host', 'keep-alive', 'proxy-connection',
+          'te', 'trailer', 'transfer-encoding', 'upgrade']);
         const entries = Object.entries(headers);
-        let bytes = 0;
-        if (entries.length > 64 || entries.some(([name, headerValue]) => {
-          bytes += utf8ByteLength(name) + utf8ByteLength(headerValue);
-          return !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(name) || forbidden.has(name.toLowerCase()) ||
-            utf8ByteLength(name) > 128 || utf8ByteLength(headerValue) > 2 * 1024 ||
-            /[\x00-\x1f\x7f]/u.test(headerValue) || bytes > 16 * 1024;
-        })) throw new TypeError('Request headers are forbidden, invalid, or exceed 16 KiB.');
+        if (entries.length > 64 || entries.some(([name, headerValue]) =>
+          !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(name) || framing.has(name.toLowerCase()) ||
+            utf8ByteLength(name) > 128 || utf8ByteLength(headerValue) > 64 * 1024 ||
+            /[\x00-\x1f\x7f]/u.test(headerValue)
+        )) throw new TypeError('Request headers must be at most 64 valid names with values of at most 64 KiB; Host, Content-Length, Connection, Transfer-Encoding and hop-by-hop headers belong to the HTTP client.');
         return entries.map(([name, headerValue]) => ({name, value: headerValue}));
       }
 
@@ -9599,6 +9687,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         state.events = [];
         state.canvasRenderCaptures = [];
         state.eventsLimited = false;
+        state.eventNextBefore = null;
+        state.eventStoreEnd = null;
         state.sequenceGaps = 0n;
         state.queueDrops = 0n;
         state.namedGaps = [];
@@ -9872,18 +9962,16 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }, {passive: true});
       // A list that gains height, or is shown, mounts the rows that come into view.
       if (typeof ResizeObserver === 'function') new ResizeObserver(() => remountTrafficRows(elements.requestRows)).observe(elements.requestRows);
-      elements.requestCopyUrl.addEventListener('click', async () => {
-        const selected = state.requests.find(request => request.id === state.selectedRequestId);
-        const fullUrl = selected?.urlTruncated ? requestFullUrl(selected) : null;
-        if (!selected || selected.hostOnly || (selected.urlTruncated && !fullUrl) || selected.targetKind === 'path') return;
-        try {
-          const url = selected.origin === 'sample' ? `https://checkout.acme.test${selected.path}` : fullUrl ?? selected.path;
-          await navigator.clipboard.writeText(url);
-          elements.requestCopyUrl.textContent = 'Copied';
-        } catch {
-          elements.requestCopyUrl.textContent = 'Copy unavailable';
-        }
-        setTimeout(() => { elements.requestCopyUrl.textContent = 'Copy URL'; }, 1800);
+      // Right-click, the context-menu key or Shift+F10 on a row selects it and opens the menu the strip's Copy opens.
+      state.trafficRowMenu = createTrafficRowMenu({rows: elements.requestRows, button: elements.requestCopyUrl,
+        select(id, opener) { state.trafficRowMenuOpener = opener; if (id !== state.selectedRequestId) selectTrafficRow(id); },
+        actions: trafficRowActions});
+      elements.requestCopyUrl.addEventListener('click', () => {
+        if (state.trafficRowMenu.isOpen()) { state.trafficRowMenu.close(); return; }
+        const id = state.selectedRequestId;
+        if (id === null) return;
+        const box = elements.requestCopyUrl.getBoundingClientRect();
+        state.trafficRowMenu.open(id, elements.requestCopyUrl, box.left, box.bottom + 4);
       });
       {
         const gaps = document.querySelector('#request-header-gaps');

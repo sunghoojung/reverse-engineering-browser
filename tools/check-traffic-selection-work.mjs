@@ -221,8 +221,8 @@ function indexFixture({windowCount = 6, holdIndex = false} = {}) {
     mime_type: null, protocol: null, response_time_ns: null, error_code: 0, loader_observed: true, initiator: 'browser', main_frame: false,
     browser_internal: false, ordinal: index, records, members: [{session_id: '1', process_id: 7, request_id: String(index + 1), records}],
     first_offset: String(index * 100), end_offset: String((index + 1) * 100), root: null});
-  const document_ = rows => ({format: 'reb-request-index-v1', requests: rows, matching: rows.length, total: rows.length, through: rows.length, added: 0,
-    index: {epoch: 'epoch-1', complete: true, store_end: '10', indexed_end: '10', unindexed_records: '0', malformed_records: '0', request_limit: 100000},
+  const document_ = rows => ({format: 'reb-request-index-v2', requests: rows, matching: rows.length, total: rows.length, through: rows.length, added: 0,
+    index: {epoch: 'epoch-1', complete: true, store_end: '10', indexed_end: '10', malformed_records: '0'},
     sizes: {transferred: 0, resources: 0}, hidden_internal: 0, located: {}, facets: {tabs: [{tab_id: '1', count: rows.length, domains: ['fixture.invalid']}], domains: [{domain: 'fixture.invalid', count: rows.length}]},
     timeline: {first_time_ns: '1', last_time_ns: '9', buckets: []}});
   const pending = [], reads = [];
@@ -584,7 +584,7 @@ const pendingWindow = t => {
 {
   // The index read: pagination, retention of the last answer on failure, unsupported backends and detail paging.
   const urls = [], changes = [];
-  const doc = () => ({format: 'reb-request-index-v1', requests: [], matching: 0, total: 0, through: 0, added: 0,
+  const doc = () => ({format: 'reb-request-index-v2', requests: [], matching: 0, total: 0, through: 0, added: 0,
     index: {epoch: 'e', complete: true}, facets: {tabs: [], domains: []}, located: {}, sizes: {transferred: 0, resources: 0}, timeline: {first_time_ns: null, last_time_ns: null, buckets: []}});
   const t = fixture(app, traffic, 1);
   const respond = (status, body) => new Response(body === undefined ? '' : JSON.stringify(body), {status, headers: {ETag: '"v"'}});
@@ -628,7 +628,7 @@ const pendingWindow = t => {
   assert.equal(events.length, 400, 'Every page of a member is read');
   assert.equal(partial, false, 'A complete read is not partial');
   assert.match(detailReads[1], /after=50/);
-  // Absence after a partial read is unknown: a limited member list, the page cap, a damaged line, a short read.
+  // Absence after a partial read is unknown: a cursor that stops, a damaged line, a short read.
   const readWith = async (pages, rowOverride = {}) => {
     let calls = 0;
     const reader = t.api.createTrafficIndex({fetcher: async () => respond(200, pages[Math.min(calls++, pages.length - 1)])});
@@ -636,10 +636,13 @@ const pendingWindow = t => {
   };
   const part = (query, count = 200) => ({events: eventsOf('1', count).map((event, i) => ({...event, sequence_number: String(i + calls())})), query});
   let serial = 1000; function calls() { serial += 1000; return serial; }
-  assert.equal((await readWith([part({next_after: '1', limited: false, budget_exhausted: false}, 400)], {members_limited: true})).partial, true, 'A row with unlisted members is partial');
-  const full = {next_after: '2', limited: true, budget_exhausted: false};
-  const capped = await readWith(Array.from({length: 17}, () => part(full, 20)));
-  assert.equal(capped.partial, true, 'Stopping at the page cap with records unread is partial');
+  let cursor = 0;
+  const moving = () => ({next_after: String(cursor += 10), limited: true, budget_exhausted: false});
+  const long = await readWith(Array.from({length: 20}, () => part(moving(), 20)));
+  assert.equal(long.partial, false, 'A long request is read page after page until every record is in');
+  assert.equal(long.events.length, 400, 'No page count stops a long request');
+  const stuck = await readWith([part({next_after: '0', limited: true, budget_exhausted: false}, 20)]);
+  assert.equal(stuck.partial, true, 'A cursor that does not move stops the read as partial');
   assert.equal((await readWith([part({next_after: '1', limited: false, budget_exhausted: false, malformed_lines: 1}, 400)])).partial, true, 'A damaged line is partial');
   assert.equal((await readWith([part({next_after: '1', limited: false, budget_exhausted: false}, 300)])).partial, true, 'Fewer records than indexed is partial');
   const broken = t.api.createTrafficIndex({fetcher: async () => respond(200, {events: 'no'})});
@@ -737,7 +740,7 @@ console.log('PASS Traffic selection reuses rendered search/sort/window; only row
 
   // A session that kept everything reads the summary once and shows nothing.
   {
-    const quiet = footer({summary: {checks: []}});
+    const quiet = footer({summary: {events: {scope: 'store'}, checks: []}});
     quiet.api.renderTrafficNotKept(); await settle();
     assert.deepEqual(quiet.reads, ['/api/session/summary'], 'every session reads the summary once');
     assert.equal(quiet.notice.hidden, true, 'no refusal, no notice');
@@ -747,7 +750,7 @@ console.log('PASS Traffic selection reuses rendered search/sort/window; only row
   // A stored capture an older browser recorded: its budget refusals are all
   // outside the loaded rows and still show, exact, naming no control to raise.
   {
-    const stored = footer({summary: {checks: [check('response_body', 'not_captured_session_budget', 5),
+    const stored = footer({summary: {events: {scope: 'store'}, checks: [check('response_body', 'not_captured_session_budget', 5),
       check('request_target', 'not_retained_session_budget', 2)]}});
     stored.api.renderTrafficNotKept(); await settle();
     assert.equal(stored.notice.hidden, false);
@@ -758,7 +761,7 @@ console.log('PASS Traffic selection reuses rendered search/sort/window; only row
 
   // A live content session whose disk reserve was reached.
   const f = footer({live: true,
-    summary: {checks: [check('response_body', 'not_captured_disk_reserve', 2400), check('request_body', 'not_captured_disk_reserve', 30),
+    summary: {events: {scope: 'store'}, checks: [check('response_body', 'not_captured_disk_reserve', 2400), check('request_body', 'not_captured_disk_reserve', 30),
       check('response_body', 'not_captured_type', 7)]}});
   const {t, api, reads, line, toggle, notice, clock, layout} = f;
   // Two response refusals and one request refusal are loaded: a lower bound
@@ -785,7 +788,7 @@ console.log('PASS Traffic selection reuses rendered search/sort/window; only row
   assert.equal(line.textContent, `Disk reserve reached: at least 2,430 bodies ${disk}.`, 'a figure read before the store changed is a lower bound');
   // The next read is exact again while nothing arrives.
   clock.now += 30_000;
-  f.answers.summary = {checks: [check('response_body', 'not_captured_disk_reserve', 2480)]};
+  f.answers.summary = {events: {scope: 'store'}, checks: [check('response_body', 'not_captured_disk_reserve', 2480)]};
   api.renderTrafficNotKept(); await settle();
   assert.equal(reads.length, 2);
   assert.equal(line.textContent, `Disk reserve reached: 2,480 bodies ${disk}.`);
@@ -800,8 +803,8 @@ console.log('PASS Traffic selection reuses rendered search/sort/window; only row
   // kinds at once; a bounded summary scan is a lower bound too.
   clock.now += 30_000;
   for (const index of [3, 4, 5, 8, 9, 10]) { t.state.requests[index].responseBody = null; t.state.requests[index].body = null; }
-  f.answers.summary = {checks: [check('response_body', 'not_captured_disk_reserve', 2400), check('request_body', 'not_captured_session_budget', 1),
-    {code: 'bounded_scope', severity: 'info', message: 'bounded'}]};
+  f.answers.summary = {events: {scope: 'indexing'}, checks: [check('response_body', 'not_captured_disk_reserve', 2400), check('request_body', 'not_captured_session_budget', 1),
+    {code: 'summary_indexing', severity: 'info', message: 'indexing'}]};
   api.renderTrafficNotKept(); await settle();
   assert.equal(reads.length, 4);
   assert.equal(line.textContent, `Disk reserve reached: at least 2,400 bodies ${disk} · Older content budget: at least 1 body or URL ${older}.`);

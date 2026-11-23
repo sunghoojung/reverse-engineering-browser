@@ -1237,7 +1237,7 @@ launcher passes for content sessions.
 Some requests have no browser `response_started`, so they have no
 `response_body` record. Each request instead has one body case, which Traffic's
 `responseBodyCase` and the request index decide alike
-([request index v1](request-index-v1.md)): the state of the newest
+([request index v2](request-index-v2.md)): the state of the newest
 `response_body` record of its final `response_started`, or `malformed`, else in
 this order:
 
@@ -1959,18 +1959,22 @@ the responses that set it and the requests that sent it in the newest 5,000
 cookie list, request start, redirect, script call and script identity records
 within the last 64 MiB of events. A cookie is often written once early and sent
 on every later request, so the request index locates every `script_cookie`
-record of the session (at most 65,536) and provenance reads back those older
+record of the session and provenance reads back those older
 than its window by byte range; `script_coverage` says whether that list is
 complete. `coverage` says what the window read, so an absent response or request
 is not proof when `coverage.complete` is false (see
-[request index v1](request-index-v1.md#per-request-detail-reads)). Each
+[request index v2](request-index-v2.md#per-request-detail-reads)). Each
 script call's `stack` resolves like `get_request_stack`: through
 `script_identity` records in the window and the index to line, column and function name,
 with every walked frame when its digest names a retained stack artifact; at
 most 64 distinct positions per answer, the rest counted in
 `stacks_unresolved`.
 Cookie values are withheld as `value_withheld: true` with their byte length
-and SHA-256, like credential headers; a script write links to a sent cookie
+and SHA-256, and a received line as `line_withheld: true` with its length, like
+credential headers, unless the read passes `credential_values=1`: then each
+cookie has its `value` and each received line its `line`, invalid UTF-8
+replaced, beside the same length and digest. `reb-api mcp` passes it only with
+`--allow-content` (`--permission full`). A script write links to a sent cookie
 when their value digests are equal. A `document.cookie` read joins a name by
 its version 3 name record. `read_coverage` counts the reads that may hold the
 name without naming it: `whole_jar_reads` (version 1 and 2 reads, recorded
@@ -2029,9 +2033,12 @@ whose name contains a credential root (`token`, `secret`, `passw`, `csrf`,
 and similar), has the whole word `auth`, `session`, `jwt`, `otp` or `pwd`, or
 has a word ending in `key`, except `Sec-WebSocket-Key`, `Idempotency-Key` and
 `Public-Key-Pins`, are withheld as `value_withheld: true` with
-their byte length: like request bodies, they stay in the binary artifact, which
-MCP never inlines. Withholding goes by name, so another value, such as a
-`Location` query, is returned as captured.
+their byte length unless the read passes `credential_values=1`, which returns
+each as `value` with `credential: true`. `reb-api mcp` never lets a model pass
+it and passes it only with `--allow-content` (`--permission full`), so below
+Full access those values stay in the binary artifact. Each document's
+`credential_values` says which it did. Withholding goes by name, so another
+value, such as a `Location` query, is returned as captured.
 
 ### Missing final blocks
 
@@ -2059,15 +2066,16 @@ a response), `no_raw_response`, since the received list comes with the
 response headers and what was sent was reported, or `record_dropped` in its
 place under the rule above. The backend reads the session's gap records of
 every category beside the request's own, from a tally it keeps per store: the
-first read scans the newest 64 MiB for gaps, a later one only the bytes
-appended since and none while the store is unchanged, and a store that shrank,
-was replaced or was cleared and written again (the bytes before the last
-boundary changed, as the request index checks) is scanned again. So a Headers,
-Cookies or provenance read costs its own records, not a 64 MiB scan.
+first read scans the whole store for gaps, so a drop early in a long session
+still counts, a later one only the bytes appended since and none while the
+store is unchanged, and a store that shrank, was replaced or was cleared and
+written again (the bytes before the last boundary changed, as the request index
+checks) is scanned again. So a Headers, Cookies or provenance read costs its
+own records, not a store scan.
 Origin Trace's Headers tab adds the reason to "Provisional headers are shown",
 and the Cookies tab lists each such hop with it.
 
-`get_session_summary` counts, over the newest 64 MiB of events:
+`get_session_summary` counts, over every record of the session:
 
 - every header block and cookie list in states 4 to 8, as
   `request_content_not_retained` with category `request_headers`,
@@ -2077,11 +2085,11 @@ and the Cookies tab lists each such hop with it.
 - the requests whose final hop ended without a `network` block, one
   `final_headers_missing` check per reason: `info` for `download`,
   `service_worker`, `from_cache` and `failed`, `warning` for `not_reported`
-  and `record_dropped` (a drop of any category while the request ran).
-  It follows at most 131,072 browser requests; header records of later ones
-  are counted as `final_headers_untracked`. A request with no header record
-  (any request of a metadata-only session) has no final block to miss and is
-  never counted there.
+  and `record_dropped` (a drop of any category while the request ran, or
+  reported within a second of its end, wherever in the store the drop's
+  record lies). Every browser request is followed. A request with no header
+  record (any request of a metadata-only session) has no final block to miss
+  and is never counted there.
 
 The Traffic footer shows the same counts for the loaded rows as one item,
 "N header gaps", whose breakdown lists each count with its reason, so the
@@ -2455,7 +2463,7 @@ scripts even when the main isolate described the same script IDs.
 
 `get_request_stack` (`GET /api/request-stack?process_id=&request_id=`, the
 renderer identity) returns the newest stack record for that request with its
-frames, reading the bytes the [request index](request-index-v1.md#per-request-detail-reads)
+frames, reading the bytes the [request index](request-index-v2.md#per-request-detail-reads)
 names for it. `status` is `outside_scan`, not `not_recorded`, when the read did
 not reach them all; `coverage` says what was read:
 

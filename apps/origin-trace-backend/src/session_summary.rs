@@ -1,32 +1,39 @@
-//! One bounded read that answers "did this capture work?": event counts by
-//! type and frame, artifact digests, gap reasons and capture state, with a
-//! short list of checks that name what looks wrong. It is counts, identifiers
-//! and origin labels only; it never includes payloads, source or bodies.
+//! One read that answers "did this capture work?" for the whole session:
+//! event counts by type and frame, artifact digests, gap reasons and capture
+//! state, with a short list of checks that name what looks wrong. The counts
+//! are folded as records arrive, into the event index (`event_index`, with
+//! `Fold`) and the artifact lookup index, so a session of any length is
+//! summarized from a few rows. It is counts, identifiers and origin labels
+//! only; it never includes payloads, source or bodies.
 use crate::{
-    app::validate_event,
-    artifact_query::{self, MANIFEST_RECORD_BYTES},
+    artifact_lookup,
     error::Result,
-    event_query::{self, Cursor, EVENT_RECORD_BYTES, SCAN_BYTES, Tally},
-    event_window, request_cookies,
+    event_index::{self, Indexes, Totals},
+    event_window,
+    index_db::{self, Position, SqlResult},
+    request_cookies,
     request_headers::{self, DROP_REPORT_SLACK_NS, Lifecycle},
-    request_tabs::RequestTabs,
+    request_tabs::{self, RequestTabs},
     session_context,
 };
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     path::Path,
+    time::{Duration, Instant},
 };
 
+/// What the answer lists; each list says how many it leaves out.
 const FRAMES: usize = 32;
-const TRACKED_FRAMES: usize = 4096;
 const FRAME_TYPES: usize = 8;
 const SESSIONS: usize = 16;
 const ARTIFACTS: usize = 32;
 const REFUSAL_REASONS: usize = 32;
-/// Browser requests followed for a final header block, as many as the
-/// request index holds; the rest are counted as untracked.
-const HEADER_REQUESTS: usize = if cfg!(test) { 16 } else { 131_072 };
+/// How long a summary folds appended records before it answers from what
+/// is indexed. The background indexer folds the rest, and the answer says
+/// how far it got.
+pub const FOLD: Duration = Duration::from_secs(1);
 
 /// Live state the backend knows outside the stores.
 pub struct CaptureState<'a> {
@@ -38,23 +45,79 @@ pub struct CaptureState<'a> {
     pub artifact_receiver_connected: bool,
 }
 
+/// A stored time or identifier for SQL: times stay below 2^63, and
+/// identifiers keep their bits (`index_db::key`).
+fn clamp(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+/// Adds `delta` to one of the summary's kept counts.
+pub(crate) fn bump(transaction: &Transaction<'_>, name: &str, delta: i64) -> Result<()> {
+    if delta != 0 {
+        transaction
+            .prepare_cached(
+                "INSERT INTO summary_counts(name, count) VALUES (?1, ?2)
+                 ON CONFLICT(name) DO UPDATE SET count = count + excluded.count",
+            )
+            .sql()?
+            .execute(params![name, delta])
+            .sql()?;
+    }
+    Ok(())
+}
+
+/// The kept counts whose names start with `prefix`, by the rest of the name.
+pub(crate) fn counts_named(connection: &Connection, prefix: &str) -> Result<BTreeMap<String, u64>> {
+    // `;` follows `:` in byte order, so the range is every name with the prefix.
+    let end = format!("{};", prefix.trim_end_matches(':'));
+    connection
+        .prepare_cached(
+            "SELECT name, count FROM summary_counts WHERE name > ?1 AND name < ?2 AND count > 0",
+        )
+        .sql()?
+        .query_map(params![prefix, end], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+        })
+        .sql()?
+        .map(|row| {
+            row.map(|(name, count)| (name[prefix.len()..].to_owned(), count))
+                .sql()
+        })
+        .collect()
+}
+
+pub(crate) fn count_named(connection: &Connection, name: &str) -> Result<u64> {
+    Ok(connection
+        .prepare_cached("SELECT count FROM summary_counts WHERE name = ?1")
+        .sql()?
+        .query_row([name], |row| row.get::<_, i64>(0))
+        .optional()
+        .sql()?
+        .map_or(0, |count| count as u64))
+}
+
+fn mib(bytes: u64) -> String {
+    format!("{:.1} MiB", bytes as f64 / 1_048_576.0)
+}
+
 #[derive(Default)]
 struct Frame {
     count: u64,
     first: u64,
     last: u64,
-    types: BTreeMap<String, u64>,
+    types: HashMap<String, u64>,
 }
 
+/// One fold's events by type, session and frame, added to the stored counts
+/// in `write`.
 #[derive(Default)]
 struct EventCounts {
     total: u64,
     first: Option<u64>,
     last: Option<u64>,
-    by_type: BTreeMap<(String, String), u64>,
-    sessions: BTreeMap<u64, u64>,
+    by_type: HashMap<(String, String), u64>,
+    sessions: HashMap<u64, u64>,
     frames: HashMap<(u64, u64, u64, u64), Frame>,
-    untracked_frame_events: u64,
 }
 impl EventCounts {
     fn record(&mut self, event: &Value) {
@@ -78,10 +141,6 @@ impl EventCounts {
             number("navigation_id"),
             number("frame_id"),
         );
-        if !self.frames.contains_key(&key) && self.frames.len() >= TRACKED_FRAMES {
-            self.untracked_frame_events += 1;
-            return;
-        }
         let frame = self.frames.entry(key).or_insert_with(|| Frame {
             first: time,
             last: time,
@@ -92,62 +151,76 @@ impl EventCounts {
         frame.last = frame.last.max(time);
         *frame.types.entry(kind).or_default() += 1;
     }
-    fn count(&self, kind: &str) -> u64 {
-        self.by_type
-            .iter()
-            .filter(|((_, name), _)| name == kind)
-            .map(|(_, count)| count)
-            .sum()
-    }
-    fn document(&self, page: &event_query::Page, tally: &Tally) -> Value {
-        let mut by_type = self
-            .by_type
-            .iter()
-            .map(|((category, kind), count)| (category, kind, *count))
-            .collect::<Vec<_>>();
-        by_type.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| (a.0, a.1).cmp(&(b.0, b.1))));
-        let mut frames = self.frames.iter().collect::<Vec<_>>();
-        frames.sort_by(|a, b| b.1.count.cmp(&a.1.count).then_with(|| a.0.cmp(b.0)));
-        let mut sessions = self.sessions.iter().collect::<Vec<_>>();
-        sessions.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
-        let mut document = json!({
-            "scope": page.scope(),
-            "scan_start": page.scan_start.to_string(),
-            "scan_end": page.scan_end.to_string(),
-            "scan_limit": SCAN_BYTES,
-            "budget_exhausted": page.exhausted,
-            "total": self.total.to_string(),
-            "first_time_ns": self.first.map(|time| time.to_string()),
-            "last_time_ns": self.last.map(|time| time.to_string()),
-            "by_type": by_type.iter().map(|(category, kind, count)| json!({
-                "category": category, "type": kind, "count": count.to_string()
-            })).collect::<Vec<_>>(),
-            "sessions": sessions.iter().take(SESSIONS).map(|(session, count)| json!({
-                "session_id": session.to_string(), "count": count.to_string()
-            })).collect::<Vec<_>>(),
-            "sessions_omitted": sessions.len().saturating_sub(SESSIONS),
-            "frames": frames.iter().take(FRAMES).map(|((session, tab, navigation, frame), stats)| {
-                let mut types = stats.types.iter().collect::<Vec<_>>();
-                types.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
-                json!({
-                    "session_id": session.to_string(),
-                    "tab_id": tab,
-                    "navigation_id": navigation.to_string(),
-                    "frame_id": frame.to_string(),
-                    "count": stats.count.to_string(),
-                    "first_time_ns": stats.first.to_string(),
-                    "last_time_ns": stats.last.to_string(),
-                    "types": types.iter().take(FRAME_TYPES).map(|(kind, count)| json!({
-                        "type": kind, "count": count.to_string()
-                    })).collect::<Vec<_>>(),
-                    "types_omitted": types.len().saturating_sub(FRAME_TYPES),
-                })
-            }).collect::<Vec<_>>(),
-            "frames_omitted": frames.len().saturating_sub(FRAMES),
-            "untracked_frame_events": self.untracked_frame_events.to_string(),
-        });
-        tally.write(&mut document);
-        document
+
+    fn write(&mut self, transaction: &Transaction<'_>) -> Result<()> {
+        let (Some(first), Some(last)) = (self.first, self.last) else {
+            return Ok(());
+        };
+        transaction
+            .prepare_cached(
+                "UPDATE totals SET events = events + ?1,
+                    first_ns = min(coalesce(first_ns, ?2), ?2), last_ns = max(coalesce(last_ns, ?3), ?3)
+                 WHERE id = 0",
+            )
+            .sql()?
+            .execute(params![clamp(self.total), clamp(first), clamp(last)])
+            .sql()?;
+        for ((category, kind), count) in self.by_type.drain() {
+            transaction
+                .prepare_cached(
+                    "INSERT INTO summary_types(category, type, count) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(category, type) DO UPDATE SET count = count + excluded.count",
+                )
+                .sql()?
+                .execute(params![category, kind, clamp(count)])
+                .sql()?;
+        }
+        for (session, count) in self.sessions.drain() {
+            transaction
+                .prepare_cached(
+                    "INSERT INTO summary_sessions(session, count) VALUES (?1, ?2)
+                     ON CONFLICT(session) DO UPDATE SET count = count + excluded.count",
+                )
+                .sql()?
+                .execute(params![index_db::key(session), clamp(count)])
+                .sql()?;
+        }
+        for ((session, tab, navigation, frame), stats) in self.frames.drain() {
+            let id: i64 = transaction
+                .prepare_cached(
+                    "INSERT INTO summary_frames(session, tab, navigation, frame, count, first_ns, last_ns)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(session, tab, navigation, frame) DO UPDATE SET
+                        count = count + excluded.count, first_ns = min(first_ns, excluded.first_ns),
+                        last_ns = max(last_ns, excluded.last_ns)
+                     RETURNING id",
+                )
+                .sql()?
+                .query_row(
+                    params![
+                        index_db::key(session),
+                        index_db::key(tab),
+                        index_db::key(navigation),
+                        index_db::key(frame),
+                        clamp(stats.count),
+                        clamp(stats.first),
+                        clamp(stats.last)
+                    ],
+                    |row| row.get(0),
+                )
+                .sql()?;
+            for (kind, count) in stats.types {
+                transaction
+                    .prepare_cached(
+                        "INSERT INTO summary_frame_types(frame, type, count) VALUES (?1, ?2, ?3)
+                         ON CONFLICT(frame, type) DO UPDATE SET count = count + excluded.count",
+                    )
+                    .sql()?
+                    .execute(params![id, kind, clamp(count)])
+                    .sql()?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -155,8 +228,8 @@ impl EventCounts {
 /// payloads, and request content a content session did not retain.
 #[derive(Default)]
 struct Refusals {
-    failures: BTreeMap<String, u64>,
-    content: BTreeMap<(&'static str, &'static str), u64>,
+    failures: HashMap<String, u64>,
+    content: HashMap<(&'static str, &'static str), u64>,
 }
 impl Refusals {
     fn record(&mut self, event: &Value) {
@@ -177,14 +250,7 @@ impl Refusals {
                     })
                     .and_then(|bytes| String::from_utf8(bytes).ok())
                     .unwrap_or_else(|| "unrecognized".into());
-                let key = if self.failures.len() < REFUSAL_REASONS
-                    || self.failures.contains_key(&reason)
-                {
-                    reason
-                } else {
-                    "other".into()
-                };
-                *self.failures.entry(key).or_default() += 1;
+                *self.failures.entry(reason).or_default() += 1;
             }
             (Some("network"), Some("request_body")) => {
                 if let Some(reason) = payload()
@@ -232,6 +298,27 @@ impl Refusals {
             _ => {}
         }
     }
+    fn write(&mut self, transaction: &Transaction<'_>) -> Result<()> {
+        let failures = self
+            .failures
+            .drain()
+            .map(|(reason, count)| ("artifact", reason, count));
+        let content = self
+            .content
+            .drain()
+            .map(|((category, reason), count)| (category, reason.to_owned(), count));
+        for (category, reason, count) in failures.chain(content) {
+            transaction
+                .prepare_cached(
+                    "INSERT INTO summary_refusals(category, reason, count) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(category, reason) DO UPDATE SET count = count + excluded.count",
+                )
+                .sql()?
+                .execute(params![category, reason, clamp(count)])
+                .sql()?;
+        }
+        Ok(())
+    }
 }
 
 /// Header block and cookie list states that retained no bytes (native-network-v3.md).
@@ -253,37 +340,31 @@ struct RequestHeaderFacts {
     provisional: u64,
     network: u64,
     lifecycle: Lifecycle,
-    /// The first and last times of its records in the window.
+    /// The first and last times of its records.
     span: Option<(u64, u64)>,
 }
 
 /// Header blocks and cookie lists no row shows, and the requests of content
 /// sessions that ended without a `network` request block, with the reason
-/// ("Missing final blocks" in protocol/native-network-v3.md).
+/// ("Missing final blocks" in protocol/native-network-v3.md). One fold's
+/// facts are merged into each request's stored row in `write`.
 #[derive(Default)]
 struct HeaderCoverage {
     /// The newest unattributed count per producer: each record carries its
     /// configuration's count so far.
-    unattributed_blocks: BTreeMap<(u64, u64), u64>,
-    unattributed_lists: BTreeMap<(u64, u64), u64>,
+    unattributed_blocks: HashMap<(u64, u64), u64>,
+    unattributed_lists: HashMap<(u64, u64), u64>,
     requests: HashMap<(u64, u64, u64), RequestHeaderFacts>,
-    untracked: u64,
-    /// Gap times and drop counts of every category: a dropped block makes an
-    /// absent one unsure. Past the bound every request counts as overlapped.
-    drops: Vec<(u64, u64, u64)>,
-    drops_overflowed: bool,
+    /// Gap times of every category, by session: a dropped block makes an
+    /// absent one unsure.
+    drops: Vec<(u64, u64)>,
 }
 impl HeaderCoverage {
     fn record(&mut self, event: &Value) {
         let number = |key: &str| event_window::unsigned(&event[key]).unwrap_or(0);
-        let dropped = event_window::dropped_records(event);
-        if dropped > 0 {
-            if self.drops.len() < HEADER_REQUESTS {
-                self.drops
-                    .push((number("session_id"), number("monotonic_time_ns"), dropped));
-            } else {
-                self.drops_overflowed = true;
-            }
+        if event_window::dropped_records(event) > 0 {
+            self.drops
+                .push((number("session_id"), number("monotonic_time_ns")));
         }
         let producer = (number("session_id"), number("process_id"));
         let key = (producer.0, producer.1, number("request_id"));
@@ -298,7 +379,7 @@ impl HeaderCoverage {
                 if facts.response || facts.hop >= 64 {
                     return;
                 }
-                if let Some(request) = self.request(key, true) {
+                if let Some(request) = self.request(key) {
                     request.widen(time);
                     if facts.source == 1 {
                         request.provisional |= 1 << facts.hop;
@@ -321,7 +402,7 @@ impl HeaderCoverage {
             ) if event["browser_context_id_high"].as_str().unwrap_or("0") != "0"
                 || event["browser_context_id_low"].as_str().unwrap_or("0") != "0" =>
             {
-                if let Some(request) = self.request(key, false) {
+                if let Some(request) = self.request(key) {
                     request.widen(time);
                     request.lifecycle.record(event);
                 }
@@ -329,48 +410,113 @@ impl HeaderCoverage {
             _ => {}
         }
     }
-    /// The request's facts. Only a header record past the bound is counted
-    /// as untracked: a request with no header record has no final block to
-    /// miss, as in a metadata-only session, whose lifecycle records are simply
-    /// not followed then.
-    fn request(&mut self, key: (u64, u64, u64), header: bool) -> Option<&mut RequestHeaderFacts> {
-        if key.2 == 0 {
-            return None;
-        }
-        if !self.requests.contains_key(&key) && self.requests.len() >= HEADER_REQUESTS {
-            self.untracked += u64::from(header);
-            return None;
-        }
-        Some(self.requests.entry(key).or_default())
+    fn request(&mut self, key: (u64, u64, u64)) -> Option<&mut RequestHeaderFacts> {
+        (key.2 != 0).then(|| self.requests.entry(key).or_default())
     }
-    /// Requests that ended without a `network` block on their final hop.
-    fn missing(&self) -> BTreeMap<&'static str, u64> {
-        let mut missing = BTreeMap::new();
-        for (key, request) in &self.requests {
-            if request.provisional == 0 {
-                continue;
-            }
-            let last = 63 - request.provisional.leading_zeros();
-            if request.network & (1 << last) != 0 {
-                continue;
-            }
-            let dropped = self.drops_overflowed
-                || request.span.is_some_and(|(first, last)| {
-                    let to = request
-                        .lifecycle
-                        .ended
-                        .then(|| last.saturating_add(DROP_REPORT_SLACK_NS));
-                    self.drops.iter().any(|(session, time, _)| {
-                        *session == key.0 && *time >= first && to.is_none_or(|to| *time <= to)
-                    })
-                });
-            let reason =
-                request_headers::qualified(request.lifecycle.missing_reason(true, false), dropped);
-            if reason != "in_progress" {
-                *missing.entry(reason).or_default() += 1;
+
+    fn write(&mut self, transaction: &Transaction<'_>) -> Result<()> {
+        for (kind, newest) in [
+            (1, &mut self.unattributed_blocks),
+            (2, &mut self.unattributed_lists),
+        ] {
+            for ((session, process), count) in newest.drain() {
+                write_newest(transaction, kind, session, process, 0, count)?;
             }
         }
-        missing
+        for (session, time) in &self.drops {
+            transaction
+                .prepare_cached("INSERT INTO summary_drops(session, time) VALUES (?1, ?2)")
+                .sql()?
+                .execute(params![index_db::key(*session), clamp(*time)])
+                .sql()?;
+        }
+        // Each request this fold saw, merged with its stored row; its reason
+        // is decided with every drop so far, this fold's included.
+        for ((session, process, request), facts) in self.requests.drain() {
+            let key = params![
+                index_db::key(session),
+                index_db::key(process),
+                index_db::key(request)
+            ];
+            let stored = transaction
+                .prepare_cached(
+                    "SELECT provisional, network, lifecycle, first_ns, last_ns, reason
+                     FROM summary_headers WHERE session = ?1 AND process = ?2 AND request = ?3",
+                )
+                .sql()?
+                .query_row(key, |row| {
+                    Ok((
+                        row.get::<_, i64>(0)? as u64,
+                        row.get::<_, i64>(1)? as u64,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)? as u64,
+                        row.get::<_, i64>(4)? as u64,
+                        row.get::<_, Option<String>>(5)?,
+                    ))
+                })
+                .optional()
+                .sql()?;
+            let (mut first, mut last) = facts.span.unwrap_or_default();
+            let mut merged = facts;
+            let mut before = None;
+            if let Some((provisional, network, lifecycle, stored_first, stored_last, reason)) =
+                stored
+            {
+                merged.provisional |= provisional;
+                merged.network |= network;
+                merged.lifecycle = lifecycle_of(lifecycle_bits(&merged.lifecycle) | lifecycle);
+                first = first.min(stored_first);
+                last = last.max(stored_last);
+                before = reason;
+            }
+            let reason = missing_reason(transaction, session, &merged, first, last)?;
+            if before.as_deref() != reason {
+                if let Some(before) = &before {
+                    bump(transaction, &format!("missing:{before}"), -1)?;
+                }
+                if let Some(reason) = reason {
+                    bump(transaction, &format!("missing:{reason}"), 1)?;
+                }
+            }
+            transaction
+                .prepare_cached(
+                    "INSERT OR REPLACE INTO summary_headers(session, process, request, provisional,
+                        network, lifecycle, first_ns, last_ns, reason)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                )
+                .sql()?
+                .execute(params![
+                    index_db::key(session),
+                    index_db::key(process),
+                    index_db::key(request),
+                    merged.provisional as i64,
+                    merged.network as i64,
+                    lifecycle_bits(&merged.lifecycle),
+                    clamp(first),
+                    clamp(last),
+                    reason
+                ])
+                .sql()?;
+        }
+        // A drop also makes unsure the ended requests written by earlier
+        // folds that it overlaps.
+        for (session, time) in self.drops.drain(..) {
+            let unsure = transaction
+                .prepare_cached(
+                    "UPDATE summary_headers SET reason = 'record_dropped'
+                     WHERE session = ?1 AND reason = 'not_reported' AND last_ns >= ?2 AND first_ns <= ?3",
+                )
+                .sql()?
+                .execute(params![
+                    index_db::key(session),
+                    clamp(time.saturating_sub(DROP_REPORT_SLACK_NS)),
+                    clamp(time)
+                ])
+                .sql()? as i64;
+            bump(transaction, "missing:not_reported", -unsure)?;
+            bump(transaction, "missing:record_dropped", unsure)?;
+        }
+        Ok(())
     }
 }
 
@@ -380,6 +526,95 @@ impl RequestHeaderFacts {
             (first.min(time), last.max(time))
         }));
     }
+}
+
+/// Why a request ended without a `network` block on its final hop, or None
+/// when it has one, has no header block, or is still open.
+fn missing_reason(
+    transaction: &Transaction<'_>,
+    session: u64,
+    request: &RequestHeaderFacts,
+    first: u64,
+    last: u64,
+) -> Result<Option<&'static str>> {
+    if request.provisional == 0 {
+        return Ok(None);
+    }
+    let hop = 63 - request.provisional.leading_zeros();
+    if request.network & (1 << hop) != 0 {
+        return Ok(None);
+    }
+    let reason = request.lifecycle.missing_reason(true, false);
+    if reason == "in_progress" {
+        return Ok(None);
+    }
+    // Only a reason inferred from the block's absence can be made unsure,
+    // and an ended request only by a drop reported within the slack.
+    let dropped = request_headers::qualified(reason, true) != reason
+        && transaction
+            .prepare_cached(
+                "SELECT 1 FROM summary_drops WHERE session = ?1 AND time >= ?2 AND time <= ?3",
+            )
+            .sql()?
+            .exists(params![
+                index_db::key(session),
+                clamp(first),
+                clamp(last.saturating_add(DROP_REPORT_SLACK_NS))
+            ])
+            .sql()?;
+    Ok(Some(request_headers::qualified(reason, dropped)))
+}
+
+fn lifecycle_bits(lifecycle: &Lifecycle) -> i64 {
+    [
+        lifecycle.ended,
+        lifecycle.failed,
+        lifecycle.responded,
+        lifecycle.from_cache,
+        lifecycle.from_service_worker,
+        lifecycle.download,
+    ]
+    .iter()
+    .enumerate()
+    .fold(0, |bits, (bit, set)| bits | (i64::from(*set) << bit))
+}
+
+fn lifecycle_of(bits: i64) -> Lifecycle {
+    let set = |bit: u32| bits & (1 << bit) != 0;
+    Lifecycle {
+        ended: set(0),
+        failed: set(1),
+        responded: set(2),
+        from_cache: set(3),
+        from_service_worker: set(4),
+        download: set(5),
+    }
+}
+
+/// Keeps the larger of a producer's stored and newest cumulative count.
+fn write_newest(
+    transaction: &Transaction<'_>,
+    kind: i64,
+    session: u64,
+    process: u64,
+    class: u8,
+    count: u64,
+) -> Result<()> {
+    transaction
+        .prepare_cached(
+            "INSERT INTO summary_newest(kind, session, process, class, count) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(kind, session, process, class) DO UPDATE SET count = max(count, excluded.count)",
+        )
+        .sql()?
+        .execute(params![
+            kind,
+            index_db::key(session),
+            index_db::key(process),
+            class,
+            clamp(count)
+        ])
+        .sql()?;
+    Ok(())
 }
 
 fn missing_check(reason: &str, count: u64) -> Value {
@@ -543,45 +778,11 @@ fn content_meaning(category: &str, reason: &str, count: u64) -> String {
     format!("{count} {what} {why}.")
 }
 
-#[derive(Default)]
-struct ArtifactCounts {
-    total: u64,
-    by_kind: BTreeMap<String, u64>,
-    items: Vec<Value>,
-}
-impl ArtifactCounts {
-    fn record(&mut self, artifact: &Value) {
-        self.total += 1;
-        *self
-            .by_kind
-            .entry(artifact["kind"].as_str().unwrap_or("").to_owned())
-            .or_default() += 1;
-        // The manifest is read newest first.
-        if self.items.len() < ARTIFACTS {
-            let mut item = json!({});
-            for key in [
-                "artifact_id",
-                "kind",
-                "session_id",
-                "navigation_id",
-                "frame_id",
-                "capture_origin",
-                "byte_size",
-                "sha256",
-            ] {
-                item[key] = artifact[key].clone();
-            }
-            item["url_label"] = session_context::url_label(&artifact["url"]);
-            self.items.push(item);
-        }
-    }
-}
-
 /// Browser-internal evidence the capture counted instead of recording
 /// (protocol/native-network-v3.md). Each record is one producer's cumulative
 /// count for one class, so the newest count per producer is summed.
 #[derive(Default)]
-struct Exclusions(BTreeMap<(u64, u64, u8), u64>);
+struct Exclusions(HashMap<(u64, u64, u8), u64>);
 impl Exclusions {
     fn record(&mut self, event: &Value) {
         if event["category"] != "network" || event["type"] != "capture_exclusion" {
@@ -605,13 +806,39 @@ impl Exclusions {
         let newest = self.0.entry(key).or_default();
         *newest = (*newest).max(count);
     }
-    fn totals(&self) -> BTreeMap<u8, u64> {
-        let mut totals = BTreeMap::new();
-        for ((_, _, class), count) in &self.0 {
-            let total: &mut u64 = totals.entry(*class).or_default();
-            *total = total.saturating_add(*count);
+    fn write(&mut self, transaction: &Transaction<'_>) -> Result<()> {
+        for ((session, process, class), count) in self.0.drain() {
+            write_newest(transaction, 0, session, process, class, count)?;
         }
-        totals
+        Ok(())
+    }
+}
+
+/// The summary's part of the event index fold: each valid record's counts,
+/// merged into the stored ones when the fold commits.
+#[derive(Default)]
+pub(crate) struct Fold {
+    events: EventCounts,
+    exclusions: Exclusions,
+    request_tabs: RequestTabs,
+    refusals: Refusals,
+    header_coverage: HeaderCoverage,
+}
+impl Fold {
+    pub(crate) fn record(&mut self, event: &Value) {
+        self.events.record(event);
+        self.exclusions.record(event);
+        self.request_tabs.record(event);
+        self.refusals.record(event);
+        self.header_coverage.record(event);
+    }
+
+    pub(crate) fn write(&mut self, transaction: &Transaction<'_>) -> Result<()> {
+        self.events.write(transaction)?;
+        self.exclusions.write(transaction)?;
+        self.request_tabs.write(transaction)?;
+        self.refusals.write(transaction)?;
+        self.header_coverage.write(transaction)
     }
 }
 
@@ -668,45 +895,282 @@ fn gap_meaning(reason: &str) -> &'static str {
     }
 }
 
-pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result<Value> {
-    let mut events = EventCounts::default();
-    let mut exclusions = Exclusions::default();
-    let mut request_tabs = RequestTabs::default();
-    let mut refusals = Refusals::default();
-    let mut header_coverage = HeaderCoverage::default();
-    let mut tally = Tally::default();
-    let event_page = event_query::read_page(
-        store,
-        Cursor::Tail,
-        usize::MAX,
-        SCAN_BYTES,
-        EVENT_RECORD_BYTES,
-        |line| {
-            let event: Value =
-                serde_json::from_slice(line).map_err(|_| event_window::malformed())?;
-            validate_event(&event)?;
-            tally.record(&event)?;
-            events.record(&event);
-            exclusions.record(&event);
-            request_tabs.record(&event);
-            refusals.record(&event);
-            header_coverage.record(&event);
-            Ok(None)
-        },
-    )?;
-    let mut stored = ArtifactCounts::default();
-    let mut seen = HashSet::new();
-    let artifact_page = event_query::read_page(
-        &artifacts.join("manifest.jsonl"),
-        Cursor::Tail,
-        usize::MAX,
-        SCAN_BYTES,
-        MANIFEST_RECORD_BYTES,
-        artifact_query::visitor(&mut seen, |artifact| {
-            stored.record(artifact);
-            false
-        }),
-    )?;
+/// The stored counts the answer lists, read at one position of the index.
+struct Stored {
+    totals: Totals,
+    total: u64,
+    first: Option<u64>,
+    last: Option<u64>,
+    by_type: Vec<(String, String, u64)>,
+    sessions: Vec<(u64, u64)>,
+    sessions_total: u64,
+    frames: Vec<Value>,
+    frames_total: u64,
+    exclusions: BTreeMap<u8, u64>,
+    /// artifact_capture_failed reasons, most frequent first.
+    failures: Vec<(String, u64)>,
+    content: Vec<(String, String, u64)>,
+    unattributed_blocks: u64,
+    unattributed_lists: u64,
+    missing: BTreeMap<String, u64>,
+    request_tabs: Value,
+    unresolved: BTreeMap<String, u64>,
+}
+
+impl Stored {
+    fn empty() -> Self {
+        Self {
+            totals: Totals {
+                indexed_to: 0,
+                sequence_gaps: 0,
+                sequence_gaps_saturated: false,
+                queue_drops: 0,
+                queue_drops_saturated: false,
+                named_gaps: Vec::new(),
+                malformed_lines: 0,
+            },
+            total: 0,
+            first: None,
+            last: None,
+            by_type: Vec::new(),
+            sessions: Vec::new(),
+            sessions_total: 0,
+            frames: Vec::new(),
+            frames_total: 0,
+            exclusions: BTreeMap::new(),
+            failures: Vec::new(),
+            content: Vec::new(),
+            unattributed_blocks: 0,
+            unattributed_lists: 0,
+            missing: BTreeMap::new(),
+            request_tabs: request_tabs::empty_document(),
+            unresolved: BTreeMap::new(),
+        }
+    }
+
+    fn read(connection: &Connection, position: &Position) -> Result<Self> {
+        let rows = |sql: &str| -> Result<Vec<(String, String, u64)>> {
+            connection
+                .prepare_cached(sql)
+                .sql()?
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? as u64))
+                })
+                .sql()?
+                .map(|row| row.sql())
+                .collect()
+        };
+        let number = |sql: &str| -> Result<u64> {
+            Ok(connection
+                .query_row(sql, [], |row| row.get::<_, i64>(0))
+                .sql()? as u64)
+        };
+        let (total, first, last) = connection
+            .query_row(
+                "SELECT events, first_ns, last_ns FROM totals WHERE id = 0",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)? as u64,
+                        row.get::<_, Option<i64>>(1)?.map(|time| time as u64),
+                        row.get::<_, Option<i64>>(2)?.map(|time| time as u64),
+                    ))
+                },
+            )
+            .sql()?;
+        let sessions = connection
+            .prepare_cached(&format!(
+                "SELECT session, count FROM summary_sessions ORDER BY count DESC, session LIMIT {SESSIONS}"
+            ))
+            .sql()?
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64))
+            })
+            .sql()?
+            .map(|row| row.sql())
+            .collect::<Result<Vec<_>>>()?;
+        let busiest = connection
+            .prepare_cached(&format!(
+                "SELECT id, session, tab, navigation, frame, count, first_ns, last_ns FROM summary_frames
+                 ORDER BY count DESC, session, tab, navigation, frame LIMIT {FRAMES}"
+            ))
+            .sql()?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    [1, 2, 3, 4, 5, 6, 7].map(|column| row.get::<_, i64>(column).map(|v| v as u64)),
+                ))
+            })
+            .sql()?
+            .map(|row| row.sql())
+            .collect::<Result<Vec<_>>>()?;
+        let mut frames = Vec::new();
+        for (id, columns) in busiest {
+            let [session, tab, navigation, frame, count, first, last] =
+                columns.map(|value| value.unwrap_or(0));
+            let types = connection
+                .prepare_cached(&format!(
+                    "SELECT type, count FROM summary_frame_types WHERE frame = ?1
+                     ORDER BY count DESC, type LIMIT {FRAME_TYPES}"
+                ))
+                .sql()?
+                .query_map([id], |row| {
+                    Ok(json!({"type": row.get::<_, String>(0)?,
+                        "count": (row.get::<_, i64>(1)? as u64).to_string()}))
+                })
+                .sql()?
+                .map(|row| row.sql())
+                .collect::<Result<Vec<_>>>()?;
+            let kinds: i64 = connection
+                .prepare_cached("SELECT count(*) FROM summary_frame_types WHERE frame = ?1")
+                .sql()?
+                .query_row([id], |row| row.get(0))
+                .sql()?;
+            frames.push(json!({
+                "session_id": session.to_string(),
+                "tab_id": tab,
+                "navigation_id": navigation.to_string(),
+                "frame_id": frame.to_string(),
+                "count": count.to_string(),
+                "first_time_ns": first.to_string(),
+                "last_time_ns": last.to_string(),
+                "types_omitted": (kinds as usize).saturating_sub(types.len()),
+                "types": types,
+            }));
+        }
+        let mut exclusions = BTreeMap::new();
+        let (mut unattributed_blocks, mut unattributed_lists) = (0u64, 0u64);
+        let newest = connection
+            .prepare_cached("SELECT kind, class, count FROM summary_newest")
+            .sql()?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, u8>(1)?,
+                    row.get::<_, i64>(2)? as u64,
+                ))
+            })
+            .sql()?
+            .map(|row| row.sql())
+            .collect::<Result<Vec<_>>>()?;
+        for (kind, class, count) in newest {
+            let total = match kind {
+                0 => exclusions.entry(class).or_default(),
+                1 => &mut unattributed_blocks,
+                _ => &mut unattributed_lists,
+            };
+            *total = total.saturating_add(count);
+        }
+        let refusals =
+            rows("SELECT category, reason, count FROM summary_refusals ORDER BY category, reason")?;
+        let mut failures = refusals
+            .iter()
+            .filter(|(category, ..)| category == "artifact")
+            .map(|(_, reason, count)| (reason.clone(), *count))
+            .collect::<Vec<_>>();
+        failures.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let unresolved = counts_named(connection, "unresolved:")?;
+        Ok(Self {
+            totals: event_index::totals(connection, position)?,
+            total,
+            first,
+            last,
+            by_type: rows(
+                "SELECT category, type, count FROM summary_types ORDER BY count DESC, category, type",
+            )?,
+            sessions,
+            sessions_total: number("SELECT count(*) FROM summary_sessions")?,
+            frames,
+            frames_total: number("SELECT count(*) FROM summary_frames")?,
+            exclusions,
+            failures,
+            content: refusals
+                .into_iter()
+                .filter(|(category, ..)| category != "artifact")
+                .collect(),
+            unattributed_blocks,
+            unattributed_lists,
+            missing: counts_named(connection, "missing:")?,
+            request_tabs: request_tabs::document(connection, &unresolved)?,
+            unresolved,
+        })
+    }
+
+    fn count(&self, kind: &str) -> u64 {
+        self.by_type
+            .iter()
+            .filter(|(_, name, _)| name == kind)
+            .map(|(_, _, count)| count)
+            .sum()
+    }
+
+    fn events_document(&self, position: &Position, scope: &str) -> Value {
+        let totals = &self.totals;
+        json!({
+            "scope": scope,
+            "scan_start": "0",
+            "scan_end": position.indexed_to.to_string(),
+            "store_end": position.file_end.to_string(),
+            "total": self.total.to_string(),
+            "first_time_ns": self.first.map(|time| time.to_string()),
+            "last_time_ns": self.last.map(|time| time.to_string()),
+            "by_type": self.by_type.iter().map(|(category, kind, count)| json!({
+                "category": category, "type": kind, "count": count.to_string()
+            })).collect::<Vec<_>>(),
+            "sessions": self.sessions.iter().map(|(session, count)| json!({
+                "session_id": session.to_string(), "count": count.to_string()
+            })).collect::<Vec<_>>(),
+            "sessions_omitted": (self.sessions_total as usize).saturating_sub(self.sessions.len()),
+            "frames": self.frames,
+            "frames_omitted": (self.frames_total as usize).saturating_sub(self.frames.len()),
+            "malformed_lines": totals.malformed_lines.to_string(),
+            "sequence_gaps": totals.sequence_gaps.to_string(),
+            "sequence_gaps_saturated": totals.sequence_gaps_saturated,
+            "queue_drops": totals.queue_drops.to_string(),
+            "queue_drops_saturated": totals.queue_drops_saturated,
+            "named_gaps": totals.named_gaps.iter().map(|gap| json!({
+                "category": gap.category, "reason": gap.reason, "count": gap.count.to_string()
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// The summary of the whole session, from the event index and the artifact
+/// lookup index, each first brought up to its store until `deadline`. A store
+/// still being indexed is summarized as far as its index reaches, which the
+/// answer's scopes and a `summary_indexing` check say.
+pub fn build(
+    indexes: &mut Indexes,
+    artifacts: &Path,
+    state: &CaptureState<'_>,
+    deadline: Instant,
+) -> Result<Value> {
+    let manifest = artifact_lookup::summary(artifacts, ARTIFACTS, deadline)?;
+    let (position, stopped, stored) = match indexes.summary_index(deadline)? {
+        Some(index) => {
+            let stored = Stored::read(index.connection, &index.position)?;
+            (index.position, index.stopped, stored)
+        }
+        None => (
+            Position {
+                epoch: String::new(),
+                indexed_to: 0,
+                scanned_to: 0,
+                file_end: 0,
+                reopened: false,
+            },
+            None,
+            Stored::empty(),
+        ),
+    };
+    let events_scope = if stopped.is_some() {
+        "stopped"
+    } else if position.caught_up(event_index::RECORD_BYTES as u64) {
+        "store"
+    } else {
+        "indexing"
+    };
+    let has_kind = |kind: &str| manifest.by_kind.iter().any(|(name, _)| name == kind);
     let mut checks = Vec::new();
     let live = state.capture_mode == "live";
     if !live {
@@ -738,15 +1202,15 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
             "The artifact receiver is not connected; new scripts and Wasm modules are not being stored.",
         ));
     }
-    if events.total == 0 {
+    if stored.total == 0 {
         checks.push(check(
             "no_events",
             "warning",
             "No events are stored yet. Open a page in the capture browser, then wait for events.",
         ));
     }
-    let compiled = events.count("module_compiled");
-    if compiled > 0 && !stored.by_kind.contains_key("wasm") {
+    let compiled = stored.count("module_compiled");
+    if compiled > 0 && !has_kind("wasm") {
         checks.push(check(
             "wasm_without_artifacts",
             "warning",
@@ -755,7 +1219,15 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
             ),
         ));
     }
-    for (reason, count) in &refusals.failures {
+    // The most frequent reasons each have a check, in name order; the rest
+    // share one, which says how many reasons it holds.
+    let mut failures = stored
+        .failures
+        .iter()
+        .take(REFUSAL_REASONS)
+        .collect::<Vec<_>>();
+    failures.sort_by(|a, b| a.0.cmp(&b.0));
+    for (reason, count) in failures {
         let mut item = check(
             "artifact_capture_failed",
             "warning",
@@ -774,7 +1246,24 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
         item["count"] = json!(count.to_string());
         checks.push(item);
     }
-    for ((category, reason), count) in &refusals.content {
+    let rest = &stored.failures[stored.failures.len().min(REFUSAL_REASONS)..];
+    if !rest.is_empty() {
+        let count = rest
+            .iter()
+            .fold(0u64, |sum, (_, count)| sum.saturating_add(*count));
+        let mut item = check(
+            "artifact_capture_failed",
+            "warning",
+            format!(
+                "{count} artifact captures failed for {} less frequent reasons; those bytes are not stored.",
+                rest.len()
+            ),
+        );
+        item["reason"] = json!("other");
+        item["count"] = json!(count.to_string());
+        checks.push(item);
+    }
+    for (category, reason, count) in &stored.content {
         let mut item = check(
             "request_content_not_retained",
             "warning",
@@ -785,8 +1274,7 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
         item["count"] = json!(count.to_string());
         checks.push(item);
     }
-    let blocks: u64 = header_coverage.unattributed_blocks.values().sum();
-    let lists: u64 = header_coverage.unattributed_lists.values().sum();
+    let (blocks, lists) = (stored.unattributed_blocks, stored.unattributed_lists);
     if blocks > 0 || lists > 0 {
         let mut item = check(
             "network_headers_unattributed",
@@ -799,23 +1287,12 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
         item["lists"] = json!(lists.to_string());
         checks.push(item);
     }
-    for (reason, count) in header_coverage.missing() {
-        checks.push(missing_check(reason, count));
+    for (reason, count) in &stored.missing {
+        checks.push(missing_check(reason, *count));
     }
-    if header_coverage.untracked > 0 {
-        let mut item = check(
-            "final_headers_untracked",
-            "info",
-            format!(
-                "{} header records belong to requests past the {HEADER_REQUESTS} this summary follows, so whether those requests have final headers is not counted.",
-                header_coverage.untracked
-            ),
-        );
-        item["count"] = json!(header_coverage.untracked.to_string());
-        checks.push(item);
-    }
-    let (drops, _) = tally.queue_drops();
-    let named: u64 = tally.named_gaps().iter().map(|gap| gap.count).sum();
+    let totals = &stored.totals;
+    let drops = totals.queue_drops;
+    let named: u64 = totals.named_gaps.iter().map(|gap| gap.count).sum();
     if drops > named {
         checks.push(check(
             "queue_drops",
@@ -826,15 +1303,15 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
             ),
         ));
     }
-    let (holes, _) = tally.sequence_gaps();
+    let holes = totals.sequence_gaps;
     if holes > 0 {
         checks.push(check(
             "sequence_gaps",
             "warning",
-            format!("{holes} sequence numbers are absent inside the scanned events."),
+            format!("{holes} sequence numbers are absent inside the stored events."),
         ));
     }
-    for gap in tally.named_gaps() {
+    for gap in &totals.named_gaps {
         let mut item = check("named_gap", "warning", gap_meaning(&gap.reason));
         item["category"] = json!(gap.category);
         item["reason"] = json!(gap.reason);
@@ -843,7 +1320,7 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
     }
     // A context with no parent document (a shared storage worklet) is not
     // linked by design, so it is a warning; every other reason is a capture bug.
-    let mut reasons = request_tabs.unresolved_reasons();
+    let mut reasons = stored.unresolved.clone();
     let no_document = reasons.remove("no_document").unwrap_or(0);
     let unresolved: u64 = reasons.values().sum();
     if unresolved > 0 {
@@ -873,7 +1350,7 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
         item["count"] = json!(no_document.to_string());
         checks.push(item);
     }
-    let excluded = exclusions.totals();
+    let excluded = &stored.exclusions;
     let no_tab: u64 = [65, 66, 68, 69]
         .iter()
         .filter_map(|class| excluded.get(class))
@@ -946,15 +1423,108 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
         item["count"] = json!(requests.to_string());
         checks.push(item);
     }
-    if event_page.exhausted {
-        checks.push(check(
-            "bounded_scope",
-            "info",
-            "Only the newest 64 MiB of events were summarized. Page older events with get_events before.",
+    if totals.malformed_lines > 0 {
+        let mut item = check(
+            "malformed_lines",
+            "warning",
+            format!(
+                "{} stored lines are not valid events, so no count here includes them.",
+                totals.malformed_lines
+            ),
+        );
+        item["count"] = json!(totals.malformed_lines.to_string());
+        checks.push(item);
+    }
+    // A record the index cannot read stops its counts for good: what follows
+    // it is in none of them.
+    let unreadable = |code: &str, error: &str, store: &str, to: u64, end: u64| {
+        check(
+            code,
+            "error",
+            format!(
+                "{}, so these counts cover the first {} of the {store}'s {} and nothing after it.",
+                error.trim_end_matches('.'),
+                mib(to),
+                mib(end)
+            ),
+        )
+    };
+    if let Some(error) = &stopped {
+        checks.push(unreadable(
+            "events_unreadable",
+            &error.message,
+            "event store",
+            position.indexed_to,
+            position.file_end,
         ));
     }
+    if let Some(error) = &manifest.stopped {
+        checks.push(unreadable(
+            "artifact_manifest_unreadable",
+            error,
+            "artifact manifest",
+            manifest.indexed_to,
+            manifest.file_end,
+        ));
+    }
+    if let Some(damage) = &manifest.damage {
+        checks.push(check(
+            "artifact_manifest_damaged",
+            "warning",
+            format!(
+                "{}. That record is in no count here, and reading an artifact by ID fails until the manifest is replaced.",
+                damage.trim_end_matches('.')
+            ),
+        ));
+    }
+    let mut indexing = Vec::new();
+    if events_scope == "indexing" {
+        indexing.push(format!(
+            "the events up to {} of {}",
+            mib(position.indexed_to),
+            mib(position.file_end)
+        ));
+    }
+    if !manifest.complete && manifest.stopped.is_none() {
+        indexing.push(format!(
+            "the artifact manifest up to {} of {}",
+            mib(manifest.indexed_to),
+            mib(manifest.file_end)
+        ));
+    }
+    if !indexing.is_empty() {
+        checks.push(check(
+            "summary_indexing",
+            "info",
+            format!(
+                "The backend is still indexing this session, so these counts cover {}. Read the summary again shortly.",
+                indexing.join(" and ")
+            ),
+        ));
+    }
+    let items = manifest
+        .newest
+        .iter()
+        .map(|artifact| {
+            let mut item = json!({});
+            for key in [
+                "artifact_id",
+                "kind",
+                "session_id",
+                "navigation_id",
+                "frame_id",
+                "capture_origin",
+                "byte_size",
+                "sha256",
+            ] {
+                item[key] = artifact[key].clone();
+            }
+            item["url_label"] = session_context::url_label(&artifact["url"]);
+            item
+        })
+        .collect::<Vec<_>>();
     Ok(json!({
-        "protocol_version": 1,
+        "protocol_version": 2,
         "instance_id": state.instance_id,
         "capture_mode": state.capture_mode,
         "live_admission": session_context::live_admission(state.capture_mode, state.broker_connected),
@@ -962,19 +1532,20 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
         "capture_stopped": state.capture_stopped,
         "artifact_receiver_configured": state.artifact_receiver_configured,
         "artifact_receiver_connected": state.artifact_receiver_connected,
-        "events": events.document(&event_page, &tally),
-        "request_tabs": request_tabs.document(),
+        "events": stored.events_document(&position, events_scope),
+        "request_tabs": stored.request_tabs,
         "exclusions": excluded.iter().map(|(class, count)| {
             let (name, unit) = exclusion_class(*class).unwrap();
             json!({"class": name, "unit": unit, "count": count.to_string()})
         }).collect::<Vec<_>>(),
         "artifacts": {
-            "scope": artifact_page.scope(),
-            "budget_exhausted": artifact_page.exhausted,
-            "total": stored.total.to_string(),
-            "by_kind": stored.by_kind.iter().map(|(kind, count)| (kind.clone(), json!(count.to_string()))).collect::<serde_json::Map<_, _>>(),
-            "items": stored.items,
-            "items_omitted": stored.total.saturating_sub(stored.items.len() as u64).to_string(),
+            "scope": if manifest.stopped.is_some() { "stopped" } else if manifest.complete { "store" } else { "indexing" },
+            "scan_end": manifest.indexed_to.to_string(),
+            "store_end": manifest.file_end.to_string(),
+            "total": manifest.total.to_string(),
+            "by_kind": manifest.by_kind.iter().map(|(kind, count)| (kind.clone(), json!(count.to_string()))).collect::<serde_json::Map<_, _>>(),
+            "items_omitted": manifest.total.saturating_sub(items.len() as u64).to_string(),
+            "items": items,
         },
         "checks": checks,
     }))
@@ -1034,24 +1605,6 @@ fn body_case_meaning(case: &str) -> &'static str {
     }
 }
 
-/// The summary's ETag key over the store's tag: capture state and artifact
-/// manifest.
-pub fn etag_key(state: &str, manifest: &str) -> String {
-    format!("summary:{state}:{manifest}")
-}
-
-/// The summary's ETag: the store's tag taken before the request index read
-/// it, and the index's progress after, the point its body case counts were
-/// read at. An answer counted mid-store therefore never shares a tag with the
-/// complete one, and bytes appended during the read change the next tag.
-pub fn etag(before: &str, progress: &str) -> String {
-    use sha2::{Digest, Sha256};
-    format!(
-        "\"{}\"",
-        hex::encode(Sha256::digest(format!("{before}:index:{progress}")))
-    )
-}
-
 /// Every request's response body case, counted from the request index's rows,
 /// and a check naming the bodies the browser proxy can never see. An index
 /// that cannot answer leaves the counts unavailable, with its reason.
@@ -1060,7 +1613,7 @@ pub fn add_response_bodies(summary: &mut Value, counts: std::result::Result<Valu
         Ok(counts) => counts,
         Err(reason) => {
             summary["response_bodies"] = json!({"available": false, "reason": reason,
-                "complete": false, "requests": "0", "unindexed_records": "0",
+                "complete": false, "requests": "0",
                 "snapshots_withheld": "0", "earlier_snapshots": "0", "cases": []});
             return;
         }
@@ -1106,7 +1659,6 @@ pub fn add_response_bodies(summary: &mut Value, counts: std::result::Result<Valu
     summary["response_bodies"] = json!({
         "available": true, "reason": null,
         "complete": counts["complete"], "requests": counts["requests"],
-        "unindexed_records": counts["unindexed_records"],
         "snapshots_withheld": counts["snapshots_withheld"].as_str().unwrap_or("0"),
         "earlier_snapshots": earlier_total.to_string(), "cases": cases,
     });
@@ -1147,13 +1699,29 @@ pub fn add_response_bodies(summary: &mut Value, counts: std::result::Result<Valu
 mod tests {
     use super::*;
 
+    /// The summary of a store, from its event index on disk beside it.
+    fn summarize(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Value {
+        let mut indexes = Indexes::new(
+            store,
+            &store.with_file_name("origin-trace.jsonl"),
+            &store.with_file_name("request-signals.jsonl"),
+        );
+        build(
+            &mut indexes,
+            artifacts,
+            state,
+            Instant::now() + Duration::from_secs(60),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn response_body_cases_are_counted_with_their_meaning() {
         let mut summary = json!({"checks": []});
         add_response_bodies(
             &mut summary,
             Ok(
-                json!({"complete": true, "requests": "8", "unindexed_records": "0", "snapshots_withheld": "3",
+                json!({"complete": true, "requests": "8", "snapshots_withheld": "3",
                 "cases": {"captured": "2", "memory_cache": "1", "service_worker": "2", "renderer_answered": "1",
                     "not_captured_session_budget": "2"},
                 "earlier_snapshots": {"not_captured_session_budget": "1"}}),
@@ -1219,9 +1787,7 @@ mod tests {
         let mut quiet = json!({"checks": []});
         add_response_bodies(
             &mut quiet,
-            Ok(
-                json!({"complete": true, "requests": "2", "unindexed_records": "0", "cases": {"captured": "2"}}),
-            ),
+            Ok(json!({"complete": true, "requests": "2", "cases": {"captured": "2"}})),
         );
         assert!(quiet["checks"].as_array().unwrap().is_empty());
         // An index that cannot answer leaves the counts unavailable, never the summary.
@@ -1233,9 +1799,6 @@ mod tests {
             "The request index is unreadable"
         );
         assert_eq!(failed["response_bodies"]["cases"], json!([]));
-        // The tag changes as the index reads an unchanged store.
-        assert_ne!(etag("\"store\"", "4096"), etag("\"store\"", "caught-up"));
-        assert!(etag("\"store\"", "caught-up").starts_with('"'));
     }
 
     #[test]
@@ -1283,7 +1846,7 @@ mod tests {
             artifact_receiver_configured: true,
             artifact_receiver_connected: true,
         };
-        let summary = build(&store, &artifacts, &state).unwrap();
+        let summary = summarize(&store, &artifacts, &state);
         let events = &summary["events"];
         assert_eq!(events["total"], "5");
         assert_eq!(events["by_type"][0]["type"], "wasm_dispatch_observation");
@@ -1312,6 +1875,7 @@ mod tests {
     }
 
     /// A `request_headers` (or `response_headers`) record of request 17 + n.
+    #[allow(clippy::too_many_arguments)] // one per field of the record under test
     fn header(
         sequence: u64,
         parent: u64,
@@ -1408,7 +1972,7 @@ mod tests {
                 artifact_receiver_configured: false,
                 artifact_receiver_connected: false,
             };
-            build(&store, &artifacts, &state).unwrap()["checks"]
+            summarize(&store, &artifacts, &state)["checks"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -1427,53 +1991,98 @@ mod tests {
     }
 
     #[test]
-    fn untracked_final_blocks_are_counted_only_for_header_records() {
-        let summarize = |events: Vec<Value>| {
-            let root = tempfile::tempdir().unwrap();
-            let store = root.path().join("events.jsonl");
-            let artifacts = root.path().join("artifacts");
-            std::fs::create_dir_all(&artifacts).unwrap();
-            let lines: Vec<String> = events.iter().map(Value::to_string).collect();
-            std::fs::write(&store, lines.join("\n") + "\n").unwrap();
-            let state = CaptureState {
-                instance_id: "1:2",
-                capture_mode: "live",
-                broker_connected: true,
-                capture_stopped: false,
-                artifact_receiver_configured: false,
-                artifact_receiver_connected: false,
-            };
-            build(&store, &artifacts, &state).unwrap()["checks"]
+    fn every_request_is_followed_across_folds_and_a_later_drop_reaches_earlier_ones() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("events.jsonl");
+        let artifacts = root.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let state = CaptureState {
+            instance_id: "1:2",
+            capture_mode: "live",
+            broker_connected: true,
+            capture_stopped: false,
+            artifact_receiver_configured: false,
+            artifact_receiver_connected: false,
+        };
+        let append = |events: &[Value]| {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&store)
+                .unwrap();
+            for event in events {
+                std::io::Write::write_all(&mut file, format!("{event}\n").as_bytes()).unwrap();
+            }
+        };
+        let missing = |summary: &Value| {
+            summary["checks"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .filter(|check| check["code"] == "final_headers_untracked")
-                .cloned()
+                .filter(|check| check["code"] == "final_headers_missing")
+                .map(|check| {
+                    (
+                        check["reason"].as_str().unwrap().to_owned(),
+                        check["count"].as_str().unwrap().to_owned(),
+                    )
+                })
                 .collect::<Vec<_>>()
         };
-        // A metadata-only session past the bound has no final block to miss.
+        // A metadata-only session has no final block to miss, however long.
         let mut sequence = 0;
         let mut metadata = Vec::new();
-        for request in 1..=HEADER_REQUESTS as u64 + 4 {
+        for request in 1..=40 {
             for kind in ["request_started", "response_started", "request_completed"] {
                 sequence += 1;
                 metadata.push(lifecycle(sequence, kind, request));
             }
         }
-        assert_eq!(summarize(metadata), Vec::<Value>::new());
-        // A content session's header records past it are counted.
+        append(&metadata);
+        let summary = summarize(&store, &artifacts, &state);
+        assert!(missing(&summary).is_empty());
+        assert_eq!(summary["events"]["scope"], "store");
+        assert_eq!(summary["protocol_version"], 2);
+        // Every content request is followed; none is past a bound.
         let mut content = Vec::new();
-        let mut sequence = 0;
-        for request in 1..=HEADER_REQUESTS as u64 + 4 {
+        let mut starts = Vec::new();
+        for request in 41..=80 {
             sequence += 1;
             let start = sequence;
+            starts.push(start * 10);
             content.push(lifecycle(start, "request_started", request));
             sequence += 1;
             content.push(header(sequence, start, request, false, 1, 3, 0, 0));
+            sequence += 1;
+            content.push(lifecycle(sequence, "request_completed", request));
         }
-        let untracked = summarize(content);
-        assert_eq!(untracked.len(), 1);
-        assert_eq!(untracked[0]["count"], "4");
+        append(&content);
+        let summary = summarize(&store, &artifacts, &state);
+        assert_eq!(
+            missing(&summary),
+            vec![("not_reported".to_owned(), "40".to_owned())]
+        );
+        // A drop folded later, timed while the first twenty ran, makes their
+        // absent blocks unsure; the rest started after it.
+        let mut gap = event(sequence + 1, "canvas", "gap", 3, "2");
+        gap["process_id"] = json!(9);
+        gap["monotonic_time_ns"] = json!((starts[19] + 5).to_string());
+        append(&[gap]);
+        let summary = summarize(&store, &artifacts, &state);
+        assert_eq!(
+            missing(&summary),
+            vec![
+                ("not_reported".to_owned(), "20".to_owned()),
+                ("record_dropped".to_owned(), "20".to_owned())
+            ]
+        );
+        // The same store folded at once agrees.
+        let whole = tempfile::tempdir().unwrap();
+        let copy = whole.path().join("events.jsonl");
+        std::fs::copy(&store, &copy).unwrap();
+        assert_eq!(
+            missing(&summarize(&copy, &artifacts, &state)),
+            missing(&summary)
+        );
     }
 
     #[test]
@@ -1552,7 +2161,7 @@ mod tests {
             artifact_receiver_configured: false,
             artifact_receiver_connected: false,
         };
-        let summary = build(&store, &artifacts, &state).unwrap();
+        let summary = summarize(&store, &artifacts, &state);
         let checks = summary["checks"].as_array().unwrap();
         let find = |code: &str| {
             checks
@@ -1618,7 +2227,6 @@ mod tests {
         let late = &find("network_headers_unattributed")[""];
         assert_eq!(late["blocks"], "3");
         assert_eq!(late["lists"], "4");
-        assert!(find("final_headers_untracked").is_empty());
     }
 
     #[test]
@@ -1673,7 +2281,7 @@ mod tests {
             artifact_receiver_configured: true,
             artifact_receiver_connected: true,
         };
-        let summary = build(&store, &artifacts, &state).unwrap();
+        let summary = summarize(&store, &artifacts, &state);
         let find = |category: &str, reason: &str| {
             summary["checks"]
                 .as_array()
@@ -1769,7 +2377,7 @@ mod tests {
             artifact_receiver_configured: false,
             artifact_receiver_connected: false,
         };
-        let summary = build(&store, &artifacts, &state).unwrap();
+        let summary = summarize(&store, &artifacts, &state);
         let gap = summary["checks"]
             .as_array()
             .unwrap()
@@ -1850,7 +2458,7 @@ mod tests {
             artifact_receiver_configured: false,
             artifact_receiver_connected: false,
         };
-        let summary = build(&store, &artifacts, &state).unwrap();
+        let summary = summarize(&store, &artifacts, &state);
         assert_eq!(
             summary["exclusions"],
             json!([
@@ -1953,12 +2561,11 @@ mod tests {
             artifact_receiver_configured: false,
             artifact_receiver_connected: false,
         };
-        let summary = build(
+        let summary = summarize(
             &root.path().join("events.jsonl"),
             &root.path().join("artifacts"),
             &state,
-        )
-        .unwrap();
+        );
         assert_eq!(summary["events"]["total"], "0");
         assert_eq!(summary["events"]["scope"], "store");
         assert_eq!(summary["checks"][0]["code"], "capture_not_live");

@@ -998,7 +998,9 @@ mod tests {
         host["type"] = json!("api_call");
         host["sequence_number"] = json!("3");
         host["parent_event_id"] = json!("2");
-        let links = crate::vm_host_links::document(&workspace, &[f.module], &[host]).unwrap();
+        let runtime = crate::vm::Runtime::of(std::slice::from_ref(&host));
+        let links =
+            crate::vm_host_links::document(&workspace, &[f.module], &[host], &runtime).unwrap();
         assert!(links["workspaces"][0]["links"][0]["guest_position"].is_null());
     }
     // V8 fires the physical and the guest callback for one br_table execution

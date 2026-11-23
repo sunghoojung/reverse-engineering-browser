@@ -558,7 +558,7 @@ class FakeBackend:
             limit, offset = int(query.get("limit", "100")), int(query.get("offset", "0"))
             through = int(query.get("through", len(self.rows)))
             chosen = self.rows[offset:min(offset + limit, through)]
-            return 200, {"format": "reb-request-index-v1", "total": len(self.rows), "through": through,
+            return 200, {"format": "reb-request-index-v2", "total": len(self.rows), "through": through,
                          "offset": offset, "limit": limit, "returned": len(chosen),
                          "next_offset": offset + limit if offset + limit < through else None, "requests": chosen}
         if path in ("/api/events", "/api/events/wait"):

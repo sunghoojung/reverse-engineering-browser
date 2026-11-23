@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-index ecf090c2f7aaeeb82d599a731117e8237a42adfe..cb2623f4b97b18e72b69461b51504bc2e6fd5ee3 100644
+index 0e3a840f2d7a3af525b4ee0929fb3f364f7fd9d1..90562ee6a44d2d5ca321c260f14ba5a05218849e 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 @@ -25,6 +25,12 @@
@@ -15,7 +15,7 @@ index ecf090c2f7aaeeb82d599a731117e8237a42adfe..cb2623f4b97b18e72b69461b51504bc2
  #include <algorithm>
  #include <bit>
  #include <cstdint>
-@@ -252,64 +258,270 @@ void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
+@@ -257,64 +263,250 @@ void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
                           UNSAFE_BUFFERS(base::span(bytes, size)));
  }
  
@@ -38,7 +38,6 @@ index ecf090c2f7aaeeb82d599a731117e8237a42adfe..cb2623f4b97b18e72b69461b51504bc2
 +
 +  void Enqueue(v8::Local<v8::Value> buffer,
 +               std::size_t size,
-+               std::size_t retained_buffer_size,
 +               const v8::RuntimeBufferScript& allocator,
 +               ExecutionContext& execution_context,
 +               std::uint64_t generation) {
@@ -46,8 +45,7 @@ index ecf090c2f7aaeeb82d599a731117e8237a42adfe..cb2623f4b97b18e72b69461b51504bc2
 +    const auto context_id = StableExecutionContextId(execution_context);
 +    const auto frame_id = StableFrameId(execution_context);
 +    const auto script_id = static_cast<std::uint64_t>(allocator.script_id);
-+    if (allocator.source.IsEmpty() ||
-+        allocator.source->Length() > static_cast<int>(reb::kNativeArtifactMaxContentBytes)) {
++    if (allocator.source.IsEmpty() || allocator.source->Length() == 0) {
 +      sink.RecordRuntimeBufferOmission(generation, frame_id,
 +                                        "allocating_script_unavailable");
 +      return;
@@ -84,29 +82,9 @@ index ecf090c2f7aaeeb82d599a731117e8237a42adfe..cb2623f4b97b18e72b69461b51504bc2
 +    if (!sink.RuntimeBufferHasSignal(generation, context_id, frame_id, size,
 +                                     script_id, allocator.is_eval))
 +      return;
-+    if (retained_buffer_size > reb::kNativeArtifactMaxContentBytes ||
-+        !pending_.CanRetain(retained_buffer_size)) {
++    if (!pending_.CanRetain()) {
 +      sink.RecordRuntimeBufferOmission(generation, frame_id,
 +                                        "runtime_buffer_checkpoint_limit");
-+      return;
-+    }
-+    // An empty name is an eval or a script with no source URL. The sink stores
-+    // script://<id> for that case. An overlong name can carry source text, so
-+    // it still drops the buffer.
-+    if (!allocator.name.IsEmpty() &&
-+        (allocator.name->Length() > static_cast<int>(reb::kNativeArtifactMaxUrlBytes) ||
-+         allocator.name->Utf8Length(isolate_) > reb::kNativeArtifactMaxUrlBytes)) {
-+      sink.RecordRuntimeBufferOmission(generation, frame_id,
-+                                        "allocating_script_url_unavailable");
-+      return;
-+    }
-+    const std::size_t source_bytes = allocator.source->Utf8Length(isolate_);
-+    if (source_bytes == 0 ||
-+        source_bytes > reb::kNativeArtifactMaxContentBytes ||
-+        retained_buffer_size > reb::kNativeArtifactMaxContentBytes ||
-+        !pending_.CanRetain(retained_buffer_size + source_bytes)) {
-+      sink.RecordRuntimeBufferOmission(generation, frame_id,
-+                                       "runtime_buffer_checkpoint_limit");
 +      return;
 +    }
 +    PendingRuntimeBuffer pending;
@@ -119,9 +97,15 @@ index ecf090c2f7aaeeb82d599a731117e8237a42adfe..cb2623f4b97b18e72b69461b51504bc2
 +    pending.context.Reset(isolate_, allocator.context);
 +    pending.buffer.Reset(isolate_, buffer);
 +    pending.source.Reset(isolate_, allocator.source);
-+    if (!allocator.name.IsEmpty())
++    // An empty name is an eval or a script with no source URL; the sink
++    // stores script://<id> for it. A name longer than any URL can carry source
++    // text, so it is not kept, and the buffer is named the same way.
++    if (!allocator.name.IsEmpty() &&
++        allocator.name->Length() <=
++            static_cast<int>(reb::kNativeArtifactMaxUrlBytes) &&
++        allocator.name->Utf8Length(isolate_) <= reb::kNativeArtifactMaxUrlBytes)
 +      pending.name.Reset(isolate_, allocator.name);
-+    pending_.Push(std::move(pending), retained_buffer_size + source_bytes);
++    pending_.Push(std::move(pending));
 +    if (!scheduled_) {
 +      scheduled_ = true;
 +      if (!base::SingleThreadTaskRunner::HasCurrentDefault() ||
@@ -195,8 +179,7 @@ index ecf090c2f7aaeeb82d599a731117e8237a42adfe..cb2623f4b97b18e72b69461b51504bc2
 +      auto backing = buffer->GetBackingStore();
 +      if (buffer->WasDetached() || !backing || backing->IsShared() ||
 +          backing->IsResizableByUserJavaScript() || size != pending.size ||
-+          size < 32 || size > reb::kNativeArtifactMaxContentBytes ||
-+          offset > backing->ByteLength() ||
++          size < 32 || offset > backing->ByteLength() ||
 +          size > backing->ByteLength() - offset) {
 +        sink.RecordRuntimeBufferOmission(pending.generation, pending.frame_id,
 +                                         "runtime_buffer_checkpoint_invalid");
@@ -220,16 +203,15 @@ index ecf090c2f7aaeeb82d599a731117e8237a42adfe..cb2623f4b97b18e72b69461b51504bc2
 +          source.clear();
 +      }
 +      // Shared backing ownership stabilizes this pointer across host
-+      // allocations. This samples the next task checkpoint, not "initialization
-+      // complete".
-+      const auto* bytes = static_cast<const std::uint8_t*>(backing->Data());
-+      std::vector<std::uint8_t> retained(size);
-+      UNSAFE_BUFFERS(
-+          std::copy(bytes + offset, bytes + offset + size, retained.begin()));
++      // allocations, and no script runs before the sink has copied the bytes
++      // out, so they are read in place. This samples the next task
++      // checkpoint, not "initialization complete".
++      const std::span<const std::uint8_t> content = UNSAFE_BUFFERS(std::span(
++          static_cast<const std::uint8_t*>(backing->Data()) + offset, size));
 +      reb::NativeRuntimeScript script{pending.script_id, pending.is_eval, source};
 +      script.capture_generation = pending.generation;
 +      sink.CaptureRuntimeTypedArray(pending.execution_context_id,
-+                                    pending.frame_id, source_url, retained,
++                                    pending.frame_id, source_url, content,
 +                                    script);
 +    });
 +  }
@@ -247,11 +229,10 @@ index ecf090c2f7aaeeb82d599a731117e8237a42adfe..cb2623f4b97b18e72b69461b51504bc2
 -  if (!sink.IsVmCaptureEnabled()) {
 +                          v8::Local<v8::Value> buffer,
 +                          const std::size_t size,
-+                          const std::size_t retained_buffer_size) {
++                          const std::size_t /*retained_buffer_size*/) {
 +  auto& sink = reb::NativeProbeSink::Get();
 +  const auto generation = sink.RuntimeCaptureGeneration();
-+  if (generation == 0 || size < 32 ||
-+      size > reb::kNativeArtifactMaxContentBytes)
++  if (generation == 0 || size < 32)
      return;
 -  }
    if (kind != v8::RuntimeBufferKind::kArrayBuffer &&
@@ -326,8 +307,7 @@ index ecf090c2f7aaeeb82d599a731117e8237a42adfe..cb2623f4b97b18e72b69461b51504bc2
 -      StableExecutionContextId(*execution_context), StableFrameId(*execution_context),
 -      std::string_view(source_url.data(), source_url.length()),
 -      base::span<const std::uint8_t>(retained), script);
-+  snapshots->Enqueue(buffer, size, retained_buffer_size, allocator,
-+                     *execution_context, generation);
++  snapshots->Enqueue(buffer, size, allocator, *execution_context, generation);
  }
  
  // NOTE: when editing this, please also edit the error messages we throw when

@@ -112,6 +112,9 @@ static_assert(offsetof(WasmDispatchObservationPayload, reserved) == 40);
   std::copy(bytes.begin() + 40, bytes.end(), value.reserved.begin());
   return true;
 }
+// V8's kV8MaxWasmModuleSize: no module, so no byte offset in one, is larger.
+// Earlier browsers sent modules of at most 16 MiB, so their offsets fit too.
+inline constexpr std::uint32_t kWasmModuleByteOffsetLimit = 1U << 30U;
 [[nodiscard]] inline bool IsValidWasmDispatchObservation(const EventRecord& event) noexcept {
   WasmDispatchObservationPayload value;
   return event.header.protocol_version == kEventProtocolVersion &&
@@ -127,7 +130,7 @@ static_assert(offsetof(WasmDispatchObservationPayload, reserved) == 40);
           value.protocol_version == 3) &&
          value.payload_size == 128 && value.function_index < 16U * 1024U * 1024U &&
          value.table_count < 16U * 1024U * 1024U && value.module_byte_offset >= 8 &&
-         value.module_byte_offset < 16U * 1024U * 1024U &&
+         value.module_byte_offset < kWasmModuleByteOffsetLimit &&
          value.sample_index <= kWasmLastSampleIndex &&
          // Version 1 reserved the context bytes, so it can only be not_observed.
          (value.protocol_version >= 2 ||
@@ -290,7 +293,8 @@ static_assert(offsetof(WasmIndirectObservationPayload, reserved) == 40);
                      [](std::byte b) { return b == std::byte{0}; }) &&
          value.function_index < kLimit && value.table_index < kLimit &&
          value.callee_function_index < kLimit && value.module_byte_offset >= 8 &&
-         value.module_byte_offset < kLimit && value.resolution < kWasmIndirectResolutionCount &&
+         value.module_byte_offset < kWasmModuleByteOffsetLimit &&
+         value.resolution < kWasmIndirectResolutionCount &&
          (value.resolution == static_cast<std::uint32_t>(WasmIndirectResolution::kResolved) ||
           value.callee_function_index == 0) &&
          value.sample_index <= kWasmLastSampleIndex &&
@@ -435,7 +439,8 @@ static_assert(std::is_trivially_copyable_v<WasmExecutionOutcomePayload>);
   } else if (value.function_index != 0) {
     return false;
   }
-  if (offset_known && (value.module_byte_offset < 8 || value.module_byte_offset >= kLimit))
+  if (offset_known &&
+      (value.module_byte_offset < 8 || value.module_byte_offset >= kWasmModuleByteOffsetLimit))
     return false;
   if (!offset_known && value.module_byte_offset != 0)
     return false;
@@ -638,7 +643,7 @@ static_assert(offsetof(WasmIndirectOverflowPayload, reserved1) == 32);
     return value.omitted_count == 0 && value.ring_index < kWasmOverflowRingLimit &&
            value.function_index < kWasmOverflowFieldLimit &&
            value.arm_count < kWasmOverflowFieldLimit && value.module_byte_offset >= 8 &&
-           value.module_byte_offset < kWasmOverflowFieldLimit;
+           value.module_byte_offset < kWasmModuleByteOffsetLimit;
   }
   return value.kind == kWasmOverflowKindOmitted && value.ring_index == 0 &&
          value.function_index == 0 && value.module_byte_offset == 0 && value.selector == 0 &&
@@ -664,7 +669,7 @@ static_assert(offsetof(WasmIndirectOverflowPayload, reserved1) == 32);
     return value.omitted_count == 0 && value.ring_index < kWasmOverflowRingLimit &&
            value.function_index < kWasmOverflowFieldLimit &&
            value.table_index < kWasmOverflowFieldLimit && value.module_byte_offset >= 8 &&
-           value.module_byte_offset < kWasmOverflowFieldLimit &&
+           value.module_byte_offset < kWasmModuleByteOffsetLimit &&
            value.resolution < kWasmIndirectResolutionCount;
   }
   return value.kind == kWasmOverflowKindOmitted && value.ring_index == 0 &&

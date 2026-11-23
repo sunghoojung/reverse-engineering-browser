@@ -13,11 +13,12 @@ use sha2::{Digest, Sha256};
 use crate::event_window;
 use crate::evidence;
 use crate::request_headers::{
-    Drops, STATES, child_payload, le, lifecycle_of, provisional_hops, qualified, span_of,
+    Drops, STATES, child_payload, le, lifecycle_of, provisional_hops, qualified, span_of, too_long,
 };
 use crate::request_stack;
 
-const LIST_LIMIT: usize = 2 * 1024 * 1024;
+/// Version 1's list limit; version 2 retains a list of any length.
+const LIST_LIMIT_V1: u32 = 2 * 1024 * 1024;
 const NAME_PREFIX: usize = 24;
 const PROVENANCE_LISTS: usize = 256;
 /// Distinct script positions resolved to source per provenance answer.
@@ -129,7 +130,7 @@ fn decode_list(event: &Value) -> Option<List> {
         && (list.count == 0) == empty
         && (list.length == 0) == empty
         && (empty || u64::from(list.length) >= 16 + 64 * u64::from(list.count))
-        && limited == (list.length as usize > LIST_LIMIT)
+        && limited == too_long(le(&bytes[0..2]), list.length, LIST_LIMIT_V1)
         && zero(&list.digest) == limited
         && (event["artifact_id"] != "0") == matches!(list.state, 1 | 2);
     valid.then_some(list)
@@ -296,7 +297,7 @@ fn read_list(
         (Some(artifact), None) => artifact,
         _ => return Err("missing"),
     };
-    match evidence::content(root, artifact, LIST_LIMIT) {
+    match evidence::content(root, artifact, list.length as usize) {
         Ok(bytes)
             if bytes.len() == list.length as usize
                 && Sha256::digest(&bytes).as_slice() == list.digest =>

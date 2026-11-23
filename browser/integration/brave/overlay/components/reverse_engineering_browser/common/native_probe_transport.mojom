@@ -129,6 +129,9 @@ struct NativeWasmDispatchRecord {
   // Wasm record that carried it, in the same sample window.
   uint64 module_token;
   mojo_base.mojom.BigBuffer content;
+  // Bytes of content the renderer charged; released by
+  // NativeProbeClient.ReleaseArtifactCredit.
+  uint64 credit_bytes;
 };
 
 // Physical call_indirect observation; same admission and module transfer as
@@ -155,6 +158,8 @@ struct NativeWasmIndirectRecord {
   string source_url;
   uint64 module_token;
   mojo_base.mojom.BigBuffer content;
+  // As NativeWasmDispatchRecord.
+  uint64 credit_bytes;
 };
 
 // Trap or still-executing follow-up for one host-visible Wasm call. content
@@ -184,6 +189,8 @@ struct NativeWasmExecutionRecord {
   string source_url;
   uint64 module_token;
   mojo_base.mojom.BigBuffer content;
+  // As NativeWasmDispatchRecord.
+  uint64 credit_bytes;
 };
 
 union NativeWasmRecord {
@@ -211,7 +218,10 @@ interface NativeProbeHost {
                      string source_url,
                      string adapter_json,
                      mojo_base.mojom.BigBuffer wasm_module,
-                     mojo_base.mojom.BigBuffer bytecode);
+                     mojo_base.mojom.BigBuffer bytecode,
+                     // wasm_module bytes the renderer charged, as
+                     // NativeWasmDispatchRecord.credit_bytes.
+                     uint64 credit_bytes);
   CaptureNativeGuestHost(uint64 capture_epoch, array<uint8> event_record);
   // The request_target child of a renderer record (a memory-cache reuse)
   // whose path and query pass the record's inline prefix, in a content

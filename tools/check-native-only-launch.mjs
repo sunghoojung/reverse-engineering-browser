@@ -73,17 +73,6 @@ printf '%s\\n' "${'${brave_arguments[@]}'}"`], {encoding:'utf8'});
     '--reb-wasm-module-allowlist=/tmp/mods.txt',
     '--reb-wasm-budget-reset-file=/tmp/reset']);
 }
-{
-  // Every record replaces the pacing; filters still apply.
-  const result = spawnSync(shell, ['-c', `set -eu; brave_arguments=(); native_quiet_mode=0; native_wasm_dispatch=1; native_wasm_call_indirect=1; native_guest_adapter=""; native_wasm_every_record=1; native_wasm_function_deny=9; wasm_budget_reset_file=/tmp/reset; ${flagsCode}
-printf '%s\\n' "${'${brave_arguments[@]}'}"`], {encoding:'utf8'});
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(result.stdout.trimEnd().split('\n'), [
-    '--js-flags=--reb-wasm-br-table-dispatch --reb-wasm-call-indirect-dispatch',
-    '--reb-wasm-every-record',
-    '--reb-wasm-function-deny=9',
-    '--reb-wasm-budget-reset-file=/tmp/reset']);
-}
 for (const [variable, options] of [['REB_NATIVE_WASM_DISPATCH', {REB_NATIVE_WASM_DISPATCH:'invalid'}],
   ['REB_NATIVE_WASM_DISPATCH', {REB_NATIVE_WASM_DISPATCH:'1',REB_CAPTURE_CATEGORY_MASK:'1'}],
   ['REB_NATIVE_WASM_CALL_INDIRECT', {REB_NATIVE_WASM_CALL_INDIRECT:'invalid'}],
@@ -98,10 +87,6 @@ for (const [options, pattern] of [
   [{REB_NATIVE_WASM_FUNCTION_ALLOW:'1,1', REB_NATIVE_WASM_DISPATCH:'1'}, /unique/],
   [{REB_NATIVE_WASM_FUNCTION_ALLOW:'16777216', REB_NATIVE_WASM_DISPATCH:'1'}, /16777216/],
   [{REB_NATIVE_WASM_MODULE_ALLOWLIST:'relative.txt', REB_NATIVE_WASM_DISPATCH:'1'}, /REB_NATIVE_WASM_MODULE_ALLOWLIST/],
-  [{REB_NATIVE_WASM_EVERY_RECORD:'2', REB_NATIVE_WASM_DISPATCH:'1'}, /REB_NATIVE_WASM_EVERY_RECORD must be 0 or 1/],
-  [{REB_NATIVE_WASM_EVERY_RECORD:'1'}, /require REB_NATIVE_WASM_DISPATCH/],
-  [{REB_NATIVE_WASM_EVERY_RECORD:'1', REB_NATIVE_WASM_SAMPLES_PER_FUNCTION:'2', REB_NATIVE_WASM_DISPATCH:'1'},
-    /takes no REB_NATIVE_WASM_SAMPLES_PER_FUNCTION/],
 ]) {
   const result = spawnSync(shell, [join(root,'scripts/run-live-session.sh')], {env:{...process.env, REB_NATIVE_WASM_DISPATCH:'0', REB_NATIVE_WASM_CALL_INDIRECT:'0', ...options}, encoding:'utf8'});
   assert.equal(result.status, 2, result.stderr);
@@ -116,7 +101,7 @@ console.log('PASS native Wasm launch is explicit opt-in, category-gated, and com
   const run = variables => {
     const result = spawnSync(shell, ['-c', `set -eu; ui_arguments=(); capture_canvas_images=0; console_document_start=0; request_stacks_state=off;
       native_wasm_dispatch=0; native_wasm_call_indirect=0; native_wasm_samples_per_function=; native_wasm_samples_per_indirect_site=;
-      native_wasm_function_allow=; native_wasm_function_deny=; native_wasm_module_allowlist=; native_wasm_every_record=0; ${variables}; ${labels}
+      native_wasm_function_allow=; native_wasm_function_deny=; native_wasm_module_allowlist=; ${variables}; ${labels}
 printf '%s\\n' "${'${ui_arguments[@]-}'}"`], {encoding:'utf8'});
     assert.equal(result.status, 0, result.stderr);
     return result.stdout.trimEnd().split('\n').filter(Boolean);
@@ -132,8 +117,6 @@ printf '%s\\n' "${'${ui_arguments[@]-}'}"`], {encoding:'utf8'});
       '--session-wasm-samples-per-indirect-site', '16', '--session-wasm-function-allow-count', '3',
       '--session-wasm-function-deny-count', '1', '--session-wasm-module-allowlist']);
   assert.deepEqual(run(`${quiet}; native_wasm_dispatch=1`), ['--session-wasm-dispatch'], 'unnamed allowances are not labeled');
-  assert.deepEqual(run(`${quiet}; native_wasm_dispatch=1; native_wasm_call_indirect=1; native_wasm_every_record=1`),
-    ['--session-wasm-dispatch', '--session-wasm-call-indirect', '--session-wasm-every-record']);
   assert.deepEqual(run(`${quiet}; native_wasm_samples_per_function=64; native_wasm_function_allow=1`), [],
     'a session without a Wasm stream names no sampling policy');
   // No content budget, media switch or store size is read or passed on.
@@ -295,7 +278,11 @@ console.log('PASS native JS invocation sites opt-in, VM-category gate, sensitive
 // A session started as another ends waits for that session's Brave to close
 // instead of refusing the profile it still holds. The holder is a stand-in
 // whose command line names the profile, as a running Brave's does; the shell
-// starts it so the shell, not this check, reaps it when it exits.
+// starts it so the shell, not this check, reaps it when it exits. Until perl
+// replaces the forked shell, that command line is the shell's and names no
+// profile, so the launch code runs only once it names one, as a Brave that is
+// already running does. The closing one outlives a slow first look by a second
+// and still ends well inside the release wait.
 {
   const holderCode = section('# Only one browser can hold a profile', '# The project V8 flags');
   const quick = holderCode.replace('profile_release_wait_seconds=10', 'profile_release_wait_seconds=4');
@@ -305,12 +292,10 @@ console.log('PASS native JS invocation sites opt-in, VM-category gate, sensitive
     const run = async (kind, hold) => {
       const profile = join(profiles, `${kind}-${hold}`);
       await mkdir(profile);
-      // The launcher reads the holder's command line, which names the profile
-      // only once the forked shell has exec'd perl; on a loaded Linux runner
-      // the launcher could look first and see no browser.
       const holder = hold === 'none' ? 'holder=""' :
-        `perl -e 'sleep shift' ${hold === 'closing' ? 1 : 30} "--user-data-dir=$1" & holder=$!; ln -s "test-host-$holder" "$1/SingletonLock"
-for _ in {1..500}; do /bin/ps -ww -o command= -p "$holder" | grep -q -F -e "--user-data-dir=$1" && break; sleep 0.01; done`;
+        `perl -e 'sleep shift' ${hold === 'closing' ? 2 : 30} "--user-data-dir=$1" & holder=$!; ln -s "test-host-$holder" "$1/SingletonLock"
+waited=0; until /bin/ps -ww -o command= -p "$holder" | grep -q -F -e "--user-data-dir=$1"; do
+  ((waited++ < 500)) || { echo "The stand-in holder never ran"; exit 3; }; sleep 0.01; done`;
       return spawnSync(shell, ['-c', `set -eu; fail_live_session() { shift; printf '%s' "$*"; exit 2; }
 trap '[[ -z "$holder" ]] || kill "$holder" 2>/dev/null || true' EXIT
 profile_kind=${kind}; profile_path="$1"; ${holder}

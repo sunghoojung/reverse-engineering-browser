@@ -10,7 +10,10 @@ use crate::{
 use serde_json::{Map, Value, json};
 use std::{collections::HashSet, path::Path};
 
-pub const MANIFEST_RECORD_BYTES: usize = 8192;
+/// The longest manifest record: its URL, at most url::kMaxURLChars (2 MiB,
+/// include/reb/artifact.hpp kMaxArtifactUrlBytes), and its MIME type, at most
+/// 255 bytes, each byte JSON-escaped to at most six, and the other fields.
+pub const MANIFEST_RECORD_BYTES: usize = 6 * (2 * 1024 * 1024 + 255) + 1024;
 const ID_FIELDS: [&str; 5] = [
     "artifact_id",
     "session_id",

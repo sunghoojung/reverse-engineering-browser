@@ -161,11 +161,6 @@ void WriteToken(const std::string& path) {
   Require(close(descriptor) == 0, "token close");
 }
 
-bool IsSocket(const std::string& path) {
-  struct stat metadata {};
-  return stat(path.c_str(), &metadata) == 0 && S_ISSOCK(metadata.st_mode);
-}
-
 bool WaitFor(const std::function<bool()>& done) {
   const auto deadline = Clock::now() + kWait;
   while (!done()) {
@@ -219,7 +214,12 @@ pid_t SpawnReceiver(const std::string& binary,
   Require(posix_spawn(&pid, binary.c_str(), &actions, nullptr, argv.data(), environ) == 0,
           "spawn receiver");
   posix_spawn_file_actions_destroy(&actions);
-  Require(WaitFor([&] { return IsSocket(socket_path); }), "receiver socket did not appear");
+  // The socket file appears at bind(), before the receiver listens, so a
+  // connection then is refused; the receiver reports once it listens.
+  Require(WaitFor([&] {
+            return ReadFile(log_path).find("Artifact receiver listening on ") != std::string::npos;
+          }),
+          "receiver did not listen");
   return pid;
 }
 

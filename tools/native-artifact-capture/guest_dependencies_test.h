@@ -44,10 +44,14 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
   reb::NativeGuestPut(d.inline_payload, 32, 30, 8);
   reb::NativeGuestPut(d.inline_payload, 72, code.size(), 4);
   reb::NativeGuestPut(d.inline_payload, 92, 7, 4);
-  reb::NativeGuestPut(i.inline_payload, 0, 3, 2);
+  reb::NativeGuestPut(i.inline_payload, 0, reb::kNativeWasmGuestInvocationVersion, 2);
   reb::NativeGuestPut(i.inline_payload, 2, 128, 2);
   reb::NativeGuestPut(i.inline_payload, 8, 20, 8);
   reb::NativeGuestPut(i.inline_payload, 16, 30, 8);
+  // The activation began inside JavaScript invocation 9.
+  const auto inside = static_cast<std::uint64_t>(reb::NativeJsInvocationContextState::kInside);
+  reb::NativeGuestPut(i.inline_payload, 84, inside, 1);
+  reb::NativeGuestPut(i.inline_payload, 88, 9, 4);
   const auto digest = reb::NativeGuestDigest(
       std::span(reinterpret_cast<const std::uint8_t*>(recipe.data()), recipe.size()));
   for (std::size_t n = 0; n < digest.size(); ++n) {
@@ -117,6 +121,9 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
   Check(reb::IsValidWasmGuestInvocation(std::bit_cast<reb::EventRecord>(emitted[0])) &&
             reb::IsValidWasmGuestDispatch(std::bit_cast<reb::EventRecord>(emitted[1])),
         "Produced guest records pass the actual core validators");
+  Check(emitted[0].inline_payload[84] == static_cast<std::byte>(inside) &&
+            emitted[0].inline_payload[88] == std::byte{9},
+        "The invocation keeps the JavaScript invocation it began in");
   Check(emitted[2].header.artifact_id == module_id && emitted[2].header.parent_event_id == 101,
         "Host retains module and genuine dispatch parent");
   NativeArtifactCaptureSink::TransferCompleted(module_id,
@@ -234,7 +241,7 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
   // Fields: sequence, parent, parent dispatch, then one byte written at 80 + offset.
   for (const auto& [sequence, parent, dispatch, at, value] :
        {std::tuple{510, 29, 510, 0, 0}, std::tuple{512, 0, 511, 0, 0}, std::tuple{514, 30, 0, 0, 0},
-        std::tuple{516, 29, 499, 4, 1}, std::tuple{518, 29, 499, 0, 8}}) {
+        std::tuple{516, 29, 499, 5, 1}, std::tuple{518, 29, 499, 0, 8}}) {
     configure();
     i.header.sequence_number = static_cast<std::uint64_t>(sequence);
     d.header.sequence_number = static_cast<std::uint64_t>(sequence + 1);
@@ -414,6 +421,27 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
   sink.CaptureNativeGuest(capture, 1, [] { return true; });
   Check(transfers.empty() && gap_for(1002, "native_guest_dependency_rejected"),
         "Wrong invocation or dispatch category rejected");
+  capture.dispatch.header.category = reb::NativeProbeCategory::kVm;
+  const auto rejected_context = [&](std::uint64_t sequence, const std::string& check) {
+    transfers.clear();
+    capture.dispatch.header.sequence_number = sequence;
+    sink.CaptureNativeGuest(capture, 1, [] { return true; });
+    Check(transfers.empty() && gap_for(sequence, "native_guest_dependency_rejected"), check);
+  };
+  const auto context = [&](std::uint64_t state, std::uint64_t reserved, std::uint64_t id) {
+    reb::NativeGuestPut(i.inline_payload, 84, state, 1);
+    reb::NativeGuestPut(i.inline_payload, 85, reserved, 3);
+    reb::NativeGuestPut(i.inline_payload, 88, id, 4);
+  };
+  context(inside, 0, 0);
+  rejected_context(1003, "An invocation inside JavaScript without its identifier is rejected");
+  context(0, 0, 9);
+  rejected_context(1004, "An identifier outside a JavaScript invocation is rejected");
+  context(inside, 1, 9);
+  rejected_context(1005, "Reserved JavaScript context bytes must be zero");
+  context(inside, 0, 9);
+  reb::NativeGuestPut(i.inline_payload, 0, 3, 2);
+  rejected_context(1006, "Only the invocation version the renderer writes is accepted");
   std::cout << "PASS production guest ACK ordering, module verdicts and bounded retry, "
                "live-document binding reclaim, exact host parents without host loss, "
                "pre-expiry flush and explicit gaps\n";

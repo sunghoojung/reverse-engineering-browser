@@ -95,11 +95,6 @@ bool IsFingerprintSurfaceCategory(const NativeProbeCategory category) noexcept {
   return false;
 }
 
-// Origin Trace reads artifact content through a bounded 2 MiB local response.
-// Keep Canvas data URLs within that exact limit so an accepted image is always
-// complete enough to validate and display instead of becoming a partial base64
-// preview. Other generated artifact kinds retain their 16 MiB transport cap.
-constexpr std::size_t kCanvasDataUrlMaxBytes = 2U * 1024U * 1024U;
 constexpr std::size_t kRuntimeTypedArrayMinBytes = 32;
 
 struct RuntimeScriptCache final {
@@ -481,13 +476,12 @@ constexpr char AsciiLower(unsigned char c) noexcept;
   return true;
 }
 
-// Bounded, allocation-free metadata sanitization. Ambiguous or control-containing
-// URLs are unavailable. data and javascript URLs must never become source metadata.
-// allow_blob is false while decoding the inner origin of a blob URL.
-std::string_view SanitizeRuntimeSourceUrl(std::string_view input,
-                                          std::array<char, kNativeArtifactMaxUrlBytes>& output,
-                                          const bool allow_blob) noexcept {
-  if (input.empty() || input.size() > output.size()) {
+// Metadata sanitization. Ambiguous or control-containing URLs are unavailable
+// (empty). data and javascript URLs must never become source metadata.
+// allow_blob is false while decoding the inner origin of a blob URL. A URL may
+// be as long as kNativeArtifactMaxUrlBytes, so the result is a heap string.
+std::string SanitizeRuntimeSourceUrl(std::string_view input, const bool allow_blob) noexcept {
+  if (input.empty() || input.size() > kNativeArtifactMaxUrlBytes) {
     return {};
   }
   for (const char character : input) {
@@ -498,23 +492,12 @@ std::string_view SanitizeRuntimeSourceUrl(std::string_view input,
   }
   input = input.substr(0, input.find_first_of("?#"));
   if (allow_blob && StartsWithAscii(input, "blob:")) {
-    std::array<char, kNativeArtifactMaxUrlBytes> inner_storage{};
-    const auto inner = SanitizeRuntimeSourceUrl(input.substr(5), inner_storage, false);
+    const std::string inner = SanitizeRuntimeSourceUrl(input.substr(5), false);
     if (inner.empty() ||
         (!StartsWithAscii(inner, "https://") && !StartsWithAscii(inner, "http://"))) {
       return {};
     }
-    constexpr std::string_view kBlob = "blob:";
-    if (kBlob.size() + inner.size() > output.size()) {
-      return {};
-    }
-    for (std::size_t index = 0; index < kBlob.size(); ++index) {
-      output[index] = kBlob[index];
-    }
-    for (std::size_t index = 0; index < inner.size(); ++index) {
-      output[kBlob.size() + index] = inner[index];
-    }
-    return {output.data(), kBlob.size() + inner.size()};
+    return "blob:" + inner;
   }
   const auto scheme = input.find("://");
   if (scheme == std::string_view::npos || scheme > 7) {
@@ -552,44 +535,21 @@ std::string_view SanitizeRuntimeSourceUrl(std::string_view input,
       }
     }
   }
-  std::size_t length = 0;
+  std::string output;
+  output.reserve(input.size());
   for (std::size_t index = 0; index < input.size(); ++index) {
     if (cut_end != 0 && index >= cut_begin && index < cut_end) {
       continue;
     }
-    output[length++] = input[index];
+    output.push_back(input[index]);
   }
-  return {output.data(), length};
-}
-
-std::string_view SanitizeRuntimeSourceUrl(
-    const std::string_view input,
-    std::array<char, kNativeArtifactMaxUrlBytes>& output) noexcept {
-  return SanitizeRuntimeSourceUrl(input, output, true);
+  return output;
 }
 
 // A script with no name is still the allocating script. The label is the id
 // only, so the page cannot put source text into the URL field.
-std::string_view RuntimeScriptIdentityLabel(
-    std::uint64_t script_id,
-    std::array<char, kNativeArtifactMaxUrlBytes>& output) noexcept {
-  constexpr std::string_view kPrefix = "script://";
-  std::array<char, 20> digits{};
-  std::size_t count = 0;
-  do {
-    digits[count++] = static_cast<char>('0' + static_cast<int>(script_id % 10U));
-    script_id /= 10U;
-  } while (script_id != 0 && count < digits.size());
-  if (kPrefix.size() + count > output.size()) {
-    return {};
-  }
-  for (std::size_t index = 0; index < kPrefix.size(); ++index) {
-    output[index] = kPrefix[index];
-  }
-  for (std::size_t index = 0; index < count; ++index) {
-    output[kPrefix.size() + index] = digits[count - 1U - index];
-  }
-  return {output.data(), kPrefix.size() + count};
+std::string RuntimeScriptIdentityLabel(const std::uint64_t script_id) noexcept {
+  return "script://" + std::to_string(script_id);
 }
 
 // Same structural weights as the offline JavaScript detector. Anti-bot lexical
@@ -1806,7 +1766,7 @@ bool NativeProbeSink::RuntimeBufferHasSignal(const std::uint64_t generation,
                                              const std::uint64_t script_id,
                                              const bool is_eval) noexcept {
   if (generation == 0 || generation != RuntimeCaptureGeneration() || bytes < 32 ||
-      bytes > kNativeArtifactMaxContentBytes || execution_context_id == 0 || script_id == 0)
+      execution_context_id == 0 || script_id == 0)
     return false;
   RuntimeObservationCache& runtime_observations = RuntimeObservationsFor(generation);
   const auto* observation =
@@ -1864,8 +1824,7 @@ void NativeProbeSink::CaptureRuntimeTypedArray(const std::uint64_t execution_con
   if (!artifact_emitter_.load(std::memory_order_acquire)) [[likely]] {
     return;
   }
-  if (content.size() < kRuntimeTypedArrayMinBytes ||
-      content.size() > kNativeArtifactMaxContentBytes) {
+  if (content.size() < kRuntimeTypedArrayMinBytes) {
     return;
   }
   const std::uint64_t generation = config_generation_.load(std::memory_order_acquire);
@@ -1886,18 +1845,18 @@ void NativeProbeSink::CaptureRuntimeTypedArray(const std::uint64_t execution_con
   }
   if (script.script_id == 0 ||
       (script.source.empty() &&
-       RuntimeScriptSourceNeeded(execution_context_id, script.script_id)) ||
-      script.source.size() > kNativeArtifactMaxContentBytes) {
+       RuntimeScriptSourceNeeded(execution_context_id, script.script_id))) {
     RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, frame_id,
                              "allocating_script_unavailable", generation);
     return;
   }
-  std::array<char, kNativeArtifactMaxUrlBytes> sanitized_storage{};
-  auto sanitized_url = SanitizeRuntimeSourceUrl(source_url, sanitized_storage);
-  if (sanitized_url.empty() && source_url.empty()) {
-    std::array<char, kNativeArtifactMaxUrlBytes> label_storage{};
-    const auto label = RuntimeScriptIdentityLabel(script.script_id, label_storage);
-    sanitized_url = SanitizeRuntimeSourceUrl(label, sanitized_storage);
+  // A name longer than any URL can carry source text; the buffer is named by
+  // its script's id, as one with no name is.
+  const std::string_view name =
+      source_url.size() > kNativeArtifactMaxUrlBytes ? std::string_view() : source_url;
+  std::string sanitized_url = SanitizeRuntimeSourceUrl(name, true);
+  if (sanitized_url.empty() && name.empty()) {
+    sanitized_url = SanitizeRuntimeSourceUrl(RuntimeScriptIdentityLabel(script.script_id), true);
   }
   if (execution_context_id == 0 || sanitized_url.empty()) {
     RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, frame_id,
@@ -1936,20 +1895,34 @@ void NativeProbeSink::CaptureRuntimeTypedArray(const std::uint64_t execution_con
     }
     return;
   }
+  // Release only our generation's reservation, never a slot reclaimed by a
+  // replacement session.
+  const auto release_claim = [&] {
+    auto expected = generation;
+    claim->compare_exchange_strong(expected, generation - 1U, std::memory_order_relaxed);
+  };
+  // The buffer and the allocating script source it carries, of any size, are
+  // kept against the renderer's credit.
+  const std::uint64_t credit_bytes = content.size() + script.source.size();
+  if (!TryChargeArtifactCredit(credit_bytes)) {
+    release_claim();
+    RecordRuntimeBufferOmission(generation, frame_id, "runtime_typed_array_backlog");
+    return;
+  }
   const std::uint64_t creator_event_id =
       RecordRuntimeBufferEvent(NativeProbeType::kApiCall, frame_id,
                                "runtime_typed_array_task_checkpoint_snapshot", generation);
-  // Rejected creator metadata cannot produce an artifact. Release only our
-  // generation's reservation, never a slot reclaimed by a replacement session.
+  // Rejected creator metadata cannot produce an artifact.
   if (creator_event_id == 0 || RuntimeCaptureGeneration() != generation) {
-    auto expected = generation;
-    claim->compare_exchange_strong(expected, generation - 1U, std::memory_order_relaxed);
+    ReleaseArtifactCredit(credit_bytes);
+    release_claim();
     return;
   }
   scoped_script.capture_generation = generation;
   artifact_emitter(NativeArtifactKind::kBytecodeBuffer,
                    NativeArtifactCaptureOrigin::kRuntimeTypedArray, creator_event_id,
-                   execution_context_id, frame_id, sanitized_url, content, scoped_script, 0);
+                   execution_context_id, frame_id, sanitized_url, content, scoped_script,
+                   credit_bytes);
   if (RuntimeCaptureGeneration() != generation) {
     return;
   }
@@ -2004,6 +1977,22 @@ bool NativeProbeSink::TryChargeArtifactCredit(const std::uint64_t bytes) noexcep
   } while (
       !artifact_credit_used_.compare_exchange_weak(used, used + bytes, std::memory_order_relaxed));
   return true;
+}
+
+template <typename Emitter, typename Observation>
+std::string_view NativeProbeSink::SendWasmObservation(const Emitter emitter,
+                                                      const Observation& observation,
+                                                      const std::uint64_t generation,
+                                                      const std::string_view unavailable) noexcept {
+  const std::uint64_t bytes = observation.module_bytes.size();
+  if (bytes != 0 && !TryChargeArtifactCredit(bytes)) {
+    return "native_wasm_module_backlog";
+  }
+  if (!emitter || !emitter(observation, generation)) {
+    ReleaseArtifactCredit(bytes);
+    return unavailable;
+  }
+  return {};
 }
 
 void NativeProbeSink::ReleaseArtifactCredit(const std::uint64_t bytes) noexcept {
@@ -2133,14 +2122,42 @@ void NativeProbeSink::CaptureGeneratedArtifact(
     const std::uint64_t frame_id,
     const std::string_view source_url,
     const std::span<const std::uint8_t> content) noexcept {
+  SendGeneratedArtifact(kind, capture_origin, creator_event_id, execution_context_id, frame_id,
+                        source_url, content, false);
+}
+
+void NativeProbeSink::CaptureChargedArtifact(const NativeArtifactKind kind,
+                                             const NativeArtifactCaptureOrigin capture_origin,
+                                             const std::uint64_t creator_event_id,
+                                             const std::uint64_t execution_context_id,
+                                             const std::uint64_t frame_id,
+                                             const std::string_view source_url,
+                                             const std::span<const std::uint8_t> content) noexcept {
+  SendGeneratedArtifact(kind, capture_origin, creator_event_id, execution_context_id, frame_id,
+                        source_url, content, true);
+}
+
+void NativeProbeSink::SendGeneratedArtifact(const NativeArtifactKind kind,
+                                            const NativeArtifactCaptureOrigin capture_origin,
+                                            const std::uint64_t creator_event_id,
+                                            const std::uint64_t execution_context_id,
+                                            const std::uint64_t frame_id,
+                                            const std::string_view source_url,
+                                            const std::span<const std::uint8_t> content,
+                                            const bool charged) noexcept {
+  // Content of any size is kept against the renderer's credit. A stack
+  // artifact is at most kNativeStackArtifactMaxBytes, and its refusal has a
+  // path of its own, so it is not charged.
+  const std::uint64_t credit_bytes = kind == NativeArtifactKind::kStack ? 0 : content.size();
+  // Content the caller already charged returns its credit when it is not sent.
+  const auto refuse = [&] {
+    if (charged) {
+      ReleaseArtifactCredit(credit_bytes);
+    }
+  };
   if (!artifact_emitter_.load(std::memory_order_acquire) || source_url.empty() ||
       source_url.size() > kNativeArtifactMaxUrlBytes || content.empty()) [[likely]] {
-    return;
-  }
-  // A Wasm module of any size is kept against the renderer's credit; the other
-  // kinds keep their own limits.
-  const bool wasm = kind == NativeArtifactKind::kWasm;
-  if (!wasm && content.size() > kNativeArtifactMaxContentBytes) {
+    refuse();
     return;
   }
   const bool valid_kind_and_origin =
@@ -2159,10 +2176,12 @@ void NativeProbeSink::CaptureGeneratedArtifact(
        capture_origin == NativeArtifactCaptureOrigin::kStackScript && creator_event_id != 0);
   if (!valid_kind_and_origin ||
       (kind != NativeArtifactKind::kCanvasDataUrl && execution_context_id == 0)) {
+    refuse();
     return;
   }
   const std::uint64_t generation = config_generation_.load(std::memory_order_acquire);
   if ((generation & 1U) != 0) {
+    refuse();
     return;
   }
   const std::uint64_t category_mask = category_mask_.load(std::memory_order_relaxed);
@@ -2175,15 +2194,20 @@ void NativeProbeSink::CaptureGeneratedArtifact(
                                                    ? NativeProbeCategory::kVm
                                                    : NativeProbeCategory::kArtifact)) == 0 ||
       MonotonicTimeNs() >= expires_at) {
+    refuse();
     return;
   }
-  if (wasm && !TryChargeArtifactCredit(content.size())) {
+  if (!charged && credit_bytes != 0 && !TryChargeArtifactCredit(credit_bytes)) {
     RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, frame_id,
-                             "wasm_module_backlog", generation, NativeProbeCategory::kArtifact);
+                             kind == NativeArtifactKind::kWasm ? "wasm_module_backlog"
+                             : kind == NativeArtifactKind::kCanvasDataUrl
+                                 ? "canvas_data_url_backlog"
+                                 : "generated_artifact_backlog",
+                             generation, NativeProbeCategory::kArtifact);
     return;
   }
   artifact_emitter(kind, capture_origin, creator_event_id, execution_context_id, frame_id,
-                   source_url, content, {}, wasm ? content.size() : 0);
+                   source_url, content, {}, credit_bytes);
 }
 
 std::uint64_t NativeProbeSink::RecordSurfaceOperation(
@@ -2261,8 +2285,7 @@ void NativeProbeSink::RecordCanvasToDataUrl() noexcept {
 void NativeProbeSink::RecordCanvasToDataUrl(const std::string_view data_url) noexcept {
   constexpr std::string_view kImageDataUrlPrefix = "data:image/";
   if (!IsCanvasImageCaptureEnabled() || !data_url.starts_with(kImageDataUrlPrefix) ||
-      data_url.find(";base64,") == std::string_view::npos ||
-      data_url.size() > kCanvasDataUrlMaxBytes) {
+      data_url.find(";base64,") == std::string_view::npos) {
     RecordCanvasToDataUrl();
     return;
   }
@@ -2395,9 +2418,10 @@ void NativeProbeSink::EmitRendererTarget(const NativeRendererRequest& start,
               std::min({target_text.size(), target_length, target.prefix.size()}),
               target.prefix.begin());
   // The scheme, host and explicit port that name a long target's artifact,
-  // as the browser names its own (an origin, never user info).
-  std::array<char, kNativeArtifactMaxUrlBytes> origin_bytes;
-  std::size_t origin_length = 0;
+  // as the browser names its own (an origin, never user info). It can be as
+  // long as kNativeArtifactMaxUrlBytes, so it is a heap string, built only for
+  // a target the record's prefix does not hold.
+  std::string origin;
   if (target_length > target.prefix.size()) {
     // As the browser decides for its own requests: no origin or a target past
     // what an artifact keeps is not retained.
@@ -2420,17 +2444,14 @@ void NativeProbeSink::EmitRendererTarget(const NativeRendererRequest& start,
       }
     }
     if (scheme.empty() || target_length > kNativeRequestTargetMaxBytes ||
-        scheme.size() + host.size() + port_length > origin_bytes.size()) {
+        scheme.size() + host.size() + port_length > kNativeArtifactMaxUrlBytes) {
       target.retention = NativeRequestTargetRetention::kNotRetainedUrl;
     } else if (host.empty() || target_text.size() != target_length) {
       // A row whose caller converted only the prefix.
       target.retention = NativeRequestTargetRetention::kNotRetainedArtifactUnavailable;
     } else {
-      origin_length = scheme.size() + host.size() + port_length;
-      std::copy(scheme.begin(), scheme.end(), origin_bytes.begin());
-      std::copy(host.begin(), host.end(), origin_bytes.begin() + scheme.size());
-      std::copy_n(port_text.begin(), port_length,
-                  origin_bytes.begin() + scheme.size() + host.size());
+      origin.reserve(scheme.size() + host.size() + port_length);
+      origin.append(scheme).append(host).append(port_text.data(), port_length);
     }
   }
   NativeProbeEvent child;
@@ -2445,14 +2466,12 @@ void NativeProbeSink::EmitRendererTarget(const NativeRendererRequest& start,
   child.header.request_id = start.request_id;
   child.header.parent_event_id = start.initiated_sequence;
   child.header.payload_size = static_cast<std::uint32_t>(kNativeRequestPayloadSize);
-  if (origin_length != 0) {
+  if (!origin.empty()) {
     // The browser fills in the retention and artifact it keeps.
     child.inline_payload = EncodeNativeRequestTargetPayload(target);
     const NativeRendererTargetEmitter target_emitter =
         target_emitter_.load(std::memory_order_relaxed);
-    if (target_emitter &&
-        target_emitter(child, std::string_view(origin_bytes.data(), origin_length), target_text,
-                       config_generation)) {
+    if (target_emitter && target_emitter(child, origin, target_text, config_generation)) {
       return;
     }
     target.retention = NativeRequestTargetRetention::kNotRetainedArtifactUnavailable;
@@ -3581,13 +3600,18 @@ void NativeProbeSink::RecordNativeWasmDispatch(std::uint64_t execution_context_i
   if (observation.module_token)
     observation.module_bytes = {};
   observation.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
-  const auto emitter = native_wasm_emitter_.load(std::memory_order_acquire);
-  if (config_generation_.load(std::memory_order_acquire) != admission.generation || !emitter ||
-      !emitter(observation, admission.generation)) {
+  constexpr std::string_view kUnavailable = "native_wasm_dispatch_transport_unavailable";
+  const std::string_view refused =
+      config_generation_.load(std::memory_order_acquire) != admission.generation
+          ? kUnavailable
+          : SendWasmObservation(native_wasm_emitter_.load(std::memory_order_acquire), observation,
+                                admission.generation, kUnavailable);
+  if (!refused.empty()) {
+    // Unbound, so a module the credit refused is offered again with the next
+    // sample.
     release_window();
     release_keys();
-    FillSequenceGap(observation.header, "native_wasm_dispatch_transport_unavailable",
-                    admission.generation);
+    FillSequenceGap(observation.header, refused, admission.generation);
     return;
   }
   if (!observation.module_token)
@@ -3852,13 +3876,18 @@ void NativeProbeSink::RecordNativeWasmIndirect(NativeWasmIndirectObservation obs
   if (observation.module_token)
     observation.module_bytes = {};
   observation.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
-  const auto emitter = native_wasm_indirect_emitter_.load(std::memory_order_acquire);
-  if (config_generation_.load(std::memory_order_acquire) != admission.generation || !emitter ||
-      !emitter(observation, admission.generation)) {
+  constexpr std::string_view kUnavailable = "native_wasm_indirect_transport_unavailable";
+  const std::string_view refused =
+      config_generation_.load(std::memory_order_acquire) != admission.generation
+          ? kUnavailable
+          : SendWasmObservation(native_wasm_indirect_emitter_.load(std::memory_order_acquire),
+                                observation, admission.generation, kUnavailable);
+  if (!refused.empty()) {
+    // Unbound, so a module the credit refused is offered again with the next
+    // sample.
     release_window();
     release_keys();
-    FillSequenceGap(observation.header, "native_wasm_indirect_transport_unavailable",
-                    admission.generation);
+    FillSequenceGap(observation.header, refused, admission.generation);
     return;
   }
   if (!observation.module_token)
@@ -3893,8 +3922,9 @@ struct WasmHostCall {
   std::uint64_t frame_id = 0;
   std::uint64_t document_token_high = 0;
   std::uint64_t document_token_low = 0;
-  std::array<char, kNativeArtifactMaxUrlBytes> url{};
-  std::uint32_t url_size = 0;
+  // The site's document URL; empty when none. Cleared, not freed, so its
+  // capacity serves the thread's later calls.
+  std::string url;
   // The thread's next invocation ID; CloseHostCall keeps it.
   std::uint32_t next_invocation_id = 1;
 };
@@ -3923,7 +3953,7 @@ void CloseHostCall(WasmHostCall& call) noexcept {
   call.has_site = false;
   call.entry_function_known = false;
   call.entry_function = 0;
-  call.url_size = 0;
+  call.url.clear();
 }
 
 void OpenHostCall(WasmHostCall& call,
@@ -4125,8 +4155,7 @@ void NativeProbeSink::NoteWasmInstrumentedSite(const std::uint64_t generation,
   call.frame_id = frame_id;
   call.document_token_high = document_token_high;
   call.document_token_low = document_token_low;
-  UNSAFE_BUFFERS(std::memcpy(call.url.data(), source_url.data(), source_url.size()));
-  call.url_size = static_cast<std::uint32_t>(source_url.size());
+  call.url.assign(source_url);
 }
 
 bool NativeProbeSink::EmitWasmExecution(const NativeWasmExecutionKind kind,
@@ -4203,13 +4232,16 @@ bool NativeProbeSink::EmitWasmExecution(const NativeWasmExecutionKind kind,
   if (observation.module_token)
     observation.module_bytes = {};
   observation.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
-  const auto emitter = native_wasm_execution_emitter_.load(std::memory_order_acquire);
-  if (config_generation_.load(std::memory_order_acquire) != admission.generation || !emitter ||
-      !emitter(observation, admission.generation)) {
+  constexpr std::string_view kUnavailable = "native_wasm_execution_transport_unavailable";
+  const std::string_view refused =
+      config_generation_.load(std::memory_order_acquire) != admission.generation
+          ? kUnavailable
+          : SendWasmObservation(native_wasm_execution_emitter_.load(std::memory_order_acquire),
+                                observation, admission.generation, kUnavailable);
+  if (!refused.empty()) {
     if (!every_record)
       ReleaseWasmWindow(native_wasm_execution_window_claims_, epoch);
-    FillSequenceGap(observation.header, "native_wasm_execution_transport_unavailable",
-                    admission.generation);
+    FillSequenceGap(observation.header, refused, admission.generation);
     return false;
   }
   if (!observation.module_token && !module_bytes.empty())
@@ -4245,15 +4277,14 @@ void NativeProbeSink::ReportWasmTrap(const NativeWasmExecutionReason reason,
       CloseHostCall(call);
     return;
   }
-  const bool stashed = call.url_size != 0;
+  const bool stashed = !call.url.empty();
   const auto stream = call.has_site ? call.site_stream : NativeWasmExecutionStream::kNone;
   const auto sample = call.has_site ? call.site_sample : kNativeWasmExecutionNoSample;
   static_cast<void>(EmitWasmExecution(
       NativeWasmExecutionKind::kTrap, reason, bounds, function_known, function_index, offset_known,
       module_byte_offset, stream, sample,
       stashed ? call.execution_context_id : execution_context_id,
-      stashed ? call.frame_id : frame_id,
-      stashed ? std::string_view(call.url.data(), call.url_size) : source_url,
+      stashed ? call.frame_id : frame_id, stashed ? std::string_view(call.url) : source_url,
       stashed ? call.document_token_high : document_token_high,
       stashed ? call.document_token_low : document_token_low, call.has_site ? call.js_state : 0,
       call.has_site ? call.js_id : 0, module_bytes));
@@ -4266,7 +4297,7 @@ std::uint64_t NativeProbeSink::WasmExecutionNudgeDelayNs() const noexcept {
   if (!open)
     return kNativeWasmExecutionNoNudge;
   const auto& call = *open;
-  if (call.depth == 0 || !call.has_site || call.still_emitted || call.url_size == 0)
+  if (call.depth == 0 || !call.has_site || call.still_emitted || call.url.empty())
     return kNativeWasmExecutionNoNudge;
   const auto generation = config_generation_.load(std::memory_order_acquire);
   if (call.generation != generation || !IsNativeWasmExecutionEnabled())
@@ -4306,20 +4337,19 @@ NativeWasmExecutionHeartbeat NativeProbeSink::PollWasmExecutionHeartbeat() noexc
       const std::uint32_t offset = offset_known ? call.site_offset : 0;
       const auto stream = call.has_site ? call.site_stream : NativeWasmExecutionStream::kNone;
       const auto sample = call.has_site ? call.site_sample : kNativeWasmExecutionNoSample;
-      if (call.url_size != 0) {
+      if (!call.url.empty()) {
         static_cast<void>(EmitWasmExecution(
             NativeWasmExecutionKind::kTrap, NativeWasmExecutionReason::kInterrupt,
             NativeWasmExecutionBounds::kNone, function_known, function, offset_known, offset,
-            stream, sample, call.execution_context_id, call.frame_id,
-            std::string_view(call.url.data(), call.url_size), call.document_token_high,
-            call.document_token_low, call.has_site ? call.js_state : 0,
+            stream, sample, call.execution_context_id, call.frame_id, call.url,
+            call.document_token_high, call.document_token_low, call.has_site ? call.js_state : 0,
             call.has_site ? call.js_id : 0, {}));
       }
       CloseHostCall(call);
       return NativeWasmExecutionHeartbeat::kInterrupt;
     }
   }
-  if (call.depth == 0 || !call.has_site || call.still_emitted || call.url_size == 0 ||
+  if (call.depth == 0 || !call.has_site || call.still_emitted || call.url.empty() ||
       !IsNativeWasmExecutionEnabled())
     return NativeWasmExecutionHeartbeat::kContinue;
   const auto now = MonotonicTimeNs();
@@ -4328,9 +4358,8 @@ NativeWasmExecutionHeartbeat NativeProbeSink::PollWasmExecutionHeartbeat() noexc
   static_cast<void>(EmitWasmExecution(
       NativeWasmExecutionKind::kStillExecuting, NativeWasmExecutionReason::kUnknown,
       NativeWasmExecutionBounds::kNone, true, call.site_function, true, call.site_offset,
-      call.site_stream, call.site_sample, call.execution_context_id, call.frame_id,
-      std::string_view(call.url.data(), call.url_size), call.document_token_high,
-      call.document_token_low, call.js_state, call.js_id, {}));
+      call.site_stream, call.site_sample, call.execution_context_id, call.frame_id, call.url,
+      call.document_token_high, call.document_token_low, call.js_state, call.js_id, {}));
   // One attempt. A refused record already filled its gap or its sequence slot.
   call.still_emitted = true;
   return NativeWasmExecutionHeartbeat::kContinue;
@@ -5290,8 +5319,7 @@ NativeWasmGuestModuleDecision NativeProbeSink::AdmitNativeWasmGuestModule(
   if (!adapter || !FindNativeGuestDispatcher(*adapter, function_index) ||
       !IsNativeWasmGuestEnabled())
     return NativeWasmGuestModuleDecision::kNotDispatcher;
-  return !module.empty() && module.size() <= kNativeArtifactMaxContentBytes &&
-                 NativeGuestDigest(module) == adapter->module_sha256
+  return !module.empty() && NativeGuestDigest(module) == adapter->module_sha256
              ? NativeWasmGuestModuleDecision::kAdmit
              : NativeWasmGuestModuleDecision::kRejectModule;
 }
@@ -5330,8 +5358,7 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
       }
   if (state)
     state->dispatch_sequence = 0;
-  if (!IsNativeWasmGuestEnabled() || module_bytes.empty() ||
-      module_bytes.size() > kNativeArtifactMaxContentBytes || source_url.empty() ||
+  if (!IsNativeWasmGuestEnabled() || module_bytes.empty() || source_url.empty() ||
       source_url.size() > kNativeArtifactMaxUrlBytes || !execution_context_id || !frame_id ||
       !(document_token_high || document_token_low))
     return;
@@ -5489,17 +5516,21 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
   const auto writes_before_send =
       send_module ? native_guest_module_status_next_.load(std::memory_order_acquire) : 0;
   const auto emit = native_guest_capture_.load(std::memory_order_acquire);
-  if (guest_thread.snapshot_cancelled ||
-      config_generation_.load(std::memory_order_acquire) != generation || !emit ||
-      !emit(capture, generation)) {
+  constexpr std::string_view kUnavailable = "native_guest_transport_unavailable";
+  const std::string_view refused =
+      guest_thread.snapshot_cancelled ||
+              config_generation_.load(std::memory_order_acquire) != generation
+          ? kUnavailable
+          : SendWasmObservation(emit, capture, generation, kUnavailable);
+  if (!refused.empty()) {
     // Nothing reached the browser. The sample index is free again, and each
     // sequence number this sample took becomes a gap in its own slot; a new
     // marker is dropped so the next sample of the activation takes another.
+    // A module the credit refused is offered again with that next sample.
     ReleaseNativeGuestSample(generation, sample_index);
-    FillSequenceGap(event.header, "native_guest_transport_unavailable", generation);
+    FillSequenceGap(event.header, refused, generation);
     if (new_marker) {
-      FillSequenceGap(state->invocation_event.header, "native_guest_transport_unavailable",
-                      generation);
+      FillSequenceGap(state->invocation_event.header, refused, generation);
       state->invocation_event = {};
     }
     return;

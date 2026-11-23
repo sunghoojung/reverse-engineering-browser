@@ -180,6 +180,10 @@ capture the renderer transport refuses never reached the browser: its sample
 index is free again unless another thread claimed one since (then the budget is
 one sample smaller), and the renderer fills its dispatch slot, and the slot of
 an invocation marker created for it, with `native_guest_transport_unavailable`.
+The module a capture carries has no size limit; it is charged to the
+renderer's 256 MiB artifact credit until the browser has copied it out, and a
+capture whose module the credit cannot take fills the same slots with
+`native_wasm_module_backlog`.
 A malformed host record from the renderer fills its own slot with
 `native_guest_host_malformed`; one naming another identity gets one
 browser-sequence marker.

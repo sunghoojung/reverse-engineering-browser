@@ -199,7 +199,7 @@ pub fn artifacts(root: &Path) -> Result<Value> {
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        if line.len() > 8192 {
+        if line.len() > crate::artifact_query::MANIFEST_RECORD_BYTES {
             return Err(
                 Error::new(500, "Session context artifact record exceeds its limit")
                     .with_code(Code::ResourceLimit),

@@ -40,7 +40,8 @@ struct NativeWasmDispatchRecord {
                                                        std::uint32_t js_invocation_id,
                                                        std::string source_url,
                                                        std::uint64_t module_token,
-                                                       mojo_base::BigBuffer content) {
+                                                       mojo_base::BigBuffer content,
+                                                       std::uint64_t credit_bytes) {
     return std::unique_ptr<NativeWasmDispatchRecord>(
         new NativeWasmDispatchRecord{session_id,
                                      sequence_number,
@@ -63,7 +64,8 @@ struct NativeWasmDispatchRecord {
                                      js_invocation_id,
                                      std::move(source_url),
                                      module_token,
-                                     std::move(content)});
+                                     std::move(content),
+                                     credit_bytes});
   }
   std::uint64_t session_id;
   std::uint64_t sequence_number;
@@ -87,6 +89,7 @@ struct NativeWasmDispatchRecord {
   std::string source_url;
   std::uint64_t module_token;
   mojo_base::BigBuffer content;
+  std::uint64_t credit_bytes;
 };
 struct NativeWasmIndirectRecord {
   static std::unique_ptr<NativeWasmIndirectRecord> New(std::uint64_t session_id,
@@ -109,7 +112,8 @@ struct NativeWasmIndirectRecord {
                                                        std::uint32_t js_invocation_id,
                                                        std::string source_url,
                                                        std::uint64_t module_token,
-                                                       mojo_base::BigBuffer content) {
+                                                       mojo_base::BigBuffer content,
+                                                       std::uint64_t credit_bytes) {
     return std::unique_ptr<NativeWasmIndirectRecord>(
         new NativeWasmIndirectRecord{session_id,
                                      sequence_number,
@@ -131,7 +135,8 @@ struct NativeWasmIndirectRecord {
                                      js_invocation_id,
                                      std::move(source_url),
                                      module_token,
-                                     std::move(content)});
+                                     std::move(content),
+                                     credit_bytes});
   }
   std::uint64_t session_id;
   std::uint64_t sequence_number;
@@ -154,6 +159,7 @@ struct NativeWasmIndirectRecord {
   std::string source_url;
   std::uint64_t module_token;
   mojo_base::BigBuffer content;
+  std::uint64_t credit_bytes;
 };
 struct NativeWasmExecutionRecord {
   static std::unique_ptr<NativeWasmExecutionRecord> New(std::uint64_t session_id,
@@ -178,7 +184,8 @@ struct NativeWasmExecutionRecord {
                                                         std::uint32_t js_invocation_id,
                                                         std::string source_url,
                                                         std::uint64_t module_token,
-                                                        mojo_base::BigBuffer content) {
+                                                        mojo_base::BigBuffer content,
+                                                        std::uint64_t credit_bytes) {
     return std::unique_ptr<NativeWasmExecutionRecord>(
         new NativeWasmExecutionRecord{session_id,
                                       sequence_number,
@@ -202,7 +209,8 @@ struct NativeWasmExecutionRecord {
                                       js_invocation_id,
                                       std::move(source_url),
                                       module_token,
-                                      std::move(content)});
+                                      std::move(content),
+                                      credit_bytes});
   }
   std::uint64_t session_id;
   std::uint64_t sequence_number;
@@ -227,6 +235,7 @@ struct NativeWasmExecutionRecord {
   std::string source_url;
   std::uint64_t module_token;
   mojo_base::BigBuffer content;
+  std::uint64_t credit_bytes;
 };
 class NativeWasmRecord {
  public:

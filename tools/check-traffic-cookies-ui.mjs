@@ -505,7 +505,7 @@ await settle();
 assert.match(panel.textContent, /(size|SHA-256)/);
 assert.match(panel.textContent, /receiver refused this list: sensitive_capture_disabled/);
 assert.match(panel.textContent, /after 64 MiB of header blocks and cookie lists were retained, a limit of the browser that recorded this session/);
-assert.match(panel.textContent, /2 MiB list limit/);
+assert.match(panel.textContent, /2 MiB list limit of the browser that recorded this session/);
 
 // A partial store read must not state that nothing was retained.
 api.renderTrafficCookies(panel, {id: 'p', origin: 'live', method: 'GET', path: 'https://echo.test/a', status: 200, hostOnly: false, cookieLists: [], recordsPartial: true}, () => {});

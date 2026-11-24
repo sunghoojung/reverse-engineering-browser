@@ -14297,7 +14297,6 @@
           },
           "workspaces": {
             "type": "array",
-            "maxItems": 256,
             "items": {
               "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/workspace"
             }
@@ -14546,8 +14545,8 @@
                 "maximum": 4294967295
               },
               "selectors": {
+                "description": "Every selector of the cluster since producer 2.21.0; earlier producers listed the first 32.",
                 "type": "array",
-                "maxItems": 32,
                 "items": {
                   "type": "integer",
                   "minimum": 0,
@@ -14647,20 +14646,19 @@
               },
               "clusters": {
                 "type": "array",
-                "maxItems": 1024,
                 "items": {
                   "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/handlerCluster"
                 }
               },
               "omitted_cluster_count": {
+                "description": "Always 0 since producer 2.21.0, which lists every cluster. Earlier producers listed 1024 and counted the rest here.",
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 4294967295
               },
               "segments": {
                 "type": "array",
-                "maxItems": 64,
-                "description": "Producer 2.9.0 and later, element rows only: each active segment for this table with its evaluated placement, at most 64; omitted_segment_count counts the rest. placed segments fill real slots at offset; relative segments read an imported global, directly or through a defined global, and fill no listed slot; out-of-range segments end past the table's declared minimum and are not placed; unreached segments follow an out-of-range segment, so instantiation traps before applying them; unresolved offsets are outside the evaluated constant subset.",
+                "description": "Producer 2.9.0 and later, element rows only: each active segment for this table with its evaluated placement, every one since producer 2.21.0 (earlier producers listed 64 and counted the rest in omitted_segment_count). placed segments fill real slots at offset; relative segments read an imported global, directly or through a defined global, and fill no listed slot; out-of-range segments end past the table's declared minimum and are not placed; unreached segments follow an out-of-range segment, so instantiation traps before applying them; unresolved offsets are outside the evaluated constant subset.",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -14714,7 +14712,7 @@
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 4294967295,
-                "description": "Element rows only: active segments of this table beyond the 64 listed in segments."
+                "description": "Element rows only: always 0 since producer 2.21.0, which lists every active segment. Earlier producers listed 64 and counted the rest here."
               }
             }
           },
@@ -15004,34 +15002,28 @@
               },
               "handler_count": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 1024
+                "minimum": 0
               },
               "retained_snapshot_bytes": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 65536
+                "minimum": 0
               },
               "characterized_bytes": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 65536
+                "minimum": 0
               },
               "uncharacterized_bytes": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 65536
+                "minimum": 0
               },
               "attributions": {
                 "type": "array",
-                "maxItems": 65536,
                 "items": {
                   "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/byteAttribution"
                 }
               },
               "omissions": {
                 "type": "array",
-                "maxItems": 256,
                 "items": {
                   "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/omission"
                 }
@@ -15081,21 +15073,18 @@
               },
               "handler_tables": {
                 "type": "array",
-                "maxItems": 12,
                 "items": {
                   "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/handlerTable"
                 }
               },
               "handlers": {
                 "type": "array",
-                "maxItems": 1024,
                 "items": {
                   "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/handler"
                 }
               },
               "snapshots": {
                 "type": "array",
-                "maxItems": 16,
                 "items": {
                   "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/snapshot"
                 }
@@ -15105,7 +15094,6 @@
               },
               "unknowns": {
                 "type": "array",
-                "maxItems": 256,
                 "uniqueItems": true,
                 "items": {
                   "type": "string",
@@ -15190,7 +15178,6 @@
               "observed_claims": {
                 "type": "array",
                 "minItems": 1,
-                "maxItems": 256,
                 "items": {
                   "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/observedClaim"
                 }
@@ -15198,7 +15185,6 @@
               "nested_guests": {
                 "type": "array",
                 "minItems": 1,
-                "maxItems": 64,
                 "items": {
                   "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nestedGuest"
                 }
@@ -15859,28 +15845,24 @@
             "properties": {
               "entry_offsets": {
                 "type": "array",
-                "maxItems": 16,
                 "items": {
                   "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/instructionPosition"
                 }
               },
               "instructions": {
                 "type": "array",
-                "maxItems": 4096,
                 "items": {
                   "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/reachableInstruction"
                 }
               },
               "edges": {
                 "type": "array",
-                "maxItems": 8192,
                 "items": {
                   "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/instructionEdge"
                 }
               },
               "frontier": {
                 "type": "array",
-                "maxItems": 256,
                 "items": {
                   "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/instructionFrontier"
                 }
@@ -16110,9 +16092,9 @@
                 "minimum": 1
               },
               "preview_hex": {
+                "description": "The whole dispatch instruction since producer 2.21.0; earlier producers kept its first 4096 bytes and set truncated.",
                 "type": "string",
                 "minLength": 2,
-                "maxLength": 8192,
                 "pattern": "^(?:[0-9a-f]{2})+$"
               },
               "truncated": {
@@ -18008,7 +17990,6 @@
                       },
                       "observed_opcodes": {
                         "type": "array",
-                        "maxItems": 64,
                         "items": {
                           "type": "object",
                           "additionalProperties": false,
@@ -18267,7 +18248,6 @@
                       },
                       "observed_opcodes": {
                         "type": "array",
-                        "maxItems": 64,
                         "items": {
                           "type": "object",
                           "additionalProperties": false,
@@ -42391,7 +42371,6 @@
           },
           "workspaces": {
             "type": "array",
-            "maxItems": 256,
             "items": {
               "$ref": "#/components/schemas/VmHostLinks/$defs/workspace"
             }

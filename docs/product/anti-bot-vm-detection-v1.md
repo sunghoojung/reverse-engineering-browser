@@ -290,6 +290,11 @@ the rest in `omitted_site_count`, which a Wasm inventory also reported as a
 `dispatch-inventory-limit` coverage omission. `omitted_site_count` is now
 always 0, no such omission is added, and the profile digest is unchanged.
 
+Producer `1.14.0` expands element tables of any size, so a table past
+1,000,000 placed slots or a threaded chain past 1024 handlers is classified
+rather than counted as a `classification-trace-limit` unknown. The profile
+digest is unchanged.
+
 The generic JavaScript signal families include:
 
 - a persistent loop with switch, function-array, object-map, or indirect

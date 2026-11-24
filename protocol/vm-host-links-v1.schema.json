@@ -23,7 +23,6 @@
     },
     "workspaces": {
       "type": "array",
-      "maxItems": 256,
       "items": {
         "$ref": "#/$defs/workspace"
       }

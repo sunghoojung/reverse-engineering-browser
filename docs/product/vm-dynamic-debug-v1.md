@@ -239,8 +239,8 @@ again at its latch qualifies. A selector written more than once with a literal
 is a state machine. A call to a helper (`next()`, `this.fetch()`,
 `read(state)`) whose one definition returns exactly one direct indexed read is
 direct, including `state.code[state.pc++]`. Transformed, position-dependent, saved-state, and
-unresolved selectors do not establish a fixed opcode mapping. The analyzer retains at most 1024 distinct handlers and
-reports `handler-limit` when additional candidates are omitted.
+unresolved selectors do not establish a fixed opcode mapping. The analyzer keeps every distinct handler; producers
+before workspace 2.21.0 kept 1024 and reported `handler-limit` for the rest.
 
 ## VM Lab UI
 
@@ -348,7 +348,7 @@ a static element funcref count is fanout evidence only. A proven guest opcode
 ISA requires guest program-counter and bytecode-stream evidence. Static arms do
 not invent a guest PC, registers, or a stack. Owned fixtures and live captures
 share that schema.
-The same 1024-candidate and 16-snapshot caps apply. Non-VM modules have no
+Every candidate and snapshot is kept, as for JavaScript. Non-VM modules have no
 workspace. Without a runtime snapshot, the guest-byte walk stops at
 `static-module-only` and does not invent a program counter or characterized
 bytes.

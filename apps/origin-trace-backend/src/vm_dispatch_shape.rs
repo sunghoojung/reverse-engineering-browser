@@ -43,6 +43,10 @@ const MAX_TRACE_DEPTH: u8 = 16;
 const MAX_EXPRESSION_CHARS: usize = 160;
 /// Fewer equality tests are ordinary branching, not a selector ladder.
 pub(crate) const MIN_COMPARE_ARMS: usize = 3;
+/// Matching slots listed on each `call_indirect` site; `matching_slot_count`
+/// counts them all. Every site with the same table and type shares one set,
+/// so listing it whole on each site would grow the document with sites times
+/// slots, quadratic in the module.
 const MAX_LISTED_SLOTS: usize = 32;
 /// Alternative reaching sources kept per local, after merging alternatives
 /// that differ only in where a constant or handler value was written.
@@ -51,9 +55,6 @@ const MAX_ALTERNATIVES: usize = 16;
 /// Logical trace steps for one selector query. Memo hits replay what a fresh
 /// computation would spend, so a query's result never depends on order.
 const MAX_QUERY_STEPS: u64 = 4096;
-/// Handlers checked for one indirect call's threaded chain. A larger table is
-/// an honest, counted unknown rather than a guessed chain.
-const MAX_CHAIN_HANDLERS: usize = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Kind {
@@ -2608,7 +2609,8 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
         .map(|(position, summary)| (summary.index, position))
         .collect::<HashMap<_, _>>();
     // Defined functions placed in each table with each call type, which an
-    // indirect call of that (table, type) can reach; None when too many.
+    // indirect call of that (table, type) can reach; None when the work
+    // meter ran out before every slot was read.
     let mut members = BTreeMap::<(u32, u32), Option<BTreeSet<u32>>>::new();
     let mut callees = BTreeSet::new();
     for summary in &summaries {
@@ -2624,27 +2626,23 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
             if members.contains_key(&(table, ty)) || !auxiliary.keep(128) {
                 continue;
             }
-            // An expanded table too large to place is an honest limit.
-            let reachable = if tables.oversized.contains(&table) {
-                None
-            } else {
-                let mut reachable = BTreeSet::new();
-                let matching = tables.matching_slots(table, ty, meter);
-                let placed = tables.slots.get(&table).map_or(&[][..], Vec::as_slice);
-                for slot in matching.iter().flat_map(|matching| matching.0.iter()) {
-                    if !meter.charge(1) || reachable.len() > MAX_CHAIN_HANDLERS {
-                        break;
-                    }
-                    if let Ok(at) = placed.binary_search_by_key(slot, |(slot, _)| *slot)
-                        && let Some(function) = placed[at].1.function()
-                        && positions.contains_key(&function)
-                        && auxiliary.keep(32)
-                    {
-                        reachable.insert(function);
-                    }
+            let mut reachable = Some(BTreeSet::new());
+            let matching = tables.matching_slots(table, ty, meter);
+            let placed = tables.slots.get(&table).map_or(&[][..], Vec::as_slice);
+            for slot in matching.iter().flat_map(|matching| matching.0.iter()) {
+                if !meter.charge(1) {
+                    reachable = None;
+                    break;
                 }
-                (reachable.len() <= MAX_CHAIN_HANDLERS).then_some(reachable)
-            };
+                if let Ok(at) = placed.binary_search_by_key(slot, |(slot, _)| *slot)
+                    && let Some(function) = placed[at].1.function()
+                    && positions.contains_key(&function)
+                    && auxiliary.keep(32)
+                    && let Some(reachable) = reachable.as_mut()
+                {
+                    reachable.insert(function);
+                }
+            }
             members.insert((table, ty), reachable);
         }
     }
@@ -2669,7 +2667,7 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
     // A chain is threaded through a cursor when every handler its indirect
     // call can reach returns a fetch at a position it advances itself, or
     // only constants (a halt handler), and at least one fetches. None marks
-    // a table too large to check, an honest limit.
+    // a table the work meter stopped before it was read.
     let mut chains = HashMap::new();
     for (call, reachable) in &members {
         let source = match reachable {

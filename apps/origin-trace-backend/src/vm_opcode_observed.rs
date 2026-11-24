@@ -5,19 +5,14 @@
 use crate::vm::dispatch_shape::{JsSite, Role, Roles};
 use crate::vm::wasm_tables::{Entry, Placement, Tables};
 use serde_json::{Value, json};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-/// Distinct observed claims kept per workspace.
-const MAX_CLAIMS: usize = 256;
-/// Event identities listed on one claim or inner guest; counts cover all rows.
+/// Event identities cited on one claim or inner guest. They are examples:
+/// every supporting row stays in its runtime stream and the counts cover all
+/// of them. Every claim, nested guest and inner opcode is kept; producers
+/// before 2.21.0 kept 256 claims, 64 nested guests and 64 inner opcodes.
 const MAX_LISTED_EVENTS: usize = 8;
-const MAX_NESTED: usize = 64;
-const MAX_INNER_OPCODES: usize = 64;
-/// Longest renderer sequence window checked for a contiguous outer dispatch,
-/// and the lookups shared by every window of one workspace. Past either bound
-/// the basis stays `nearest-retained`, which claims less.
-const MAX_SEQUENCE_WINDOW: u64 = 4096;
-const MAX_SEQUENCE_WORK: u64 = 65536;
 
 pub(super) struct Inputs<'a> {
     pub runtime: &'a str,
@@ -70,6 +65,42 @@ struct Claim {
     javascript: Option<(Value, Value)>,
 }
 
+/// Handler lookups each claim's static comparison makes, built once so a
+/// comparison costs the same however many handlers and claims there are.
+struct Lookup<'a> {
+    /// Handlers of each opcode, in document order.
+    of_opcode: HashMap<u64, Vec<&'a Value>>,
+    /// The first handler of each (source byte offset, opcode).
+    at_site: HashMap<(u64, u64), &'a Value>,
+    /// Whether the module fills a table's slots at run time.
+    runtime_filled: RefCell<HashMap<u32, bool>>,
+}
+
+impl<'a> Lookup<'a> {
+    fn new(handlers: &'a [Value]) -> Self {
+        let mut of_opcode = HashMap::<u64, Vec<&Value>>::new();
+        let mut at_site = HashMap::new();
+        for handler in handlers {
+            let Some(opcode) = handler["opcode"].as_u64() else {
+                continue;
+            };
+            of_opcode.entry(opcode).or_default().push(handler);
+            if let Some(offset) = handler["source"]["byte_offset"].as_u64() {
+                at_site.entry((offset, opcode)).or_insert(handler);
+            }
+        }
+        Self {
+            of_opcode,
+            at_site,
+            runtime_filled: RefCell::default(),
+        }
+    }
+
+    fn of_opcode(&self, opcode: u64) -> &[&'a Value] {
+        self.of_opcode.get(&opcode).map_or(&[], Vec::as_slice)
+    }
+}
+
 /// A native JavaScript handler: the selected case of a `switch`, or the
 /// artifact byte span of the function an indexed call invoked, when that
 /// function belongs to this script.
@@ -98,6 +129,7 @@ fn javascript_handler(row: &Value) -> (Value, u64) {
 /// entry agrees only when it spans the function the call invoked.
 fn javascript_static_claim(
     inputs: &Inputs<'_>,
+    lookup: &Lookup<'_>,
     site: &JsSite,
     opcode: u64,
     handler: &Value,
@@ -108,9 +140,8 @@ fn javascript_static_claim(
     };
     let found = if handler["kind"] == "switch-case" {
         let nested = inputs.roles.map_or(&[][..], Roles::js_sites);
-        inputs.handlers.iter().find(|row| {
-            row["opcode"].as_u64() == Some(opcode)
-                && row.get("handler_index").is_none()
+        lookup.of_opcode(opcode).iter().copied().find(|row| {
+            row.get("handler_index").is_none()
                 && row["source"]["byte_offset"].as_u64().is_some_and(|offset| {
                     inside(offset, site.byte_offset, site.byte_size)
                         && !nested.iter().any(|inner| {
@@ -122,9 +153,11 @@ fn javascript_static_claim(
                 })
         })
     } else {
-        inputs.handlers.iter().find(|row| {
-            row["opcode"].as_u64() == Some(opcode) && row["handler_index"].as_u64().is_some()
-        })
+        lookup
+            .of_opcode(opcode)
+            .iter()
+            .copied()
+            .find(|row| row["handler_index"].as_u64().is_some())
     };
     match found {
         Some(found) => {
@@ -168,7 +201,11 @@ fn javascript_site_json(site: &JsSite) -> Value {
 /// Native JavaScript claims at exact interpreter-candidate sites. Returns
 /// rows at other sites, rows at no classified site, and rows whose selector
 /// is not an integer, each counted rather than dropped.
-fn javascript_rows(claims: &mut BTreeMap<Key, Claim>, inputs: &Inputs<'_>) -> (u64, u64, u64) {
+fn javascript_rows(
+    claims: &mut BTreeMap<Key, Claim>,
+    inputs: &Inputs<'_>,
+    lookup: &Lookup<'_>,
+) -> (u64, u64, u64) {
     let (mut unattached, mut unsited, mut unkeyed) = (0, 0, 0);
     for row in inputs.javascript {
         let Some(site) = native_js_site(inputs.roles, row) else {
@@ -196,7 +233,7 @@ fn javascript_rows(claims: &mut BTreeMap<Key, Claim>, inputs: &Inputs<'_>) -> (u
                 handler_key,
             ),
             || {
-                let comparison = javascript_static_claim(inputs, site, selector, &handler);
+                let comparison = javascript_static_claim(inputs, lookup, site, selector, &handler);
                 Claim {
                     site: javascript_site_json(site),
                     attribution: "exact",
@@ -265,12 +302,13 @@ fn javascript_site(inputs: &Inputs<'_>) -> Option<(Value, &'static str)> {
 /// opcode (JavaScript) or the same site and arm (WebAssembly). Static arms are
 /// labeled by their selector, so a guest opcode observed on another arm
 /// contradicts that label rather than replacing it.
-fn static_claim(inputs: &Inputs<'_>, key: &Key, claim: &Claim) -> Value {
+fn static_claim(inputs: &Inputs<'_>, lookup: &Lookup<'_>, key: &Key, claim: &Claim) -> Value {
     let (stream, _, site, selector, opcode, handler) = *key;
     let is_default = claim.is_default;
     if stream == "native-wasm-indirect" {
         return indirect_static_claim(
             inputs.tables,
+            lookup,
             claim.table.expect("call_indirect claims name a table"),
             selector.expect("call_indirect claims name a slot"),
             handler,
@@ -280,11 +318,7 @@ fn static_claim(inputs: &Inputs<'_>, key: &Key, claim: &Claim) -> Value {
     let row = |state: &str, opcode: Option<u64>, index: &Value, offset: &Value| json!({"state":state,"opcode":opcode,"handler_index":index,"byte_offset":offset});
     if stream == "dispatch-sample" {
         let opcode = opcode.expect("dispatch samples carry an opcode");
-        return match inputs
-            .handlers
-            .iter()
-            .find(|row| row["opcode"].as_u64() == Some(opcode))
-        {
+        return match lookup.of_opcode(opcode).first() {
             Some(found) => {
                 // A switch case names its own case value as its handler.
                 let named = found["handler_index"].as_u64().unwrap_or(opcode);
@@ -306,11 +340,7 @@ fn static_claim(inputs: &Inputs<'_>, key: &Key, claim: &Claim) -> Value {
         };
     }
     let found = (!is_default)
-        .then(|| {
-            inputs.handlers.iter().find(|row| {
-                row["source"]["byte_offset"].as_u64() == site && row["opcode"].as_u64() == selector
-            })
-        })
+        .then(|| lookup.at_site.get(&(site?, selector?)).copied())
         .flatten();
     match found {
         Some(found) => row(
@@ -335,6 +365,7 @@ fn static_claim(inputs: &Inputs<'_>, key: &Key, claim: &Claim) -> Value {
 /// other slot has no static claim.
 fn indirect_static_claim(
     tables: Option<&Tables>,
+    lookup: &Lookup<'_>,
     table: u32,
     slot: u64,
     callee: u64,
@@ -350,17 +381,21 @@ fn indirect_static_claim(
         Some(entries[index].1)
     });
     let runtime = || {
-        tables.oversized.contains(&table)
-            || tables.segments_for(table).iter().any(|index| {
-                matches!(
-                    tables.segments[*index].placement,
-                    Placement::Relative(_) | Placement::Unresolved
-                )
+        *lookup
+            .runtime_filled
+            .borrow_mut()
+            .entry(table)
+            .or_insert_with(|| {
+                tables.segments_for(table).iter().any(|index| {
+                    matches!(
+                        tables.segments[*index].placement,
+                        Placement::Relative(_) | Placement::Unresolved
+                    )
+                }) || tables
+                    .segments
+                    .iter()
+                    .any(|segment| segment.placement == Placement::Passive)
             })
-            || tables
-                .segments
-                .iter()
-                .any(|segment| segment.placement == Placement::Passive)
     };
     match placed {
         Some(Entry::Function(function)) => row(
@@ -492,6 +527,7 @@ fn wasm_rows(
 pub(super) fn derive(inputs: Inputs<'_>) -> Derived {
     let mut derived = Derived::default();
     let mut claims = BTreeMap::<Key, Claim>::new();
+    let lookup = Lookup::new(inputs.handlers);
     // Caller reports are never observations; their rows stay as retained.
     let native = inputs
         .samples
@@ -503,7 +539,7 @@ pub(super) fn derive(inputs: Inputs<'_>) -> Derived {
     let (mut javascript_unsited, mut javascript_unkeyed) = (0u64, 0u64);
     let mut unresolved = 0u64;
     if inputs.runtime == "javascript" {
-        let (other, unsited_rows, unkeyed) = javascript_rows(&mut claims, &inputs);
+        let (other, unsited_rows, unkeyed) = javascript_rows(&mut claims, &inputs, &lookup);
         unattached += other;
         javascript_unsited = unsited_rows;
         javascript_unkeyed = unkeyed;
@@ -542,9 +578,8 @@ pub(super) fn derive(inputs: Inputs<'_>) -> Derived {
         unattached += outside;
         unresolved = unnamed;
     }
-    let omitted = claims.len().saturating_sub(MAX_CLAIMS);
     let mut disagreements = 0u64;
-    for (key, mut claim) in claims.into_iter().take(MAX_CLAIMS) {
+    for (key, mut claim) in claims {
         let (stream, _, _, selector, opcode, handler) = key;
         let (handler, comparison) = match claim.javascript.take() {
             Some(javascript) => javascript,
@@ -558,7 +593,7 @@ pub(super) fn derive(inputs: Inputs<'_>) -> Derived {
                     }
                     _ => json!({"kind":"br-table-arm","arm":handler,"is_default":claim.is_default}),
                 },
-                static_claim(&inputs, &key, &claim),
+                static_claim(&inputs, &lookup, &key, &claim),
             ),
         };
         disagreements += u64::from(comparison["state"] == "disagrees");
@@ -580,11 +615,6 @@ pub(super) fn derive(inputs: Inputs<'_>) -> Derived {
             "{} with the static handler claim for the same opcode, arm or table slot. Both are kept; neither replaces the other.",
             plural(disagreements, "observed dispatch claim disagrees", "observed dispatch claims disagree")
         ));
-    }
-    if omitted > 0 {
-        derived.omissions.push(json!({"reason":"observed-claim-limit","detail":format!(
-            "Only the first 256 distinct observed dispatch claims are kept; {omitted} more are omitted. Their retained sample rows are unchanged."
-        )}));
     }
     if unattached > 0 {
         derived.omissions.push(json!({"reason":"observed-claims-not-interpreter","detail":format!(
@@ -638,6 +668,60 @@ fn buffer(row: &Value) -> (Value, Value, Value) {
 
 type Identity = (String, u64, u64);
 
+/// The retained renderer sequence numbers of each session and process, so a
+/// contiguous window costs two binary searches however long it is. Producers
+/// before 2.21.0 checked windows of at most 4096 and 65536 lookups in all,
+/// and called a longer window `nearest-retained`.
+struct Sequences {
+    present: HashMap<(String, u64), Vec<u64>>,
+    breaking: HashMap<(String, u64), Vec<u64>>,
+}
+
+impl Sequences {
+    /// `breaking` names the event types that end a contiguous window.
+    fn new(index: &HashMap<Identity, &Value>, breaking: &[&str]) -> Self {
+        let mut present = HashMap::<_, Vec<u64>>::new();
+        let mut ends = HashMap::<_, Vec<u64>>::new();
+        for ((session, process, seq), event) in index {
+            let key = (session.clone(), *process);
+            if event["type"]
+                .as_str()
+                .is_some_and(|kind| breaking.contains(&kind))
+            {
+                ends.entry(key.clone()).or_default().push(*seq);
+            }
+            present.entry(key).or_default().push(*seq);
+        }
+        for list in present.values_mut().chain(ends.values_mut()) {
+            list.sort_unstable();
+        }
+        Self {
+            present,
+            breaking: ends,
+        }
+    }
+
+    /// Every sequence number strictly between `start` and `end` is retained
+    /// and none of those events ends the window.
+    fn contiguous(&self, session: &str, process: u64, start: u64, end: u64) -> bool {
+        let key = (session.to_owned(), process);
+        let within = |list: Option<&Vec<u64>>| {
+            list.map_or(0, |list| {
+                list.partition_point(|seq| *seq < end) - list.partition_point(|seq| *seq <= start)
+            }) as u64
+        };
+        within(self.present.get(&key)) == end - start - 1 && within(self.breaking.get(&key)) == 0
+    }
+}
+
+/// The row with the greatest sequence number below `before`, the last such
+/// row when several share it, in rows sorted by sequence.
+fn last_before<'r>(sorted: &[&'r Value], before: u64) -> Option<&'r Value> {
+    let end = sorted.partition_point(|row| sequence(&row["event"]).is_none_or(|seq| seq < before));
+    let row = *sorted.get(end.checked_sub(1)?)?;
+    sequence(&row["event"]).is_some().then_some(row)
+}
+
 fn identity(reference: &Value) -> Option<Identity> {
     Some((
         reference["session_id"].as_str()?.to_owned(),
@@ -682,6 +766,15 @@ fn nested(inputs: &Inputs<'_>, derived: &mut Derived) {
             identity(&reference).map(|key| (key, event))
         })
         .collect::<HashMap<_, _>>();
+    let sequences = Sequences::new(&index, &["gap", "wasm_guest_dispatch"]);
+    let by_sequence = groups
+        .iter()
+        .map(|(id, rows)| {
+            let mut sorted = rows.clone();
+            sorted.sort_by_key(|row| sequence(&row["event"]));
+            (*id, sorted)
+        })
+        .collect::<HashMap<_, _>>();
     let site = |row: &Value| {
         (
             row["function_index"].clone(),
@@ -689,8 +782,6 @@ fn nested(inputs: &Inputs<'_>, derived: &mut Derived) {
         )
     };
     let mut unproven = 0u64;
-    let mut omitted = 0u64;
-    let mut sequence_work = MAX_SEQUENCE_WORK;
     for id in order {
         let rows = &groups[id];
         let first = rows[0];
@@ -725,10 +816,7 @@ fn nested(inputs: &Inputs<'_>, derived: &mut Derived) {
             // last retained dispatch before the child's marker. An exact name
             // must be that dispatch; a lost or contradicted one stays unproven
             // rather than falling back to the sequence-order guess.
-            let outer = parents
-                .iter()
-                .filter(|row| sequence(&row["event"]).is_some_and(|seq| seq < child_key.2))
-                .max_by_key(|row| sequence(&row["event"]))?;
+            let outer = last_before(&by_sequence[parent], child_key.2)?;
             let exact = super::native_guest::exact_parent_dispatch(index.get(&child_key)?);
             if exact.is_some_and(|seq| sequence(&outer["event"]) != Some(seq)) {
                 return None;
@@ -737,22 +825,9 @@ fn nested(inputs: &Inputs<'_>, derived: &mut Derived) {
                 return None;
             }
             let start = sequence(&outer["event"])?;
-            let window = child_key.2 - start - 1;
             let basis = if exact.is_some() {
                 "exact-parent-dispatch"
-            } else if window <= MAX_SEQUENCE_WINDOW.min(sequence_work)
-                && {
-                    sequence_work -= window;
-                    true
-                }
-                && (start + 1..child_key.2).all(|seq| {
-                    index
-                        .get(&(child_key.0.clone(), child_key.1, seq))
-                        .is_some_and(|event| {
-                            !matches!(event["type"].as_str(), Some("gap" | "wasm_guest_dispatch"))
-                        })
-                })
-            {
+            } else if sequences.contiguous(&child_key.0, child_key.1, start, child_key.2) {
                 "contiguous-sequence"
             } else {
                 "nearest-retained"
@@ -763,7 +838,6 @@ fn nested(inputs: &Inputs<'_>, derived: &mut Derived) {
                     *opcodes.entry(opcode).or_default() += 1;
                 }
             }
-            let omitted_opcodes = opcodes.len().saturating_sub(MAX_INNER_OPCODES);
             let side = |row: &Value, invocation: &str| {
                 json!({
                     "invocation_id": invocation,
@@ -799,11 +873,10 @@ fn nested(inputs: &Inputs<'_>, derived: &mut Derived) {
             inner["observed_opcodes"] = json!(
                 opcodes
                     .iter()
-                    .take(MAX_INNER_OPCODES)
                     .map(|(opcode, count)| json!({"opcode":opcode,"sample_count":count}))
                     .collect::<Vec<_>>()
             );
-            inner["omitted_opcode_count"] = json!(omitted_opcodes);
+            inner["omitted_opcode_count"] = json!(0);
             Some(json!({
                 "confidence": "observed",
                 "instance_id": first["instance_id"],
@@ -812,8 +885,7 @@ fn nested(inputs: &Inputs<'_>, derived: &mut Derived) {
             }))
         })();
         match linked {
-            Some(row) if derived.nested.len() < MAX_NESTED => derived.nested.push(row),
-            Some(_) => omitted += 1,
+            Some(row) => derived.nested.push(row),
             None => unproven += 1,
         }
     }
@@ -821,11 +893,6 @@ fn nested(inputs: &Inputs<'_>, derived: &mut Derived) {
         derived.omissions.push(json!({"reason":"nested-guest-unproven","detail":format!(
             "{} a parent invocation but cannot be linked as a nested guest: a retained parent, outer dispatch, shared thread and instance, interpreter-candidate sites or a distinct guest buffer is missing.",
             plural(unproven, "guest activation names", "guest activations name")
-        )}));
-    }
-    if omitted > 0 {
-        derived.omissions.push(json!({"reason":"nested-guest-limit","detail":format!(
-            "Only the first 64 nested guests are kept; {omitted} more are omitted. Their guest sample rows are unchanged."
         )}));
     }
 }
@@ -883,9 +950,8 @@ fn javascript_nested(inputs: &Inputs<'_>, derived: &mut Derived) {
             identity(&reference).map(|key| (key, event))
         })
         .collect::<HashMap<_, _>>();
+    let sequences = Sequences::new(&index, &["gap", "js_dispatch_observation"]);
     let mut unproven = 0u64;
-    let mut omitted = 0u64;
-    let mut sequence_work = MAX_SEQUENCE_WORK;
     for key in &order {
         let rows = &groups[key];
         let first = rows[0];
@@ -897,10 +963,7 @@ fn javascript_nested(inputs: &Inputs<'_>, derived: &mut Derived) {
             let child_key = identity(&first["event"])?;
             let child_site = native_js_site(inputs.roles, first)?;
             // The parent's dispatch running when the child activation began.
-            let outer = parents
-                .iter()
-                .filter(|row| sequence(&row["event"]).is_some_and(|seq| seq < child_key.2))
-                .max_by_key(|row| sequence(&row["event"]))?;
+            let outer = last_before(parents, child_key.2)?;
             let outer_site = native_js_site(inputs.roles, outer)?;
             if outer_site.anchor == child_site.anchor {
                 // A reentrant activation of one dispatcher, not a nested guest.
@@ -913,29 +976,13 @@ fn javascript_nested(inputs: &Inputs<'_>, derived: &mut Derived) {
                 return None;
             }
             let start = sequence(&outer["event"])?;
-            let window = child_key.2 - start - 1;
-            let contiguous = window <= MAX_SEQUENCE_WINDOW.min(sequence_work)
-                && {
-                    sequence_work -= window;
-                    true
-                }
-                && (start + 1..child_key.2).all(|seq| {
-                    index
-                        .get(&(child_key.0.clone(), child_key.1, seq))
-                        .is_some_and(|event| {
-                            !matches!(
-                                event["type"].as_str(),
-                                Some("gap" | "js_dispatch_observation")
-                            )
-                        })
-                });
+            let contiguous = sequences.contiguous(&child_key.0, child_key.1, start, child_key.2);
             let mut opcodes = BTreeMap::<u64, u64>::new();
             for row in rows {
                 if let Some(opcode) = row["selector"].as_u64() {
                     *opcodes.entry(opcode).or_default() += 1;
                 }
             }
-            let omitted_opcodes = opcodes.len().saturating_sub(MAX_INNER_OPCODES);
             let (handler, _) = if outer["selector"].is_u64() {
                 javascript_handler(outer)
             } else {
@@ -959,16 +1006,15 @@ fn javascript_nested(inputs: &Inputs<'_>, derived: &mut Derived) {
                     "first_event": first["event"],
                     "sample_count": rows.len(),
                     "events": rows.iter().take(MAX_LISTED_EVENTS).map(|row| row["event"].clone()).collect::<Vec<_>>(),
-                    "observed_opcodes": opcodes.iter().take(MAX_INNER_OPCODES)
+                    "observed_opcodes": opcodes.iter()
                         .map(|(opcode, count)| json!({"opcode":opcode,"sample_count":count})).collect::<Vec<_>>(),
-                    "omitted_opcode_count": omitted_opcodes,
+                    "omitted_opcode_count": 0,
                 },
             })))
         })();
         match linked {
             Some(None) => (),
-            Some(Some(row)) if derived.nested.len() < MAX_NESTED => derived.nested.push(row),
-            Some(Some(_)) => omitted += 1,
+            Some(Some(row)) => derived.nested.push(row),
             None => unproven += 1,
         }
     }
@@ -976,11 +1022,6 @@ fn javascript_nested(inputs: &Inputs<'_>, derived: &mut Derived) {
         derived.omissions.push(json!({"reason":"nested-guest-unproven","detail":format!(
             "{} a parent activation but cannot be linked as a nested guest: a retained parent dispatch before it, interpreter-candidate sites or a site outside a threaded cycle is missing.",
             plural(unproven, "native JavaScript activation names", "native JavaScript activations name")
-        )}));
-    }
-    if omitted > 0 {
-        derived.omissions.push(json!({"reason":"nested-guest-limit","detail":format!(
-            "Only the first 64 nested guests are kept; {omitted} more are omitted. Their dispatch rows are unchanged."
         )}));
     }
 }
@@ -2003,6 +2044,71 @@ mod tests {
         )));
         assert!(file.ends_with("],\"version\":1}"));
         assert_eq!(arming["refused"], json!([]));
+    }
+
+    /// More nested guests, inner opcodes, and intervening events than
+    /// producers before 2.21.0 kept (64 guests, 64 opcodes, and a 4096-event
+    /// window for a contiguous outer dispatch) are kept whole.
+    #[test]
+    fn native_javascript_nesting_keeps_every_guest_opcode_and_window() {
+        let (outer, inner, _) = two_level_sites();
+        let root = tempfile::tempdir().unwrap();
+        let source = artifact(root.path(), 1, "javascript", TWO_LEVEL.as_bytes(), 0, 0);
+        let add = table_function(TWO_LEVEL, 0);
+        let row = |seq, anchor, indexed, selector, handler, activation, parent, flags| {
+            js_row(
+                TWO_LEVEL, seq, anchor, indexed, selector, handler, activation, parent, flags,
+            )
+        };
+        let mut seq = 10;
+        let mut next = || {
+            seq += 1;
+            seq
+        };
+        let mut events = vec![row(next(), outer, false, Some(10), None, 1, 0, 1)];
+        for guest in 0..70u32 {
+            events.push(row(next(), outer, false, Some(11), None, 1, 0, 0));
+            if guest == 69 {
+                // Another module's VM records between the outer dispatch and
+                // the inner activation keep the window contiguous.
+                for _ in 0..5000 {
+                    events.push(event(
+                        "wasm_dispatch_observation",
+                        next(),
+                        0,
+                        999,
+                        &[0; 128],
+                    ));
+                }
+            }
+            let opcodes = if guest == 0 { 70 } else { 1 };
+            for opcode in 0..opcodes {
+                let flags = u8::from(opcode == 0);
+                events.push(row(
+                    next(),
+                    inner,
+                    true,
+                    Some(opcode),
+                    Some(add),
+                    2 + guest,
+                    1,
+                    flags,
+                ));
+            }
+        }
+        let workspace = analyze(root.path(), std::slice::from_ref(&source), &events);
+        let nested = workspace["nested_guests"].as_array().unwrap();
+        assert_eq!(nested.len(), 70);
+        let first = &nested[0]["inner"];
+        assert_eq!(first["observed_opcodes"].as_array().unwrap().len(), 70);
+        assert_eq!(first["omitted_opcode_count"], 0);
+        assert_eq!(first["sample_count"], 70);
+        assert_eq!(nested[69]["inner"]["activation_id"], 71);
+        assert!(
+            nested
+                .iter()
+                .all(|guest| guest["outer"]["basis"] == "contiguous-sequence")
+        );
     }
 
     #[test]

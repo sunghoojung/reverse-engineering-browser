@@ -1,21 +1,39 @@
-//! Bounded graph walking over declared owned byte layouts, never execution.
+//! Graph walking over declared owned byte layouts, never execution. The walk
+//! covers each snapshot's inline window. Every entry, instruction, edge and
+//! frontier row is kept; producers before 2.21.0 walked 16 snapshots and kept
+//! 4096 instructions and 256 frontier rows.
 use crate::vm_effects;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-const MAX_INSTRUCTIONS: usize = 4096;
-const MAX_FRONTIER: usize = 256;
+/// The inline window of each snapshot that the walk reads.
+const WINDOW_BYTES: usize = 4096;
 
-fn frontier(rows: &mut Vec<Value>, artifact: &Value, offset: Option<u32>, reason: &str) {
-    let row = json!({"artifact_id": artifact, "byte_offset": offset, "reason": reason});
-    if rows.contains(&row) {
-        return;
+/// Frontier rows, each listed once.
+#[derive(Default)]
+struct Frontier {
+    rows: Vec<Value>,
+    seen: HashSet<String>,
+}
+
+impl Frontier {
+    fn push(&mut self, artifact: &Value, offset: Option<u32>, reason: &str) {
+        let row = json!({"artifact_id": artifact, "byte_offset": offset, "reason": reason});
+        if self.seen.insert(row.to_string()) {
+            self.rows.push(row);
+        }
     }
-    if rows.len() < MAX_FRONTIER - 1 {
-        rows.push(row);
-    } else if !rows.iter().any(|row| row["reason"] == "frontier-limit") {
-        rows.push(json!({"artifact_id": null, "byte_offset": null, "reason": "frontier-limit"}));
+}
+
+/// The first handler of each opcode, the one a walk binds.
+fn by_opcode(handlers: &[Value]) -> HashMap<u64, &Value> {
+    let mut index = HashMap::new();
+    for handler in handlers {
+        if let Some(opcode) = handler["opcode"].as_u64() {
+            index.entry(opcode).or_insert(handler);
+        }
     }
+    index
 }
 
 fn target(effect: &Value, bytes: &[u8], offset: usize) -> Option<u32> {
@@ -41,50 +59,38 @@ pub(crate) fn walk(snapshots: &[Value], handlers: &[Value], entry: Option<u32>) 
     let mut entries = Vec::new();
     let mut instructions = Vec::new();
     let mut edges = Vec::new();
-    let mut stops = Vec::new();
+    let mut stops = Frontier::default();
+    let handlers = by_opcode(handlers);
     if snapshots.is_empty() {
-        frontier(&mut stops, &Value::Null, None, "snapshot-unavailable");
-    }
-    if snapshots.len() > 16 {
-        frontier(
-            &mut stops,
-            &snapshots[16]["artifact_id"],
-            None,
-            "snapshot-gap",
-        );
+        stops.push(&Value::Null, None, "snapshot-unavailable");
     }
     let mut seen_artifacts = BTreeSet::new();
-    for snapshot in snapshots.iter().take(16) {
+    for snapshot in snapshots {
         let artifact = &snapshot["artifact_id"];
         if !seen_artifacts.insert(artifact.as_str()) {
-            frontier(&mut stops, artifact, None, "snapshot-gap");
+            stops.push(artifact, None, "snapshot-gap");
             continue;
         }
         let Some(entry) = entry else {
-            frontier(&mut stops, artifact, None, "entry-unavailable");
+            stops.push(artifact, None, "entry-unavailable");
             continue;
         };
         let Some(bytes) = snapshot["preview_hex"]
             .as_str()
             .and_then(|text| hex::decode(text).ok())
         else {
-            frontier(&mut stops, artifact, Some(entry), "snapshot-unavailable");
+            stops.push(artifact, Some(entry), "snapshot-unavailable");
             continue;
         };
-        let oversized = bytes.len() > 4096;
-        let bytes = &bytes[..bytes.len().min(4096)];
+        let oversized = bytes.len() > WINDOW_BYTES;
+        let bytes = &bytes[..bytes.len().min(WINDOW_BYTES)];
         if oversized
             || snapshot["truncated"] == true
             || snapshot["byte_count"]
                 .as_u64()
                 .is_some_and(|count| count > bytes.len() as u64)
         {
-            frontier(
-                &mut stops,
-                artifact,
-                Some(bytes.len() as u32),
-                "snapshot-gap",
-            );
+            stops.push(artifact, Some(bytes.len() as u32), "snapshot-gap");
         }
         entries.push(json!({"artifact_id": artifact, "byte_offset": entry}));
         let mut pending = BTreeSet::from([entry]);
@@ -93,10 +99,6 @@ pub(crate) fn walk(snapshots: &[Value], handlers: &[Value], entry: Option<u32>) 
         while let Some(position) = pending.pop_first() {
             if !visited.insert(position) {
                 continue;
-            }
-            if instructions.len() >= MAX_INSTRUCTIONS {
-                frontier(&mut stops, artifact, Some(position), "instruction-limit");
-                break;
             }
             let offset = position as usize;
             let Some(opcode) = bytes.get(offset).copied() else {
@@ -108,23 +110,15 @@ pub(crate) fn walk(snapshots: &[Value], handlers: &[Value], entry: Option<u32>) 
                 } else {
                     "past-snapshot"
                 };
-                frontier(&mut stops, artifact, Some(position), reason);
+                stops.push(artifact, Some(position), reason);
                 continue;
             };
             if occupied.contains_key(&offset) {
-                frontier(
-                    &mut stops,
-                    artifact,
-                    Some(position),
-                    "overlapping-instruction",
-                );
+                stops.push(artifact, Some(position), "overlapping-instruction");
                 continue;
             }
-            let Some(handler) = handlers
-                .iter()
-                .find(|handler| handler["opcode"].as_u64() == Some(u64::from(opcode)))
-            else {
-                frontier(&mut stops, artifact, Some(position), "unknown-opcode");
+            let Some(handler) = handlers.get(&u64::from(opcode)).copied() else {
+                stops.push(artifact, Some(position), "unknown-opcode");
                 continue;
             };
             let Some(effect) = vm_effects::unique_effect(handler) else {
@@ -138,33 +132,23 @@ pub(crate) fn walk(snapshots: &[Value], handlers: &[Value], entry: Option<u32>) 
                 } else {
                     "effect-unavailable"
                 };
-                frontier(&mut stops, artifact, Some(position), reason);
+                stops.push(artifact, Some(position), reason);
                 continue;
             };
             let Some(size) = effect["instruction_size"]
                 .as_u64()
                 .filter(|size| (1..=65).contains(size))
             else {
-                frontier(&mut stops, artifact, Some(position), "unsupported-layout");
+                stops.push(artifact, Some(position), "unsupported-layout");
                 continue;
             };
             let end = offset + size as usize;
             if end > bytes.len() {
-                frontier(
-                    &mut stops,
-                    artifact,
-                    Some(position),
-                    "truncated-instruction",
-                );
+                stops.push(artifact, Some(position), "truncated-instruction");
                 continue;
             }
             if (offset..end).any(|byte| occupied.contains_key(&byte)) {
-                frontier(
-                    &mut stops,
-                    artifact,
-                    Some(position),
-                    "overlapping-instruction",
-                );
+                stops.push(artifact, Some(position), "overlapping-instruction");
                 continue;
             }
             for byte in offset..end {
@@ -197,33 +181,29 @@ pub(crate) fn walk(snapshots: &[Value], handlers: &[Value], entry: Option<u32>) 
                         pending.insert(destination);
                     }
                 } else {
-                    frontier(&mut stops, artifact, Some(position), "unknown-target");
+                    stops.push(artifact, Some(position), "unknown-target");
                 }
             }
         }
     }
     json!({"entry_offsets": entries, "instructions": instructions, "edges": edges,
-        "complete": !entries.is_empty() && stops.is_empty(), "frontier": stops})
+        "complete": !entries.is_empty() && stops.rows.is_empty(), "frontier": stops.rows})
 }
 
 pub(crate) fn attributions(traversal: &Value, handlers: &[Value]) -> Vec<Value> {
     let mut rows = Vec::new();
-    for instruction in traversal["instructions"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .take(MAX_INSTRUCTIONS)
-    {
-        let effect = handlers
-            .iter()
-            .find(|handler| handler["opcode"] == instruction["opcode"])
+    let handlers = by_opcode(handlers);
+    for instruction in traversal["instructions"].as_array().into_iter().flatten() {
+        let effect = instruction["opcode"]
+            .as_u64()
+            .and_then(|opcode| handlers.get(&opcode).copied())
             .and_then(vm_effects::unique_effect);
         let Some(effect) = effect else {
             continue;
         };
         let Some(offset) = instruction["byte_offset"]
             .as_u64()
-            .filter(|offset| *offset < 4096)
+            .filter(|offset| *offset < WINDOW_BYTES as u64)
         else {
             continue;
         };
@@ -233,7 +213,7 @@ pub(crate) fn attributions(traversal: &Value, handlers: &[Value]) -> Vec<Value> 
         else {
             continue;
         };
-        if offset + size > 4096 {
+        if offset + size > WINDOW_BYTES as u64 {
             continue;
         }
         let mut append = |start, size, kind| {
@@ -257,10 +237,6 @@ pub(crate) fn attributions(traversal: &Value, handlers: &[Value]) -> Vec<Value> 
             {
                 append(offset + start, width, "operand");
             }
-        }
-        if rows.len() > crate::vm_byte_coverage::MAX_ATTRIBUTIONS {
-            rows.truncate(crate::vm_byte_coverage::MAX_ATTRIBUTIONS + 1);
-            break;
         }
     }
     rows
@@ -384,18 +360,30 @@ mod tests {
     }
 
     #[test]
-    fn instruction_and_frontier_limits_remain_visible() {
+    fn every_instruction_and_frontier_row_is_kept() {
+        // Producers before 2.21.0 stopped at 4096 instructions over all
+        // snapshots (`instruction-limit`) and 256 frontier rows
+        // (`frontier-limit`).
         let handlers = handlers("stack");
-        let result = walk(&[snapshot(&vec![2; 4096])], &handlers, Some(0));
-        assert_eq!(result["instructions"].as_array().unwrap().len(), 4096);
-        assert_eq!(result["complete"], false);
-        assert_eq!(result["frontier"][0]["reason"], "instruction-limit");
-        let mut stops = Vec::new();
+        let many = (0..3)
+            .map(|id| {
+                let mut snapshot = snapshot(&[2; 4096]);
+                snapshot["artifact_id"] = json!(id.to_string());
+                snapshot
+            })
+            .collect::<Vec<_>>();
+        let result = walk(&many, &handlers, Some(0));
+        assert_eq!(result["entry_offsets"].as_array().unwrap().len(), 3);
+        assert_eq!(result["instructions"].as_array().unwrap().len(), 3 * 4096);
+        assert!(result["frontier"].as_array().unwrap().iter().all(|row| {
+            row["reason"] != "instruction-limit" && row["reason"] != "frontier-limit"
+        }));
+        let mut stops = Frontier::default();
         for offset in 0..300 {
-            frontier(&mut stops, &json!("1"), Some(offset), "unknown-opcode");
+            stops.push(&json!("1"), Some(offset), "unknown-opcode");
+            stops.push(&json!("1"), Some(offset), "unknown-opcode");
         }
-        assert_eq!(stops.len(), 256);
-        assert_eq!(stops[255]["reason"], "frontier-limit");
+        assert_eq!(stops.rows.len(), 300);
         let duplicate = snapshot(&[8]);
         assert_eq!(
             walk(&[duplicate.clone(), duplicate], &handlers, Some(0))["complete"],
@@ -423,7 +411,9 @@ mod tests {
         assert_eq!(overlap["frontier"][0]["reason"], "overlapping-instruction");
     }
     #[test]
-    fn snapshot_cap_and_unreachable_truncation_are_not_complete() {
+    fn every_snapshot_is_walked_and_unreachable_truncation_is_not_complete() {
+        // Producers before 2.21.0 walked 16 snapshots and left the rest a
+        // `snapshot-gap`.
         let handlers = handlers("stack");
         let many = (0..17)
             .map(|id| {
@@ -432,7 +422,9 @@ mod tests {
                 snapshot
             })
             .collect::<Vec<_>>();
-        assert_eq!(walk(&many, &handlers, Some(0))["complete"], false);
+        let result = walk(&many, &handlers, Some(0));
+        assert_eq!(result["entry_offsets"].as_array().unwrap().len(), 17);
+        assert_eq!(result["complete"], true);
         let mut truncated = snapshot(&[8]);
         truncated["byte_count"] = json!(10);
         assert_eq!(walk(&[truncated], &handlers, Some(0))["complete"], false);

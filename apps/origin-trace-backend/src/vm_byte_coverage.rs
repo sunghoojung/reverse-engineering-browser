@@ -1,10 +1,11 @@
 //! Retained-byte accounting. Handler counts are never a byte numerator.
+//! Every snapshot, attribution and omission is kept; producers before 2.21.0
+//! counted 16 snapshots, 4096 attributions and 256 omissions.
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
+/// The inline window of each snapshot that coverage counts.
 const MAX_PREVIEW_BYTES: usize = 4096;
-pub(crate) const MAX_ATTRIBUTIONS: usize = 4096;
-const MAX_OMISSIONS: usize = 256;
 
 fn omit(omissions: &mut Vec<Value>, reason: &str) {
     if !omissions.iter().any(|row| row["reason"] == reason) {
@@ -22,7 +23,7 @@ pub(crate) fn coverage(
     mut omissions: Vec<Value>,
 ) -> Value {
     let mut retained = BTreeMap::<String, Vec<bool>>::new();
-    for snapshot in snapshots.iter().take(16) {
+    for snapshot in snapshots {
         let Some(artifact_id) = snapshot["artifact_id"].as_str() else {
             omit(&mut omissions, "invalid-snapshot");
             continue;
@@ -58,11 +59,8 @@ pub(crate) fn coverage(
     {
         omit(&mut omissions, "runtime-snapshot-unavailable");
     }
-    if snapshots.len() > 16 {
-        omit(&mut omissions, "snapshot-limit");
-    }
     let mut accepted = Vec::new();
-    for attribution in attributions.iter().take(MAX_ATTRIBUTIONS) {
+    for attribution in attributions {
         let Some(cells) = attribution["artifact_id"]
             .as_str()
             .and_then(|id| retained.get_mut(id))
@@ -104,9 +102,6 @@ pub(crate) fn coverage(
             accepted.push(accepted_range);
         }
     }
-    if attributions.len() > MAX_ATTRIBUTIONS {
-        omit(&mut omissions, "attribution-limit");
-    }
     let retained_bytes = retained.values().map(Vec::len).sum::<usize>();
     let characterized = retained
         .values()
@@ -119,10 +114,6 @@ pub(crate) fn coverage(
     }
     if retained_bytes == 0 {
         omit(&mut omissions, "snapshot-bytes-unavailable");
-    }
-    if omissions.len() > MAX_OMISSIONS {
-        omissions.truncate(MAX_OMISSIONS - 1);
-        omissions.push(json!({"reason": "omission-limit"}));
     }
     json!({
         "complete": retained_bytes > 0 && uncharacterized == 0 && omissions.is_empty() && unknowns.is_empty(),
@@ -248,21 +239,28 @@ mod tests {
     }
 
     #[test]
-    fn attribution_work_is_bounded_and_omission_is_visible() {
-        let snapshots = [snapshot("1", "01", 1)];
-        let rows = vec![range("1", 0, 1, "opcode"); MAX_ATTRIBUTIONS + 1];
-        let result = coverage(&snapshots, 1, &rows, &[], vec![]);
-        assert_eq!(
-            result["attributions"].as_array().unwrap().len(),
-            MAX_ATTRIBUTIONS
-        );
-        assert_eq!(result["complete"], false);
-        assert!(
-            result["omissions"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|row| row["reason"] == "attribution-limit")
-        );
+    fn every_snapshot_attribution_and_omission_is_kept() {
+        // Producers before 2.21.0 kept 16 snapshots, 4096 attributions and
+        // 256 omissions, naming the rest `snapshot-limit`, `attribution-limit`
+        // and `omission-limit`.
+        let snapshots = (0..17)
+            .map(|id| snapshot(&id.to_string(), "01", 1))
+            .collect::<Vec<_>>();
+        let rows = (0..5000)
+            .map(|index| range(&(index % 17).to_string(), 0, 1, "opcode"))
+            .collect::<Vec<_>>();
+        let omissions = (0..300)
+            .map(|index| json!({"reason": format!("reason-{index}")}))
+            .collect::<Vec<_>>();
+        let result = coverage(&snapshots, 1, &rows, &[], omissions);
+        assert_eq!(result["attributions"].as_array().unwrap().len(), 5000);
+        assert_eq!(result["retained_snapshot_bytes"], 17);
+        assert_eq!(result["characterized_bytes"], 17);
+        let reasons = result["omissions"].as_array().unwrap();
+        assert_eq!(reasons.len(), 300);
+        assert!(!reasons.iter().any(|row| {
+            ["snapshot-limit", "attribution-limit", "omission-limit"]
+                .contains(&row["reason"].as_str().unwrap())
+        }));
     }
 }

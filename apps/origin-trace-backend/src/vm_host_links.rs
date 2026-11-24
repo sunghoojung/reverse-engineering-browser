@@ -4,6 +4,11 @@
 //! `get_events` filter that lists it, so a busy frame never grows a row list.
 use crate::{error::Result, vm};
 use serde_json::{Value, json};
+use std::collections::HashMap;
+
+/// (session, process, sequence number) as JSON text, which is equal exactly
+/// when the values are.
+type Dispatch = (String, String, String);
 
 fn reference(event: &Value) -> Value {
     json!({"session_id":event["session_id"], "process_id":event["process_id"],
@@ -38,12 +43,38 @@ pub(crate) fn host_event(event: &Value) -> bool {
         )
     )
 }
-fn position(host: &Value, artifact: &Value, samples: &[Value]) -> Option<Value> {
+/// Samples by the dispatch event that a host event can name as its parent.
+fn by_dispatch(samples: &[Value]) -> HashMap<Dispatch, Vec<&Value>> {
+    let mut index = HashMap::<Dispatch, Vec<&Value>>::new();
+    for sample in samples {
+        let event = &sample["event"];
+        index
+            .entry((
+                event["session_id"].to_string(),
+                event["process_id"].to_string(),
+                event["sequence_number"].to_string(),
+            ))
+            .or_default()
+            .push(sample);
+    }
+    index
+}
+
+fn position(
+    host: &Value,
+    artifact: &Value,
+    samples: &HashMap<Dispatch, Vec<&Value>>,
+) -> Option<Value> {
     if host["artifact_id"] != artifact["artifact_id"] {
         return None;
     }
     let sequence = host["sequence_number"].as_str()?.parse::<u64>().ok()?;
-    samples.iter().find_map(|sample| {
+    let parent = (
+        host["session_id"].to_string(),
+        host["process_id"].to_string(),
+        host["parent_event_id"].to_string(),
+    );
+    samples.get(&parent)?.iter().find_map(|sample| {
         let event = &sample["event"];
         let before = event["sequence_number"].as_str()?.parse::<u64>().ok()?;
         (sample["invocation_id"].is_string()
@@ -79,16 +110,35 @@ pub(crate) fn document(
     events: &[Value],
     runtime: &vm::Runtime,
 ) -> Result<Value> {
+    // Artifacts and host events by artifact ID, so the report is linear in
+    // workspaces, events and samples however many workspaces there are.
+    let mut by_id = HashMap::<&str, Vec<&Value>>::new();
+    for artifact in artifacts {
+        if let Some(id) = artifact["artifact_id"].as_str() {
+            by_id.entry(id).or_default().push(artifact);
+        }
+    }
+    let mut hosts = HashMap::<&str, Vec<&Value>>::new();
+    for event in events.iter().filter(|event| host_event(event)) {
+        if let Some(id) = event["artifact_id"].as_str() {
+            hosts.entry(id).or_default().push(event);
+        }
+    }
     let mut workspaces = Vec::new();
     for workspace in workspace_document["workspaces"]
         .as_array()
         .into_iter()
         .flatten()
     {
-        let Some(artifact) = artifacts.iter().find(|artifact| {
-            artifact["artifact_id"] == workspace["interpreter_artifact_id"]
-                && artifact["sha256"] == workspace["source_artifact_sha256"]
-        }) else {
+        let Some(artifact) = workspace["interpreter_artifact_id"]
+            .as_str()
+            .and_then(|id| by_id.get(id))
+            .and_then(|rows| {
+                rows.iter()
+                    .copied()
+                    .find(|artifact| artifact["sha256"] == workspace["source_artifact_sha256"])
+            })
+        else {
             continue;
         };
         let samples = workspace["samples"]
@@ -124,12 +174,15 @@ pub(crate) fn document(
         {
             omissions.push("dispatch-sample-retention-limit");
         }
-        for event in events.iter().filter(|event| {
-            host_event(event)
-                && event["artifact_id"] == artifact["artifact_id"]
-                && ["session_id", "navigation_id", "frame_id"]
-                    .iter()
-                    .all(|key| event[*key] == artifact[*key])
+        let samples = by_dispatch(&samples);
+        let artifact_hosts = artifact["artifact_id"]
+            .as_str()
+            .and_then(|id| hosts.get(id))
+            .map_or(&[][..], Vec::as_slice);
+        for event in artifact_hosts.iter().copied().filter(|event| {
+            ["session_id", "navigation_id", "frame_id"]
+                .iter()
+                .all(|key| event[*key] == artifact[*key])
         }) {
             let guest = position(event, artifact, &samples);
             let (state, reason) = if guest.is_some() {

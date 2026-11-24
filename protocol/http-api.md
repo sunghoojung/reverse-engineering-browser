@@ -1567,7 +1567,7 @@ Triskel's waypoints as a flat `x0, y0, x1, y1, ...` list from the source to the
 target. Values are rounded to 2 decimals and moved so the drawing, waypoints
 included, starts at `0, 0`; `width` and `height` are its extent. Separate
 weakly connected parts are laid out one at a time and packed in rows, largest
-first. Any other graph has `status` `failed` or `timeout` and a `reason`.
+first. Any other graph has `status` `failed` and a `reason`.
 
 The route lays out any number of graphs of any size, with no request deadline.
 Triskel's cost grows faster than the node count, so the caller decides what to
@@ -1586,22 +1586,22 @@ nodes 6.6 s, 8,000 nodes 85 s. The UI sends a graph of up to 2,000 nodes and
   unknown member, a bad size or an index outside its graph returns 400 with an
   `error` and lays out nothing.
 - A client that closes the connection drops the request, which stops its
-  worker.
-- A graph has its own budget, 1 s plus 8 µs times the square of its node and
-  edge count together. It separates a slow layout from one Triskel never
-  finishes (see below), and it grows with the graph, so it limits no size. It
-  runs from when the worker begins that graph, so starting the worker and
-  reading the request count against no graph.
+  worker. That is the only way a layout stops before it ends: a graph has no
+  time budget, so a slow or loaded machine costs no graph its layout. The UI's
+  **Cancel** and leaving the view close it.
 
 Triskel is third-party C++ fed graphs shaped by captured pages, and this
-revision can loop forever or crash on some inputs, so it never runs in the
-server. Each request starts the backend executable again as a contained
+revision can crash on some inputs, so it never runs in the server. Each request starts the backend executable again as a contained
 `--graph-layout-worker` process with no network access (on macOS no file
 access either), a 2 GiB resident memory limit and no core dump, so a crash
 ends it at once and leaves no image of the graphs; at most two run at once and
-later requests wait for a slot. A graph whose budget passes is `timeout`; one
-that crashes the worker or reaches the memory limit is `failed`; either way a
-new worker continues with the graphs after it. A layout with
+later requests wait for a slot. A graph that crashes the worker or reaches the
+memory limit is `failed`, and a new worker continues with the graphs after it.
+Upstream Triskel never finishes layer assignment on some graphs; the backend
+compiles it with that loop ended, so such a graph is `failed` at once with a
+reason that says so
+([vendored sources](../apps/origin-trace-backend/vendor/README.md#fixed-at-build-time)).
+A layout with
 overlapping nodes or an edge that does not reach its nodes is `failed`, so a
 `laid_out` result never has either. The worker adds a virtual root and, where a
 part has no node without out-edges, a virtual exit, both of size 0, which

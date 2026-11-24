@@ -9,30 +9,58 @@ Apple Clang. Point the cc crate at one with CXX or CXX_<target>, for example \
 CXX_x86_64_unknown_linux_gnu=g++-14 on Ubuntu 24.04.";
 
 /// A fix to one upstream Triskel source. The engine is compiled from a copy
-/// in `OUT_DIR` with `upstream` replaced by `fixed`, so the vendored file stays
-/// the upstream copy that `vendor/README.md` verifies.
+/// in `OUT_DIR` with each edit applied, so the vendored file stays the
+/// upstream copy that `vendor/README.md` verifies.
 struct Fix {
     /// The source, under `vendor/triskel/lib/src`.
     file: &'static str,
-    /// Text that occurs exactly once in that source.
+    edits: &'static [Edit],
+}
+
+struct Edit {
+    /// Text that occurs exactly once in the source.
     upstream: &'static str,
     fixed: &'static str,
 }
 
-/// `SugiyamaAnalysis::coordinate_assignment_iteration` places a layer's
-/// nodes and edge waypoints in priority order, and the bounds it places them
-/// in (`min_x`, `max_x`) keep them apart only when entries of equal priority
-/// are placed left to right, as `min_x` says. `std::ranges::sort` does not
-/// keep that order: libc++ can reorder equal entries in a range of 24 or
-/// more, libstdc++ in one of more than 16. An entry placed before its left
-/// neighbour is bounded by where that neighbour was in the previous pass; the
-/// neighbour then moves without regard to it, and nodes overlap or an edge
-/// runs through a node. A stable sort keeps the order the bounds assume.
-const FIXES: &[Fix] = &[Fix {
-    file: "layout/sugiyama/sugiyama.cpp",
-    upstream: "    std::ranges::sort(sorted_indexes, [&](size_t a, size_t b) {",
-    fixed: "    std::ranges::stable_sort(sorted_indexes, [&](size_t a, size_t b) {",
-}];
+const FIXES: &[Fix] = &[
+    // `SugiyamaAnalysis::coordinate_assignment_iteration` places a layer's
+    // nodes and edge waypoints in priority order, and the bounds it places
+    // them in (`min_x`, `max_x`) keep them apart only when entries of equal
+    // priority are placed left to right, as `min_x` says. `std::ranges::sort`
+    // does not keep that order: libc++ can reorder equal entries in a range
+    // of 24 or more, libstdc++ in one of more than 16. An entry placed before
+    // its left neighbour is bounded by where that neighbour was in the
+    // previous pass; the neighbour then moves without regard to it, and nodes
+    // overlap or an edge runs through a node. A stable sort keeps the order
+    // the bounds assume.
+    Fix {
+        file: "layout/sugiyama/sugiyama.cpp",
+        edits: &[Edit {
+            upstream: "    std::ranges::sort(sorted_indexes, [&](size_t a, size_t b) {",
+            fixed: "    std::ranges::stable_sort(sorted_indexes, [&](size_t a, size_t b) {",
+        }],
+    },
+    // `SpanningTree::init_rank` ranks, in each pass, every node whose
+    // parents are all ranked. Without cycles every node is ranked within one
+    // pass per node, so a pass past the node count means cycle removal missed
+    // a loop, and the loop would never end (the SESE defect in
+    // `vendor/README.md`). It throws there instead, and the graph fails at
+    // once rather than holding its worker until someone stops it.
+    Fix {
+        file: "layout/sugiyama/network_simplex.cpp",
+        edits: &[
+            Edit {
+                upstream: "#include <deque>\n",
+                fixed: "#include <deque>\n#include <stdexcept>\n",
+            },
+            Edit {
+                upstream: "        while (found_nodes < nodes.size()) {\n",
+                fixed: "        while (found_nodes < nodes.size()) {\n            if (rank > nodes.size()) {\n                throw std::runtime_error(\n                    \"its layer assignment met a loop its cycle removal \"\n                    \"missed, and would never end\");\n            }\n",
+            },
+        ],
+    },
+];
 
 fn main() {
     let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest dir"));
@@ -129,22 +157,24 @@ fn main() {
 }
 
 /// Writes `source` with `fix` applied under `out` and returns its path. A new
-/// upstream revision without the text stops the build, so the fix is either
-/// carried over or dropped on purpose.
+/// upstream revision without an edit's text stops the build, so the fix is
+/// either carried over or dropped on purpose.
 fn fixed(source: &Path, fix: &Fix, out: &Path) -> PathBuf {
-    let text = std::fs::read_to_string(source)
+    let mut text = std::fs::read_to_string(source)
         .unwrap_or_else(|error| panic!("{}: {error}", source.display()));
-    assert_eq!(
-        text.matches(fix.upstream).count(),
-        1,
-        "{} no longer holds the text build.rs fixes once; see vendor/README.md",
-        source.display()
-    );
+    for edit in fix.edits {
+        assert_eq!(
+            text.matches(edit.upstream).count(),
+            1,
+            "{} no longer holds the text build.rs fixes once; see vendor/README.md",
+            source.display()
+        );
+        text = text.replacen(edit.upstream, edit.fixed, 1);
+    }
     let copy = out.join("triskel-fixed").join(fix.file);
     std::fs::create_dir_all(copy.parent().expect("a file has a directory"))
         .unwrap_or_else(|error| panic!("{}: {error}", copy.display()));
-    std::fs::write(&copy, text.replacen(fix.upstream, fix.fixed, 1))
-        .unwrap_or_else(|error| panic!("{}: {error}", copy.display()));
+    std::fs::write(&copy, text).unwrap_or_else(|error| panic!("{}: {error}", copy.display()));
     copy
 }
 

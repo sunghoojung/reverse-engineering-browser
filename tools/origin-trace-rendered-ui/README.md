@@ -354,7 +354,9 @@ whose second export (`stamp<b>`) reads the import `env.now`, and chooses
 above every field, list the export names as text, and keep **Run** disabled
 until the confirmation is checked with a pointer click. A run without stubs
 must show **Import trapped** with the recorded `env.now` call; a run with
-`env.now` stubbed to 1000 must return `i32 1001`. After each run the outcome
+`env.now` stubbed to 1000, a write of `6869` at offset 16 and a two-byte read
+there must return `i32 1001` and show `16:2 · read · 6869`, fetched from the
+run's stored memory after the record arrives. After each run the outcome
 line must be inside the dialog's visible frame and be the topmost element at
 its position, since the result follows the fields and starts below the visible
 area until the dialog scrolls to it. Nothing may be clipped, captured names stay
@@ -392,6 +394,17 @@ refused as busy. It then sends 150 more, aborts them after 300 ms, and the next
 request must be answered within 1.5 s, since the abandoned ones would take
 seconds to drain if WebKit stopping them did not take them off the queue. It
 prints the times as a `decoder queue in the packaged app` line.
+
+`test21cDecoderRunsUntilCancelledAndHoldsLargeInput` converts two million
+decimal digits to Base36 in the packaged decoder, which takes seconds now that
+no CPU-time or size limit ends it. The notice must count past two seconds with
+**Cancel** enabled and the engine busy, in the header badge and the service;
+clicking **Cancel** must end the decode, free the engine within two seconds and
+leave the input editable. It then runs 3 MiB of different text through
+**Run transformation** and expects one 4 MiB Base64 step whose badges name no
+cap. WebKit stopped matching the page's former Base64 check past a few MB, so
+this step also proves a result that large is accepted. It writes
+`decoder-running` and `decoder-large-input` screenshots.
 
 `test22NewLiveSessionAsksAboutUnsavedWork` first opens the bundled workspace
 through **New Live Session…** and the start panel's **Continue Offline**, because the close guard

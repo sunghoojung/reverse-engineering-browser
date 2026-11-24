@@ -56,24 +56,19 @@
     },
     "relationships": {
       "type": "array",
-      "maxItems": 4096,
       "items": {
         "$ref": "#/$defs/EvidencePackageRelationship"
       }
     },
     "gaps": {
       "type": "array",
-      "maxItems": 4096,
       "items": {
         "$ref": "#/$defs/EvidencePackageGap"
       }
     }
   },
   "description": "Version 1 closed metadata-only evidence package. Validity establishes internal consistency of supplied untrusted metadata, not producer authenticity, capture completeness, source availability, or artifact-byte verification. Semantic checks and canonical digest rules are defined in evidence-package-v1.md.",
-  "x-max-body-bytes": 4194304,
-  "x-max-parsed-nodes": 200000,
   "x-max-depth": 32,
-  "x-max-string-utf8-bytes": 4096,
   "$defs": {
     "EvidencePackageUint64String": {
       "type": "string",
@@ -155,14 +150,12 @@
       "properties": {
         "events": {
           "type": "array",
-          "maxItems": 1024,
           "items": {
             "$ref": "#/$defs/EvidencePackageEventKey"
           }
         },
         "artifacts": {
           "type": "array",
-          "maxItems": 64,
           "items": {
             "$ref": "#/$defs/EvidencePackageArtifactKey"
           }
@@ -250,8 +243,7 @@
         },
         "selected_count": {
           "type": "integer",
-          "minimum": 0,
-          "maximum": 1024
+          "minimum": 0
         },
         "source_scan": {
           "type": "string",
@@ -298,8 +290,7 @@
         },
         "selected_count": {
           "type": "integer",
-          "minimum": 0,
-          "maximum": 64
+          "minimum": 0
         },
         "source_scan": {
           "type": "string",
@@ -857,14 +848,12 @@
       "properties": {
         "events": {
           "type": "array",
-          "maxItems": 1024,
           "items": {
             "$ref": "#/$defs/EvidencePackageEventMetadata"
           }
         },
         "artifacts": {
           "type": "array",
-          "maxItems": 64,
           "items": {
             "$ref": "#/$defs/EvidencePackageArtifactMetadata"
           }
@@ -1114,8 +1103,7 @@
         },
         "occurrences": {
           "type": "integer",
-          "minimum": 1,
-          "maximum": 100000
+          "minimum": 1
         }
       },
       "allOf": [

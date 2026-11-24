@@ -43,25 +43,16 @@ pub const SCHEMA: &str = "wasm-run-v1";
 const STORE_SCHEMA: &str = "reb-wasm-runs-v1";
 /// Wasm itself allows 1,000 parameters and results per function type.
 const MAX_VALUES: usize = 1000;
-const MAX_STUBS: usize = 256;
-const MAX_SEQUENCE: usize = 256;
-const MAX_WRITES: usize = 16;
-const MAX_READS: usize = 16;
-/// Memory written before the call and read after it, each in total.
-pub const MAX_WRITE_BYTES: usize = 256 * 1024;
-/// Reads are returned as hex, so 32 KiB of reads is 64 KiB of text: with the
-/// rest of a record that still fits the 128 KiB MCP inline limit.
-pub const MAX_READ_BYTES: usize = 32 * 1024;
-/// A record is trimmed in a fixed order until its pretty-printed JSON fits
-/// this, so a whole run result always inlines through `reb-api mcp`.
-const RECORD_INLINE_BUDGET: usize = 120 * 1024;
-/// Captured import and export names, and messages that quote them, are cut to
-/// this many bytes in a record; a module can declare a name of any length.
-const MAX_RECORD_NAME: usize = 128;
-const MAX_RECORD_MESSAGE: usize = 1024;
+/// Memory is written before the call and read after it as often and as much
+/// as the request asks, each write and read within the instance's memory.
+/// A run stores the bytes its reads cover once, and `get_wasm_run_memory`
+/// reads one read in pages.
+///
+/// Import calls are recorded as the run makes them, each with every argument
+/// and result, and only the first 256 are kept: the record is built in memory
+/// while the module runs, and a loop of import calls can make millions of
+/// them within its deadline. `import_calls_total` counts every call.
 const MAX_RECORDED_CALLS: usize = 256;
-const MAX_RECORDED_ARGS: usize = 16;
-const MAX_RECORDED_RESULTS: usize = 16;
 /// The longest value literal; a float's shortest round-trip form is at most
 /// 24 characters and a v128 34.
 const MAX_LITERAL: usize = 64;
@@ -83,7 +74,6 @@ const MAX_TABLES: u32 = 16;
 /// millisecond of interpretation.
 const FUEL_SLICE: u64 = 100_000;
 const MAX_RUNS: usize = 64;
-const MAX_STORE_BYTES: usize = 16 * 1024 * 1024;
 const PAGE: u64 = 65_536;
 const INTERPRETER: &str = "wasmi";
 const INTERPRETER_VERSION: &str = "2.0.0";
@@ -192,8 +182,6 @@ pub struct Limits {
     pub table_elements: u64,
     pub call_depth: u64,
     pub deadline_ms: u64,
-    pub max_write_bytes: usize,
-    pub max_read_bytes: usize,
     pub max_recorded_import_calls: usize,
 }
 
@@ -220,10 +208,10 @@ fn decode_hex(text: &str, label: &str) -> Result<Vec<u8>> {
 }
 
 impl Request {
-    /// Parses and bounds a request. The confirmation is checked first, so a
-    /// request without it is refused before any artifact is read.
-    pub fn parse(bytes: &[u8]) -> Result<(Self, Limits)> {
-        let request: Self = serde_json::from_slice(bytes)
+    /// Parses a request as it arrives. The confirmation is checked first, so
+    /// a request without it is refused before any artifact is read.
+    pub fn parse(reader: impl std::io::Read) -> Result<(Self, Limits)> {
+        let request: Self = serde_json::from_reader(reader)
             .map_err(|error| Error::bad(format!("Invalid WASM run request: {error}")))?;
         if request.confirm_offline_execution != Some(true) {
             return Err(Error::bad(
@@ -250,20 +238,10 @@ impl Request {
         for arg in &request.args {
             value(arg)?;
         }
-        if request.imports.len() > MAX_STUBS {
-            return Err(Error::bad("A WASM run takes at most 256 import stubs"));
-        }
         for stub in &request.imports {
             let lists = match (&stub.results, &stub.sequence) {
                 (Some(results), None) => vec![results],
-                (None, Some(sequence)) if !sequence.is_empty() => {
-                    if sequence.len() > MAX_SEQUENCE {
-                        return Err(Error::bad(
-                            "An import stub sequence has at most 256 entries",
-                        ));
-                    }
-                    sequence.iter().collect()
-                }
+                (None, Some(sequence)) if !sequence.is_empty() => sequence.iter().collect(),
                 _ => {
                     return Err(Error::bad(
                         "An import stub names exactly one of results or a nonempty sequence; an import without a stub traps",
@@ -279,28 +257,8 @@ impl Request {
                 }
             }
         }
-        if request.memory_writes.len() > MAX_WRITES || request.memory_reads.len() > MAX_READS {
-            return Err(Error::bad(
-                "A WASM run takes at most 16 memory writes and 16 memory reads",
-            ));
-        }
-        let mut written = 0usize;
         for write in &request.memory_writes {
-            written += decode_hex(&write.hex, "A memory write")?.len();
-        }
-        if written > MAX_WRITE_BYTES {
-            return Err(Error::bad(
-                "WASM run memory writes exceed their 256 KiB limit",
-            ));
-        }
-        let read = request
-            .memory_reads
-            .iter()
-            .try_fold(0u64, |total, r| total.checked_add(r.length));
-        if read.is_none_or(|total| total > MAX_READ_BYTES as u64) {
-            return Err(Error::bad(
-                "WASM run memory reads exceed their 32 KiB limit",
-            ));
+            decode_hex(&write.hex, "A memory write")?;
         }
         if request.memory_reads.iter().any(|r| r.length == 0) {
             return Err(Error::bad("A memory read length must be positive"));
@@ -337,8 +295,6 @@ impl Request {
             )?,
             call_depth: limit(request.limits.call_depth, CALL_DEPTH, "call_depth")?,
             deadline_ms: limit(request.limits.deadline_ms, DEADLINE_MS, "deadline_ms")?,
-            max_write_bytes: MAX_WRITE_BYTES,
-            max_read_bytes: MAX_READ_BYTES,
             max_recorded_import_calls: MAX_RECORDED_CALLS,
         };
         Ok((request, limits))
@@ -998,21 +954,17 @@ fn stub_call(
             .ok_or(ImportTrapReason::SequenceExhausted),
     };
     if state.calls.len() < MAX_RECORDED_CALLS {
-        let args = params
-            .iter()
-            .take(MAX_RECORDED_ARGS)
-            .map(encode)
-            .collect::<Vec<_>>();
+        let args = params.iter().map(encode).collect::<Vec<_>>();
         state.calls.push(json!({
             "sequence": sequence,
             "function_index": function.function_index,
             "module": function.module,
             "field": function.field,
             "args": args,
-            "args_truncated": params.len() > MAX_RECORDED_ARGS,
+            "args_truncated": false,
             "outcome": if reply.is_ok() { "returned" } else { "trapped" },
-            "results": reply.as_ref().ok().map(|values| values.iter().take(MAX_RECORDED_RESULTS).map(encode).collect::<Vec<_>>()),
-            "results_truncated": reply.as_ref().is_ok_and(|values| values.len() > MAX_RECORDED_RESULTS),
+            "results": reply.as_ref().ok().map(|values| values.iter().map(encode).collect::<Vec<_>>()),
+            "results_truncated": false,
         }));
     }
     match reply {
@@ -1237,14 +1189,21 @@ fn select(request: &Request, facts: &Scan) -> Result<Selected> {
     });
     Ok(Selected {
         index,
-        export: export.map(|name| bounded(&name, MAX_RECORD_NAME)),
+        export,
         body,
     })
 }
 
 /// Compiles, instantiates and runs. Request errors return `Err` before any
-/// module code runs; every outcome after that is part of the record.
-fn execute(request: &Request, limits: Limits, bytes: &[u8], started: Instant) -> Result<Value> {
+/// module code runs; every outcome after that is part of the record. The
+/// record comes with the bytes of its memory snapshot, which `persist` stores
+/// beside it.
+fn execute(
+    request: &Request,
+    limits: Limits,
+    bytes: &[u8],
+    started: Instant,
+) -> Result<(Value, Option<Vec<u8>>)> {
     let facts = scan(bytes)?;
     let selected = select(request, &facts)?;
     let (executable, aliases) = rewrite(bytes, &facts, selected.index, request.run_start)?;
@@ -1316,8 +1275,8 @@ fn execute(request: &Request, limits: Limits, bytes: &[u8], started: Instant) ->
             };
             functions.push(ImportFunction {
                 function_index,
-                module: bounded(import.module(), MAX_RECORD_NAME),
-                field: bounded(import.name(), MAX_RECORD_NAME),
+                module: import.module().to_owned(),
+                field: import.name().to_owned(),
                 plan,
                 calls: 0,
             });
@@ -1399,7 +1358,7 @@ fn execute(request: &Request, limits: Limits, bytes: &[u8], started: Instant) ->
             }
             ExternType::Memory(ty) => match Memory::new(&mut store, ty) {
                 Ok(memory) => {
-                    others.push(json!({"kind":"memory","module":bounded(import.module(), MAX_RECORD_NAME),"field":bounded(import.name(), MAX_RECORD_NAME),"provided":"fresh_zeroed","minimum_pages":ty.minimum()}));
+                    others.push(json!({"kind":"memory","module":import.module(),"field":import.name(),"provided":"fresh_zeroed","minimum_pages":ty.minimum()}));
                     externs.push(Extern::Memory(memory));
                 }
                 Err(error) => {
@@ -1414,7 +1373,7 @@ fn execute(request: &Request, limits: Limits, bytes: &[u8], started: Instant) ->
                 };
                 match Table::new(&mut store, ty, init) {
                     Ok(table) => {
-                        others.push(json!({"kind":"table","module":bounded(import.module(), MAX_RECORD_NAME),"field":bounded(import.name(), MAX_RECORD_NAME),"provided":"fresh_null","minimum_elements":ty.minimum()}));
+                        others.push(json!({"kind":"table","module":import.module(),"field":import.name(),"provided":"fresh_null","minimum_elements":ty.minimum()}));
                         externs.push(Extern::Table(table));
                     }
                     Err(error) => {
@@ -1424,7 +1383,7 @@ fn execute(request: &Request, limits: Limits, bytes: &[u8], started: Instant) ->
                 }
             }
             ExternType::Global(ty) => {
-                others.push(json!({"kind":"global","module":bounded(import.module(), MAX_RECORD_NAME),"field":bounded(import.name(), MAX_RECORD_NAME),"provided":"zero","type":type_name(&ty.content()),"mutable":ty.mutability() == Mutability::Var}));
+                others.push(json!({"kind":"global","module":import.module(),"field":import.name(),"provided":"zero","type":type_name(&ty.content()),"mutable":ty.mutability() == Mutability::Var}));
                 externs.push(Extern::Global(Global::new(
                     &mut store,
                     zero(&ty.content()),
@@ -1516,24 +1475,54 @@ fn execute(request: &Request, limits: Limits, bytes: &[u8], started: Instant) ->
     }
     let outcome = outcome
         .unwrap_or_else(|| Outcome::new(Status::Returned, Phase::Call, "The function returned"));
+    // The bytes a run's reads cover are kept once, as the merged ranges of
+    // memory 0 they span, so reading one region many times, or a large one,
+    // costs that memory once and never a copy per read. Each read carries the
+    // SHA-256 of its own bytes.
+    let data = memory.as_ref().map(|memory| memory.data(&store));
+    let covered = |read: &MemoryRead| {
+        let data = data?;
+        let end = read.offset.checked_add(read.length)?;
+        (end <= data.len() as u64).then(|| &data[read.offset as usize..end as usize])
+    };
     let reads = request
         .memory_reads
         .iter()
         .map(|read| {
-            let Some(memory) = memory.as_ref() else {
-                return json!({"offset":read.offset,"length":read.length,"status":"no_memory","sha256":null,"hex":null});
+            let (status, sha256) = match (data, covered(read)) {
+                (None, _) => ("no_memory", None),
+                (Some(_), None) => ("out_of_bounds", None),
+                (Some(_), Some(bytes)) => ("read", Some(hex::encode(Sha256::digest(bytes)))),
             };
-            let size = memory.data_size(&store) as u64;
-            if read.offset.checked_add(read.length).is_none_or(|end| end > size) {
-                return json!({"offset":read.offset,"length":read.length,"status":"out_of_bounds","sha256":null,"hex":null});
-            }
-            let mut buffer = vec![0u8; read.length as usize];
-            if memory.read(&store, read.offset as usize, &mut buffer).is_err() {
-                return json!({"offset":read.offset,"length":read.length,"status":"out_of_bounds","sha256":null,"hex":null});
-            }
-            json!({"offset":read.offset,"length":read.length,"status":"read","sha256":hex::encode(Sha256::digest(&buffer)),"hex":hex::encode(&buffer)})
+            json!({"offset":read.offset,"length":read.length,"status":status,"sha256":sha256})
         })
         .collect::<Vec<_>>();
+    let mut spans = request
+        .memory_reads
+        .iter()
+        .filter(|read| covered(read).is_some())
+        .map(|read| (read.offset, read.offset + read.length))
+        .collect::<Vec<_>>();
+    spans.sort_unstable();
+    let mut merged: Vec<(u64, u64)> = Vec::new();
+    for (start, end) in spans {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    let snapshot = data.filter(|_| !merged.is_empty()).map(|data| {
+        let mut bytes = Vec::new();
+        let ranges = merged
+            .iter()
+            .map(|&(start, end)| {
+                let at = bytes.len();
+                bytes.extend_from_slice(&data[start as usize..end as usize]);
+                json!({"offset":start,"length":end - start,"at":at})
+            })
+            .collect::<Vec<_>>();
+        (ranges, bytes)
+    });
     let expectation = request.expect.as_ref().map(|expect| {
         let results_match = expect.results.as_ref().map(|expected| {
             results.as_ref().is_some_and(|actual: &Vec<Typed>| {
@@ -1545,14 +1534,18 @@ fn execute(request: &Request, limits: Limits, bytes: &[u8], started: Instant) ->
             .memory
             .iter()
             .map(|entry| {
-                let read = &reads[entry.read];
-                json!({"read":entry.read,"match":read["hex"].as_str() == Some(entry.hex.to_ascii_lowercase().as_str())})
+                let expected = hex::decode(&entry.hex).ok();
+                let actual = covered(&request.memory_reads[entry.read]);
+                json!({"read":entry.read,"match":actual.is_some() && actual == expected.as_deref()})
             })
             .collect::<Vec<_>>();
         let all = results_match.unwrap_or(true)
             && memory.iter().all(|m| m["match"] == true)
             && outcome.status == Status::Returned;
         json!({"results_match":results_match,"memory":memory,"all_match":all})
+    });
+    let memory_snapshot = snapshot.as_ref().map(|(ranges, bytes)| {
+        json!({"sha256":hex::encode(Sha256::digest(bytes)),"byte_size":bytes.len(),"ranges":ranges})
     });
     let state = store.data();
     let consumed = budget.granted - store.get_fuel().unwrap_or(0);
@@ -1570,7 +1563,7 @@ fn execute(request: &Request, limits: Limits, bytes: &[u8], started: Instant) ->
         json!({"function_index":f.function_index,"module":f.module,"field":f.field,
             "reason":if reason == ImportTrapReason::NoStub { "no_stub" } else { "sequence_exhausted" }})
     });
-    Ok(json!({
+    let record = json!({
         "outcome": {
             "status": outcome.status,
             "phase": outcome.phase,
@@ -1602,9 +1595,11 @@ fn execute(request: &Request, limits: Limits, bytes: &[u8], started: Instant) ->
         "table_grow_denied": state.limiter.table_denied,
         "memory_pages_after": memory.as_ref().map(|m| m.size(&store)),
         "memory_reads": reads,
+        "memory_snapshot": memory_snapshot,
         "expectation": expectation,
         "executed_module_sha256": hex::encode(Sha256::digest(&executable)),
-    }))
+    });
+    Ok((record, snapshot.map(|(_, bytes)| bytes)))
 }
 
 fn memory_failure(error: &wasmi::Error, store: &Store<HostState>, label: &str) -> Outcome {
@@ -1642,8 +1637,13 @@ fn instantiation_failure(error: &wasmi::Error, store: &Store<HostState>) -> Outc
     outcome
 }
 
-/// Reads the artifact, verifies it, runs it, and builds the derived record.
-fn run_blocking(root: &Path, request: &Request, limits: Limits) -> Result<Value> {
+/// Reads the artifact, verifies it, runs it, and builds the derived record
+/// and its memory snapshot.
+fn run_blocking(
+    root: &Path,
+    request: &Request,
+    limits: Limits,
+) -> Result<(Value, Option<Vec<u8>>)> {
     let started = Instant::now();
     let artifact = evidence::find_artifact(root, &request.artifact_id)?;
     if artifact["kind"] != "wasm" {
@@ -1657,7 +1657,7 @@ fn run_blocking(root: &Path, request: &Request, limits: Limits) -> Result<Value>
     }
     // A module of any size is read whole.
     let bytes = evidence::read(root, &artifact)?;
-    let mut record = execute(request, limits, &bytes, started)?;
+    let (mut record, snapshot) = execute(request, limits, &bytes, started)?;
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
@@ -1692,196 +1692,10 @@ fn run_blocking(root: &Path, request: &Request, limits: Limits) -> Result<Value>
     record["notice"] = json!(
         "Captured code ran offline in a local interpreter with every import stubbed. This result describes these inputs only and is a derived experiment record, not captured evidence."
     );
-    fit(&mut record);
-    Ok(record)
-}
-
-/// The bytes `c` takes inside a JSON string: control characters, quotes and
-/// backslashes are escaped, so a name of 128 control bytes is 768 bytes of
-/// JSON.
-fn escaped_width(c: char) -> usize {
-    match c {
-        '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
-        c if (c as u32) < 0x20 => 6,
-        c => c.len_utf8(),
-    }
-}
-
-/// `text` cut to at most `limit` bytes as a JSON string (escapes counted),
-/// marked when cut. Two names that share their first `limit` bytes look the
-/// same afterwards; the function index tells them apart.
-fn bounded(text: &str, limit: usize) -> String {
-    let mut width = 0;
-    for (at, c) in text.char_indices() {
-        width += escaped_width(c);
-        if width > limit {
-            return format!("{} [cut]", &text[..at]);
-        }
-    }
-    text.to_owned()
-}
-
-fn pretty_len(value: &Value) -> usize {
-    serde_json::to_string_pretty(value).map_or(usize::MAX, |text| text.len())
-}
-
-/// The pretty length of `record` as `get_wasm_runs` returns it, nested in
-/// `{"runs": [...]}` with the listing's fixed keys: nesting indents every line,
-/// so a record that fits alone can overflow as a listing.
-fn listed_len(record: &Value) -> usize {
-    pretty_len(&json!({
-        "schema": "wasm-runs-v1",
-        "artifact_id": u64::MAX.to_string(),
-        "total": MAX_RUNS,
-        "evicted_runs": u64::MAX,
-        "max_runs": MAX_RUNS,
-        "runs": [record],
-    }))
-}
-
-/// Keeps the longest prefix of the list under `key` with which `record` fits,
-/// and returns how many of how many entries were kept when that removed any:
-/// never for an empty list, so no step reads "first 0 of 0".
-fn keep_prefix(
-    record: &mut Value,
-    key: &str,
-    fits: impl Fn(&Value) -> bool,
-) -> Option<(usize, usize)> {
-    let full = record[key].as_array()?.clone();
-    let total = full.len();
-    let (mut low, mut high) = (0usize, total);
-    while low < high {
-        let middle = (low + high).div_ceil(2);
-        record[key] = Value::Array(full[..middle].to_vec());
-        if fits(record) {
-            low = middle;
-        } else {
-            high = middle - 1;
-        }
-    }
-    record[key] = Value::Array(full[..low].to_vec());
-    (low < total).then_some((low, total))
-}
-
-/// Whether `record` fits RECORD_INLINE_BUDGET as a one-record listing.
-fn fits(record: &Value) -> bool {
-    listed_len(record) <= RECORD_INLINE_BUDGET
-}
-
-/// Adds a step to `size_trimmed`, which is measured with the rest of the
-/// record, so every later step is sized with it.
-fn note(record: &mut Value, trimmed: &mut Vec<String>, step: String) {
-    trimmed.push(step);
-    record["size_trimmed"] = json!(trimmed);
-}
-
-/// keep_prefix on `key`, sized with the widest step `describe` can add (a
-/// kept count has no more digits than the total), and noted when it removed
-/// any entry.
-fn trim_prefix(
-    record: &mut Value,
-    trimmed: &mut Vec<String>,
-    key: &str,
-    describe: impl Fn(usize, usize) -> String,
-) -> bool {
-    let total = record[key].as_array().map_or(0, Vec::len);
-    let mut widest = trimmed.clone();
-    widest.push(describe(total, total));
-    record["size_trimmed"] = json!(widest);
-    let kept = keep_prefix(record, key, fits);
-    record["size_trimmed"] = json!(trimmed);
-    let Some((kept, total)) = kept else {
-        return false;
-    };
-    note(record, trimmed, describe(kept, total));
-    true
-}
-
-/// Trims a record until it fits RECORD_INLINE_BUDGET as a one-record
-/// `get_wasm_runs` listing (and so also alone), in a fixed order, recording in
-/// `size_trimmed` only the steps that removed something. Outcomes, counts,
-/// memory reads, digests and the expectation are never trimmed: the reads cap
-/// leaves room for them. The store keeps the trimmed record, as returned.
-fn fit(record: &mut Value) {
-    if let Some(message) = record["outcome"]["message"].as_str() {
-        record["outcome"]["message"] = json!(bounded(message, MAX_RECORD_MESSAGE));
-    }
-    // The list is measured as it grows: added only after the last step, it
-    // took a record whose calls were sized to the byte 162 bytes past the
-    // budget.
-    let mut trimmed = Vec::new();
-    record["size_trimmed"] = json!(trimmed);
-    if !fits(record) && record["request"].get("omitted").is_none() {
-        let bytes = serde_json::to_vec(&record["request"]).map_or(0, |bytes| bytes.len());
-        record["request"] = json!({"omitted": "size", "bytes": bytes});
-        note(
-            record,
-            &mut trimmed,
-            "request: replaced by its size; provenance.inputs_digest names it".into(),
-        );
-    }
-    for key in ["imports", "other_imports"] {
-        if !fits(record)
-            && let Some(list) = record[key].as_array_mut()
-            && list.len() > 32
-        {
-            let total = list.len();
-            list.truncate(32);
-            note(record, &mut trimmed, format!("{key}: first 32 of {total}"));
-        }
-    }
-    let lists = |record: &Value| {
-        ["params", "results"]
-            .iter()
-            .map(|key| {
-                record["function"]["type"][key]
-                    .as_array()
-                    .map_or(0, Vec::len)
-            })
-            .collect::<Vec<_>>()
-    };
-    if !fits(record)
-        && record["function"]["type"].is_object()
-        && lists(record).iter().any(|n| *n > 0)
-    {
-        let counts = lists(record);
-        record["function"]["type"] = json!({"params_count": counts[0], "results_count": counts[1]});
-        note(
-            record,
-            &mut trimmed,
-            "function.type: replaced by its counts".into(),
-        );
-    }
-    // Results are cut before the calls are sized: sized against all 1000
-    // results, the calls could all be dropped from a record that then had
-    // room for about half of them.
-    if !fits(record)
-        && let Some(list) = record["results"].as_array_mut()
-        && list.len() > 64
-    {
-        let total = list.len();
-        list.truncate(64);
-        note(
-            record,
-            &mut trimmed,
-            format!("results: first 64 of {total}"),
-        );
-    }
-    if !fits(record)
-        && trim_prefix(record, &mut trimmed, "import_calls", |kept, total| {
-            format!("import_calls: first {kept} of {total} recorded calls")
-        })
-    {
-        record["import_calls_truncated"] = json!(true);
-    }
-    // A last, hard step: the import lists keep only as many entries as fit.
-    for key in ["imports", "other_imports"] {
-        if !fits(record) {
-            trim_prefix(record, &mut trimmed, key, |kept, total| {
-                format!("{key}: first {kept} of {total}")
-            });
-        }
-    }
+    // Records are kept whole. Earlier builds trimmed one to fit what reb-api
+    // mcp inlines and listed the steps here.
+    record["size_trimmed"] = json!([]);
+    Ok((record, snapshot))
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1894,6 +1708,13 @@ struct Document {
 
 fn store_path(root: &Path) -> PathBuf {
     root.join("analysis/wasm-runs-v1.json")
+}
+
+/// The bytes a run's reads cover, named by its run_id, which is `wr-`, decimal
+/// milliseconds, `-` and hex digits, so it is always a plain file name.
+fn snapshot_path(root: &Path, run_id: &str) -> PathBuf {
+    root.join("analysis/wasm-run-memory")
+        .join(format!("{run_id}.bin"))
 }
 
 fn decode(bytes: Option<Vec<u8>>) -> Result<Document> {
@@ -2031,13 +1852,15 @@ fn move_aside(path: &Path, millis: u128) -> Result<String> {
 }
 
 /// Keeps the newest runs. A run is derived, not evidence, so the oldest is
-/// evicted at capacity, and `evicted_runs` counts every eviction. Returns a
-/// notice when an unreadable store was moved aside. Its bytes are kept under a
-/// new name, never overwritten, and the run that moved it says so.
-fn persist(root: &Path, record: &Value) -> Result<Option<String>> {
+/// evicted at capacity with its memory snapshot, and `evicted_runs` counts
+/// every eviction. The snapshot is written first, so a stored record always
+/// has its bytes. Returns a notice when an unreadable store was moved aside.
+/// Its bytes are kept under a new name, never overwritten, and the run that
+/// moved it says so.
+fn persist(root: &Path, record: &Value, snapshot: Option<&[u8]>) -> Result<Option<String>> {
     let path = store_path(root);
     let lease = crate::workspace_lease::Lease::acquire(&path)?;
-    let (mut document, notice) = match lease.read(MAX_STORE_BYTES).and_then(decode) {
+    let (mut document, notice) = match lease.read(usize::MAX).and_then(decode) {
         Ok(document) => (document, None),
         Err(_) => {
             let millis = std::time::SystemTime::now()
@@ -2053,18 +1876,29 @@ fn persist(root: &Path, record: &Value) -> Result<Option<String>> {
             )
         }
     };
-    document.runs.push(record.clone());
-    loop {
-        let bytes = serde_json::to_vec(&document)?;
-        if document.runs.len() <= MAX_RUNS && bytes.len() <= MAX_STORE_BYTES {
-            return lease.write(&bytes).map(|()| notice);
-        }
-        if document.runs.len() == 1 {
-            return Err(Error::bad("A WASM run record exceeds the store limit"));
-        }
-        document.runs.remove(0);
-        document.evicted_runs += 1;
+    let run_id = record["run_id"].as_str().unwrap_or_default();
+    if let Some(bytes) = snapshot {
+        crate::durable::write_private(&snapshot_path(root, run_id), bytes)?;
     }
+    document.runs.push(record.clone());
+    let evicted = document.runs.len().saturating_sub(MAX_RUNS);
+    let evicted = document.runs.drain(..evicted).collect::<Vec<_>>();
+    document.evicted_runs += evicted.len() as u64;
+    let written = serde_json::to_vec(&document)
+        .map_err(Error::from)
+        .and_then(|bytes| lease.write(&bytes));
+    // A snapshot whose record is not in the store, or whose record was
+    // evicted, is removed; one left behind by a crash is only unreferenced.
+    let stale = match written {
+        Ok(()) => evicted,
+        Err(_) => vec![record.clone()],
+    };
+    for run in &stale {
+        if let Some(id) = run["run_id"].as_str() {
+            let _ = std::fs::remove_file(snapshot_path(root, id));
+        }
+    }
+    written.map(|()| notice)
 }
 
 /// The contract check runs before a record is stored. Its error never carries
@@ -2090,23 +1924,26 @@ impl Runs {
             permit: Arc::new(Semaphore::new(1)),
         }
     }
-    /// One run at a time per backend. Once admitted, HTTP cancellation does
-    /// not cancel the run or its persistence; the deadline ends it.
-    pub async fn run(&self, bytes: &[u8]) -> Result<Value> {
-        let (request, limits) = Request::parse(bytes)?;
-        let permit = self.permit.clone().try_acquire_owned().map_err(|_| {
-            Error::conflict("A WASM run is already in progress; nothing ran")
-                .with_code(Code::ResourceLimit)
-        })?;
+    /// One run at a time per backend; a later request waits its turn, and one
+    /// that goes away while waiting has run nothing. Once admitted, HTTP
+    /// cancellation does not cancel the run or its persistence; the deadline
+    /// ends it.
+    pub async fn run(&self, (request, limits): (Request, Limits)) -> Result<Value> {
+        let permit = self
+            .permit
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| Error::new(503, "The WASM runner is unavailable"))?;
         let root = self.root.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let mut record = run_blocking(&root, &request, limits)?;
+            let (mut record, snapshot) = run_blocking(&root, &request, limits)?;
             checked(&record)?;
             record["store_notice"] = Value::Null;
-            // fit() already brought the record under RECORD_INLINE_BUDGET, so
-            // the only reason it is not stored is a storage failure.
-            match persist(&root, &record) {
+            // A record of any size is stored, so the only reason it is not
+            // is a storage failure.
+            match persist(&root, &record, snapshot.as_deref()) {
                 Ok(notice) => {
                     record["stored"] = json!(true);
                     record["store_error"] = Value::Null;
@@ -2127,8 +1964,7 @@ impl Runs {
 /// Stored runs, newest first, optionally for one artifact. Reads only.
 pub fn list(root: &Path, artifact_id: Option<&str>, limit: usize) -> Result<Value> {
     let document = decode(
-        crate::durable::read_private(&store_path(root), MAX_STORE_BYTES)
-            .map_err(|_| unreadable())?,
+        crate::durable::read_private(&store_path(root), usize::MAX).map_err(|_| unreadable())?,
     )?;
     let matching = document
         .runs
@@ -2144,6 +1980,105 @@ pub fn list(root: &Path, artifact_id: Option<&str>, limit: usize) -> Result<Valu
         "max_runs": MAX_RUNS,
         "runs": matching.into_iter().take(limit).collect::<Vec<_>>(),
     }))
+}
+
+/// One page of one stored run's memory read: `length` bytes from `start`
+/// within the read, as hex. A read of any size is read whole through these
+/// pages, so its record stays small. A page is not checked against the read's
+/// SHA-256, which covers the whole read; the snapshot's size is. Reads only.
+pub fn memory(root: &Path, run_id: &str, read: usize, start: u64, length: u64) -> Result<Value> {
+    let document = decode(
+        crate::durable::read_private(&store_path(root), usize::MAX).map_err(|_| unreadable())?,
+    )?;
+    let unavailable = |message: &str| Error::new(404, message).with_code(Code::TargetUnavailable);
+    let run = document
+        .runs
+        .iter()
+        .find(|run| run["run_id"] == run_id)
+        .ok_or_else(|| unavailable("No stored WASM run has this run_id"))?;
+    let entry = run["memory_reads"]
+        .get(read)
+        .ok_or_else(|| unavailable("The run made no memory read with this index"))?;
+    if entry["status"] != "read" {
+        return Err(unavailable(
+            "This memory read was out of bounds or had no memory, so it holds no bytes",
+        ));
+    }
+    let offset = entry["offset"].as_u64().ok_or_else(unreadable)?;
+    let total = entry["length"].as_u64().ok_or_else(unreadable)?;
+    if start > total {
+        return Err(Error::bad("start is past the end of the memory read"));
+    }
+    let end = total.min(start.saturating_add(length));
+    // Records stored before snapshots carry their bytes inline as hex.
+    let hex = if let Some(hex) = entry["hex"].as_str() {
+        hex.get(start as usize * 2..end as usize * 2)
+            .ok_or_else(unreadable)?
+            .to_owned()
+    } else {
+        let snapshot = &run["memory_snapshot"];
+        let range = snapshot["ranges"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|range| {
+                let (Some(from), Some(size)) = (range["offset"].as_u64(), range["length"].as_u64())
+                else {
+                    return false;
+                };
+                from <= offset && offset + total <= from + size
+            })
+            .ok_or_else(unreadable)?;
+        let at = range["at"].as_u64().ok_or_else(unreadable)?
+            + (offset - range["offset"].as_u64().unwrap_or(0))
+            + start;
+        snapshot_page(
+            root,
+            run_id,
+            snapshot["byte_size"].as_u64(),
+            at,
+            end - start,
+        )?
+    };
+    Ok(json!({
+        "schema": "wasm-run-memory-v1",
+        "run_id": run_id,
+        "read": read,
+        "memory_offset": offset,
+        "sha256": entry["sha256"],
+        "total": total,
+        "start": start,
+        "length": end - start,
+        "hex": hex,
+        "next_start": (end < total).then_some(end),
+    }))
+}
+
+/// `length` bytes at `at` in a run's snapshot, as hex. A missing snapshot, or
+/// one whose size differs from its record, is an integrity failure.
+fn snapshot_page(
+    root: &Path,
+    run_id: &str,
+    size: Option<u64>,
+    at: u64,
+    length: u64,
+) -> Result<String> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let missing = || {
+        Error::new(
+            500,
+            "The memory snapshot of this WASM run is missing or damaged under analysis/wasm-run-memory",
+        )
+        .with_code(Code::ArtifactIntegrity)
+    };
+    let mut file = std::fs::File::open(snapshot_path(root, run_id)).map_err(|_| missing())?;
+    if Some(file.metadata()?.len()) != size || at.saturating_add(length) > size.unwrap_or(0) {
+        return Err(missing());
+    }
+    file.seek(SeekFrom::Start(at))?;
+    let mut bytes = vec![0; length as usize];
+    file.read_exact(&mut bytes).map_err(|_| missing())?;
+    Ok(hex::encode(bytes))
 }
 
 #[cfg(test)]
@@ -2162,11 +2097,13 @@ mod tests {
         if body.get("function_index").is_some() {
             body.as_object_mut().unwrap().remove("export");
         }
-        Request::parse(&serde_json::to_vec(&body).unwrap()).unwrap()
+        Request::parse(&serde_json::to_vec(&body).unwrap()[..]).unwrap()
     }
     fn run(source: &str, extra: Value) -> Value {
         let (request, limits) = request(extra);
-        execute(&request, limits, &module(source), Instant::now()).unwrap()
+        execute(&request, limits, &module(source), Instant::now())
+            .unwrap()
+            .0
     }
     fn fixture(name: &str) -> String {
         std::fs::read_to_string(
@@ -2234,13 +2171,13 @@ mod tests {
             json!({"artifact_id":"1","sha256":"0".repeat(64),"export":"run"}),
             json!({"artifact_id":"1","sha256":"0".repeat(64),"export":"run","confirm_offline_execution":false}),
         ] {
-            let error = Request::parse(&serde_json::to_vec(&body).unwrap()).unwrap_err();
+            let error = Request::parse(&serde_json::to_vec(&body).unwrap()[..]).unwrap_err();
             assert_eq!(error.status, 400);
             assert!(error.message.contains("confirm_offline_execution"));
         }
         let unknown = json!({"artifact_id":"1","sha256":"0".repeat(64),"export":"run",
             "confirm_offline_execution":true,"network":true});
-        assert!(Request::parse(&serde_json::to_vec(&unknown).unwrap()).is_err());
+        assert!(Request::parse(&serde_json::to_vec(&unknown).unwrap()[..]).is_err());
     }
 
     #[test]
@@ -2380,14 +2317,19 @@ mod tests {
         );
         assert_eq!(result["outcome"]["status"], "returned", "{result}");
         assert_eq!(result["results"][0]["value"], "10");
-        assert_eq!(result["memory_reads"][0]["hex"], "0a000000");
+        let digest = |hex: &str| json!(hex::encode(Sha256::digest(hex::decode(hex).unwrap())));
+        assert_eq!(result["memory_reads"][0]["sha256"], digest("0a000000"));
         assert_eq!(result["memory_reads"][1]["status"], "out_of_bounds");
-        assert_eq!(result["memory_reads"][2]["hex"], "01020304");
+        assert_eq!(result["memory_reads"][2]["sha256"], digest("01020304"));
         assert_eq!(result["expectation"]["all_match"], true);
+        assert_eq!(
+            result["memory_snapshot"]["ranges"],
+            json!([{"offset":0,"length":4,"at":0},{"offset":16,"length":4,"at":4}])
+        );
         let body = json!({"artifact_id":"1","sha256":"0".repeat(64),"export":"sum",
-            "confirm_offline_execution":true,"memory_reads":[{"offset":0,"length":MAX_READ_BYTES + 1}]});
-        let error = Request::parse(&serde_json::to_vec(&body).unwrap()).unwrap_err();
-        assert!(error.message.contains("32 KiB"));
+            "confirm_offline_execution":true,"memory_reads":[{"offset":0,"length":0}]});
+        let error = Request::parse(&serde_json::to_vec(&body).unwrap()[..]).unwrap_err();
+        assert!(error.message.contains("must be positive"));
         let outside = run(
             &fixture("memory.wat"),
             json!({"export":"sum",
@@ -2573,7 +2515,7 @@ mod tests {
         let bytes = module(&source);
         assert!(bytes.len() > 200_000, "{}", bytes.len());
         let (request, limits) = request(json!({}));
-        let result = execute(&request, limits, &bytes, Instant::now()).unwrap();
+        let (result, _) = execute(&request, limits, &bytes, Instant::now()).unwrap();
         assert_eq!(
             result["outcome"]["status"], "returned",
             "{}",
@@ -2612,7 +2554,7 @@ mod tests {
         ] {
             let mut full = json!({"artifact_id":"1","sha256":"0".repeat(64),"export":"echo","confirm_offline_execution":true});
             full["args"] = body["args"].clone();
-            let error = Request::parse(&serde_json::to_vec(&full).unwrap()).unwrap_err();
+            let error = Request::parse(&serde_json::to_vec(&full).unwrap()[..]).unwrap_err();
             let quoted = body["args"][0]["value"].as_str().unwrap();
             assert!(!error.message.contains(quoted), "{}", error.message);
         }
@@ -2744,7 +2686,7 @@ mod tests {
             ") (func (export \"run\") (result i32) i32.const 1))",
         ));
         let (late, limits) = self::request(json!({"limits":{"deadline_ms":1}}));
-        let result = execute(
+        let (result, _) = execute(
             &late,
             limits,
             &full,
@@ -2924,12 +2866,12 @@ mod tests {
                 value: "2".into(),
             },
         ];
-        run_blocking(directory.path(), &request, limits).unwrap()
+        run_blocking(directory.path(), &request, limits).unwrap().0
     }
 
-    /// run_blocking on `bytes` in a fresh store, with `body` as the request
-    /// (artifact_id, sha256 and the confirmation are filled in).
-    fn run_stored(bytes: &[u8], mut body: Value) -> Value {
+    /// A fresh artifact store holding `bytes` as artifact 1, and `body` as a
+    /// request for it (artifact_id, sha256 and the confirmation filled in).
+    fn store_with(bytes: &[u8], mut body: Value) -> (tempfile::TempDir, Request, Limits) {
         let directory = tempfile::tempdir().unwrap();
         let hash = hex::encode(Sha256::digest(bytes));
         std::fs::create_dir_all(directory.path().join("blobs")).unwrap();
@@ -2943,315 +2885,197 @@ mod tests {
         body["artifact_id"] = json!("1");
         body["sha256"] = json!(hash);
         body["confirm_offline_execution"] = json!(true);
-        let (request, limits) = Request::parse(&serde_json::to_vec(&body).unwrap()).unwrap();
-        run_blocking(directory.path(), &request, limits).unwrap()
+        let (request, limits) = Request::parse(&serde_json::to_vec(&body).unwrap()[..]).unwrap();
+        (directory, request, limits)
     }
 
-    /// A module that fills every part of a record: 200 imports with long
-    /// names, 300 import calls of 16 values each way, 100 results and memory
-    /// for the largest writes and reads.
-    pub(super) fn maximal_module() -> Vec<u8> {
-        let sixteen = " i64".repeat(16);
-        let long = "m".repeat(200);
-        let mut source = format!(
-            "(module (import \"env\" \"big\" (func $big (param{sixteen}) (result{sixteen})))"
+    /// Runs, checks and stores as `Runs::run` does, and returns the store.
+    fn run_stored(bytes: &[u8], body: Value) -> (tempfile::TempDir, Value) {
+        let (directory, request, limits) = store_with(bytes, body);
+        let (record, snapshot) = run_blocking(directory.path(), &request, limits).unwrap();
+        checked(&record).unwrap();
+        persist(directory.path(), &record, snapshot.as_deref()).unwrap();
+        (directory, record)
+    }
+
+    /// Every byte of one stored read, read back through `memory` in pages.
+    fn read_back(root: &Path, record: &Value, read: usize, page: u64) -> Vec<u8> {
+        let run_id = record["run_id"].as_str().unwrap();
+        let (mut bytes, mut start) = (Vec::new(), 0);
+        loop {
+            let value = memory(root, run_id, read, start, page).unwrap();
+            assert!(value["length"].as_u64().unwrap() <= page);
+            bytes.extend(hex::decode(value["hex"].as_str().unwrap()).unwrap());
+            match value["next_start"].as_u64() {
+                Some(next) => start = next,
+                None => break,
+            }
+        }
+        assert_eq!(
+            hex::encode(Sha256::digest(&bytes)),
+            record["memory_reads"][read]["sha256"]
         );
-        for index in 0..200 {
-            source.push_str(&format!(
-                "(import \"{long}\" \"f{index}\" (func (param{sixteen})))"
-            ));
-        }
-        source.push_str("(memory 8) (func (export \"run\") (param");
-        source.push_str(&sixteen);
-        source.push_str(") (result");
-        source.push_str(&" i64".repeat(100));
-        source
-            .push_str(") (local $n i32) (local.set $n (i32.const 300)) (block $done (loop $again");
-        source.push_str("(br_if $done (i32.eqz (local.get $n)))");
-        for index in 0..16 {
-            source.push_str(&format!("(local.get {index})"));
-        }
-        source.push_str("(call $big)");
-        source.push_str(&"(drop)".repeat(16));
-        source.push_str("(local.set $n (i32.sub (local.get $n) (i32.const 1))) (br $again)))");
-        source.push_str(&"(i64.const -9223372036854775808)".repeat(100));
-        source.push_str("))");
-        module(&source)
-    }
-
-    /// The largest request a run admits against maximal_module.
-    pub(super) fn maximal_body() -> Value {
-        let value = json!({"type": "i64", "value": "-9223372036854775808"});
-        let sixteen = vec![value.clone(); 16];
-        json!({"export": "run", "args": sixteen,
-            "imports": [{"module": "env", "field": "big", "results": sixteen}],
-            "memory_writes": (0..16).map(|index| json!({"offset": index * 16384, "hex": "ab".repeat(16384)})).collect::<Vec<_>>(),
-            "memory_reads": (0..16).map(|index| json!({"offset": index * 2048, "length": 2048})).collect::<Vec<_>>(),
-            "expect": {"memory": (0..16).map(|index| json!({"read": index, "hex": "ab".repeat(2048)})).collect::<Vec<_>>()},
-            "limits": {"deadline_ms": 10000}})
-    }
-
-    /// 16 reads of 2 KiB: the 32 KiB read cap.
-    fn full_reads() -> Value {
-        json!(
-            (0..16)
-                .map(|index| json!({"offset": index * 2048, "length": 2048}))
-                .collect::<Vec<_>>()
-        )
+        bytes
     }
 
     #[test]
-    fn a_record_fits_as_a_one_record_listing() {
-        // fit() measured the record alone; nested in {"runs":[...]} every line
-        // gains four spaces, and a record at 122,902 bytes became a 150,830-byte
-        // listing that reb-api mcp summarized.
-        let sixteen = " i32".repeat(16);
-        let mut source = format!(
-            "(module (import \"env\" \"f\" (func $f (param{sixteen}) (result{sixteen}))) (memory 1) (func (export \"run\") (local $n i32) (local.set $n (i32.const 48)) (block $done (loop $again (br_if $done (i32.eqz (local.get $n)))"
+    fn reads_of_any_size_are_stored_once_and_read_whole_in_pages() {
+        // 16 reads of at most 32 KiB in total were refused past that with 400,
+        // so a run could not show a buffer larger than 32 KiB.
+        let pattern = (0..300 * 1024)
+            .map(|i| (i * 7 % 251) as u8)
+            .collect::<Vec<_>>();
+        let tail = vec![0x5a; 12 * 1024];
+        let reads = json!([
+            {"offset": 0, "length": pattern.len()},
+            {"offset": 0, "length": pattern.len()},
+            {"offset": 100 * 1024, "length": 300 * 1024},
+            {"offset": 500 * 1024, "length": tail.len()},
+            {"offset": 512 * 1024, "length": 1},
+        ]);
+        let (directory, record) = run_stored(
+            &module("(module (memory 8) (func (export \"run\")))"),
+            json!({"export": "run", "memory_reads": reads,
+                "memory_writes": [{"offset": 0, "hex": hex::encode(&pattern)},
+                    {"offset": 500 * 1024, "hex": hex::encode(&tail)}],
+                "expect": {"memory": [{"read": 0, "hex": hex::encode(&pattern)}]}}),
         );
-        source.push_str(&"(i32.const 1)".repeat(16));
-        source.push_str("(call $f)");
-        source.push_str(&"(drop)".repeat(16));
-        source.push_str("(local.set $n (i32.sub (local.get $n) (i32.const 1))) (br $again)))))");
-        let value = json!({"type": "i32", "value": "-2147483648"});
-        let record = run_stored(
-            &module(&source),
-            json!({"export": "run",
-            "imports": [{"module": "env", "field": "f", "results": vec![value; 16]}],
-            "memory_reads": [{"offset": 0, "length": 324}]}),
+        assert_eq!(record["expectation"]["all_match"], true);
+        assert_eq!(record["memory_reads"][4]["status"], "out_of_bounds");
+        assert!(record["memory_reads"][0].get("hex").is_none());
+        // The reads cover 0..400 KiB and 500..512 KiB once each, not the
+        // 912 KiB they ask for.
+        let snapshot = &record["memory_snapshot"];
+        assert_eq!(snapshot["byte_size"], 412 * 1024);
+        assert_eq!(snapshot["ranges"].as_array().unwrap().len(), 2);
+        let stored = std::fs::metadata(snapshot_path(
+            directory.path(),
+            record["run_id"].as_str().unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(stored.len(), 412 * 1024);
+        assert_eq!(read_back(directory.path(), &record, 0, 65_536), pattern);
+        assert_eq!(read_back(directory.path(), &record, 1, 1_000_000), pattern);
+        let shifted = read_back(directory.path(), &record, 2, 4096);
+        assert_eq!(&shifted[..200 * 1024], &pattern[100 * 1024..]);
+        assert!(shifted[200 * 1024..].iter().all(|&byte| byte == 0));
+        assert_eq!(read_back(directory.path(), &record, 3, 7), tail);
+        let run_id = record["run_id"].as_str().unwrap();
+        for (read, start, status) in [(4, 0, 404), (5, 0, 404), (3, 12 * 1024 + 1, 400)] {
+            assert_eq!(
+                memory(directory.path(), run_id, read, start, 1)
+                    .unwrap_err()
+                    .status,
+                status
+            );
+        }
+        let end = memory(directory.path(), run_id, 3, 12 * 1024, 1).unwrap();
+        assert_eq!(
+            (end["length"].clone(), end["next_start"].clone()),
+            (json!(0), Value::Null)
         );
-        assert_eq!(record["import_calls_total"], 48);
+        // A snapshot whose size differs from its record is not read.
+        std::fs::write(snapshot_path(directory.path(), run_id), b"short").unwrap();
+        assert_eq!(
+            memory(directory.path(), run_id, 0, 0, 1)
+                .unwrap_err()
+                .status,
+            500
+        );
+    }
+
+    #[test]
+    fn an_evicted_run_takes_its_snapshot_with_it() {
+        let bytes = module("(module (memory 1) (func (export \"run\")))");
+        let (directory, request, limits) = store_with(
+            &bytes,
+            json!({"export": "run", "memory_reads": [{"offset": 0, "length": 8}]}),
+        );
+        let mut ids = Vec::new();
+        for _ in 0..=MAX_RUNS {
+            let (record, snapshot) = run_blocking(directory.path(), &request, limits).unwrap();
+            persist(directory.path(), &record, snapshot.as_deref()).unwrap();
+            ids.push(record["run_id"].as_str().unwrap().to_owned());
+        }
+        assert!(!snapshot_path(directory.path(), &ids[0]).exists());
         assert!(
-            listed_len(&record) <= RECORD_INLINE_BUDGET,
-            "{}",
-            listed_len(&record)
+            ids[1..]
+                .iter()
+                .all(|id| snapshot_path(directory.path(), id).exists())
+        );
+        let listed = list(directory.path(), None, 1).unwrap();
+        assert_eq!(listed["evicted_runs"], 1);
+    }
+
+    #[test]
+    fn a_read_stored_inline_before_snapshots_is_still_paged() {
+        let directory = tempfile::tempdir().unwrap();
+        let document = json!({"schema": STORE_SCHEMA, "evicted_runs": 0, "runs": [{
+            "schema": SCHEMA, "run_id": "wr-1-00",
+            "memory_reads": [{"offset": 4, "length": 3, "status": "read",
+                "sha256": hex::encode(Sha256::digest([1, 2, 3])), "hex": "010203"}]}]});
+        crate::durable::write_private(
+            &store_path(directory.path()),
+            &serde_json::to_vec(&document).unwrap(),
+        )
+        .unwrap();
+        let page = memory(directory.path(), "wr-1-00", 0, 1, 5).unwrap();
+        assert_eq!(page["hex"], "0203");
+        assert_eq!(page["memory_offset"], 4);
+        assert_eq!(page["next_start"], Value::Null);
+        assert_eq!(
+            memory(directory.path(), "wr-1-01", 0, 0, 1)
+                .unwrap_err()
+                .status,
+            404
         );
     }
 
     #[test]
-    fn escaped_names_are_bounded_by_their_json_length() {
-        // 40 function and 40 global imports named with 128 control bytes are
-        // 768 bytes each as JSON; the record stayed at 178,179 bytes after
-        // every trim step.
-        let name = "\\01".repeat(128);
+    fn a_record_is_kept_whole() {
+        // A record was trimmed to fit what reb-api mcp inlines: names cut to
+        // 128 bytes, results to 64, the function type to its counts, the
+        // request echo to its size and import calls to a prefix.
+        let wide = " i64".repeat(1000);
+        let name = "\\01".repeat(300);
         let mut source = String::from("(module");
         for index in 0..40 {
             source.push_str(&format!("(import \"{name}\" \"f{index}\" (func))"));
-            source.push_str(&format!("(import \"{name}\" \"g{index}\" (global i32))"));
         }
-        source.push_str("(memory 1) (func (export \"run\")))");
-        let record = run_stored(
-            &module(&source),
-            json!({"export": "run", "memory_reads": full_reads()}),
-        );
-        assert!(
-            listed_len(&record) <= RECORD_INLINE_BUDGET,
-            "{}",
-            listed_len(&record)
-        );
-        let module = record["imports"][0]["module"].as_str().unwrap();
-        assert!(
-            serde_json::to_string(module).unwrap().len() <= MAX_RECORD_NAME + 8,
-            "{module:?}"
-        );
-        assert!(module.ends_with(" [cut]"));
-    }
-
-    #[test]
-    fn the_longest_prefix_of_import_calls_that_fits_is_kept() {
-        // The whole call list was dropped ("0 of 256 kept") although about
-        // 48 KB of calls would have fit beside 32 KiB of reads.
-        let source = "(module (import \"env\" \"f\" (func $f (param i32))) (memory 1) (func (export \"run\") (local $n i32) (local.set $n (i32.const 256)) (block $done (loop $again (br_if $done (i32.eqz (local.get $n))) (call $f (local.get $n)) (local.set $n (i32.sub (local.get $n) (i32.const 1))) (br $again)))))";
-        let record = run_stored(
-            &module(source),
-            json!({"export": "run",
-            "imports": [{"module": "env", "field": "f", "results": []}], "memory_reads": full_reads()}),
-        );
-        let kept = record["import_calls"].as_array().unwrap().len();
-        assert!(
-            kept > 64,
-            "only {kept} calls kept: {}",
-            record["size_trimmed"]
-        );
-        assert!(listed_len(&record) <= RECORD_INLINE_BUDGET);
-        if kept < 256 {
-            assert_eq!(record["import_calls_truncated"], true);
-            assert!(
-                record["size_trimmed"]
-                    .to_string()
-                    .contains(&format!("first {kept} of 256")),
-                "{}",
-                record["size_trimmed"]
-            );
-        }
-    }
-
-    #[test]
-    fn the_type_and_results_steps_trim_a_wide_function() {
-        // A function with 1000 parameters and 1000 results needs both steps;
-        // removing either used to pass every test.
-        let wide = " i64".repeat(1000);
-        let source = format!(
-            "(module (memory 1) (func (export \"run\") (param{wide}) (result{wide}) {}))",
+        source.push_str(&format!(
+            "(memory 1) (func (export \"run\") (param{wide}) (result{wide}) {}))",
             "(i64.const -9223372036854775808)".repeat(1000)
-        );
+        ));
         let value = json!({"type": "i64", "value": "-9223372036854775808"});
-        let record = run_stored(
+        let (_directory, record) = run_stored(
             &module(&source),
-            json!({"export": "run", "args": vec![value; 1000], "memory_reads": full_reads()}),
+            json!({"export": "run", "args": vec![value; 1000],
+                "memory_writes": [{"offset": 0, "hex": "ab".repeat(65_536)}]}),
         );
         assert_eq!(
             record["outcome"]["status"], "returned",
             "{}",
             record["outcome"]
-        );
-        let steps = record["size_trimmed"].to_string();
-        assert!(
-            steps.contains("function.type: replaced by its counts"),
-            "{steps}"
-        );
-        assert!(steps.contains("results: first 64 of 1000"), "{steps}");
-        assert_eq!(record["results"].as_array().unwrap().len(), 64);
-        assert_eq!(
-            record["function"]["type"],
-            json!({"params_count": 1000, "results_count": 1000})
-        );
-        assert!(listed_len(&record) <= RECORD_INLINE_BUDGET);
-    }
-
-    #[test]
-    fn import_calls_are_sized_after_results_are_trimmed() {
-        // The calls were sized against a record that still held all 1000
-        // results, so "import_calls: first 0 of 256" was kept in a 77,150-byte
-        // listing with room for 121 of them.
-        let wide = " i32".repeat(1000);
-        let source = format!(
-            "(module (import \"env\" \"f\" (func $f (param i32))) (memory 1) (func (export \"run\") (result{wide}) (local $n i32) (local.set $n (i32.const 256)) (block $done (loop $again (br_if $done (i32.eqz (local.get $n))) (call $f (i32.const 7)) (local.set $n (i32.sub (local.get $n) (i32.const 1))) (br $again))) {}))",
-            "(i32.const -2147483648)".repeat(1000)
-        );
-        let mut record = run_stored(
-            &module(&source),
-            json!({"export": "run",
-            "imports": [{"module": "env", "field": "f", "results": []}], "memory_reads": full_reads()}),
-        );
-        assert_eq!(
-            record["outcome"]["status"], "returned",
-            "{}",
-            record["outcome"]
-        );
-        let steps = record["size_trimmed"].to_string();
-        assert!(steps.contains("results: first 64 of 1000"), "{steps}");
-        assert_eq!(record["results"].as_array().unwrap().len(), 64);
-        let kept = record["import_calls"].as_array().unwrap().len();
-        assert!(kept > 64, "only {kept} calls kept: {steps}");
-        assert!(kept < 256, "every call fit: {steps}");
-        assert!(
-            steps.contains(&format!("import_calls: first {kept} of 256 recorded calls")),
-            "{steps}"
-        );
-        assert_eq!(record["import_calls_truncated"], true);
-        assert!(listed_len(&record) <= RECORD_INLINE_BUDGET);
-        // The prefix is the longest that fits: every call has the same
-        // argument, so the next one differs from the last kept only in its
-        // sequence number.
-        let calls = record["import_calls"].as_array_mut().unwrap();
-        let mut next = calls[kept - 1].clone();
-        next["sequence"] = json!(kept);
-        calls.push(next);
-        assert!(listed_len(&record) > RECORD_INLINE_BUDGET);
-    }
-
-    #[test]
-    fn only_steps_that_removed_something_are_recorded() {
-        // A record over the budget only through its request echo recorded
-        // "import_calls: 0 of 0" too, and a function with no parameters or
-        // results could be "replaced by its counts".
-        let writes = (0..16)
-            .map(|index| json!({"offset": index * 16384, "hex": "ab".repeat(16384)}))
-            .collect::<Vec<_>>();
-        let record = run_stored(
-            &module("(module (memory 8) (func (export \"run\")))"),
-            json!({"export": "run", "memory_writes": writes}),
-        );
-        assert_eq!(
-            record["size_trimmed"],
-            json!(["request: replaced by its size; provenance.inputs_digest names it"])
-        );
-        // That record fits after the request step, so no later guard was
-        // reached. No run stays over the budget past the import-list step
-        // with no calls and an empty type: 32 and 32 imports with names cut
-        // to 128 bytes beside the full reads come to about 100 KB. So a run
-        // record is grown by hand with 40 imports named 2,000 bytes, which
-        // only the last, hard step can bring under the budget.
-        let mut record = run_stored(
-            &module("(module (memory 1) (func (export \"run\")))"),
-            json!({"export": "run", "memory_reads": full_reads()}),
         );
         assert_eq!(record["size_trimmed"], json!([]));
-        assert_eq!(record["import_calls"], json!([]));
-        assert_eq!(record["other_imports"], json!([]));
-        assert_eq!(record["results"], json!([]));
+        assert_eq!(record["results"].as_array().unwrap().len(), 1000);
         assert_eq!(
-            record["function"]["type"],
-            json!({"params": [], "results": []})
+            record["function"]["type"]["params"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1000
         );
-        record["imports"] = json!(
-            (0..40)
-                .map(|index| json!({"function_index": index, "module": "env",
-                    "field": format!("{index}{}", "f".repeat(2000)), "stub": "trap", "calls": 0}))
-                .collect::<Vec<_>>()
-        );
-        fit(&mut record);
-        let kept = record["imports"].as_array().unwrap().len();
-        assert!(kept > 0 && kept < 32, "{kept}");
+        assert_eq!(record["imports"].as_array().unwrap().len(), 40);
+        assert_eq!(record["imports"][0]["module"].as_str().unwrap().len(), 300);
         assert_eq!(
-            record["size_trimmed"],
-            json!([
-                "request: replaced by its size; provenance.inputs_digest names it",
-                "imports: first 32 of 40",
-                format!("imports: first {kept} of 32"),
-            ])
+            record["request"]["memory_writes"][0]["hex"]
+                .as_str()
+                .unwrap()
+                .len(),
+            131_072
         );
-        assert_eq!(
-            record["function"]["type"],
-            json!({"params": [], "results": []})
-        );
-        assert_eq!(record["import_calls_truncated"], false);
-        assert!(listed_len(&record) <= RECORD_INLINE_BUDGET);
-    }
-
-    #[test]
-    fn a_maximal_record_fits_the_mcp_inline_limit() {
-        // 64 KiB of reads and the rest of a large record came to more than the
-        // 128 KiB reb-api mcp inlines, so a Full client got a structural
-        // summary without the bytes.
-        let record = run_stored(&maximal_module(), maximal_body());
-        assert_eq!(
-            record["outcome"]["status"], "returned",
-            "{}",
-            record["outcome"]
-        );
-        let pretty = serde_json::to_string_pretty(&record).unwrap().len();
-        assert!(pretty <= RECORD_INLINE_BUDGET, "{pretty}");
-        assert!(!record["size_trimmed"].as_array().unwrap().is_empty());
-        assert_eq!(record["import_calls_total"], 300);
-        assert_eq!(record["expectation"]["all_match"], true);
-        for read in record["memory_reads"].as_array().unwrap() {
-            assert_eq!(
-                read["hex"].as_str().unwrap().len(),
-                4096,
-                "reads are never trimmed"
-            );
-        }
-        let names = record["imports"].as_array().unwrap();
-        assert!(
-            names
-                .iter()
-                .all(|entry| entry["module"].as_str().unwrap().len() <= MAX_RECORD_NAME + 6)
-        );
-        // A small record is left whole.
-        let small = run_blocking_record(&request(json!({})).0, request(json!({})).1);
-        assert_eq!(small["size_trimmed"], json!([]));
+        assert_eq!(record["memory_snapshot"], Value::Null);
     }
 
     #[test]
@@ -3290,9 +3114,9 @@ mod tests {
                 "memory_reads":[{"offset":0,"length":1},{"offset":1,"length":1}],"expect":{"memory":memory}})
         };
         let one_each = body(json!([{"read":0,"hex":"53"},{"read":1,"hex":"45"}]));
-        assert!(Request::parse(&serde_json::to_vec(&one_each).unwrap()).is_ok());
+        assert!(Request::parse(&serde_json::to_vec(&one_each).unwrap()[..]).is_ok());
         let guesses = body(json!([{"read":0,"hex":"52"},{"read":0,"hex":"53"}]));
-        let error = Request::parse(&serde_json::to_vec(&guesses).unwrap()).unwrap_err();
+        let error = Request::parse(&serde_json::to_vec(&guesses).unwrap()[..]).unwrap_err();
         assert!(
             error.message.contains("one expected memory entry per read"),
             "{}",
@@ -3301,7 +3125,7 @@ mod tests {
     }
 
     #[test]
-    fn recorded_import_results_are_capped() {
+    fn recorded_import_calls_keep_every_result() {
         let values = (0..40)
             .map(|_| json!({"type":"i64","value":"9"}))
             .collect::<Vec<_>>();
@@ -3315,10 +3139,7 @@ mod tests {
             result["outcome"]
         );
         let call = &result["import_calls"][0];
-        assert_eq!(
-            call["results"].as_array().unwrap().len(),
-            MAX_RECORDED_RESULTS
-        );
-        assert_eq!(call["results_truncated"], true);
+        assert_eq!(call["results"].as_array().unwrap().len(), 40);
+        assert_eq!(call["results_truncated"], false);
     }
 }

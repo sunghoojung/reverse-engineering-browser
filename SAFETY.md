@@ -344,11 +344,12 @@ it.
   its outcome, trap kind, fuel used, import call count and arguments, memory
   growth, timing, and the answer to repeated expectations. No subset of a run's
   record is safe to show below Full access. So an agent can run captured code,
-  or read stored runs (`get_wasm_runs`), only at Full access
-  (`--permission full`, which sets `--allow-content`), and running also needs
-  `--allow-effects` and `confirm_offline_execution`. At Read only, Ask for
-  actions and Auto-approve actions neither tool is listed, and a call is refused
-  before anything is sent.
+  or read stored runs (`get_wasm_runs`) and the memory they read
+  (`get_wasm_run_memory`), only at Full access (`--permission full`, which
+  sets `--allow-content`), and running also needs `--allow-effects` and
+  `confirm_offline_execution`. At Read only, Ask for actions and Auto-approve
+  actions none of these tools is listed, and a call is refused before anything
+  is sent.
 
 - The native Console defaults to a separate disposable browser profile. Explicit
   Live capture mode additionally requires a specifically selected native document

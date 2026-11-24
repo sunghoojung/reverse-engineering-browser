@@ -3,29 +3,28 @@
   'use strict';
   const profile = 'reb-declared-metadata-v1';
   const facets = ['artifacts', 'coverage', 'events', 'gaps', 'provenance', 'relationships', 'selection'];
-  const inputLimit = 4194304;
-  const outputLimit = 524288;
   const stableId = (value,prefix) => typeof value==='string' && value.length===prefix.length+64 && value.startsWith(prefix) && /^[a-f0-9]{64}$/.test(value.slice(prefix.length));
   const packageId = value => stableId(value,'reb-package-v1:sha256:');
   const statuses = ['equal_declared_metadata','changed_declared_metadata','left_only','right_only'];
   const limitations = ['untrusted_input','authenticity_not_established','artifact_bytes_not_present_not_reverified','capture_configuration_unknown','observer_regime_unknown','historical_epochs_unknown','behavioral_equivalence_not_established','timing_equivalence_not_established'];
-  const integer = (value, maximum) => Number.isSafeInteger(value) && value >= 0 && value <= maximum;
+  // Packages and comparisons have no record or row limit, so a count is any safe integer.
+  const integer = (value, maximum = Number.MAX_SAFE_INTEGER) => Number.isSafeInteger(value) && value >= 0 && value <= maximum;
   const object = value => value && typeof value === 'object' && !Array.isArray(value);
   const summary = value => object(value) && (value.kind === 'scalar'
-    ? value.value === null || typeof value.value === 'boolean' || Number.isSafeInteger(value.value) || typeof value.value === 'string' && value.value.length <= 4096
-    : ['object', 'array'].includes(value.kind) && integer(value.count, 4096));
+    ? value.value === null || typeof value.value === 'boolean' || Number.isSafeInteger(value.value) || typeof value.value === 'string'
+    : ['object', 'array'].includes(value.kind) && integer(value.count));
   function validResult(value, offset, leftId, rightId) {
     if (!object(value) || value.protocol_version !== 1 || value.normalization_profile !== profile || !stableId(value.comparison_id,'reb-comparison-v1:sha256:') ||
       value.left_package_id !== leftId || value.right_package_id !== rightId || !packageId(leftId) || !packageId(rightId) ||
       JSON.stringify(value.facets) !== JSON.stringify(facets) || JSON.stringify(value.limitations) !== JSON.stringify(limitations) || value.package_metadata_equal !== (leftId===rightId) || ![true, false, null].includes(value.selected_metadata_equal) ||
       !object(value.comparability) || value.comparability.observer_regime !== 'unknown' || value.comparability.capture_coverage !== 'unknown_or_partial' ||
       value.comparability.behavior !== 'not_established' || value.comparability.timing !== 'not_established' ||
-      !object(value.page) || value.page.offset !== offset || value.page.limit !== 50 || !integer(value.page.total, 2181) ||
+      !object(value.page) || value.page.offset !== offset || value.page.limit !== 50 || !integer(value.page.total) ||
       !Array.isArray(value.rows) || value.rows.length > 50 || value.rows.length !== Math.min(50, Math.max(0, value.page.total - offset)) ||
       value.page.next_offset !== (offset + value.rows.length < value.page.total ? offset + value.rows.length : null) ||
-      !object(value.counts) || !['equal_declared_metadata', 'changed_declared_metadata', 'left_only', 'right_only', 'ambiguous_cross_scope'].every(k => integer(value.counts[k], 2181))) return false;
+      !object(value.counts) || !['equal_declared_metadata', 'changed_declared_metadata', 'left_only', 'right_only', 'ambiguous_cross_scope'].every(k => integer(value.counts[k]))) return false;
     const coverage = v => object(v) && ['complete','empty'].includes(v.selection) && ['events','artifacts'].every(section => {
-      const c=v[section]; return object(c) && integer(c.selected_count,section==='events'?1024:64) && ['complete','not_requested'].includes(c.selection_state) && ['complete','not_read'].includes(c.source_scan) && ['unknown','partial'].includes(c.capture_state) && Array.isArray(c.limitations) && c.limitations.length<=11 && c.limitations.every(text=>typeof text==='string' && /^[a-z_]{1,64}$/.test(text));
+      const c=v[section]; return object(c) && integer(c.selected_count) && ['complete','not_requested'].includes(c.selection_state) && ['complete','not_read'].includes(c.source_scan) && ['unknown','partial'].includes(c.capture_state) && Array.isArray(c.limitations) && c.limitations.length<=11 && c.limitations.every(text=>typeof text==='string' && /^[a-z_]{1,64}$/.test(text));
     });
     if (!object(value.coverage) || !coverage(value.coverage.left) || !coverage(value.coverage.right) ||
       value.counts.equal_declared_metadata+value.counts.changed_declared_metadata+value.counts.left_only+value.counts.right_only!==value.page.total ||
@@ -44,8 +43,8 @@
     if (!value.rows.every(row => {
       if (!object(row) || !stableId(row.row_id,'reb-comparison-row-v1:sha256:') || !facets.includes(row.facet) ||
         !statuses.includes(row.status) || !['declared_scoped_key','selected_facet','ambiguous_cross_scope','unmatched'].includes(row.alignment) ||
-        !ref(row.left,leftId,row.facet) || !ref(row.right,rightId,row.facet) || !integer(row.cross_scope_candidates,1024) || !integer(row.differences_omitted,64) ||
-        !Array.isArray(row.differences) || row.differences.length>12 || !row.differences.every(d=>object(d) && typeof d.field==='string' && d.field.length<=64 && summary(d.left) && summary(d.right) && !(d.left.kind==='scalar' && d.right.kind==='scalar' && d.left.value===d.right.value)) || new Set(row.differences.map(d=>d.field)).size!==row.differences.length) return false;
+        !ref(row.left,leftId,row.facet) || !ref(row.right,rightId,row.facet) || !integer(row.cross_scope_candidates) || row.differences_omitted!==0 ||
+        !Array.isArray(row.differences) || !row.differences.every(d=>object(d) && typeof d.field==='string' && d.field.length<=64 && summary(d.left) && summary(d.right) && !(d.left.kind==='scalar' && d.right.kind==='scalar' && d.left.value===d.right.value)) || new Set(row.differences.map(d=>d.field)).size!==row.differences.length) return false;
       const pair=row.left!==null && row.right!==null, record=['events','artifacts'].includes(row.facet);
       if (pair) {
         if (record && JSON.stringify(evidencePackageKey(row.facet==='events'?'event':'artifact',row.left.key))!==JSON.stringify(evidencePackageKey(row.facet==='events'?'event':'artifact',row.right.key))) return false;
@@ -68,7 +67,7 @@
   }
   async function readResponse(response,signal) {
     if (!response.ok) throw new ComparisonFailure(response.status===503?'busy':response.status===408?'deadline':'rejected');
-    const bytes = await evidencePackageReadBytes(response,outputLimit,signal);
+    const bytes = await evidencePackageReadBytes(response,Infinity,signal);
     return JSON.parse(new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(bytes));
   }
   // No deadline: a comparison shows its elapsed seconds until it finishes or
@@ -85,8 +84,8 @@
     };
     async function compare(offset = 0) {
       if (disposed || model.busy) return false;
-      if (!integer(offset,2181) || model.files.some(file => !file || !integer(file.size,inputLimit) || file.size === 0)) {
-        model.message = 'Choose two nonempty metadata JSON files, each at most 4 MiB.'; publish(); return false;
+      if (!integer(offset) || model.files.some(file => !file || !integer(file.size) || file.size === 0)) {
+        model.message = 'Choose two nonempty metadata JSON files.'; publish(); return false;
       }
       retire(); const owned = revision; const files = [...model.files]; const abort = new AbortController();
       const current=()=>owned===revision && !disposed && !abort.signal.aborted;
@@ -105,7 +104,7 @@
             if (!current()) return null;
             const bytes = new Uint8Array(await file.arrayBuffer());
             if (!current()) return null;
-            if (bytes.length !== file.size || bytes.length > inputLimit) throw new Error('A selected file changed or exceeded its limit.');
+            if (bytes.length !== file.size) throw new Error('A selected file changed while it was read.');
             originals.push(new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(bytes));
           }
           // Preserve original duplicate keys and numeric tokens for the backend.
@@ -124,7 +123,7 @@
         if (!current() || !result) return false;
         model.result = result; model.message = 'Declared metadata compared. Capture, behavior and timing equivalence remain unknown.'; return true;
       } catch (error) {
-        const reason = error instanceof ComparisonFailure ? ({busy:'The local comparison service is busy or unavailable. Retry only when you choose.',deadline:'The request did not reach the local service in time. No new result was applied.',rejected:'The comparison request was rejected. Review both metadata packages and their limits.'})[error.kind] : null;
+        const reason = error instanceof ComparisonFailure ? ({busy:'The local comparison service is busy or unavailable. Retry only when you choose.',deadline:'The request did not reach the local service in time. No new result was applied.',rejected:'The comparison request was rejected. Review both metadata packages.'})[error.kind] : null;
         if (owned === revision && !disposed) model.message = (reason || 'Comparison unavailable or incompatible. Check the selected files and local service.') + ' The previous result is retained.';
         return false;
       } finally {
@@ -185,7 +184,6 @@
         if (row.cross_scope_candidates) detail.append(node('p',`${row.cross_scope_candidates} coincident local identifiers in other sessions. No records were paired.`,'package-note'));
         if (row.declared_content_hash_match !== null) detail.append(node('p',`Declared artifact hash and size ${row.declared_content_hash_match?'match':'differ'}. Raw bytes were not reverified.`,'package-note'));
         for (const d of row.differences) detail.append(node('p',`${d.field}: ${show(d.left)} → ${show(d.right)}`,'package-note'));
-        if (row.differences_omitted) detail.append(node('p',`${row.differences_omitted} additional changed fields omitted. Inspect the referenced originals.`,'package-note'));
         detail.append(node('p',row.row_id,'package-note'));item.append(detail);list.append(item);
       }
       results.append(list);page.textContent=result.page.total ? `${result.page.offset+1}–${result.page.offset+result.rows.length} of ${result.page.total}` : 'No selected records';

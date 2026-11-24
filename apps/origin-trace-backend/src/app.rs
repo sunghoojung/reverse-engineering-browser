@@ -36,7 +36,7 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
     time::Duration,
 };
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 const UI_ASSETS: [&str; 86] = [
     "index.html",
@@ -514,20 +514,20 @@ impl App {
         .await
         .map_err(|_| Error::new(500, "Package validator failed"))?
     }
-    async fn float32_operation(&self, bytes: Vec<u8>) -> Result<Vec<u8>> {
-        let permit = tokio::time::timeout(Duration::from_secs(1), self.io.clone().acquire_owned())
-            .await
-            .map_err(|_| {
-                Error::new(408, "Float32 admission deadline exceeded").with_code(Code::Timeout)
-            })?
-            .map_err(|_| {
-                Error::new(503, "Float32 diagnostics unavailable")
-                    .with_code(Code::DependencyUnavailable)
-            })?;
+    /// A comparison waits for a reader with no deadline and runs over every
+    /// sample, however many; a request that goes away sets the flag it
+    /// polls, so its reader comes back promptly.
+    async fn float32_operation(&self, request: float32::Request) -> Result<Vec<u8>> {
+        let permit = self.io.clone().acquire_owned().await.map_err(|_| {
+            Error::new(503, "Float32 diagnostics unavailable")
+                .with_code(Code::DependencyUnavailable)
+        })?;
         let root = self.options.artifacts.clone();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let _cancel = CancelOnDrop(cancelled.clone());
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            float32::compare_bytes(&root, &bytes)
+            float32::compare(&root, &request, &cancelled)
         })
         .await
         .map_err(|_| Error::new(500, "Float32 diagnostic task failed"))?
@@ -722,6 +722,26 @@ impl App {
             let root = self.options.artifacts.clone();
             let value = self
                 .blocking(move || crate::wasm_run::list(&root, artifact.as_deref(), limit as usize))
+                .await?;
+            return Ok(axum::Json(value).into_response());
+        }
+        if path == "/api/wasm/runs/memory" {
+            let q = Query::new(raw_query);
+            q.only(&["run_id", "read", "start", "length"], &[])?;
+            let run_id = q.required("run_id")?.to_owned();
+            if run_id.len() > 128
+                || !run_id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            {
+                return Err(Error::bad("run_id is invalid"));
+            }
+            let read = q.number("read", None, 64, false)? as usize;
+            let start = q.number("start", Some("0"), 64, false)?;
+            let length = q.number("length", Some("32768"), 64, true)?;
+            let root = self.options.artifacts.clone();
+            let value = self
+                .blocking(move || crate::wasm_run::memory(&root, &run_id, read, start, length))
                 .await?;
             return Ok(axum::Json(value).into_response());
         }
@@ -990,8 +1010,9 @@ impl App {
                 {
                     return Ok(not_modified(tag));
                 }
-                // These documents are at most 1–2 MiB. Do not wait behind VM
-                // analysis or Wasm inspection, which hold the shared reader permits.
+                // These are the researcher's own documents, read whole. Do not
+                // wait behind VM analysis or Wasm inspection, which hold the
+                // shared reader permits.
                 let (value, digest) = tokio::task::spawn_blocking(move || {
                     store.load().map(|value| {
                         // A store replaced outside this backend can repeat a
@@ -1363,37 +1384,23 @@ impl App {
                 if matches_etag(headers, etag.as_deref()) {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
-                if filtered {
-                    let filter = artifact_query::ArtifactFilter::parse(&q)?;
-                    let cursor = event_query::cursor(&q)?;
-                    let root = self.options.artifacts.clone();
-                    let (page, filter) = self
-                        .blocking(move || {
-                            artifact_query::read(&root, &filter, cursor, limit)
-                                .map(|page| (page, filter))
-                        })
-                        .await?;
-                    let mut result = json!({"count":page.records.len(),"artifact_receiver_configured":configured,"artifact_receiver_connected":connected});
-                    result["query"] = artifact_query::query_document(&page, &filter, cursor, limit);
-                    result["artifacts"] = Value::Array(page.records);
-                    result
-                } else {
-                    let root = self.options.artifacts.clone();
-                    let mut artifacts = self
-                        .blocking(move || evidence::artifacts(&root, limit))
-                        .await?;
-                    for artifact in &mut artifacts {
-                        artifact
-                            .as_object_mut()
-                            .expect("Validated artifact object")
-                            .retain(|key, _| {
-                                evidence::PUBLIC_ARTIFACT_FIELDS.contains(&key.as_str())
-                            });
-                    }
-                    let mut result = json!({"count":artifacts.len(),"artifact_receiver_configured":configured,"artifact_receiver_connected":connected});
-                    result["artifacts"] = Value::Array(artifacts);
-                    result
-                }
+                // Every read, filtered or not, is one cursor page of the
+                // manifest, so the newest records lead to older ones through
+                // query.next_before. Earlier revisions answered an unfiltered
+                // read with the newest 500 (at most 5,000) and no cursor.
+                let filter = artifact_query::ArtifactFilter::parse(&q)?;
+                let cursor = event_query::cursor(&q)?;
+                let root = self.options.artifacts.clone();
+                let (page, filter) = self
+                    .blocking(move || {
+                        artifact_query::read(&root, &filter, cursor, limit)
+                            .map(|page| (page, filter))
+                    })
+                    .await?;
+                let mut result = json!({"count":page.records.len(),"artifact_receiver_configured":configured,"artifact_receiver_connected":connected});
+                result["query"] = artifact_query::query_document(&page, &filter, cursor, limit);
+                result["artifacts"] = Value::Array(page.records);
+                result
             }
             "/api/events/wait" => {
                 q.only(&event_query::EVENT_QUERY_KEYS, &["limit", "timeout_ms"])?;
@@ -2590,12 +2597,6 @@ impl App {
     }
     async fn post(&self, path: &str, value: &Value) -> Result<Value> {
         match path {
-            "/api/decoder/actions" => self.decoder.action(value).await,
-            "/api/api-collection/actions" => {
-                let store = self.collection.clone();
-                let value = value.clone();
-                self.blocking(move || store.replace(&value)).await
-            }
             "/api/live-wasm/actions" => self.live_wasm.action(value),
             "/api/native-debugger/actions" => {
                 // The command blocks on the peer socket, so it does not run
@@ -2944,36 +2945,29 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                 .and_then(|v| v.parse::<usize>().ok())
                 .filter(|n| *n > 0 && *n <= maximum)
                 .ok_or_else(|| Error::bad("The request body size is invalid"))?;
-            // Comparison bodies can contain two 4 MiB originals. Reserve the
-            // existing package permit before ingesting them, with no body queue.
-            // Keep this permit through blocking work; body timeout/disconnect or
-            // dispatch admission failure releases it without starting comparison.
+            // A comparison holds two packages of any size, and a pack request
+            // its whole document, so at most two such bodies are read at a
+            // time: a later one waits for a package permit before its body is
+            // read, with no admission deadline. The permit is kept through the
+            // blocking work; a body timeout or disconnect releases it without
+            // starting any. Earlier revisions refused a third with HTTP 503.
             let comparison_permit = if matches!(
                 path,
                 "/api/evidence/packages/compare"
                     | "/api/analysis/vm/packs/apply"
                     | "/api/analysis/vm/packs/compare"
             ) {
-                Some(
-                    app.package_io
-                        .clone()
-                        .try_acquire_owned()
-                        .map_err(|error| match error {
-                            TryAcquireError::NoPermits => {
-                                Error::new(503, "Comparison capacity is full; retry explicitly")
-                                    .with_code(Code::ResourceLimit)
-                            }
-                            TryAcquireError::Closed => {
-                                Error::new(503, "Package operations are unavailable")
-                                    .with_code(Code::DependencyUnavailable)
-                            }
-                        })?,
-                )
+                Some(app.package_io.clone().acquire_owned().await.map_err(|_| {
+                    Error::new(503, "Package operations are unavailable")
+                        .with_code(Code::DependencyUnavailable)
+                })?)
             } else {
                 None
             };
-            // A pack request and an analyst run's evidence snapshot parse as
-            // they arrive, so the body is held once, as its parsed value.
+            // A pack request, an analyst run's evidence snapshot, a decoder's
+            // input, a Wasm run, a Binary32 request and a Collection
+            // replacement parse as they arrive, so the body is held once, as
+            // its parsed value.
             if matches!(
                 path,
                 "/api/analysis/vm/packs/apply" | "/api/analysis/vm/packs/compare"
@@ -2987,7 +2981,26 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                 .await
                 .map(|value| axum::Json(value).into_response());
             }
-            if path == "/api/local-analyst/actions" {
+            // Typed parse with unknown and duplicate keys refused.
+            if path == "/api/wasm/runs" {
+                let request = streamed(body, length, crate::wasm_run::Request::parse).await?;
+                return app
+                    .wasm_runs
+                    .run(request)
+                    .await
+                    .map(|value| axum::Json(value).into_response());
+            }
+            if path == "/api/float32/compare" {
+                let request = streamed(body, length, float32::parse_reader).await?;
+                return app
+                    .float32_operation(request)
+                    .await
+                    .map(|bytes| ([("content-type", "application/json")], bytes).into_response());
+            }
+            if matches!(
+                path,
+                "/api/local-analyst/actions" | "/api/decoder/actions" | "/api/api-collection/actions"
+            ) {
                 let value = streamed(body, length, |reader| {
                     let value: Value = serde_json::from_reader(reader)
                         .map_err(|_| Error::bad("The request body is malformed JSON"))?;
@@ -2997,10 +3010,15 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                     Ok(value)
                 })
                 .await?;
-                return app
-                    .analyst_action(value)
-                    .await
-                    .map(|value| axum::Json(value).into_response());
+                return match path {
+                    "/api/decoder/actions" => app.decoder.action(&value).await,
+                    "/api/local-analyst/actions" => app.analyst_action(value).await,
+                    _ => {
+                        let store = app.collection.clone();
+                        app.blocking(move || store.replace(&value)).await
+                    }
+                }
+                .map(|value| axum::Json(value).into_response());
             }
             let bytes = tokio::time::timeout(body_deadline(length), to_bytes(body, maximum))
                 .await
@@ -3019,20 +3037,6 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                     .package_operation(Vec::from(bytes), operation, comparison_permit)
                     .await
                     .map(|bytes| ([("content-type", "application/json")], bytes).into_response());
-            }
-            if path == "/api/float32/compare" {
-                return app
-                    .float32_operation(Vec::from(bytes))
-                    .await
-                    .map(|bytes| ([("content-type", "application/json")], bytes).into_response());
-            }
-            // Typed parse with unknown and duplicate keys refused.
-            if path == "/api/wasm/runs" {
-                return app
-                    .wasm_runs
-                    .run(&bytes)
-                    .await
-                    .map(|value| axum::Json(value).into_response());
             }
             // Typed parse of up to 64 MiB of numbers, never a generic JSON tree.
             if path == "/api/graph-layout" {
@@ -3591,7 +3595,14 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn float32_admission_reasons_and_permit_release() {
+    async fn float32_waits_for_a_reader_and_gives_it_back() {
+        let request = || {
+            float32::parse_reader(
+                br#"{"protocol_version":1,"input":{"representation":"float32-le","channels":1,"frames":1,"source":{"kind":"bits","words":["3f800000"]}},"reference":null,"tolerances":{"absolute":0,"relative":0,"ulps":0},"detail":{"start":0,"limit":1}}"#
+                    .as_slice(),
+            )
+            .unwrap()
+        };
         for closed in [false, true] {
             let root = tempfile::tempdir().unwrap();
             let mut options = Options::parse_from(["origin-trace-backend"]);
@@ -3601,33 +3612,43 @@ mod tests {
             let permit = app.io.clone().acquire_many_owned(4).await.unwrap();
             if closed {
                 app.io.close();
-            }
-            let error = app.float32_operation(b"{}".to_vec()).await.unwrap_err();
-            assert_eq!(error.status, if closed { 503 } else { 408 });
-            assert_eq!(
-                serde_json::to_value(&error).unwrap()["code"],
-                if closed {
-                    "dependency_unavailable"
-                } else {
-                    "timeout"
-                }
-            );
-            drop(permit);
-            if !closed {
+                let error = app.float32_operation(request()).await.unwrap_err();
+                assert_eq!(error.status, 503);
                 assert_eq!(
-                    app.float32_operation(b"{}".to_vec())
-                        .await
-                        .unwrap_err()
-                        .status,
-                    400
+                    serde_json::to_value(&error).unwrap()["code"],
+                    "dependency_unavailable"
                 );
+            } else {
+                // Past the second a busy reader pool once allowed, the
+                // comparison is still waiting, and runs once a reader frees.
+                let waiting = tokio::spawn({
+                    let app = app.clone();
+                    async move { app.float32_operation(request()).await }
+                });
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+                assert!(!waiting.is_finished());
+                drop(permit);
+                let bytes = waiting.await.unwrap().unwrap();
+                let result: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(result["detail"]["rows"][0]["input"]["bits"], "3f800000");
+                assert_eq!(app.io.available_permits(), 4);
+                // A request that goes away leaves the queue with no permit held.
+                let held = app.io.clone().acquire_many_owned(4).await.unwrap();
+                let abandoned = tokio::spawn({
+                    let app = app.clone();
+                    async move { app.float32_operation(request()).await }
+                });
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                abandoned.abort();
+                assert!(abandoned.await.unwrap_err().is_cancelled());
+                drop(held);
                 assert_eq!(app.io.available_permits(), 4);
             }
             app.stop().await;
         }
     }
     #[tokio::test]
-    async fn comparison_prebody_admission_rejects_saturation_and_releases_cancelled_bodies() {
+    async fn comparison_prebody_admission_waits_for_a_permit_and_releases_cancelled_bodies() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let root = tempfile::tempdir().unwrap();
         let mut options = Options::parse_from(["origin-trace-backend"]);
@@ -3657,9 +3678,10 @@ mod tests {
                 .unwrap();
             }
         };
+        // A declared 8 MiB keeps the body deadline at its five-second floor.
+        let declared = 8 << 20;
         let header = format!(
-            "POST /api/evidence/packages/compare HTTP/1.1\r\nHost: {address}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{{",
-            evidence_comparison::MAX_REQUEST_BYTES
+            "POST /api/evidence/packages/compare HTTP/1.1\r\nHost: {address}\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n{{"
         );
         let mut first = tokio::net::TcpStream::connect(address).await.unwrap();
         first.write_all(header.as_bytes()).await.unwrap();
@@ -3669,23 +3691,8 @@ mod tests {
         wait_permits(0).await;
         // The asserted permits are an admission barrier, not a timing sleep.
         // These stalled requests have supplied one byte, not two large bodies.
-        let request = Request::builder()
-            .method("POST")
-            .uri("/api/evidence/packages/compare")
-            .header("host", address.to_string())
-            .header("content-length", evidence_comparison::MAX_REQUEST_BYTES)
-            .body(Body::empty())
-            .unwrap();
-        let rejected = handle(State(app.clone()), request).await;
-        assert_eq!(rejected.status(), 503);
-        let value: Value =
-            serde_json::from_slice(&to_bytes(rejected.into_body(), 4096).await.unwrap()).unwrap();
-        assert_eq!(value["code"], "resource_limit");
-        assert_eq!(app.package_io.available_permits(), 0);
-        // Cancellation releases a pre-body lease, allowing an explicit new call.
-        first.shutdown().await.unwrap();
-        drop(first);
-        wait_permits(1).await;
+        // A third comparison waits for a permit, with no admission deadline,
+        // instead of the 503 that saturation once returned.
         let p: Value =
             serde_json::from_slice(include_bytes!("../assets/evidence-packages/golden-v1.json"))
                 .unwrap();
@@ -3697,7 +3704,14 @@ mod tests {
             .header("content-length", body.len())
             .body(Body::from(body))
             .unwrap();
-        assert_eq!(handle(State(app.clone()), request).await.status(), 200);
+        let waiting = tokio::spawn(handle(State(app.clone()), request));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!waiting.is_finished());
+        assert_eq!(app.package_io.available_permits(), 0);
+        // Cancellation releases a pre-body lease, and the waiting comparison runs.
+        first.shutdown().await.unwrap();
+        drop(first);
+        assert_eq!(waiting.await.unwrap().status(), 200);
         assert_eq!(app.package_io.available_permits(), 1);
         // The second stalled body reaches its real body deadline and releases
         // the lease, without blocking or launching any comparison worker.

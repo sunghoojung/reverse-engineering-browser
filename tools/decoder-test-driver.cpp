@@ -1,5 +1,5 @@
-// Test-only parser driver. Production CLI resource limits remain unchanged.
-// ASan needs a large virtual shadow map, incompatible with the CLI's RLIMIT_AS.
+// Test-only parser driver: the transform path of the production CLI without
+// its process setup, so sanitizers see only the library.
 #include "reb/decoder.hpp"
 
 #include <array>
@@ -24,10 +24,6 @@ int main(int argc, char** argv) {
     if (count <= 0) {
       break;
     }
-    const auto size = static_cast<std::size_t>(count);
-    if (size > reb::kDecoderMaxInputBytes - input.size()) {
-      return 2;
-    }
     input.insert(input.end(), chunk.begin(), chunk.begin() + count);
   }
   if (!std::cin.eof()) {
@@ -35,7 +31,7 @@ int main(int argc, char** argv) {
   }
   const auto result = reb::TransformBytes(*operation, input);
   if (result.status != reb::DecoderStatus::kOk) {
-    return result.status == reb::DecoderStatus::kOutputLimit ? 3 : 2;
+    return 2;
   }
   std::cout.write(reinterpret_cast<const char*>(result.output.data()),
                   static_cast<std::streamsize>(result.output.size()));

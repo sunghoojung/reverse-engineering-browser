@@ -13,8 +13,6 @@ pub(crate) const SITE_LIMIT: usize = 256;
 const V1_SITE_LIMIT: u8 = 8;
 const V1_SITE_SAMPLES: u32 = 64;
 const V1_SAMPLES: u32 = 256;
-/// Refused interpreter-candidate sites listed by the arming export.
-const MAX_REFUSED: usize = 64;
 
 /// The text V8 compiles for an artifact: strict UTF-8 without one leading
 /// U+FEFF, which Blink's decoder strips. Offsets into it are UTF-16 code
@@ -496,8 +494,6 @@ pub(super) fn arming(artifact: &Value, bytes: &[u8], roles: &Roles) -> Option<Va
             })),
         }
     }
-    let omitted = refused.len().saturating_sub(MAX_REFUSED);
-    refused.truncate(MAX_REFUSED);
     // base::JSONWriter writes sorted keys without whitespace; serde_json
     // maps are sorted, so the compact rendering is the canonical file.
     let file = (!sites.is_empty())
@@ -508,7 +504,8 @@ pub(super) fn arming(artifact: &Value, bytes: &[u8], roles: &Roles) -> Option<Va
         "source_length": key.as_ref().map(|key| key.length),
         "sites": sites,
         "refused": refused,
-        "omitted_refused_count": omitted,
+        // Every refused site is listed; earlier revisions listed 64.
+        "omitted_refused_count": 0,
         "file": file,
     }))
 }

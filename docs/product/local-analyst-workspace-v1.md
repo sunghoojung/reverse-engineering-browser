@@ -66,8 +66,7 @@ Scripts run inside an async function and receive `WB`, `Utils`, and a
 
 - `getVar(name)` for one private per-run variable snapshot;
 - `safeJsonStringify(value)`, which handles circular, BigInt and accessor
-  values, keeps strings whole, and marks values nested deeper than 256 levels;
-  and
+  values and keeps strings and every nesting level whole; and
 - `iterate(value)` for arrays, typed arrays, sets, maps, and own enumerable
   data properties.
 
@@ -106,8 +105,9 @@ heap, console entries, the result, the error and the run history have no
 limit. Library document `limits` is the empty object; a document an earlier
 host wrote with its limits still reads, and the next save records `{}`.
 Folder hierarchies are checked in linear time, so a cycle is refused at any
-depth. The only nesting bound is the serializer's 256 levels, which marks
-deeper values instead of overflowing the stack.
+depth. The serializer copies and writes values with explicit stacks, so a
+result or log nested any number of levels deep is written whole instead of
+overflowing the stack.
 
 Long lists show everything a page at a time: each folder of the tree lists
 200 entries before a **Show more** row, run history lists 200 runs before

@@ -100,6 +100,38 @@ final class StandIn: @unchecked Sendable {
   }
 }
 
+// A conversation past the 32 MiB the file once kept, with rows longer than a
+// page chunk and a torn line: every row is still there, in order, and the
+// unreadable line is counted.
+func checkLongTranscript(_ directory: URL) {
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let transcript = try! AgentTranscript(directory: directory, sessionKey: "long")
+  let filler = String(repeating: "x", count: 1024 * 1024)
+  for index in 0..<40 { try! transcript.append(["role": "user", "text": "\(index):\(filler)"]) }
+  let long = String(repeating: "y", count: 3 * 1024 * 1024)
+  try! transcript.append(["role": "tool", "name": "get_artifact_text", "result": long])
+  let file = directory.appendingPathComponent("session-long.jsonl")
+  let handle = try! FileHandle(forWritingTo: file)
+  try! handle.seekToEnd()
+  try! handle.write(contentsOf: Data("{\"role\":\"user\",\"te\n".utf8))
+  try! handle.close()
+  let reopened = try! AgentTranscript(directory: directory, sessionKey: "long")
+  try! reopened.append(["role": "user", "text": "last"])
+  var rows: [[String: Any]] = [], before: Int? = nil, unreadable = 0, pages = 0
+  repeat {
+    let page = reopened.page(before: before)
+    rows.insert(contentsOf: page.rows, at: 0)
+    unreadable += page.unreadable
+    before = page.before
+    pages += 1
+  } while before != nil && pages < 1000
+  check(rows.count == 42, "every row of a long conversation is kept (\(rows.count))")
+  check(!rows.contains { $0["role"] as? String == "notice" }, "no row is replaced by a removal notice")
+  check((0..<40).allSatisfy { (rows[$0]["text"] as? String)?.hasPrefix("\($0):") == true }, "rows stay in order")
+  check((rows[40]["result"] as? String)?.count == long.count, "a row longer than a page chunk is read whole")
+  check(rows[41]["text"] as? String == "last" && unreadable == 1, "a torn line is counted, not dropped silently")
+}
+
 func json(_ object: Any) -> String { String(decoding: try! JSONSerialization.data(withJSONObject: object), as: UTF8.self) }
 
 nonisolated(unsafe) var backendProcessForFailure: Process?
@@ -241,6 +273,7 @@ enum AgentCoreChecks {
       "a paused page value is not written to the transcript")
     check((try! FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as! NSNumber).intValue == 0o600, "the transcript is user-only")
     check((try! FileManager.default.attributesOfItem(atPath: transcripts.path)[.posixPermissions] as! NSNumber).intValue == 0o700, "its directory is user-only")
+    checkLongTranscript(root.appendingPathComponent("long-transcript", isDirectory: true))
     agent.setPanelVisible(false)
     check(!agent.childIsRunning, "an idle tool server stops when the panel closes")
     let restarted = try! await agent.callTool(name: "get_session_summary", arguments: [:], approved: false)
@@ -367,6 +400,8 @@ enum AgentCoreChecks {
       ("get_wasm_runs", true, .readOnly, [:], refuse),
       ("get_wasm_runs", true, .auto, [:], refuse),
       ("get_wasm_runs", true, .full, [:], .run),
+      ("get_wasm_run_memory", true, .auto, [:], refuse),
+      ("get_wasm_run_memory", true, .full, [:], .run),
       ("search_wasm_inspection", true, .auto, [:], refuse),
       ("search_wasm_inspection", true, .full, [:], .run),
     ]
@@ -452,8 +487,10 @@ enum AgentCoreChecks {
     }
     let headers = AgentProviderRoute.forwarded(["X-Api-Key": "k", "Authorization": "a", "Cookie": "c", "Content-Type": "application/json", "Anthropic-Beta": "b"])
     check(headers == ["content-type": "application/json", "anthropic-beta": "b"], "credentials are never forwarded from the page")
-    let oversized = Data(count: AgentProviderRoute.bodyLimit + 1)
-    check((try? AgentProviderRoute.resolve("https://api.openai.com/v1/responses", method: "POST", standIn: nil)!.request(headers: [:], body: oversized, key: nil)) == nil, "oversized bodies are refused")
+    // A turn past the 32 MiB the proxy once refused is forwarded; the
+    // provider's own limit, if it has one, answers with its status.
+    let large = Data("{\"input\":\"\(String(repeating: "x", count: 40 * 1024 * 1024))\"}".utf8)
+    check((try? AgentProviderRoute.resolve("https://api.openai.com/v1/responses", method: "POST", standIn: nil)!.request(headers: [:], body: large, key: nil))?.httpBody?.count == large.count, "a large turn is forwarded whole")
     check((try? AgentProviderRoute.resolve("https://api.openai.com/v1/responses", method: "POST", standIn: nil)!.request(headers: [:], body: Data("[]".utf8), key: nil)) == nil, "non-object bodies are refused")
     print("PASS agent native: routes, headers and stand-in rules")
   }

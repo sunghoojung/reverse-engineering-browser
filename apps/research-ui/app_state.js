@@ -17,15 +17,7 @@
         updated_at_ms: 0,
         folders: [{id: 1, name: 'API Collection', parent_id: null, variables: []}],
         requests: [],
-        limits: {
-          folders: 32,
-          requests: 128,
-          folder_depth: 4,
-          variables_per_scope: 32,
-          variable_bytes_per_scope: 32 * 1024,
-          request_body_bytes: 64 * 1024,
-          document_bytes: 2 * 1024 * 1024
-        }
+        limits: {}
       });
 
       const emptyLocalAnalystWorkspace = () => ({
@@ -43,21 +35,11 @@
       const ANALYST_LIST_PAGE = 200;
 
       const emptyDecoderEngine = () => ({
-        protocol_version: 1,
+        protocol_version: 2,
         available: false,
         busy: false,
-        limits: {
-          input_bytes: 1024 * 1024,
-          output_bytes: 1024 * 1024,
-          pipeline_steps: 16,
-          retained_bytes: 4 * 1024 * 1024,
-          jwt_bytes: 64 * 1024,
-          secret_bytes: 4 * 1024,
-          json_depth: 64,
-          json_tokens: 100000,
-          operations: [],
-          jwt_algorithms: ['HS256', 'HS384', 'HS512', 'none']
-        }
+        operations: [],
+        jwt_algorithms: ['HS256', 'HS384', 'HS512', 'none']
       });
 
       const state = {
@@ -277,6 +259,9 @@
         decoderSelectedStepId: null,
         decoderNextOperationId: 1,
         decoderPending: false,
+        // The running decoder or JWT request, which Cancel aborts.
+        decoderController: null,
+        jwtController: null,
         decoderView: 'text',
         jwtResult: null,
         jwtPending: false,
@@ -530,6 +515,7 @@
         input: document.querySelector('#decoder-input'),
         inputBadge: document.querySelector('#decoder-input-badge'),
         append: document.querySelector('#decoder-append'),
+        cancel: document.querySelector('#decoder-cancel'),
         useField: document.querySelector('#decoder-use-field'),
         removeAfter: document.querySelector('#decoder-remove-after'),
         reset: document.querySelector('#decoder-reset'),
@@ -549,6 +535,7 @@
         jwtInspect: document.querySelector('#jwt-inspect'),
         jwtVerify: document.querySelector('#jwt-verify'),
         jwtClear: document.querySelector('#jwt-clear'),
+        jwtCancel: document.querySelector('#jwt-cancel'),
         jwtCreateForm: document.querySelector('#jwt-create-form'),
         jwtPayload: document.querySelector('#jwt-payload'),
         jwtAlgorithm: document.querySelector('#jwt-algorithm'),
@@ -557,6 +544,7 @@
         jwtUnsignedRow: document.querySelector('#jwt-unsigned-row'),
         jwtConfirmUnsigned: document.querySelector('#jwt-confirm-unsigned'),
         jwtCreate: document.querySelector('#jwt-create'),
+        jwtCreateCancel: document.querySelector('#jwt-create-cancel'),
         jwtResultMessage: document.querySelector('#jwt-result-message'),
         jwtResultBadge: document.querySelector('#jwt-result-badge'),
         jwtStatus: document.querySelector('#jwt-status'),

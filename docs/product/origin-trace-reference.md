@@ -302,13 +302,13 @@ and comparisons. Traffic prefills only the selected method and URL without query
 headers, cookies, or body content. See
 [Repeater v1](./repeater-v1.md).
 
-API Collection persists up to 128 credential-free request templates in 32
-folders with four bounded hierarchy levels. Root, ancestor-folder,
+API Collection persists request templates in folders, with no limit on
+their number, size or nesting depth. Root, ancestor-folder,
 selected-folder, and request variables resolve in that order before the
 existing Repeater validator runs the request inside the disposable Request Lab
 context. Traffic import copies only method and URL with query and fragment
 removed. It never copies captured headers, cookies, request bodies, or
-credentials. The versioned document is capped at 2 MiB, uses generation-based
+credentials. The versioned document has no size limit, uses generation-based
 conflict rejection, and is atomically replaced with user-only permissions.
 Saved templates persist, while the associated 24-entry and 512-KiB Repeater
 history remains ephemeral and is erased with the Request Lab context. The

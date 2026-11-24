@@ -39,7 +39,6 @@ use wasmparser::{
 pub(crate) mod javascript;
 
 pub(crate) const CLASSIFICATION_VERSION: u32 = 1;
-pub(crate) const MAX_LISTED_SITES: usize = 256;
 const MAX_TRACE_DEPTH: u8 = 16;
 const MAX_EXPRESSION_CHARS: usize = 160;
 /// Fewer equality tests are ordinary branching, not a selector ladder.
@@ -278,9 +277,9 @@ pub(crate) fn bounded_expression(text: &str) -> String {
     text
 }
 
-/// The versioned classification object. Interpreter candidates and
-/// multiplexers are listed first so the bound never hides them behind
-/// ordinary branching; counts always cover every classified site.
+/// The versioned classification object. Every classified site is listed, in
+/// byte order. VM detector producers before 1.13.0 listed the 256 strongest
+/// and counted the rest in `omitted_site_count`, which is now always 0.
 pub(crate) fn document(artifact_id: &Value, mut sites: Vec<Site>, omissions: Vec<Value>) -> Value {
     let mut role_counts = BTreeMap::<&str, usize>::new();
     let mut kind_counts = BTreeMap::<&str, usize>::new();
@@ -295,14 +294,6 @@ pub(crate) fn document(artifact_id: &Value, mut sites: Vec<Site>, omissions: Vec
         *kind_counts.get_mut(site.kind.label()).expect("kind") += 1;
     }
     let total = sites.len();
-    sites.sort_by_key(|site| {
-        (
-            site.role(),
-            std::cmp::Reverse(site.strength),
-            site.byte_offset,
-        )
-    });
-    sites.truncate(MAX_LISTED_SITES);
     sites.sort_by_key(|site| site.byte_offset);
     let listed = sites
         .iter()
@@ -343,7 +334,7 @@ pub(crate) fn document(artifact_id: &Value, mut sites: Vec<Site>, omissions: Vec
     json!({
         "classification_version": CLASSIFICATION_VERSION,
         "site_count": total,
-        "omitted_site_count": total - listed.len(),
+        "omitted_site_count": 0,
         "role_counts": role_counts,
         "kind_counts": kind_counts,
         "sites": listed,
@@ -353,7 +344,7 @@ pub(crate) fn document(artifact_id: &Value, mut sites: Vec<Site>, omissions: Vec
 
 /// The role of every classified site of one artifact, keyed by its exact
 /// dispatch byte offset. Built from the full classification, never from the
-/// bounded listed document, so the listing cap cannot hide a site.
+/// listed document.
 pub(crate) struct Roles {
     pub javascript: Option<std::rc::Rc<javascript::Proofs>>,
     roles: HashMap<usize, Role>,

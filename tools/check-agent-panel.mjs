@@ -82,7 +82,7 @@ export async function checkAgentPanel() {
   // AgentBridge does.
   const saved = {provider: 'claude', auth: {}, permission: 'full'};
   // Later the native side reports subscriptions too, as AgentBridge.status does.
-  let subscriptions = false, standIn = true, grokSignedIn = false, chatgptSignedIn = false;
+  let subscriptions = false, standIn = true, grokSignedIn = false, chatgptSignedIn = false, failTranscriptAppend = false;
   const status = () => ({available: true, reason: '', standIn,
     providers: [{id: 'claude', label: 'Claude', vendor: 'Anthropic', defaultModel: 'claude-opus-5-5', hasKey: true},
       {id: 'chatgpt', label: 'ChatGPT', vendor: 'OpenAI', defaultModel: 'gpt-6-astra', hasKey: true,
@@ -115,6 +115,7 @@ export async function checkAgentPanel() {
     if (message.op === 'cliSend' || message.op === 'cliCancel') return Promise.resolve({ok: true});
     if (message.op === 'cliDecide') return Promise.resolve({waiting: true});
     if (message.op === 'disable') { engine = {...engine, phase: 'off', childRunning: false}; return Promise.resolve(status()); }
+    if (message.op === 'transcriptAppend' && failTranscriptAppend) return Promise.reject(new Error('disk full'));
     if (message.op === 'turn' || message.op === 'transcriptAppend') return Promise.resolve({ok: true});
     if (message.op === 'transcript') return Promise.resolve({rows: [], before: null});
     if (message.op === 'models') {
@@ -376,6 +377,7 @@ export async function checkAgentPanel() {
   await settle();
   assert.ok(posted.some(message => message.op === 'turn' && message.running === false), 'native knows the turn ended');
 
+
   // Counts live in the menu and the tooltip, not the header text.
   assert.doesNotMatch(byId('agent-status').textContent, /tool|token/);
   assert.match(byId('agent-status').title, /1 tool · Read only · last turn 1,200 tokens in, 34 tokens out/);
@@ -401,6 +403,21 @@ export async function checkAgentPanel() {
   assert.match(sheet.textContent, /LangGraph in this window/);
   await press(sheet, 'Escape');
   assert.equal(sheet.hidden, true, 'Escape closes Info');
+
+  // A turn past the 1 MiB the composer once refused goes to the graph whole;
+  // a row the transcript could not keep says so instead of vanishing.
+  const large = `Explain this:\n${'x'.repeat(2 * 1024 * 1024)}`;
+  failTranscriptAppend = true;
+  input.value = large;
+  input.dispatchEvent(new window.Event('input'));
+  byId('agent-send').click();
+  await settle();
+  failTranscriptAppend = false;
+  assert.ok(runtimeCalls.some(call => call.op === 'send' && call.text === large), 'a 2 MiB turn is sent, not refused');
+  assert.doesNotMatch(logNode.textContent, /larger than 1 MiB/);
+  assert.match(logNode.textContent, /was not saved to the local transcript: disk full/, 'a transcript write failure is visible');
+  emit({type: 'turnEnd', turnId: 't2', inputTokens: 1, outputTokens: 1});
+  await settle();
 
   // While on, the composer picker shows the running choice; another one
   // turns the agent off and asks again.

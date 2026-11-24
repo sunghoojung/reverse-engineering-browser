@@ -8,7 +8,7 @@ export function collectionFixtureDocument() {
   return {contract_version:1,document_kind:'api-collection',generation:3,updated_at_ms:1000,
     folders:[{id:1,name:'API Collection',parent_id:null,variables:[]},{id:2,name:'API checks',parent_id:1,variables:[{name:'host',value:'fixture.invalid'}]},{id:3,name:'Regression',parent_id:1,variables:[]}],
     requests:[1,2].map(id=>({id,folder_id:2,name:id===1?'List catalog':'Submit sample',url:`https://{{host}}/catalog/${id}`,method:id===1?'GET':'POST',headers:[{name:'accept',value:'application/json'}],body:id===1?'':'{"name":"sample"}',timeout_ms:15000,variables:[],created_at_ms:1000,updated_at_ms:1000})),
-    limits:{folders:32,requests:128,folder_depth:4,variables_per_scope:32,variable_bytes_per_scope:32768,request_body_bytes:65536,document_bytes:2097152}};
+    limits:{}};
 }
 
 // Exercise real Collection controller functions without claiming rendered acceptance.
@@ -42,10 +42,10 @@ export async function checkCollectionController(root, fixtureOnly = false) {
   for(const suffix of ['Name','Parent','Variables']){const node=elements[`collectionFolder${suffix}`];node.tagName=suffix==='Variables'?'textarea':suffix==='Parent'?'select':'input';elements.collectionFolderForm.append(node);}
   const state={apiCollection:collectionFixtureDocument(),apiCollectionLoaded:true,apiCollectionVersion:0,apiCollectionStatus:'ready',apiCollectionMessage:'Loaded',apiCollectionNoticeRevision:0,apiCollectionEtag:null,collectionSelectedFolderId:2,collectionSelectedRequestId:1,collectionExpandedFolderIds:new Set([1,2]),collectionRequestDraftId:null,collectionDraftDirty:false,collectionFolderDraftId:null,collectionFolderDirty:false,collectionSelectedHistoryId:null,collectionResponseTab:'body',collectionSelectionVersion:0,collectionHistorySelectionVersion:0,collectionRunOwners:new Map(),collectionPendingSubmission:null,collectionPendingRunSelection:null,apiCollectionNeedsReload:false,
     debuggerSession:{state:'running',target:{id:'target-1'},request_interception:{experiment_id:1,state:'ready',isolated:true,target_id:'target-1'},repeater:{state:'ready',history:[]}}};
-  const pending=[];const actions=[];let fireDeadline;
+  const pending=[];const actions=[];const deadlines=[];
   let actionHandler=async request=>{actions.push(request);return {};};
   const textElement=(tag,className,text)=>{const node=new Node(tag);node.className=className;node.textContent=text;return node;};
-  const context={state,elements,document,TextEncoder,TextDecoder,URL,Set,Map,AbortController,setTimeout:(callback,delay)=>{if(delay===15000)fireDeadline=callback;return setTimeout(callback,delay);},clearTimeout,location:{protocol:'http:'},requestAnimationFrame:fn=>fn(),
+  const context={state,elements,document,TextEncoder,TextDecoder,URL,Set,Map,AbortController,setTimeout:(callback,delay)=>{deadlines.push(delay);return setTimeout(callback,delay);},clearTimeout,location:{protocol:'http:'},requestAnimationFrame:fn=>fn(),
     isPlainObject:value=>value!==null&&typeof value==='object'&&!Array.isArray(value),utf8ByteLength:value=>Buffer.byteLength(value),parseExperimentHeaders:value=>value.trim()?JSON.parse(value):{},repeaterHeaderObject:headers=>Object.fromEntries(headers.map(header=>[header.name,header.value])),
     textElement,emptyListboxOption:(_,text)=>textElement('div','',text),experimentFact:(label,value)=>textElement('div','',label+value),
     requestInterception:()=>state.debuggerSession.request_interception,repeaterState:()=>state.debuggerSession.repeater,
@@ -78,12 +78,40 @@ export async function checkCollectionController(root, fixtureOnly = false) {
   assert.equal(await ui.saveCollectionRequest(),false);assert.equal(pending.length,0,'A known-stale owner cannot be written');
   state.collectionDraftDirty=false;const reload=ui.refreshApiCollection(true);pending.shift().resolve(Response.json(latest));assert.equal(await reload,true);
   elements.collectionRequestBody.value='draft survives';state.collectionDraftDirty=true;
-  const timedOut=ui.saveCollectionRequest();pending.shift();fireDeadline();assert.equal(await timedOut,false);
-  assert.equal(state.apiCollectionSaving,false);assert(state.collectionDraftDirty);assert.match(state.apiCollectionMessage,/timed out/);
-  const loadTimeout=ui.refreshApiCollection(true);pending.shift();fireDeadline();assert.equal(await loadTimeout,false);assert.equal(state.apiCollectionRefreshing,false);assert.equal(elements.collectionRequestBody.value,'draft survives');
+  // A slow save or load has no client deadline: it waits for its answer.
+  const slowSave=ui.saveCollectionRequest();const slowSaveRequest=pending.shift();await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(state.apiCollectionSaving,true);assert.match(state.apiCollectionMessage,/Saving/);
+  slowSaveRequest.resolve(Response.json({error:'Synthetic disk failure'},{status:503}));assert.equal(await slowSave,false);
+  assert.equal(state.apiCollectionSaving,false);assert(state.collectionDraftDirty);assert.match(state.apiCollectionMessage,/Synthetic disk failure/);
+  const slowLoad=ui.refreshApiCollection(true);const slowLoadRequest=pending.shift();await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(state.apiCollectionRefreshing,true);slowLoadRequest.resolve(Response.json({error:'Unavailable'},{status:503}));
+  assert.equal(await slowLoad,false);assert.equal(state.apiCollectionRefreshing,false);assert.equal(elements.collectionRequestBody.value,'draft survives');
+  assert.deepEqual(deadlines.filter(delay=>delay>=1000),[],'Collection loads and saves set no client deadline');
   // An older load may not replace a newer explicit save or clear its status.
   state.collectionDraftDirty=false;ui.renderApiCollection();const load=ui.refreshApiCollection(true);const stale=pending.shift();
   elements.collectionRequestName.value='Saved after load';state.collectionDraftDirty=true;const save=ui.saveCollectionRequest();const replacement=pending.shift();const savedDoc=structuredClone(state.apiCollection);savedDoc.generation=5;savedDoc.requests[0].name='Saved after load';replacement.resolve(Response.json(savedDoc));assert.equal(await save,true);stale.resolve(Response.json(latest));assert.equal(await load,false);assert.equal(state.apiCollection.generation,5);assert.equal(elements.collectionRequestName.value,'Saved after load');
+  // A collection has no count, size or depth limit, and one written under the
+  // old limits still reads. Credential headers are kept as written.
+  const legacy=collectionFixtureDocument();legacy.limits={folders:32,requests:128,folder_depth:4,variables_per_scope:32,variable_bytes_per_scope:32768,request_body_bytes:65536,document_bytes:2097152};
+  assert(ui.isApiCollection(legacy),'A document written under the old limits still reads');
+  const large=collectionFixtureDocument();large.generation=9;
+  for(let id=4;id<=203;id++)large.folders.push({id,name:`Level ${id}`,parent_id:id-1,variables:[]});
+  large.folders[1].variables=Array.from({length:600},(_,index)=>({name:`v${String(index).padStart(4,'0')}`,value:'x'.repeat(100)}));
+  const body='b'.repeat(3*1024*1024);
+  for(let id=3;id<=1500;id++)large.requests.push({...large.requests[1],id,folder_id:id%200+4,name:`Request ${id}`,url:`https://{{host}}/${'q'.repeat(9000)}`,
+    headers:[{name:'Authorization',value:'Bearer '+'t'.repeat(70*1024)},{name:'Cookie',value:'session=abc'},...Array.from({length:70},(_,index)=>({name:`x-h${index}`,value:'v'}))],body:id===3?body:'{}'});
+  assert(ui.isApiCollection(large),'Any number, size and depth of folders, requests, headers and variables reads');
+  const cyclic=structuredClone(large);cyclic.folders[3].parent_id=203;assert(!ui.isApiCollection(cyclic),'A folder cycle is refused');
+  const orphan=structuredClone(large);orphan.folders[3].parent_id=9999;assert(!ui.isApiCollection(orphan),'A missing parent is refused');
+  const framing=structuredClone(large);framing.requests[2].headers.push({name:'Content-Length',value:'1'});assert(!ui.isApiCollection(framing),'A framing header is refused');
+  state.collectionDraftDirty=false;state.collectionFolderDirty=false;
+  const largeLoad=ui.refreshApiCollection(true);pending.shift().resolve(Response.json(large));assert.equal(await largeLoad,true);
+  assert.equal(state.apiCollection.requests.length,1500);assert.equal(state.apiCollection.requests.find(request=>request.id===3).body.length,body.length);
+  assert.equal(ui.selectCollectionRequest(3),true);assert.equal(elements.collectionRequestBody.value.length,body.length);
+  const largeSave=ui.saveCollectionRequest();const largeRequest=pending.shift();const sent=JSON.parse(largeRequest.options.body);
+  assert.equal(sent.requests.length,1500);assert.equal(sent.requests.find(request=>request.id===3).body.length,body.length);
+  assert.equal(sent.requests.find(request=>request.id===3).headers[0].value.length,7+70*1024);
+  const savedLarge=structuredClone(large);savedLarge.generation=10;largeRequest.resolve(Response.json(savedLarge));assert.equal(await largeSave,true);
   assert.equal(actions.length,0,'Collection authoring never invokes browser actions');
-  console.log('PASS native-only Collection CRUD: drafts, folders, focus, failed/conflicting/removed saves, stale loads and deadlines; no browser execution');
+  console.log('PASS native-only Collection CRUD: drafts, folders, focus, failed/conflicting/removed saves, stale loads, no deadline, old limits and a collection of any size; no browser execution');
 }

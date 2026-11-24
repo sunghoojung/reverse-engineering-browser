@@ -1,24 +1,24 @@
-//! Inert, bounded binary32 diagnostics. Raw words remain authoritative, including NaNs.
+//! Inert binary32 diagnostics over complete buffers of any size. Raw words
+//! remain authoritative, including NaNs.
 use crate::{
-    error::{Code, Error, Result},
+    error::{Code, Error, Result, check_cancelled},
     evidence, validation,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::{
+    io::{BufReader, Read},
+    path::Path,
+    sync::atomic::AtomicBool,
+};
 
-pub const MAX_SAMPLES: usize = 65536;
-pub const MAX_BYTES: usize = MAX_SAMPLES * 4;
-pub const MAX_BODY: usize = 2 * 1024 * 1024;
-pub const MAX_ROWS: usize = 256;
-pub const MAX_RESPONSE: usize = 512 * 1024;
 const PROFILE: &str = "binary32-finite-steps-v1";
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Request {
+pub struct Request {
     protocol_version: u32,
     input: Input,
     reference: Option<Input>,
@@ -30,7 +30,7 @@ struct Request {
 struct Input {
     representation: Representation,
     channels: u32,
-    frames: u32,
+    frames: u64,
     source: Source,
 }
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq)]
@@ -52,7 +52,7 @@ enum Source {
         session_id: String,
         artifact_id: String,
         sha256: String,
-        byte_length: usize,
+        byte_length: u64,
     },
 }
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -68,42 +68,62 @@ struct Detail {
     start: usize,
     limit: usize,
 }
-struct Loaded {
-    bytes: Vec<u8>,
-    words: Vec<u32>,
+/// One side's words, read once in index order. Supplied words or bytes are
+/// already in the request; an artifact is streamed through a reader that
+/// verifies its size and hash when it reaches the end, so memory stays the
+/// same at any artifact size.
+enum Words {
+    Memory { bytes: Vec<u8>, position: usize },
+    Artifact(BufReader<evidence::VerifiedReader>),
+}
+struct Side {
+    representation: Representation,
+    words: Words,
+    count: usize,
     identity: Value,
-    description: Value,
+    summary: Summary,
 }
 
-fn limit() -> Error {
-    Error::new(413, "Float32 diagnostic resource limit exceeded").with_code(Code::ResourceLimit)
-}
 fn invalid() -> Error {
     Error::bad("Float32 request does not match the versioned contract")
+}
+fn layout() -> Error {
+    Error::bad("Float32 byte length does not match the complete declared interleaved layout")
+}
+fn integrity(_: std::io::Error) -> Error {
+    Error::protocol("Float32 artifact bytes failed complete integrity verification")
 }
 fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
-fn load(root: &Path, input: &Input) -> Result<Loaded> {
-    if input.channels == 0 || input.channels > 64 || input.frames > MAX_SAMPLES as u32 {
+fn lowercase_hex(text: &str, length: usize) -> bool {
+    text.len() == length
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+fn open(root: &Path, input: &Input) -> Result<Side> {
+    if input.channels == 0 {
         return Err(invalid());
     }
-    let count = (input.channels as usize)
-        .checked_mul(input.frames as usize)
-        .filter(|n| *n <= MAX_SAMPLES)
-        .ok_or_else(limit)?;
-    let (bytes, origin, session, artifact) = match &input.source {
+    let count = usize::try_from(input.frames)
+        .ok()
+        .and_then(|frames| frames.checked_mul(input.channels as usize))
+        .filter(|count| count.checked_mul(4).is_some())
+        .ok_or_else(layout)?;
+    let memory = |bytes: Vec<u8>| -> Result<(Words, String, usize)> {
+        if bytes.len() != count * 4 {
+            return Err(layout());
+        }
+        let sha256 = digest(&bytes);
+        let length = bytes.len();
+        Ok((Words::Memory { bytes, position: 0 }, sha256, length))
+    };
+    let (words, sha256, byte_length, origin, session, artifact) = match &input.source {
         Source::Bits { words } => {
-            if words.len() > MAX_SAMPLES {
-                return Err(limit());
-            }
-            let mut bytes = Vec::with_capacity(words.len() * 4);
+            let mut bytes = Vec::with_capacity(words.len().saturating_mul(4));
             for word in words {
-                if word.len() != 8
-                    || !word
-                        .bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-                {
+                if !lowercase_hex(word, 8) {
                     return Err(invalid());
                 }
                 let bits = u32::from_str_radix(word, 16).map_err(|_| invalid())?;
@@ -112,20 +132,16 @@ fn load(root: &Path, input: &Input) -> Result<Loaded> {
                     Representation::Float32Be => bits.to_be_bytes(),
                 });
             }
-            (bytes, "supplied_bits", None, None)
+            let (words, sha256, length) = memory(bytes)?;
+            (words, sha256, length, "supplied_bits", None, None)
         }
         Source::Bytes { base64 } => {
-            if base64.len() > MAX_BYTES.div_ceil(3) * 4 {
-                return Err(limit());
-            }
             let bytes = STANDARD.decode(base64).map_err(|_| invalid())?;
-            if bytes.len() > MAX_BYTES {
-                return Err(limit());
-            }
             if STANDARD.encode(&bytes) != *base64 {
                 return Err(invalid());
             }
-            (bytes, "supplied_bytes", None, None)
+            let (words, sha256, length) = memory(bytes)?;
+            (words, sha256, length, "supplied_bytes", None, None)
         }
         Source::Artifact {
             session_id,
@@ -137,15 +153,8 @@ fn load(root: &Path, input: &Input) -> Result<Loaded> {
                 .map_err(|_| invalid())?;
             validation::canonical(&json!(artifact_id), 64, false, "Artifact ID")
                 .map_err(|_| invalid())?;
-            if sha256.len() != 64
-                || !sha256
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            {
+            if !lowercase_hex(sha256, 64) {
                 return Err(invalid());
-            }
-            if *byte_length > MAX_BYTES {
-                return Err(limit());
             }
             let record =
                 evidence::find_artifact(root, artifact_id).map_err(|error| match error.status {
@@ -171,43 +180,64 @@ fn load(root: &Path, input: &Input) -> Result<Loaded> {
             if record["sha256"] != *sha256 || record["byte_size"] != *byte_length {
                 return Err(Error::conflict("Float32 artifact identity changed"));
             }
-            let bytes = evidence::content(root, &record, MAX_BYTES).map_err(|_| {
+            if *byte_length != count as u64 * 4 {
+                return Err(layout());
+            }
+            let reader = evidence::VerifiedReader::open(root, &record).map_err(|_| {
                 Error::protocol("Float32 artifact bytes failed complete integrity verification")
             })?;
             (
-                bytes,
+                Words::Artifact(BufReader::with_capacity(64 * 1024, reader)),
+                sha256.clone(),
+                count * 4,
                 "verified_artifact",
                 Some(session_id),
                 Some(artifact_id),
             )
         }
     };
-    if bytes.len() != count * 4 {
-        return Err(Error::bad(
-            "Float32 byte length does not match the complete declared interleaved layout",
-        ));
-    }
-    let words: Vec<u32> = bytes
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|chunk| {
-            let bytes = *chunk;
-            match input.representation {
-                Representation::Float32Le => u32::from_le_bytes(bytes),
-                Representation::Float32Be => u32::from_be_bytes(bytes),
-            }
-        })
-        .collect();
-    let identity = json!({"origin":origin,"sha256":digest(&bytes),"byte_length":bytes.len(),"sample_count":words.len(),"session_id":session,"artifact_id":artifact,
+    let identity = json!({"origin":origin,"sha256":sha256,"byte_length":byte_length,"sample_count":count,"session_id":session,"artifact_id":artifact,
         "representation":input.representation,"channels":input.channels,"frames":input.frames,"layout":"interleaved"});
-    let description = describe(&words);
-    Ok(Loaded {
-        bytes,
+    Ok(Side {
+        representation: input.representation,
         words,
+        count,
         identity,
-        description,
+        summary: Summary::default(),
     })
+}
+impl Side {
+    /// The next sample's four bytes as stored, and its bits.
+    fn next(&mut self) -> Result<([u8; 4], u32)> {
+        let mut bytes = [0u8; 4];
+        match &mut self.words {
+            Words::Memory {
+                bytes: all,
+                position,
+            } => {
+                bytes.copy_from_slice(&all[*position..*position + 4]);
+                *position += 4;
+            }
+            Words::Artifact(reader) => reader.read_exact(&mut bytes).map_err(integrity)?,
+        }
+        let bits = match self.representation {
+            Representation::Float32Le => u32::from_le_bytes(bytes),
+            Representation::Float32Be => u32::from_be_bytes(bytes),
+        };
+        self.summary.add(bits);
+        Ok((bytes, bits))
+    }
+    /// Reads an artifact to its end, where its size and hash are checked:
+    /// no result is returned from bytes that were not the recorded ones.
+    fn finish(&mut self) -> Result<()> {
+        if let Words::Artifact(reader) = &mut self.words {
+            let mut rest = [0u8; 1];
+            if reader.read(&mut rest).map_err(integrity)? != 0 {
+                return Err(integrity(std::io::ErrorKind::InvalidData.into()));
+            }
+        }
+        Ok(())
+    }
 }
 
 fn class(bits: u32) -> &'static str {
@@ -238,11 +268,14 @@ fn rank(bits: u32) -> u32 {
         0x8000_0000 + bits
     }
 }
-fn describe(words: &[u32]) -> Value {
-    let mut counts = [0usize; 7];
-    let mut sum_abs = 0.0f64;
-    for bits in words {
-        let index = match class(*bits) {
+#[derive(Default)]
+struct Summary {
+    counts: [usize; 7],
+    sum_abs: f64,
+}
+impl Summary {
+    fn add(&mut self, bits: u32) {
+        let index = match class(bits) {
             "zero" => {
                 if bits >> 31 == 1 {
                     1
@@ -261,13 +294,16 @@ fn describe(words: &[u32]) -> Value {
             }
             _ => 6,
         };
-        counts[index] += 1;
-        if let Some(n) = number(*bits) {
-            sum_abs += n.abs();
+        self.counts[index] += 1;
+        if let Some(n) = number(bits) {
+            self.sum_abs += n.abs();
         }
     }
-    json!({"positive_zero":counts[0],"negative_zero":counts[1],"subnormal":counts[2],"normal":counts[3],"positive_infinity":counts[4],"negative_infinity":counts[5],"nan":counts[6],
-        "finite_count":counts[..4].iter().sum::<usize>(),"finite_sum_absolute":sum_abs})
+    fn json(&self) -> Value {
+        let counts = &self.counts;
+        json!({"positive_zero":counts[0],"negative_zero":counts[1],"subnormal":counts[2],"normal":counts[3],"positive_infinity":counts[4],"negative_infinity":counts[5],"nan":counts[6],
+            "finite_count":counts[..4].iter().sum::<usize>(),"finite_sum_absolute":self.sum_abs})
+    }
 }
 struct Difference {
     bit_equal: bool,
@@ -313,18 +349,72 @@ fn difference(left: u32, right: u32, tolerance: Tolerances) -> Difference {
 fn difference_json(d: &Difference) -> Value {
     json!({"bit_equal":d.bit_equal,"numeric_equal":d.numeric_equal,"absolute_delta":d.absolute,"relative_delta":d.relative,"ulp_distance":d.ulps,"within_tolerance":d.within})
 }
-
-fn parse_request(bytes: &[u8]) -> Result<Request> {
-    if bytes.len() > MAX_BODY {
-        return Err(limit());
+/// Pairwise totals, accumulated in index order as the pairs are read.
+#[derive(Default)]
+struct Comparison {
+    bit_equal: usize,
+    numeric_equal: usize,
+    finite_pairs: usize,
+    within: usize,
+    max_abs: f64,
+    max_relative: f64,
+    sum_squared: f64,
+    max_ulps: u32,
+    histogram: [usize; 5],
+    first_bit_mismatch: Option<usize>,
+    raw_bytes_equal: bool,
+}
+impl Comparison {
+    fn add(&mut self, index: usize, d: &Difference) {
+        self.bit_equal += usize::from(d.bit_equal);
+        self.numeric_equal += usize::from(d.numeric_equal);
+        if !d.bit_equal && self.first_bit_mismatch.is_none() {
+            self.first_bit_mismatch = Some(index);
+        }
+        if let (Some(abs), Some(relative), Some(ulps), Some(passed)) =
+            (d.absolute, d.relative, d.ulps, d.within)
+        {
+            self.finite_pairs += 1;
+            self.within += usize::from(passed);
+            self.max_abs = self.max_abs.max(abs);
+            self.max_relative = self.max_relative.max(relative);
+            self.max_ulps = self.max_ulps.max(ulps);
+            self.sum_squared += abs * abs;
+            self.histogram[match ulps {
+                0 => 0,
+                1 => 1,
+                2..=4 => 2,
+                5..=16 => 3,
+                _ => 4,
+            }] += 1;
+        }
     }
-    // Typed deserialization rejects duplicate and unknown members before Value
-    // could silently collapse them. Diagnostics never echo caller content.
-    let request: Request = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    fn json(&self, input: &Side, reference: &Side) -> Value {
+        let compared = input.count.min(reference.count);
+        let (finite_pairs, histogram) = (self.finite_pairs, &self.histogram);
+        let same_length = input.count == reference.count;
+        let same_layout = input.identity["channels"] == reference.identity["channels"]
+            && input.identity["frames"] == reference.identity["frames"];
+        let comparable = same_length && same_layout && compared > 0;
+        json!({"status":if compared == 0 {"empty"} else if !same_length {"unequal_length"} else if !same_layout {"layout_mismatch"} else {"complete"},
+            "compared_pairs":compared,"input_tail":input.count-compared,"reference_tail":reference.count-compared,
+            "raw_bytes_equal":same_length && self.raw_bytes_equal,"representations_match":input.identity["representation"] == reference.identity["representation"],"layouts_match":same_layout,
+            "all_bits_equal":comparable.then_some(self.bit_equal==compared),"all_numeric_equal":comparable.then_some(self.numeric_equal==compared),
+            "bit_equal_pairs":self.bit_equal,"numeric_equal_pairs":self.numeric_equal,"first_bit_mismatch":self.first_bit_mismatch,
+            "finite_pairs":finite_pairs,"excluded_nonfinite_pairs":compared-finite_pairs,"within_tolerance_pairs":self.within,
+            "all_within_tolerance":(comparable && finite_pairs==compared).then_some(self.within==compared),
+            "maximum_absolute_delta":(finite_pairs>0).then_some(self.max_abs),"maximum_relative_delta":(finite_pairs>0).then_some(self.max_relative),
+            "rms_delta":(finite_pairs>0).then(||(self.sum_squared/finite_pairs as f64).sqrt()),"maximum_ulp_distance":(finite_pairs>0).then_some(self.max_ulps),
+            "ulp_histogram":{"zero":histogram[0],"one":histogram[1],"two_to_four":histogram[2],"five_to_sixteen":histogram[3],"over_sixteen":histogram[4]}})
+    }
+}
+
+/// Typed deserialization rejects duplicate and unknown members before Value
+/// could silently collapse them. Diagnostics never echo caller content.
+pub fn parse_reader(reader: impl Read) -> Result<Request> {
+    let request: Request = serde_json::from_reader(reader).map_err(|_| invalid())?;
     if request.protocol_version != 1
-        || request.detail.start > MAX_SAMPLES
         || request.detail.limit == 0
-        || request.detail.limit > MAX_ROWS
         || !request.tolerances.absolute.is_finite()
         || request.tolerances.absolute < 0.0
         || request.tolerances.absolute > 1e80
@@ -338,84 +428,69 @@ fn parse_request(bytes: &[u8]) -> Result<Request> {
 }
 /// Shared inert CLI preflight. Does not load artifacts or compute diagnostics.
 pub fn validate_request_bytes(bytes: &[u8]) -> Result<()> {
-    parse_request(bytes).map(|_| ())
+    parse_reader(bytes).map(|_| ())
 }
-pub fn compare_bytes(root: &Path, bytes: &[u8]) -> Result<Vec<u8>> {
-    let request = parse_request(bytes)?;
-    let input = load(root, &request.input)?;
-    let reference = request
+/// Full metrics over every sample of both sides, read once in lockstep, with
+/// the caller's detail page. Reading stops between blocks once `cancelled`
+/// is set.
+pub fn compare(root: &Path, request: &Request, cancelled: &AtomicBool) -> Result<Vec<u8>> {
+    let mut input = open(root, &request.input)?;
+    let mut reference = request
         .reference
         .as_ref()
-        .map(|source| load(root, source))
+        .map(|source| open(root, source))
         .transpose()?;
-    let total = input
-        .words
-        .len()
-        .max(reference.as_ref().map_or(0, |r| r.words.len()));
-    if request.detail.start > total {
+    let total = input.count.max(reference.as_ref().map_or(0, |r| r.count));
+    let start = request.detail.start;
+    if start > total {
         return Err(Error::bad(
             "Float32 detail start exceeds the available samples",
         ));
     }
-    let end = total.min(request.detail.start + request.detail.limit);
-    let mut rows = Vec::with_capacity(end - request.detail.start);
-    for index in request.detail.start..end {
-        let a = input.words.get(index).copied();
-        let b = reference.as_ref().and_then(|r| r.words.get(index)).copied();
-        rows.push(json!({"index":index,"byte_offset":index * 4,"input":a.map(sample),"reference":b.map(sample),"difference":a.zip(b).map(|(a,b)|difference_json(&difference(a,b,request.tolerances)))}));
-    }
-    let comparison = reference.as_ref().map(|reference| {
-        let compared = input.words.len().min(reference.words.len());
-        let mut bit_equal = 0usize;
-        let mut numeric_equal = 0usize;
-        let mut finite_pairs = 0usize;
-        let mut within = 0usize;
-        let (mut max_abs, mut max_relative, mut sum_squared) = (0.0f64,0.0f64,0.0f64);
-        let mut max_ulps = 0u32;
-        let mut histogram = [0usize; 5];
-        let mut first_bit_mismatch = None;
-        for (index, (a,b)) in input.words.iter().zip(&reference.words).enumerate() {
-            let d = difference(*a,*b,request.tolerances);
-            bit_equal += usize::from(d.bit_equal);
-            numeric_equal += usize::from(d.numeric_equal);
-            if !d.bit_equal && first_bit_mismatch.is_none() { first_bit_mismatch = Some(index); }
-            if let (Some(abs),Some(relative),Some(ulps),Some(passed)) = (d.absolute,d.relative,d.ulps,d.within) {
-                finite_pairs += 1; within += usize::from(passed);
-                max_abs = max_abs.max(abs); max_relative = max_relative.max(relative); max_ulps = max_ulps.max(ulps); sum_squared += abs * abs;
-                histogram[match ulps { 0=>0,1=>1,2..=4=>2,5..=16=>3,_=>4 }] += 1;
-            }
+    let end = total.min(start.saturating_add(request.detail.limit));
+    let mut rows = Vec::with_capacity(end - start);
+    let mut comparison = Comparison {
+        raw_bytes_equal: true,
+        ..Comparison::default()
+    };
+    for index in 0..total {
+        if index % 65_536 == 0 {
+            check_cancelled(cancelled, "Float32 comparison")?;
         }
-        let same_length = input.words.len() == reference.words.len();
-        let same_layout = input.identity["channels"] == reference.identity["channels"] && input.identity["frames"] == reference.identity["frames"];
-        let comparable = same_length && same_layout && compared > 0;
-        json!({"status":if compared == 0 {"empty"} else if !same_length {"unequal_length"} else if !same_layout {"layout_mismatch"} else {"complete"},
-            "compared_pairs":compared,"input_tail":input.words.len()-compared,"reference_tail":reference.words.len()-compared,
-            "raw_bytes_equal":input.bytes == reference.bytes,"representations_match":input.identity["representation"] == reference.identity["representation"],"layouts_match":same_layout,
-            "all_bits_equal":comparable.then_some(bit_equal==compared),"all_numeric_equal":comparable.then_some(numeric_equal==compared),
-            "bit_equal_pairs":bit_equal,"numeric_equal_pairs":numeric_equal,"first_bit_mismatch":first_bit_mismatch,
-            "finite_pairs":finite_pairs,"excluded_nonfinite_pairs":compared-finite_pairs,"within_tolerance_pairs":within,
-            "all_within_tolerance":(comparable && finite_pairs==compared).then_some(within==compared),
-            "maximum_absolute_delta":(finite_pairs>0).then_some(max_abs),"maximum_relative_delta":(finite_pairs>0).then_some(max_relative),
-            "rms_delta":(finite_pairs>0).then(||(sum_squared/finite_pairs as f64).sqrt()),"maximum_ulp_distance":(finite_pairs>0).then_some(max_ulps),
-            "ulp_histogram":{"zero":histogram[0],"one":histogram[1],"two_to_four":histogram[2],"five_to_sixteen":histogram[3],"over_sixteen":histogram[4]}})
-    });
-    let result = json!({"protocol_version":1,"profile":PROFILE,"input":input.identity,"reference":reference.as_ref().map(|r| &r.identity),
-        "input_summary":input.description,"reference_summary":reference.as_ref().map(|r| &r.description),"comparison":comparison,
-        "tolerances":request.tolerances,"policies":{"zero":"numeric_equal_bits_distinct","nonfinite":"excluded_from_delta_ulp_tolerance","nan":"never_numeric_equal_payload_preserved","relative":"absolute_delta_over_maximum_magnitude_zero_is_zero","tolerance":"absolute_or_relative_or_ulp_finite_only","accumulation":"binary64_sequential_index_order","coverage":"complete_supplied_buffers_not_capture_completeness"},
-        "detail":{"start":request.detail.start,"limit":request.detail.limit,"total":total,"returned":rows.len(),"next_start":(end<total).then_some(end),"rows":rows},
-        "limits":{"samples_per_input":MAX_SAMPLES,"bytes_per_input":MAX_BYTES,"detail_rows":MAX_ROWS,"request_bytes":MAX_BODY,"response_bytes":MAX_RESPONSE,"manifest_bytes":8388608,"manifest_records":8192},
-        "source_ids":["rust-f32-representation","oracle-binary32-format"]});
-    let bytes = serde_json::to_vec(&result)
-        .map_err(|_| Error::new(500, "Float32 result serialization failed"))?;
-    if bytes.len() > MAX_RESPONSE {
-        return Err(limit());
+        let a = (index < input.count).then(|| input.next()).transpose()?;
+        let b = match reference.as_mut() {
+            Some(side) if index < side.count => Some(side.next()?),
+            _ => None,
+        };
+        let d = a.zip(b).map(|((a_bytes, a), (b_bytes, b))| {
+            comparison.raw_bytes_equal &= a_bytes == b_bytes;
+            let d = difference(a, b, request.tolerances);
+            comparison.add(index, &d);
+            d
+        });
+        if (start..end).contains(&index) {
+            rows.push(json!({"index":index,"byte_offset":index * 4,"input":a.map(|(_, bits)| sample(bits)),"reference":b.map(|(_, bits)| sample(bits)),"difference":d.as_ref().map(difference_json)}));
+        }
     }
-    Ok(bytes)
+    input.finish()?;
+    if let Some(side) = reference.as_mut() {
+        side.finish()?;
+    }
+    let comparison = reference.as_ref().map(|r| comparison.json(&input, r));
+    let result = json!({"protocol_version":2,"profile":PROFILE,"input":input.identity,"reference":reference.as_ref().map(|r| &r.identity),
+        "input_summary":input.summary.json(),"reference_summary":reference.as_ref().map(|r| r.summary.json()),"comparison":comparison,
+        "tolerances":request.tolerances,"policies":{"zero":"numeric_equal_bits_distinct","nonfinite":"excluded_from_delta_ulp_tolerance","nan":"never_numeric_equal_payload_preserved","relative":"absolute_delta_over_maximum_magnitude_zero_is_zero","tolerance":"absolute_or_relative_or_ulp_finite_only","accumulation":"binary64_sequential_index_order","coverage":"complete_supplied_buffers_not_capture_completeness"},
+        "detail":{"start":start,"limit":request.detail.limit,"total":total,"returned":rows.len(),"next_start":(end<total).then_some(end),"rows":rows},
+        "source_ids":["rust-f32-representation","oracle-binary32-format"]});
+    serde_json::to_vec(&result).map_err(|_| Error::new(500, "Float32 result serialization failed"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn compare_bytes(root: &Path, bytes: &[u8]) -> Result<Vec<u8>> {
+        compare(root, &parse_reader(bytes)?, &AtomicBool::new(false))
+    }
     fn input(words: &[u32]) -> Value {
         json!({"representation":"float32-le","channels":1,"frames":words.len(),"source":{"kind":"bits","words":words.iter().map(|word|format!("{word:08x}")).collect::<Vec<_>>()}})
     }
@@ -554,12 +629,19 @@ mod tests {
         req["reference"]["channels"] = json!(2);
         req["reference"]["frames"] = json!(1);
         assert_eq!(run(req)["comparison"]["status"], "layout_mismatch");
-        let mut req = request(&[0; MAX_SAMPLES], Some(&[0; MAX_SAMPLES]));
-        req["detail"] = json!({"start":65535,"limit":256});
+        // Past the 65,536 samples a side once held, and a page past the 256
+        // rows it once returned.
+        let mut req = request(&[0; 200_000], Some(&[0; 200_000]));
+        req["detail"] = json!({"start":199_999,"limit":256});
         let report = run(req);
-        assert_eq!(report["comparison"]["compared_pairs"], 65536);
+        assert_eq!(report["comparison"]["compared_pairs"], 200_000);
         assert_eq!(report["detail"]["returned"], 1);
-        assert_eq!(report["detail"]["rows"][0]["byte_offset"], 262140);
+        assert_eq!(report["detail"]["rows"][0]["byte_offset"], 799_996);
+        assert!(report["detail"]["next_start"].is_null());
+        let mut req = request(&[0x3f80_0000; 1000], None);
+        req["detail"] = json!({"start":0,"limit":1000});
+        let report = run(req);
+        assert_eq!(report["detail"]["returned"], 1000);
         assert!(report["detail"]["next_start"].is_null());
         let mut req = request(&[1, 2, 3], None);
         req["detail"] = json!({"start":0,"limit":1});
@@ -592,7 +674,6 @@ mod tests {
             ("/input/representation", json!("native")),
             ("/input/source/words", json!(["NaN"])),
             ("/detail/limit", json!(0)),
-            ("/detail/limit", json!(257)),
             ("/detail/start", json!(2)),
             ("/tolerances/relative", json!(2.1)),
             ("/tolerances/absolute", json!(-1)),
@@ -627,20 +708,29 @@ mod tests {
         let mut req = base.clone();
         req["input"]["source"] = json!({"kind":"bytes","base64":"AAAA"});
         assert!(compare_bytes(Path::new("."), req.to_string().as_bytes()).is_err());
+        // No size refuses a request: what is malformed is refused as such.
+        assert_eq!(
+            compare_bytes(Path::new("."), &vec![b' '; 2 * 1024 * 1024 + 1])
+                .unwrap_err()
+                .status,
+            400
+        );
         let mut req = base;
-        req["input"]["source"] = json!({"kind":"bits","words":vec!["00000000";MAX_SAMPLES+1]});
-        assert_eq!(
-            compare_bytes(Path::new("."), req.to_string().as_bytes())
-                .unwrap_err()
-                .status,
-            413
-        );
-        assert_eq!(
-            compare_bytes(Path::new("."), &vec![b' '; MAX_BODY + 1])
-                .unwrap_err()
-                .status,
-            413
-        );
+        req["input"]["channels"] = json!(65);
+        req["input"]["frames"] = json!(1009);
+        req["input"]["source"] = json!({"kind":"bits","words":vec!["00000000";65 * 1009]});
+        assert_eq!(run(req)["input_summary"]["positive_zero"], 65 * 1009);
+    }
+    #[test]
+    fn float32_comparison_stops_once_its_request_goes_away() {
+        let bytes = serde_json::to_vec(&request(&[0; 70_000], Some(&[0; 70_000]))).unwrap();
+        let error = compare(
+            Path::new("."),
+            &parse_reader(bytes.as_slice()).unwrap(),
+            &AtomicBool::new(true),
+        )
+        .unwrap_err();
+        assert_eq!(error.status, 499);
     }
     #[test]
     fn float32_original_ui_fixture_matches_authoritative_engine() {

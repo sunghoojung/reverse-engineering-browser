@@ -306,7 +306,7 @@
                     <button id="source-wasm-diff" class="source-tool" type="button" aria-controls="source-diff-view" aria-pressed="false" title="Match this module's functions with another captured WebAssembly module" hidden>Compare with…</button>
                     <button id="source-goto" class="source-tool" type="button" aria-keyshortcuts="Control+G" disabled>Go to line…</button>
                     <button id="source-rename" class="source-tool" type="button" aria-keyshortcuts="F2" title="Open a captured source to name it." disabled>Rename</button>
-                    <button id="investigation-decode-range" class="source-tool" type="button" title="First select an Original bytes link in Facts; this copies at most 64 KiB without running a transformation" disabled>Decode range</button>
+                    <button id="investigation-decode-range" class="source-tool" type="button" title="First select an Original bytes link in Facts; this copies the range without running a transformation" disabled>Decode range</button>
                     <button id="source-facts-toggle" class="source-tool" type="button" aria-controls="source-facts-details" aria-expanded="false" disabled>Facts</button>
                     <button id="source-track-calls" class="source-tool" type="button" aria-controls="invocation-sites-details" disabled>Track calls</button>
                     <button id="source-deob" class="source-tool" type="button" aria-label="Run local static cleanup" title="Run local static cleanup" disabled>Static cleanup</button>
@@ -536,8 +536,8 @@
                 <p data-package-selection class="package-note"></p>
                 <div data-package-selected></div>
                 <div class="package-toolbar"><button data-package-export class="primary-button" type="button" disabled>Export selected metadata</button><button data-package-clear class="secondary-button" type="button">Clear selection</button></div>
-                <details data-package-policy class="package-disclosure"><summary>Limits &amp; privacy</summary><p class="package-note">Select up to 1,024 event keys and 64 artifact keys. These retained windows contain at most 5,000 events or 500 artifacts; they are not full store inventories. Selected identities persist across pages and eviction. Refresh never selects new records. Export checks current retained-store presence under updated stopped-store guards. Historical build, capture settings, observer regime and epochs remain unknown. Payloads, URLs, headers, cookies, bodies and artifact bytes are never exported.</p></details>
-                <details data-package-upload class="package-disclosure"><summary>Validate a supplied package</summary><p class="package-note">Choose metadata JSON up to 4 MiB. Original bytes stay with this local validator; duplicate keys are preserved for rejection. Validation imports no evidence and runs no code.</p><div class="package-toolbar"><label>Package file <input data-package-file type="file" accept=".json,application/json" /></label><button data-package-validate class="secondary-button" type="button" disabled>Validate original bytes</button></div></details>
+                <details data-package-policy class="package-disclosure"><summary>Limits &amp; privacy</summary><p class="package-note">Select any number of event and artifact keys. Retained events list the stored range the investigation view shows; Earlier and Oldest there reach older records. Selected identities persist across pages, ranges and eviction. Refresh never selects new records. Export checks current retained-store presence under updated stopped-store guards. Historical build, capture settings, observer regime and epochs remain unknown. Payloads, URLs, headers, cookies, bodies and artifact bytes are never exported.</p></details>
+                <details data-package-upload class="package-disclosure"><summary>Validate a supplied package</summary><p class="package-note">Choose a metadata JSON file of any size. Original bytes stay with this local validator; duplicate keys are preserved for rejection. Validation imports no evidence and runs no code.</p><div class="package-toolbar"><label>Package file <input data-package-file type="file" accept=".json,application/json" /></label><button data-package-validate class="secondary-button" type="button" disabled>Validate original bytes</button></div></details>
                 <p data-package-notice class="package-notice" role="status" aria-live="polite"></p>
                 <div class="package-toolbar"><button data-package-cancel class="secondary-button" type="button" hidden>Cancel</button><button data-package-download class="secondary-button" type="button" aria-describedby="package-save-note" disabled>Download validated package</button><button data-package-copy class="secondary-button" type="button" disabled>Copy validated metadata</button></div>
                 <p id="package-save-note" data-package-save-note class="package-note"></p>
@@ -576,7 +576,7 @@
                     <p class="collection-help">Root and ancestor variables are inherited. Request variables override them.</p>
                     <label>Name<input id="collection-folder-name" type="text" maxlength="128" autocomplete="off" /></label>
                     <label>Parent folder<select id="collection-folder-parent"></select></label>
-                    <label>Variables (JSON)<textarea id="collection-folder-variables" maxlength="40000" spellcheck="false" placeholder='{"host":"api.example.test"}'></textarea></label>
+                    <label>Variables (JSON)<textarea id="collection-folder-variables" spellcheck="false" placeholder='{"host":"api.example.test"}'></textarea></label>
                     <div class="collection-form-actions"><button id="collection-save-folder" class="trace-button collection-primary" type="submit">Save folder</button><button id="collection-discard-folder" class="secondary-button" type="button" disabled>Discard edits</button><button id="collection-delete-folder" class="secondary-button" type="button">Delete folder</button></div>
                   </form>
                 </details>
@@ -589,7 +589,7 @@
                   <div class="collection-empty-actions"><button id="collection-empty-new-request" class="trace-button" type="button">New request</button></div>
                 </div>
                 <form id="collection-request-form" class="collection-form" hidden>
-                  <div class="collection-command-row"><label>Method<input id="collection-request-method" type="text" maxlength="256" value="GET" autocomplete="off" /></label><label>Request URL<input id="collection-request-url" type="text" maxlength="8192" placeholder="https://{{host}}/path/{{id}}" autocomplete="off" /></label></div>
+                  <div class="collection-command-row"><label>Method<input id="collection-request-method" type="text" maxlength="256" value="GET" autocomplete="off" /></label><label>Request URL<input id="collection-request-url" type="text" placeholder="https://{{host}}/path/{{id}}" autocomplete="off" /></label></div>
                   <div class="collection-author-actions"><button id="collection-save-request" class="trace-button collection-primary" type="submit">Save request</button><button id="collection-discard-request" class="secondary-button" type="button" disabled>Discard edits</button></div>
 
                   <details class="collection-properties" open><summary>Request settings</summary>
@@ -602,9 +602,9 @@
                     <button id="collection-tab-body" type="button" role="tab" data-collection-tab="body" aria-selected="false" aria-controls="collection-panel-body" tabindex="-1">Body</button>
                     <button id="collection-tab-variables" type="button" role="tab" data-collection-tab="variables" aria-selected="false" aria-controls="collection-panel-variables" tabindex="-1">Variables</button>
                   </div>
-                  <section id="collection-panel-headers" class="collection-content-panel" role="tabpanel" aria-labelledby="collection-tab-headers"><label>Headers (JSON)<textarea id="collection-request-headers" spellcheck="false" placeholder='{"accept":"application/json"}'></textarea></label><p class="collection-help">Up to 64 headers of 64 KiB each, credentials and cookies included. Host, Content-Length, Connection, Transfer-Encoding and hop-by-hop headers belong to the HTTP client and are rejected.</p></section>
-                  <section id="collection-panel-body" class="collection-content-panel" role="tabpanel" aria-labelledby="collection-tab-body" hidden><label>Request body<textarea id="collection-request-body" maxlength="65536" spellcheck="false" placeholder='{"id":"{{id}}"}'></textarea></label><p class="collection-help">Up to 64 KiB. GET and HEAD requests cannot include a body.</p></section>
-                  <section id="collection-panel-variables" class="collection-content-panel" role="tabpanel" aria-labelledby="collection-tab-variables" hidden><label>Request variables (JSON)<textarea id="collection-request-variables" maxlength="40000" spellcheck="false" placeholder='{"id":"42"}'></textarea></label><p class="collection-help">Text values replace matching {{name}} placeholders in the method, URL, headers and body.</p></section>
+                  <section id="collection-panel-headers" class="collection-content-panel" role="tabpanel" aria-labelledby="collection-tab-headers"><label>Headers (JSON)<textarea id="collection-request-headers" spellcheck="false" placeholder='{"accept":"application/json"}'></textarea></label><p class="collection-help">Credentials and cookies are kept as written. Host, Content-Length, Connection, Transfer-Encoding and hop-by-hop headers belong to the HTTP client and are rejected.</p></section>
+                  <section id="collection-panel-body" class="collection-content-panel" role="tabpanel" aria-labelledby="collection-tab-body" hidden><label>Request body<textarea id="collection-request-body" spellcheck="false" placeholder='{"id":"{{id}}"}'></textarea></label><p class="collection-help">GET and HEAD requests cannot include a body.</p></section>
+                  <section id="collection-panel-variables" class="collection-content-panel" role="tabpanel" aria-labelledby="collection-tab-variables" hidden><label>Request variables (JSON)<textarea id="collection-request-variables" spellcheck="false" placeholder='{"id":"42"}'></textarea></label><p class="collection-help">Text values replace matching {{name}} placeholders in the method, URL, headers and body.</p></section>
                   <div id="collection-variable-status" class="collection-variable-status" role="status" aria-live="polite"><span class="collection-variable-chip">No variables used</span></div>
                 </form>
               </section>
@@ -728,7 +728,7 @@
                       <header><div><h2>1. Input</h2><p>Paste a value, then choose the transformation to apply.</p></div><span id="decoder-input-badge" class="experiment-card-badge">0 B</span></header>
                       <form id="decoder-form" class="decoder-form">
                         <label>Input format<select id="decoder-input-encoding"><option value="text">UTF-8 text</option><option value="base64">Base64 bytes</option><option value="hex">Hex bytes</option></select></label>
-                        <label>Input<textarea id="decoder-input" maxlength="1398110" spellcheck="false" placeholder="Paste a value, token segment, encoded string, or byte representation"></textarea></label>
+                        <label>Input<textarea id="decoder-input" spellcheck="false" placeholder="Paste a value, token segment, encoded string, or byte representation"></textarea></label>
                         <div class="decoder-input-actions"><button id="decoder-use-field" class="secondary-button" type="button">Use selected request value</button></div>
                         <label>2. Transformation<select id="decoder-operation">
                             <optgroup label="Base64"><option value="base64-decode">Base64 decode</option><option value="base64-encode">Base64 encode</option><option value="base64url-decode">Base64URL decode</option><option value="base64url-encode">Base64URL encode</option></optgroup>
@@ -737,12 +737,12 @@
                             <optgroup label="Identify and hash"><option value="magic-inspect">Magic: suggest encodings (no automatic decoding)</option><option value="sha256">SHA-256 digest (hex)</option><option value="sha384">SHA-384 digest (hex)</option><option value="sha512">SHA-512 digest (hex)</option></optgroup>
                             <optgroup label="Structured data"><option value="json-pretty">JSON pretty print</option><option value="json-minify">JSON minify</option><option value="protobuf-inspect">Protobuf wire inspection (no schema)</option><option value="grpc-web-inspect">gRPC-web envelope inspection</option><option value="grpc-web-text-inspect">gRPC-web text inspection (chunked Base64)</option></optgroup>
                           </select></label>
-                        <div class="decoder-actions"><button id="decoder-append" class="secondary-button decoder-primary" type="submit">Run transformation</button></div>
-                        <details class="tool-detail-disclosure"><summary>Processing limits</summary><p class="experiment-privacy">At most 16 explicit steps, 1 MiB per input or output, and 4 MiB retained. Decompression stops at the output cap.</p></details>
+                        <div class="decoder-actions"><button id="decoder-append" class="secondary-button decoder-primary" type="submit">Run transformation</button><button id="decoder-cancel" class="secondary-button" type="button" disabled>Cancel</button></div>
+                        <details class="tool-detail-disclosure"><summary>Processing</summary><p class="experiment-privacy">A transformation runs in the native decoder until it finishes, however long its input needs; Cancel stops it. Steps, inputs and outputs have no fixed size, and every step's bytes stay in this page until you reset the chain.</p></details>
                       </form>
                     </article>
                     <details class="decoder-card"><summary class="workspace-disclosure-title">Transformation history</summary>
-                      <header><div><h2>Steps</h2><p>Select a step to see its output. The next transformation starts from that step.</p></div><span id="decoder-pipeline-badge" class="experiment-card-badge">0 / 16</span></header>
+                      <header><div><h2>Steps</h2><p>Select a step to see its output. The next transformation starts from that step.</p></div><span id="decoder-pipeline-badge" class="experiment-card-badge">0 steps</span></header>
                       <div id="decoder-pipeline" class="decoder-pipeline" role="listbox" aria-label="Decoder transformation steps"><div class="analyst-empty" role="option" aria-disabled="true" aria-selected="false">Enter input and append the first transform.</div></div>
                       <div class="decoder-chain-actions"><button id="decoder-remove-after" class="secondary-button" type="button">Remove from selected step</button><button id="decoder-reset" class="secondary-button" type="button">Reset chain</button></div>
                     </details>
@@ -758,7 +758,7 @@
                         <section id="investigation-decoder-origin" class="decoder-field-origin" aria-label="Decoded value evidence origin" hidden><p></p><button class="secondary-button" type="button">Open original evidence</button></section>
                       </div>
                       <details class="tool-detail-disclosure"><summary>Result details</summary>
-                      <div class="decoder-facts"><div class="decoder-fact"><span>Selected bytes</span><strong id="decoder-selected-bytes">0 B</strong></div><div class="decoder-fact"><span>Retained</span><strong id="decoder-retained-bytes">0 B / 4 MiB</strong></div><div class="decoder-fact"><span>Engine time</span><strong id="decoder-duration">Not run</strong></div><div class="decoder-fact"><span>Execution</span><strong>Explicit only</strong></div></div>
+                      <div class="decoder-facts"><div class="decoder-fact"><span>Selected bytes</span><strong id="decoder-selected-bytes">0 B</strong></div><div class="decoder-fact"><span>Retained</span><strong id="decoder-retained-bytes">0 B</strong></div><div class="decoder-fact"><span>Engine time</span><strong id="decoder-duration">Not run</strong></div><div class="decoder-fact"><span>Execution</span><strong>Explicit only</strong></div></div>
                       </details>
                     </article>
                   </aside>
@@ -768,19 +768,19 @@
               <div id="tools-panel-float32" class="tools-panel" role="tabpanel" aria-labelledby="tools-tab-float32" hidden>
                 <div class="float32-workspace">
                   <form class="float32-form" aria-label="Exact float32 inputs">
-                    <h2>Binary32 evidence</h2><p>Explicit buffers only. Interleaved layout; 65,536 samples per side. No capture or environment inference. Retained choices use the current catalog’s first 2,048 rows, up to 256 KiB per artifact.</p>
+                    <h2>Binary32 evidence</h2><p>Explicit buffers only, compared whole at any size. Interleaved layout. No capture or environment inference. Retained choices use the current catalog’s first 2,048 rows.</p>
                     <button id="float32-example" class="secondary-button" type="button">Load synthetic edge examples</button>
                     <fieldset id="float32-input-fields"><legend>Input</legend>
  <div class="float32-controls"><label>Source<select data-float32-kind="input"><option value="bits">Raw hex words</option><option value="bytes">Base64 bytes</option><option value="artifact">Retained artifact</option></select></label><label>Byte order<select data-float32-endian="input"><option value="float32-le">Float32 little-endian</option><option value="float32-be">Float32 big-endian</option></select></label></div>
- <label>Exact input<textarea data-float32-input="input" aria-label="Input raw values" maxlength="720896" spellcheck="false" placeholder="Eight-digit lowercase hex words, separated by whitespace"></textarea></label>
+ <label>Exact input<textarea data-float32-input="input" aria-label="Input raw values" spellcheck="false" placeholder="Eight-digit lowercase hex words, separated by whitespace"></textarea></label>
  <label hidden>Retained artifact<select data-float32-artifact="input"><option value="">Select retained artifact</option></select></label>
- <div class="float32-controls"><label>Channels<input data-float32-channels="input" type="number" min="1" max="64" step="1" value="1" required /></label><label>Frames<input data-float32-frames="input" type="number" min="0" max="65536" step="1" value="0" required /></label></div></fieldset>
+ <div class="float32-controls"><label>Channels<input data-float32-channels="input" type="number" min="1" max="4294967295" step="1" value="1" required /></label><label>Frames<input data-float32-frames="input" type="number" min="0" step="1" value="0" required /></label></div></fieldset>
                     <label class="float32-check"><input id="float32-reference-enabled" type="checkbox" /> Compare with a reference</label>
                     <fieldset id="float32-reference-fields"><legend>Reference</legend>
  <div class="float32-controls"><label>Source<select data-float32-kind="reference"><option value="bits">Raw hex words</option><option value="bytes">Base64 bytes</option><option value="artifact">Retained artifact</option></select></label><label>Byte order<select data-float32-endian="reference"><option value="float32-le">Float32 little-endian</option><option value="float32-be">Float32 big-endian</option></select></label></div>
- <label>Exact input<textarea data-float32-input="reference" aria-label="Reference raw values" maxlength="720896" spellcheck="false" placeholder="Eight-digit lowercase hex words, separated by whitespace"></textarea></label>
+ <label>Exact input<textarea data-float32-input="reference" aria-label="Reference raw values" spellcheck="false" placeholder="Eight-digit lowercase hex words, separated by whitespace"></textarea></label>
  <label hidden>Retained artifact<select data-float32-artifact="reference"><option value="">Select retained artifact</option></select></label>
- <div class="float32-controls"><label>Channels<input data-float32-channels="reference" type="number" min="1" max="64" step="1" value="1" required /></label><label>Frames<input data-float32-frames="reference" type="number" min="0" max="65536" step="1" value="0" required /></label></div></fieldset>
+ <div class="float32-controls"><label>Channels<input data-float32-channels="reference" type="number" min="1" max="4294967295" step="1" value="1" required /></label><label>Frames<input data-float32-frames="reference" type="number" min="0" step="1" value="0" required /></label></div></fieldset>
                     <fieldset><legend>Caller tolerances · finite pairs only</legend><div class="float32-controls"><label>Absolute ≤ 1e80<input id="float32-absolute" type="number" min="0" max="1e80" step="any" value="0" required /></label><label>Relative ≤ 2<input id="float32-relative" type="number" min="0" max="2" step="any" value="0" required /></label><label>ULP steps<input id="float32-ulps" type="number" min="0" max="4294967295" step="1" value="0" required /></label></div><p>Passes absolute OR relative OR ULP. Tolerance does not change equality.</p></fieldset>
                     <div class="float32-actions"><button id="float32-run" class="secondary-button decoder-primary" type="submit">Inspect / compare</button><button id="float32-cancel" class="secondary-button" type="button" disabled>Cancel</button><button id="float32-clear" class="secondary-button" type="button">Clear result</button></div>
                   </form>
@@ -791,22 +791,22 @@
                 <div class="jwt-grid">
                   <section class="jwt-column" aria-label="JWT input and creation">
                     <article class="decoder-card">
-                      <header><div><h2>Inspect a token</h2><p>Decoding is not verification. Add a secret only when explicitly verifying an HMAC signature.</p></div><span class="experiment-card-badge">64 KiB max</span></header>
+                      <header><div><h2>Inspect a token</h2><p>Decoding is not verification. Add a secret only when explicitly verifying an HMAC signature.</p></div><span class="experiment-card-badge">Decode only</span></header>
                       <form id="jwt-inspect-form" class="decoder-form">
-                        <label>JSON Web Token (JWT)<textarea id="jwt-token" maxlength="65536" spellcheck="false" placeholder="header.payload.signature"></textarea></label>
-                        <label>Verification secret (HMAC only)<input id="jwt-secret" class="jwt-secret" type="password" maxlength="4096" autocomplete="off" /></label>
-                        <div class="decoder-actions"><button id="jwt-inspect" class="secondary-button decoder-primary" type="submit">Inspect without verifying</button><button id="jwt-verify" class="secondary-button" type="button">Verify HMAC signature</button><button id="jwt-clear" class="secondary-button" type="button">Clear</button></div>
+                        <label>JSON Web Token (JWT)<textarea id="jwt-token" spellcheck="false" placeholder="header.payload.signature"></textarea></label>
+                        <label>Verification secret (HMAC only)<input id="jwt-secret" class="jwt-secret" type="password" autocomplete="off" /></label>
+                        <div class="decoder-actions"><button id="jwt-inspect" class="secondary-button decoder-primary" type="submit">Inspect without verifying</button><button id="jwt-verify" class="secondary-button" type="button">Verify HMAC signature</button><button id="jwt-clear" class="secondary-button" type="button">Clear</button><button id="jwt-cancel" class="secondary-button" type="button" disabled>Cancel</button></div>
                       </form>
                     </article>
                     <details class="tool-disclosure">
                       <summary>Create a test token</summary>
                       <header><div><h2>Create test JWT</h2><p>Create a local HS256, HS384, HS512, or explicitly confirmed unsigned test token.</p></div><span class="experiment-card-badge">Ephemeral</span></header>
                       <form id="jwt-create-form" class="decoder-form">
-                        <label>Payload JSON<textarea id="jwt-payload" maxlength="57344" spellcheck="false">{}</textarea></label>
+                        <label>Payload JSON<textarea id="jwt-payload" spellcheck="false">{}</textarea></label>
                         <div class="decoder-form-row"><label>Algorithm<select id="jwt-algorithm"><option value="HS256">HS256</option><option value="HS384">HS384</option><option value="HS512">HS512</option><option value="none">Unsigned test token</option></select></label><label>Expires in seconds<input id="jwt-expiry" type="number" min="1" max="604800" value="3600" /></label></div>
-                        <label>HMAC secret<input id="jwt-create-secret" class="jwt-secret" type="password" maxlength="4096" autocomplete="off" /></label>
+                        <label>HMAC secret<input id="jwt-create-secret" class="jwt-secret" type="password" autocomplete="off" /></label>
                         <label id="jwt-unsigned-row" class="analyst-check analyst-sensitive jwt-unsigned" hidden><input id="jwt-confirm-unsigned" type="checkbox" /> I understand this creates an unsigned token with no authenticity</label>
-                        <div class="decoder-actions"><button id="jwt-create" class="secondary-button decoder-primary" type="submit">Create test token</button></div>
+                        <div class="decoder-actions"><button id="jwt-create" class="secondary-button decoder-primary" type="submit">Create test token</button><button id="jwt-create-cancel" class="secondary-button" type="button" disabled>Cancel</button></div>
                       </form>
                     </details>
                   </section>

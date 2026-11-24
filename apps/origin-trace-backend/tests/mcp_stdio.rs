@@ -439,7 +439,7 @@ fn running_captured_code_is_full_access_only() {
     for level in ["read-only", "ask", "auto"] {
         let mut mcp = at_level(&server, level);
         let names = tool_names(&mcp.request("tools/list", json!({})));
-        for name in ["run_wasm_function", "get_wasm_runs"] {
+        for name in ["run_wasm_function", "get_wasm_runs", "get_wasm_run_memory"] {
             assert!(
                 !names.iter().any(|listed| listed == name),
                 "{level} lists {name}"
@@ -447,11 +447,16 @@ fn running_captured_code_is_full_access_only() {
         }
         let answer = run_wasm(&mut mcp, body.clone());
         assert!(refused(&answer), "{level}: {answer}");
-        let listed = mcp.request(
-            "tools/call",
-            json!({"name": "get_wasm_runs", "arguments": {}}),
-        );
-        assert!(refused(&listed), "{level}: {listed}");
+        for (name, arguments) in [
+            ("get_wasm_runs", json!({})),
+            (
+                "get_wasm_run_memory",
+                json!({"run_id": "wr-1-00", "read": 0}),
+            ),
+        ] {
+            let read = mcp.request("tools/call", json!({"name": name, "arguments": arguments}));
+            assert!(refused(&read), "{level}: {read}");
+        }
     }
     assert_eq!(
         stored_runs(&server)["total"],
@@ -468,10 +473,14 @@ fn running_captured_code_is_full_access_only() {
     let answer = run_wasm(&mut full, body);
     assert_eq!(answer["result"]["isError"], false, "{answer}");
     let record: Value = serde_json::from_str(tool_text(&answer)).unwrap();
-    assert_eq!(
-        record["memory_reads"][0]["hex"],
-        hex::encode(b"SECRETBYTES")
+    let read = full.request(
+        "tools/call",
+        json!({"name": "get_wasm_run_memory",
+            "arguments": {"run_id": record["run_id"], "read": 0}}),
     );
+    assert_eq!(read["result"]["isError"], false, "{read}");
+    let page: Value = serde_json::from_str(tool_text(&read)).unwrap();
+    assert_eq!(page["hex"], hex::encode(b"SECRETBYTES"));
     assert_eq!(stored_runs(&server)["total"], 1);
 }
 
@@ -495,7 +504,7 @@ fn repeated_expectations_cannot_read_bytes_back_below_full_access() {
         assert!(!answer.to_string().contains("all_match"), "{answer}");
     }
     assert_eq!(stored_runs(&server)["total"], 0);
-    // The expectation bounds still hold at Full: 16 entries and one per read.
+    // One expectation per read still holds at Full.
     let mut full = at_level(&server, "full");
     let guesses = (0..=255u8)
         .map(|byte| json!({"read": 0, "hex": format!("{byte:02x}")}))
@@ -614,79 +623,6 @@ fn a_read_only_client_cannot_list_runs_or_rebuild_their_inputs() {
     }
 }
 
-#[test]
-fn a_maximal_full_run_and_the_default_listing_inline() {
-    // A run with 64 KiB or more of reads, or a listing of 16 large records,
-    // came back from reb-api mcp as a structural summary without its bytes.
-    let server = Server::start();
-    let sixteen = " i64".repeat(16);
-    let mut source =
-        format!("(module (import \"env\" \"big\" (func $big (param{sixteen}) (result{sixteen})))");
-    for index in 0..200 {
-        source.push_str(&format!(
-            "(import \"{}\" \"f{index}\" (func (param{sixteen})))",
-            "m".repeat(200)
-        ));
-    }
-    source.push_str(&format!(
-        "(memory 8) (func (export \"run\") (param{sixteen}) (result{})",
-        " i64".repeat(100)
-    ));
-    source.push_str("(local $n i32) (local.set $n (i32.const 300)) (block $done (loop $again (br_if $done (i32.eqz (local.get $n)))");
-    for index in 0..16 {
-        source.push_str(&format!("(local.get {index})"));
-    }
-    source.push_str("(call $big)");
-    source.push_str(&"(drop)".repeat(16));
-    source.push_str("(local.set $n (i32.sub (local.get $n) (i32.const 1))) (br $again)))");
-    source.push_str(&"(i64.const -9223372036854775808)".repeat(100));
-    source.push_str("))");
-    let hash = retained_wasm(&server, &wat::parse_str(&source).unwrap());
-    let value = json!({"type": "i64", "value": "-9223372036854775808"});
-    let body = json!({"artifact_id": "1", "sha256": hash, "export": "run",
-        "args": vec![value.clone(); 16],
-        "imports": [{"module": "env", "field": "big", "results": vec![value; 16]}],
-        "memory_writes": (0..16).map(|index| json!({"offset": index * 16384, "hex": "ab".repeat(16384)})).collect::<Vec<_>>(),
-        "memory_reads": (0..16).map(|index| json!({"offset": index * 2048, "length": 2048})).collect::<Vec<_>>(),
-        "limits": {"deadline_ms": 10000},
-        "confirm_offline_execution": true});
-    let mut full = at_level(&server, "full");
-    let inlined = |answer: &Value| {
-        assert_eq!(answer["result"]["isError"], false, "{answer}");
-        let record: Value = serde_json::from_str(tool_text(answer)).unwrap();
-        assert!(
-            record.get("mcp_projection").is_none(),
-            "a structural summary came back"
-        );
-        record
-    };
-    for _ in 0..3 {
-        let record = inlined(&run_wasm(&mut full, body.clone()));
-        assert_eq!(record["outcome"]["status"], "returned");
-        for read in record["memory_reads"].as_array().unwrap() {
-            assert_eq!(read["hex"].as_str().unwrap().len(), 4096);
-        }
-    }
-    let listed = full.request(
-        "tools/call",
-        json!({"name": "get_wasm_runs", "arguments": {"limit": 1}}),
-    );
-    let listing = inlined(&listed);
-    assert_eq!(listing["total"], 3);
-    assert_eq!(
-        listing["runs"].as_array().unwrap().len(),
-        1,
-        "the default listing is one record"
-    );
-    assert_eq!(
-        listing["runs"][0]["memory_reads"][0]["hex"]
-            .as_str()
-            .unwrap()
-            .len(),
-        4096
-    );
-}
-
 /// One tool answer, inline: not a structural summary and not an error.
 fn inline_record(answer: &Value) -> Value {
     assert_eq!(answer["result"]["isError"], false, "{answer}");
@@ -700,58 +636,93 @@ fn inline_record(answer: &Value) -> Value {
 }
 
 #[test]
-fn records_that_overflowed_after_trimming_now_inline() {
-    // Review repros at --permission full. (1) 48 calls of 16 i32 values each
-    // way and a 324-byte read fit alone but not nested in the listing.
-    // (2) 40 function and 40 global imports named with 128 control bytes, 768
-    // bytes each as JSON, stayed over the limit after every trim step.
+fn a_full_client_reads_memory_of_any_size_in_pages() {
+    // Reads were capped at 32 KiB in total so that a record, hex and all,
+    // fit what reb-api mcp inlines; records past that were trimmed.
+    use sha2::{Digest, Sha256};
     let server = Server::start();
-    let sixteen = " i32".repeat(16);
-    let mut calls = format!(
-        "(module (import \"env\" \"f\" (func $f (param{sixteen}) (result{sixteen}))) (memory 1) (func (export \"run\") (local $n i32) (local.set $n (i32.const 48)) (block $done (loop $again (br_if $done (i32.eqz (local.get $n)))"
+    let hash = retained_wasm(
+        &server,
+        &wat::parse_str(r#"(module (memory 16) (func (export "run")))"#).unwrap(),
     );
-    calls.push_str(&"(i32.const 1)".repeat(16));
-    calls.push_str("(call $f)");
-    calls.push_str(&"(drop)".repeat(16));
-    calls.push_str("(local.set $n (i32.sub (local.get $n) (i32.const 1))) (br $again)))))");
-    let hash = retained_wasm(&server, &wat::parse_str(&calls).unwrap());
+    let pattern = (0..512 * 1024)
+        .map(|i| (i * 31 % 253) as u8)
+        .collect::<Vec<_>>();
     let mut full = at_level(&server, "full");
-    let value = json!({"type": "i32", "value": "-2147483648"});
-    inline_record(&run_wasm(
+    let answer = run_wasm(
         &mut full,
         json!({"artifact_id": "1", "sha256": hash, "export": "run",
-        "imports": [{"module": "env", "field": "f", "results": vec![value; 16]}],
-        "memory_reads": [{"offset": 0, "length": 324}], "confirm_offline_execution": true}),
-    ));
-    let listing = inline_record(&full.request(
+            "memory_writes": [{"offset": 4096, "hex": hex::encode(&pattern)}],
+            "memory_reads": [{"offset": 4096, "length": pattern.len()},
+                {"offset": 0, "length": 16}],
+            "confirm_offline_execution": true}),
+    );
+    // The record keeps its request whole, and the 1 MiB of write hex it
+    // echoes is past the inline limit, so it comes back as a structural
+    // summary. The summary still names the run and its outcome, and the
+    // reads hold no bytes, so nothing a client needs is in the omitted hex.
+    assert_eq!(answer["result"]["isError"], false, "{answer}");
+    let summary: Value = serde_json::from_str(tool_text(&answer)).unwrap();
+    assert_eq!(summary["mcp_projection"], "structural_summary");
+    let record = &summary["document"];
+    assert_eq!(record["outcome"]["status"], "returned");
+    assert_eq!(record["size_trimmed"], json!([]));
+    assert_eq!(record["memory_reads"][0]["status"], "read");
+    assert_eq!(record["memory_reads"][0].get("hex"), None);
+    let run_id = record["run_id"].as_str().unwrap().to_owned();
+    let run_id = run_id.as_str();
+    let mut page = |arguments: Value| {
+        inline_record(&full.request(
+            "tools/call",
+            json!({"name": "get_wasm_run_memory", "arguments": arguments}),
+        ))
+    };
+    // A page asked for whole is halved until it inlines, and next_start
+    // continues it to the last byte.
+    let (mut whole, mut start, mut pages) = (Vec::new(), 0, 0);
+    loop {
+        let value =
+            page(json!({"run_id": run_id, "read": 0, "start": start, "length": pattern.len()}));
+        assert!(value["length"].as_u64().unwrap() < pattern.len() as u64);
+        whole.extend(hex::decode(value["hex"].as_str().unwrap()).unwrap());
+        pages += 1;
+        match value["next_start"].as_u64() {
+            Some(next) => start = next,
+            None => break,
+        }
+    }
+    assert!(pages > 1, "{pages}");
+    assert_eq!(whole, pattern);
+    assert_eq!(
+        hex::encode(Sha256::digest(&whole)),
+        page(json!({"run_id": run_id, "read": 0, "length": 1}))["sha256"]
+    );
+    assert_eq!(
+        page(json!({"run_id": run_id, "read": 1}))["hex"],
+        "00".repeat(16)
+    );
+    // A listing halves its limit to one run, which is still the summary.
+    let listing = full.request(
         "tools/call",
         json!({"name": "get_wasm_runs", "arguments": {}}),
-    ));
-    assert_eq!(listing["runs"][0]["import_calls_total"], 48);
-
+    );
+    let listing: Value = serde_json::from_str(tool_text(&listing)).unwrap();
+    assert_eq!(listing["document"]["runs"][0]["run_id"], run_id);
+    // Names are whole: 40 function imports named with 128 control bytes, 768
+    // bytes each as JSON, were cut to fit.
     let name = "\\01".repeat(128);
     let mut escaped = String::from("(module");
     for index in 0..40 {
-        escaped.push_str(&format!(
-            "(import \"{name}\" \"f{index}\" (func))(import \"{name}\" \"g{index}\" (global i32))"
-        ));
+        escaped.push_str(&format!("(import \"{name}\" \"f{index}\" (func))"));
     }
     escaped.push_str("(memory 1) (func (export \"run\")))");
     let hash = retained_wasm(&server, &wat::parse_str(&escaped).unwrap());
     let record = inline_record(&run_wasm(
         &mut full,
         json!({"artifact_id": "1", "sha256": hash, "export": "run",
-        "memory_reads": (0..16).map(|index| json!({"offset": index * 2048, "length": 2048})).collect::<Vec<_>>(),
-        "confirm_offline_execution": true}),
+            "confirm_offline_execution": true}),
     ));
-    assert_eq!(
-        record["memory_reads"][15]["hex"].as_str().unwrap().len(),
-        4096
-    );
-    inline_record(&full.request(
-        "tools/call",
-        json!({"name": "get_wasm_runs", "arguments": {"limit": 1}}),
-    ));
+    assert_eq!(record["imports"][39]["module"], "\u{1}".repeat(128));
 }
 
 fn float32_artifact_request(artifact: &Value) -> Value {
@@ -856,6 +827,7 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
             "search_wasm_inspection",
             "run_wasm_function",
             "get_wasm_runs",
+            "get_wasm_run_memory",
             "export_requests_har"
         ])
     );

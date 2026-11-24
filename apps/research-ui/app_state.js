@@ -161,6 +161,7 @@
         queueDrops: null,
         // Named gap reasons per category; null means derive from visible events.
         namedGaps: null,
+        brokerRefusals: null,
         eventCountScope: 'rendered_window',
         networkEventsAvailable: false,
         networkEventsLimited: false,

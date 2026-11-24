@@ -26,7 +26,7 @@ const state = {
 let notice;
 const elements = {networkNotice: {hidden: true, dataset: {}}};
 const api = runInNewContext(
-  `${failedNoticeHelpers}\n${models}\n${app.slice(start, end)};({isBrokerResponse,isBrokerEvent,decodePayload,acceptEventWindow,captureWideTotal,countSequenceGaps,countReportedQueueDrops,requestsFromEvents,shownSequenceGaps,shownQueueDrops,shownNamedGaps,namedGapsFromEvents,namedGapsIn,namedGapNotice,eventGapLabel,fingerprintCoverageNotice,renderNetworkNotice,fingerprintSignalCategories,vmGapCategories})`,
+  `${failedNoticeHelpers}\n${models}\n${app.slice(start, end)};({isBrokerResponse,isBrokerEvent,decodePayload,acceptEventWindow,captureWideTotal,countSequenceGaps,countReportedQueueDrops,requestsFromEvents,shownSequenceGaps,shownQueueDrops,shownNamedGaps,namedGapsFromEvents,namedGapsIn,namedGapNotice,eventGapLabel,fingerprintCoverageNotice,renderNetworkNotice,fingerprintSignalCategories,vmGapCategories,decodeBrokerRefusal,brokerRefusalsFromEvents,shownBrokerRefusals,fingerprintEventsFromEvents})`,
   {
     state,
     TextEncoder,
@@ -377,3 +377,71 @@ assert.equal(api.shownNamedGaps().length, 300);
 assert.equal(api.namedGapsFromEvents(manyPairs.map((pair, index) => ({...liveBudgets[0], sequence_number: String(index + 1),
   payload: Buffer.from(pair.reason).toString('hex'), payload_size: pair.reason.length}))).length, 300);
 console.log('PASS named gap summaries are strict, unique, complete and covered by queue_drops');
+
+// protocol/broker-refusal-v1.md: the broker's record in place of one it
+// refused. Reason 5 (reserved) keeps the refused record's place; reason 1
+// (protocol version) is on the broker's own stream, process 4294967295.
+const refusal = (sequence, reason, category = 'canvas') => {
+  const payload = Buffer.alloc(128);
+  const broker = reason <= 3;
+  const raw = {canvas: 1, webgl: 2, network: 9}[category] ?? 999;
+  payload.writeUInt16LE(1, 0); payload.writeUInt16LE(128, 2); payload.writeUInt16LE(reason, 4);
+  payload.writeUInt16LE(broker ? 2 : 1, 6); payload.writeUInt16LE(reason === 1 ? 2 : 3, 8);
+  payload.writeUInt16LE(144, 10); payload.writeUInt16LE(reason === 6 ? 999 : raw, 12); payload.writeUInt16LE(1, 14);
+  payload.writeBigUInt64LE(77n, 24); payload.writeBigUInt64LE(BigInt(sequence), 32);
+  payload.writeBigUInt64LE(BigInt(sequence) * 10n, 40); payload.writeUInt32LE(7, 48); payload.writeUInt32LE(1, 52);
+  return {...request(sequence, 'broker_refusal'), session_id: '1', category: reason === 6 ? 'unknown' : category,
+    request_id: '0', tab_id: broker ? 0 : 1, resource_type: 0, payload_truncated: false,
+    process_id: broker ? 4294967295 : 7, thread_id: broker ? 0 : 1, sequence_number: broker ? '1' : String(sequence),
+    monotonic_time_ns: broker ? '77' : String(sequence * 10), navigation_id: broker ? '0' : '1', frame_id: broker ? '0' : '1',
+    payload: payload.toString('hex'), payload_size: 128};
+};
+const placed = refusal(2, 5);
+assert.equal(api.isBrokerEvent(placed), true, 'a refusal in its place is a broker event');
+const decoded = api.decodeBrokerRefusal(placed);
+assert.equal(decoded.reason, 'reserved');
+assert.equal(decoded.identity, 'refused');
+assert.equal(decoded.refused.sequence_number, '2');
+assert.equal(decoded.received_monotonic_time_ns, '77');
+const own = refusal(5, 1);
+assert.equal(api.decodeBrokerRefusal(own)?.identity, 'broker', 'an envelope refusal is on the broker stream');
+assert.equal(api.decodeBrokerRefusal(refusal(6, 6))?.reason, 'category');
+assert.equal(api.isBrokerEvent(refusal(6, 6)), true, 'only a refusal files under the unknown category');
+assert.equal(api.isBrokerEvent({...canvas(1), category: 'unknown'}), false);
+for (const [name, broken] of [
+  ['a header sequence other than the refused one', {...placed, sequence_number: '3'}],
+  ['a category other than the refused one', {...placed, category: 'webgl'}],
+  ['network fields', {...placed, status_code: 200}],
+  ['a short payload', {...placed, payload: placed.payload.slice(2), payload_size: 127}],
+  ['a broker stream thread', {...own, thread_id: 4}],
+  ['a trailing payload byte', {...placed, payload: `${placed.payload.slice(0, 254)}01`}],
+  ['a reason the fields disagree with', {...placed, payload: `${placed.payload.slice(0, 8)}0100${placed.payload.slice(12)}`}]
+]) {
+  assert.equal(api.decodeBrokerRefusal(broken), null, name);
+  assert.equal(api.isBrokerEvent(broken), false, name);
+}
+const refusals = [{category: 'canvas', reason: 'reserved', count: '2'}, {category: 'canvas', reason: 'protocol_version', count: '1'}];
+const refusedResponse = {...liveResponse, events: [placed, own], count: 2, named_gaps: [], queue_drops: '0', broker_refusals: refusals};
+assert.equal(api.isBrokerResponse(refusedResponse), true);
+for (const broker_refusals of [
+  [{category: 'canvas', reason: 'reserved', count: '0'}],
+  [{category: 'canvas', reason: 'unlisted', count: '1'}],
+  [{category: 'Canvas', reason: 'reserved', count: '1'}],
+  [{category: 'canvas', reason: 'reserved', count: 1}],
+  [refusals[0], refusals[0]],
+  {category: 'canvas', reason: 'reserved', count: '1'}
+]) assert.equal(api.isBrokerResponse({...refusedResponse, broker_refusals}), false, JSON.stringify(broker_refusals));
+Object.assign(state, {events: [placed, own], requests: []});
+api.acceptEventWindow(refusedResponse);
+assert.equal(api.shownBrokerRefusals().map(entry => `${entry.reason}:${entry.count}`).join(), 'reserved:2,protocol_version:1');
+assert.equal(api.eventGapLabel(0n, 0n, [], api.shownBrokerRefusals()),
+  '0 sequence-gap IDs (the stored capture) · 3 records refused by the broker (reserved, protocol_version)');
+api.acceptEventWindow({...refusedResponse, broker_refusals: undefined});
+assert.equal(api.shownBrokerRefusals().map(entry => `${entry.category}:${entry.reason}:${entry.count}`).join(),
+  'canvas:reserved:1,canvas:protocol_version:1', 'without the field the visible refusals are counted');
+assert.equal(api.eventGapLabel(0n, 0n, [], []), '0 sequence-gap IDs (the stored capture)', 'no refusal, no clause');
+assert.equal(api.eventGapLabel(0n, 0n, [], [{category: 'canvas', reason: 'type', count: 1n}]),
+  '0 sequence-gap IDs (the stored capture) · 1 record refused by the broker (type)');
+assert.equal(api.fingerprintEventsFromEvents([placed, canvas(9)]).map(event => event.type).join(), 'api_call',
+  'a refused canvas record is no canvas signal');
+console.log('PASS broker refusals decode strictly, are counted and stay out of Signals');

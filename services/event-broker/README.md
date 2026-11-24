@@ -99,6 +99,24 @@ The command connects a deterministic native producer to the broker and creates
 `build/sessions/demo.jsonl`. Invalid or truncated records fail closed. The
 broker reports accepted records, invalid records, gaps, and retention evictions.
 
+A record the broker refuses at validation is never stored. A `broker_refusal`
+record (type 53, [broker refusal v1](../../protocol/broker-refusal-v1.md))
+stands in its place, so the loss is evidence rather than only a count. It
+names the first check that failed and keeps the refused header fields as
+read, but no byte of the refused payload. It takes the refused record's
+identifiers and sequence number, so no sequence gap is left. When the refused
+header cannot name that place, it takes the broker's own stream instead: a
+wrong protocol version or header size, or a claim on the broker's reserved
+process ID 4294967295.
+
+After expiry, or for a known category the session excludes, nothing is
+stored, as for a valid record. The stop line counts every refusal in
+`invalid` and the stored ones in `refusals_recorded`, and the exit status is
+still 1 whenever a record was refused. `make e2e` runs
+`tools/check-broker-refusals.py`, which drives every reason through the real
+broker over standard input and the authenticated socket. The resulting
+stores are then read through the evidence validator and the backend.
+
 Large artifact bytes are intentionally outside this service and its event
 queue. `reb-artifact-receiver` owns the independently bounded artifact stream,
 immutable blob store, hashing, and manifest. Events reference artifacts by ID;

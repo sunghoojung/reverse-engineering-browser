@@ -91,6 +91,7 @@ EVENT_CATEGORIES = {
 EVENT_TYPES = {
     "api_call",
     "artifact_capture_failed",
+    "broker_refusal",
     "artifact_captured",
     "cookie_list",
     "capture_exclusion",
@@ -1142,6 +1143,56 @@ def valid_request_extension_link(event: dict, payload: bytes) -> bool:
             and event["tab_id"] == 0 and names_browser_record(event) == (payload[4] in (4, 6)))
 
 
+# protocol/broker-refusal-v1.md, shared with include/reb/broker_refusal.hpp:
+# the broker's record in place of one it refused at validation. Reasons 1 to
+# 10 in check order; the first three leave the refused header unusable, so the
+# refusal takes the broker's own stream, process BROKER_PROCESS_ID.
+BROKER_REFUSAL_REASONS = (
+    "protocol_version", "header_size", "process_id", "payload_size", "reserved",
+    "category", "type", "flags", "network_class", "typed_payload",
+)
+BROKER_REFUSAL_CATEGORIES = (
+    "unknown", "canvas", "webgl", "web_audio", "navigator", "permissions", "storage",
+    "webrtc", "wasm", "network", "vm", "artifact", "runtime",
+)
+BROKER_PROCESS_ID = 0xFFFFFFFF
+
+
+def valid_broker_refusal(event: dict, payload: bytes) -> bool:
+    def at(offset: int, size: int) -> int:
+        return int.from_bytes(payload[offset:offset + size], "little")
+
+    if (event["protocol_version"] != 3 or len(payload) != 128 or event["flags"] != 0
+            or event["payload_truncated"] or "scheme_class" in event or "loader_kind" in event
+            or any(event[key] != "0" for key in ("browser_context_id_high", "browser_context_id_low",
+                                                  "encoded_data_length", "decoded_body_length"))
+            or any(event[key] != 0 for key in ("status_code", "error_code", "resource_type",
+                                                "initiator_request_id", "initiator_process_id"))
+            or at(0, 2) != 1 or at(2, 2) != 128 or any(payload[56:])):
+        return False
+    reason, identity, raw_category = at(4, 2), at(6, 2), at(12, 2)
+    category = BROKER_REFUSAL_CATEGORIES[raw_category] if raw_category < len(BROKER_REFUSAL_CATEGORIES) else "unknown"
+    if not 1 <= reason <= len(BROKER_REFUSAL_REASONS) or event["category"] != category:
+        return False
+
+    # Each check before the reason passed and the reason's own failed.
+    def holds(check: int, passed: bool) -> bool:
+        return not passed if reason == check else reason < check or passed
+
+    if not (holds(1, at(8, 2) == 3) and holds(2, at(10, 2) == 144)
+            and holds(3, at(48, 4) != BROKER_PROCESS_ID) and holds(4, at(16, 4) <= 128)
+            and holds(6, category != "unknown")):
+        return False
+    if reason <= 3:
+        return (identity == 2 and event["process_id"] == BROKER_PROCESS_ID and event["thread_id"] == 0
+                and event["tab_id"] == 0 and event["sequence_number"] != "0"
+                and event["monotonic_time_ns"] == str(at(24, 8))
+                and all(event[key] == "0" for key in ("navigation_id", "frame_id", "artifact_id",
+                                                       "parent_event_id", "request_id")))
+    return (identity == 1 and event["process_id"] == at(48, 4) and event["thread_id"] == at(52, 4)
+            and event["sequence_number"] == str(at(32, 8)) and event["monotonic_time_ns"] == str(at(40, 8)))
+
+
 def validate_event(event: object, line_number: int) -> None:
     if not isinstance(event, dict):
         raise ValueError(f"line {line_number}: event must be a JSON object")
@@ -1187,7 +1238,11 @@ def validate_event(event: object, line_number: int) -> None:
         raise ValueError(f"line {line_number}: payload_truncated is not a boolean")
     if protocol_version not in {2, 3}:
         raise ValueError(f"line {line_number}: unsupported protocol version")
-    if event["category"] not in EVENT_CATEGORIES or event["type"] not in EVENT_TYPES:
+    # Only a refusal of a record whose category was not a known one files
+    # under the unknown category.
+    known_category = event["category"] in EVENT_CATEGORIES or (
+        event["type"] == "broker_refusal" and event["category"] == "unknown")
+    if not known_category or event["type"] not in EVENT_TYPES:
         raise ValueError(f"line {line_number}: unknown category or event type")
     if not 0 <= event["flags"] <= 7:
         raise ValueError(f"line {line_number}: unsupported event flags")
@@ -1325,6 +1380,8 @@ def validate_event(event: object, line_number: int) -> None:
         raise ValueError(f"line {line_number}: capture exclusion record is invalid")
     if event["type"] == "memory_cache_reuse" and not valid_memory_cache_reuse(event, payload):
         raise ValueError(f"line {line_number}: memory-cache reuse record is invalid")
+    if event["type"] == "broker_refusal" and not valid_broker_refusal(event, payload):
+        raise ValueError(f"line {line_number}: broker refusal record is invalid")
     loader_kind = event.get("loader_kind", 0)
     if "loader_kind" in event and (not isinstance(loader_kind, int) or isinstance(loader_kind, bool)
                                    or event["category"] != "network"

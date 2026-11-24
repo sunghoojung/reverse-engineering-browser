@@ -323,6 +323,7 @@ fn adjacent_candidate(
     for event in siblings {
         if reference(event).is_ok_and(|key| visited.contains(&key))
             || event["type"] == "gap"
+            || event["type"] == crate::broker_refusal::TYPE
             || event["session_id"] != current["session_id"]
             || event["category"] != "network"
             || event["request_id"] != current["request_id"]
@@ -746,7 +747,10 @@ pub(crate) fn trace(
     let candidates: Vec<&Value> = request_events
         .iter()
         .filter(|e| {
+            // Neither a gap marker nor a broker refusal is an observation of
+            // the request, though a refusal keeps the refused record's ID.
             e["type"] != "gap"
+                && e["type"] != crate::broker_refusal::TYPE
                 && e["category"] == "network"
                 && e["request_id"] == request_id
                 && session_id.is_none_or(|session| e["session_id"] == session)

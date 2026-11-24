@@ -532,6 +532,7 @@
         "category": {
           "type": "string",
           "enum": [
+            "unknown",
             "canvas",
             "webgl",
             "web_audio",
@@ -598,7 +599,8 @@
             "async_task_stack",
             "request_extension_link",
             "script_compiled",
-            "memory_cache_reuse"
+            "memory_cache_reuse",
+            "broker_refusal"
           ]
         },
         "status_code": {

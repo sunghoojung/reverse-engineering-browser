@@ -16,8 +16,10 @@
       // integer; include/reb/wasm_guest.hpp kWasmGuestSampleIndexLimit.
       const WASM_GUEST_SAMPLE_INDEX_LIMIT = 2 ** 31 - 1;
 
+      // A broker_refusal stands in for a record the broker never accepted, so
+      // it is no signal of its category.
       function fingerprintEventsFromEvents(events) {
-        return events.filter(event => fingerprintSignalCategories.has(event.category));
+        return events.filter(event => fingerprintSignalCategories.has(event.category) && event.type !== 'broker_refusal');
       }
       const eventTypes = {
         1: new Set([
@@ -45,7 +47,7 @@
           'script_identity', 'capture_exclusion', 'tab_set', 'request_tab_link', 'navigation_initiator_stack',
           'navigation_initiator_link', 'async_task_stack',
           'request_extension_link', 'request_watch_match', 'listener_dispatch', 'timer_observation',
-          'csp_violation', 'exception_observation', 'dom_mutation', 'memory_cache_reuse',
+          'csp_violation', 'exception_observation', 'dom_mutation', 'memory_cache_reuse', 'broker_refusal',
           'debugger_attached', 'debugger_paused', 'debugger_resumed', 'debugger_breakpoint'
         ])
       };
@@ -353,6 +355,10 @@
         return Array.isArray(state.namedGaps) ? state.namedGaps : namedGapsFromEvents(state.events);
       }
 
+      function shownBrokerRefusals() {
+        return Array.isArray(state.brokerRefusals) ? state.brokerRefusals : brokerRefusalsFromEvents(state.events);
+      }
+
       // queue_drops weighs each named marker as one (protocol/http-api.md). Those
       // markers are capture limits in their own category, so take them back out.
       function shownQueueDrops() {
@@ -374,6 +380,9 @@
         state.queueDropsSaturated = body.queue_drops_saturated === true;
         state.namedGaps = Array.isArray(body.named_gaps)
           ? body.named_gaps.map(gap => ({category: gap.category, reason: gap.reason, count: BigInt(gap.count)})) : null;
+        state.brokerRefusals = Array.isArray(body.broker_refusals)
+          ? body.broker_refusals.map(refusal => ({category: refusal.category, reason: refusal.reason,
+            count: BigInt(refusal.count)})) : null;
         state.eventCountScope = body.event_window?.scope ??
           (state.sequenceGaps !== null && state.queueDrops !== null ? 'store' : 'rendered_window');
         state.eventsLimited = body.event_window?.events_limited ?? body.count >= 5000;
@@ -385,12 +394,21 @@
         state.eventMalformedLines = body.event_window?.malformed_lines ?? 0;
       }
 
-      function eventGapLabel(gapCount, reportedDrops, namedGaps = []) {
+      function eventGapLabel(gapCount, reportedDrops, namedGaps = [], brokerRefusals = []) {
         const gaps = `${state.sequenceGapsSaturated ? 'at least ' : ''}${gapCount}`;
         const drops = `${state.queueDropsSaturated ? 'at least ' : ''}${reportedDrops}`;
         return `${gaps} sequence-gap IDs (${eventCountScopeLabel()})` +
           (reportedDrops > 0n ? ` · ${drops} reported queue ${reportedDrops === 1n ? 'drop' : 'drops'} (may overlap)` : '') +
-          namedGapStatusLabel(namedGaps);
+          namedGapStatusLabel(namedGaps) + brokerRefusalStatusLabel(brokerRefusals);
+      }
+
+      // Records the broker refused at validation: each is lost but for the
+      // broker_refusal standing in its place.
+      function brokerRefusalStatusLabel(refusals) {
+        const total = refusals.reduce((sum, refusal) => sum + refusal.count, 0n);
+        if (total === 0n) return '';
+        const reasons = [...new Set(refusals.map(refusal => refusal.reason))].join(', ');
+        return ` · ${total} ${total === 1n ? 'record' : 'records'} refused by the broker (${reasons})`;
       }
 
       // namedGaps must already be limited to fingerprint categories.
@@ -1202,13 +1220,87 @@
           u64(40) < BigInt(length) && u64(64) + BigInt(length) <= uint64Max && bytes.slice(96).some(b => b !== 0) ? {} : null;
       }
 
+      // protocol/broker-refusal-v1.md: the record the broker stores in place of
+      // one it refused at validation. The same rules as IsValidBrokerRefusal
+      // in src/capture/event.cpp; null for a record any reader refuses.
+      const brokerRefusalReasons = ['protocol_version', 'header_size', 'process_id', 'payload_size', 'reserved',
+        'category', 'type', 'flags', 'network_class', 'typed_payload'];
+      const brokerRefusalCategories = ['unknown', 'canvas', 'webgl', 'web_audio', 'navigator', 'permissions',
+        'storage', 'webrtc', 'wasm', 'network', 'vm', 'artifact', 'runtime'];
+      const brokerProcessId = 0xffffffff;
+      function decodeBrokerRefusal(event) {
+        if (event?.type !== 'broker_refusal' || event.protocol_version !== 3 || event.payload_size !== 128 ||
+            event.payload_encoding !== 'hex' || typeof event.payload !== 'string' || !/^[0-9a-f]{256}$/i.test(event.payload) ||
+            event.payload_truncated !== false || event.flags !== 0 || Object.hasOwn(event, 'scheme_class') ||
+            Object.hasOwn(event, 'loader_kind') ||
+            ['browser_context_id_high', 'browser_context_id_low', 'encoded_data_length', 'decoded_body_length']
+              .some(key => event[key] !== '0') ||
+            ['status_code', 'error_code', 'resource_type', 'initiator_request_id', 'initiator_process_id']
+              .some(key => event[key] !== 0)) return null;
+        const bytes = bytesFromHex(event.payload);
+        const view = new DataView(bytes.buffer);
+        const u64 = offset => view.getBigUint64(offset, true);
+        const reason = view.getUint16(4, true), identity = view.getUint16(6, true);
+        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || reason < 1 ||
+            reason > brokerRefusalReasons.length || bytes.slice(56).some(byte => byte !== 0)) return null;
+        const refused = {
+          protocol_version: view.getUint16(8, true), header_size: view.getUint16(10, true),
+          category: view.getUint16(12, true), type: view.getUint16(14, true), payload_size: view.getUint32(16, true),
+          flags: view.getUint16(20, true), scheme_class: bytes[22], loader_kind: bytes[23],
+          sequence_number: String(u64(32)), monotonic_time_ns: String(u64(40)),
+          process_id: view.getUint32(48, true), thread_id: view.getUint32(52, true)
+        };
+        const category = brokerRefusalCategories[refused.category] ?? 'unknown';
+        if (event.category !== category) return null;
+        // Every check before the reason passed and the reason's own failed.
+        const holds = (check, passed) => reason === check ? !passed : reason < check || passed;
+        if (!holds(1, refused.protocol_version === 3) || !holds(2, refused.header_size === 144) ||
+            !holds(3, refused.process_id !== brokerProcessId) || !holds(4, refused.payload_size <= 128) ||
+            !holds(6, category !== 'unknown')) return null;
+        const received = String(u64(24));
+        const brokerStream = reason <= 3;
+        const placed = brokerStream
+          ? identity === 2 && event.process_id === brokerProcessId && event.thread_id === 0 &&
+            event.sequence_number !== '0' && event.monotonic_time_ns === received && event.tab_id === 0 &&
+            ['navigation_id', 'frame_id', 'artifact_id', 'parent_event_id', 'request_id'].every(key => event[key] === '0')
+          : identity === 1 && event.process_id === refused.process_id && event.thread_id === refused.thread_id &&
+            event.sequence_number === refused.sequence_number && event.monotonic_time_ns === refused.monotonic_time_ns;
+        return placed ? {
+          reason: brokerRefusalReasons[reason - 1], identity: brokerStream ? 'broker' : 'refused',
+          received_monotonic_time_ns: received, refused
+        } : null;
+      }
+
+      function brokerRefusalsFromEvents(events) {
+        const refusals = [];
+        for (const event of events) {
+          const decoded = event?.type === 'broker_refusal' ? decodeBrokerRefusal(event) : null;
+          if (!decoded) continue;
+          const existing = refusals.find(refusal => refusal.category === event.category && refusal.reason === decoded.reason);
+          if (existing) existing.count += 1n;
+          else refusals.push({category: event.category, reason: decoded.reason, count: 1n});
+        }
+        return refusals;
+      }
+
+      function isBrokerRefusalList(value) {
+        if (!Array.isArray(value)) return false;
+        const keys = new Set();
+        return value.every(refusal => isPlainObject(refusal) && Object.keys(refusal).length === 3 &&
+          brokerRefusalCategories.includes(refusal.category) && brokerRefusalReasons.includes(refusal.reason) &&
+          isCaptureTotal(refusal.count) && refusal.count !== '0' &&
+          !keys.has(`${refusal.category}:${refusal.reason}`) && keys.add(`${refusal.category}:${refusal.reason}`));
+      }
+
       function isBrokerEvent(event) {
         if (!isPlainObject(event) || !Number.isInteger(event.protocol_version)) return false;
         const payloadLimit = event.protocol_version === 1 ? 48
           : event.protocol_version === 2 || event.protocol_version === 3 ? 128 : null;
         if (payloadLimit === null || !eventTypes[event.protocol_version]?.has(event.type)) return false;
         if (!eventCategories.has(event.category)) return false;
-        if (event.protocol_version >= 2 && (event.category === 'unknown' || event.type === 'unknown')) return false;
+        // Only a refusal of a record with an unknown category files under it.
+        if (event.protocol_version >= 2 && (event.category === 'unknown' && event.type !== 'broker_refusal' ||
+          event.type === 'unknown')) return false;
         if (!isSafeIntegerInRange(event.payload_size, 0, payloadLimit)) return false;
         if (event.payload_encoding !== 'hex' || typeof event.payload !== 'string') return false;
         if (event.payload.length !== event.payload_size * 2 || !/^[0-9a-f]*$/i.test(event.payload)) return false;
@@ -1248,6 +1340,7 @@
             decodeWasmOverflow(event) !== null) &&
           (event.type !== 'js_dispatch_observation' || decodeNativeJsObservation(event) !== null) &&
           (event.type !== 'memory_cache_reuse' || decodeMemoryCacheReuse(event) !== null) &&
+          (event.type !== 'broker_refusal' || decodeBrokerRefusal(event) !== null) &&
           (!event.type.startsWith('js_invocation_') || decodeNativeJsInvocation(event) !== null) &&
           (!['wasm_guest_dispatch','wasm_guest_invocation'].includes(event.type) || decodeNativeGuestRecord(event) !== null);
       }
@@ -1273,6 +1366,7 @@
             // Each listed marker is inside queue_drops, so an honest total covers them.
             (body.queue_drops === undefined || body.queue_drops_saturated === true ||
               BigInt(body.queue_drops) >= body.named_gaps.reduce((total, gap) => total + BigInt(gap.count), 0n)))) &&
+          (body.broker_refusals === undefined || isBrokerRefusalList(body.broker_refusals)) &&
           (body.canvas_render_captures === undefined ||
             (body.capture_mode === 'demo' &&
               Array.isArray(body.canvas_render_captures) &&

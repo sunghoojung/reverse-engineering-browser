@@ -1566,6 +1566,11 @@ records are not full observations. Each one-second window has its own ring
 and count, and starts the Wasm budgets again; `reset_wasm_sample_budgets`
 closes the window at once. See
 [overflow identities](../../protocol/native-wasm-dispatch-v1.md#overflow-identities).
+A record the broker refused at validation is stored as a `broker_refusal`
+([broker refusal v1](../../protocol/broker-refusal-v1.md)). The backend counts
+these by category and reason in `broker_refusals`, and the status bar adds
+a loss clause such as `3 records refused by the broker (reserved, type)`.
+Signals does not list a refusal as a signal of its category.
 For a live session that records a Wasm stream, VM Lab shows the session
 context's `capture_options.wasm_sampling` under its notice: the streams, the
 records each window keeps, the per-function and per-call-site allowances (an

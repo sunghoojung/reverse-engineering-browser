@@ -1555,7 +1555,8 @@ fn event_response(events: &[Value], scan_end: usize, older: Option<usize>) -> Va
         "sequence_gaps_saturated": false,
         "queue_drops": "0",
         "queue_drops_saturated": false,
-        "named_gaps": []
+        "named_gaps": [],
+        "broker_refusals": []
     })
 }
 fn window_event(sequence: u64, category: &str, kind: &str, payload: &str) -> Value {
@@ -2079,6 +2080,141 @@ async fn session_summary_counts_frames_and_explains_gaps() {
     assert_contract_response(unchanged, "get", "/api/session/summary", 304).await;
     let bad = server.get("/api/session/summary?limit=1").await;
     assert_contract_response(bad, "get", "/api/session/summary", 400).await;
+}
+
+/// A broker_refusal as the broker stores it (protocol/broker-refusal-v1.md):
+/// reason 5 (reserved) in the refused record's place, or reason 1 (protocol
+/// version) on the broker's own stream.
+fn refusal_event(sequence: u64, broker_stream: bool) -> Value {
+    let mut payload = [0u8; 128];
+    let mut put = |at: usize, size: usize, value: u64| {
+        payload[at..at + size].copy_from_slice(&value.to_le_bytes()[..size]);
+    };
+    put(0, 2, 1);
+    put(2, 2, 128);
+    put(4, 2, if broker_stream { 1 } else { 5 });
+    put(6, 2, if broker_stream { 2 } else { 1 });
+    put(8, 2, if broker_stream { 2 } else { 3 });
+    put(10, 2, 144);
+    put(12, 2, 9);
+    put(14, 2, 2);
+    put(24, 8, 77);
+    put(32, 8, sequence);
+    put(40, 8, sequence * 1000);
+    put(48, 4, 100);
+    put(52, 4, 101);
+    let mut event = metadata_event(sequence);
+    for (key, value) in [
+        ("type", json!("broker_refusal")),
+        ("payload", json!(hex::encode(payload))),
+        ("payload_size", json!(128)),
+        ("tab_id", json!(0)),
+        ("browser_context_id_high", json!("0")),
+        ("browser_context_id_low", json!("0")),
+        ("resource_type", json!(0)),
+        ("request_id", json!("0")),
+    ] {
+        event[key] = value;
+    }
+    if broker_stream {
+        event["process_id"] = json!(4294967295u64);
+        event["thread_id"] = json!(0);
+        event["sequence_number"] = json!("1");
+        event["monotonic_time_ns"] = json!("77");
+        event["navigation_id"] = json!("0");
+        event["frame_id"] = json!("0");
+    }
+    event
+}
+
+// A record the broker refused leaves a broker_refusal in its place: the
+// polling window, a filtered read and the summary count it by category and
+// reason, decode it beside the payload, and its sequence is no gap.
+#[tokio::test]
+async fn broker_refusals_are_counted_decoded_and_fill_their_place() {
+    let server = Server::start().await;
+    let mut bad = refusal_event(3, false);
+    bad["thread_id"] = json!(5);
+    let events = [
+        metadata_event(1),
+        refusal_event(2, false),
+        bad,
+        metadata_event(4),
+        refusal_event(9, true),
+    ];
+    server.file("events.jsonl", &jsonl(&events));
+    let response = server.get("/api/events").await;
+    let bytes = assert_contract_response(response, "get", "/api/events", 200).await;
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        body["broker_refusals"],
+        json!([
+            {"category": "network", "reason": "reserved", "count": "1"},
+            {"category": "network", "reason": "protocol_version", "count": "1"}
+        ])
+    );
+    assert_eq!(body["sequence_gaps"], "0");
+    assert_eq!(body["queue_drops"], "0");
+    assert_eq!(body["named_gaps"], json!([]));
+    let decoded = &body["events"][1]["broker_refusal"];
+    assert_eq!(decoded["status"], "decoded");
+    assert_eq!(decoded["reason"], "reserved");
+    assert_eq!(decoded["identity"], "refused");
+    assert_eq!(decoded["refused"]["sequence_number"], "2");
+    assert_eq!(decoded["refused"]["type"], 2);
+    assert_eq!(
+        body["events"][2]["broker_refusal"],
+        json!({"status": "invalid"})
+    );
+    let broker = &body["events"][4]["broker_refusal"];
+    assert_eq!(
+        (&broker["identity"], &broker["reason"]),
+        (&json!("broker"), &json!("protocol_version"))
+    );
+    assert_eq!(broker["refused"]["protocol_version"], 2);
+    assert!(body["events"][0].get("broker_refusal").is_none());
+
+    let filtered = server.get("/api/events?type=broker_refusal").await;
+    let bytes = assert_contract_response(filtered, "get", "/api/events", 200).await;
+    let filtered: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(filtered["count"], 3);
+    // A filtered read tallies in its scan order, newest first.
+    let mut pairs = filtered["broker_refusals"].as_array().unwrap().clone();
+    pairs.reverse();
+    assert_eq!(Value::Array(pairs), body["broker_refusals"]);
+    assert_eq!(
+        filtered["events"][0]["broker_refusal"]["reason"],
+        "reserved"
+    );
+
+    let response = server.get("/api/session/summary").await;
+    let bytes = assert_contract_response(response, "get", "/api/session/summary", 200).await;
+    let summary: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        summary["events"]["broker_refusals"],
+        body["broker_refusals"]
+    );
+    let refusals: Vec<_> = summary["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|check| check["code"] == "broker_refusal")
+        .collect();
+    assert_eq!(refusals.len(), 2);
+    assert_eq!(refusals[0]["severity"], "error");
+    assert_eq!(refusals[0]["reason"], "reserved");
+    assert_eq!(refusals[0]["count"], "1");
+    assert_eq!(
+        refusals[0]["message"],
+        "The broker refused 1 network record at validation (reserved bytes that are not zero); only a broker_refusal record stands in for each."
+    );
+    assert!(
+        summary["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|check| check["code"] != "sequence_gaps")
+    );
 }
 
 // The summary counts the whole store from its indexes, says how far they

@@ -1662,14 +1662,15 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       // carries its own state: recorded loss reads as a failure, a sampling
       // limit as a caution and a zero count as meta. The text is unchanged;
       // a clause count that disagrees with the label leaves it plain.
-      function markGapClauses(gapCount, reportedDrops, namedGaps = []) {
+      function markGapClauses(gapCount, reportedDrops, namedGaps = [], brokerRefusals = []) {
         const node = elements.gaps;
         if (typeof node.replaceChildren !== 'function' || typeof namedGapTotal !== 'function') return;
         const named = (matching, kind) => namedGapTotal(matching) > 0n ? [kind] : [];
         const kinds = [gapCount > 0n ? 'loss' : '', ...(reportedDrops > 0n ? ['loss'] : []),
           ...named(namedGaps.filter(gap => samplingBudgetGapLabels.has(gap.reason)), 'limit'),
           ...named(namedGaps.filter(gap => samplePolicyFilterGapLabels.has(gap.reason)), 'limit'),
-          ...named(namedGaps.filter(gap => !samplingBudgetGapLabels.has(gap.reason) && !samplePolicyFilterGapLabels.has(gap.reason)), 'loss')];
+          ...named(namedGaps.filter(gap => !samplingBudgetGapLabels.has(gap.reason) && !samplePolicyFilterGapLabels.has(gap.reason)), 'loss'),
+          ...named(brokerRefusals, 'loss')];
         const clauses = node.textContent.split(' · ');
         if (clauses.length !== kinds.length) return;
         node.replaceChildren(...clauses.map((clause, index) => {
@@ -9604,8 +9605,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
               : state.sessionMode === 'demo' ? 'deterministic developer evidence loaded' : 'start a live capture'
             : (state.events.length > 0 ? 'last valid evidence retained' : 'no live evidence');
           renderShellStatus();
-          elements.gaps.textContent = eventGapLabel(shownSequenceGaps(), shownQueueDrops(), shownNamedGaps());
-          if (typeof markGapClauses === 'function') markGapClauses(shownSequenceGaps(), shownQueueDrops(), shownNamedGaps());
+          elements.gaps.textContent = eventGapLabel(shownSequenceGaps(), shownQueueDrops(), shownNamedGaps(),
+            shownBrokerRefusals());
+          if (typeof markGapClauses === 'function') {
+            markGapClauses(shownSequenceGaps(), shownQueueDrops(), shownNamedGaps(), shownBrokerRefusals());
+          }
           renderNetworkNotice();
           renderRequests();
           renderInspector();
@@ -9692,6 +9696,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         state.sequenceGaps = 0n;
         state.queueDrops = 0n;
         state.namedGaps = [];
+        state.brokerRefusals = [];
         state.eventCountScope = 'rendered_window';
         state.networkEventsAvailable = false;
         state.networkEventsLimited = false;

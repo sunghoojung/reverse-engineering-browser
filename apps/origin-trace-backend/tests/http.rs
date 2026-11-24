@@ -13657,7 +13657,23 @@ async fn request_har_exports_redirect_and_failed_hops_with_their_headers() {
         let bytes = assert_contract_response(response, "get", route, 200).await;
         serde_json::from_slice(&bytes).unwrap()
     };
-    let har = read("").await;
+    // An export holds the rows the request index has folded, and a read folds
+    // for a bounded slice first. On a loaded machine opening the index can
+    // spend that slice, and the archive says its index is behind the store.
+    let mut answers = 0;
+    let har = loop {
+        let har = read("").await;
+        if har["log"]["_reb"]["index"]["complete"] == true {
+            break har;
+        }
+        answers += 1;
+        assert!(
+            answers < 240,
+            "the export never covered the store: {}",
+            har["log"]["_reb"]
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
     let log = &har["log"];
     assert_eq!(log["version"], "1.2");
     assert_eq!(log["_reb"]["complete"], true, "{log}");

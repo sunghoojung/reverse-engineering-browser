@@ -163,6 +163,92 @@ registration. `node tools/check-command-palette.mjs` is run by
 `make javascript-check` through the debugger check and exercises the registry,
 key guards and the app's providers against the production code.
 
+## Evidence chips
+
+`evidence_chips.js` and `evidence_chips.css` hold the blocks every pane uses in
+place of explanatory sentences: the one fact a researcher acts on is shown, and
+its scope, meaning and raw reasons are one click or one focus away, never
+removed. The script loads right after `command_palette.js` and installs nothing
+until a block renders, so `globalThis.RebEvidenceChips` exists while any later
+script evaluates; `evidence_models.js` defines the named-gap glossary there.
+
+```js
+const chips = globalThis.RebEvidenceChips;
+chips.renderChips(container, [
+  {key: 'drops', tone: 'loss', count: 3n, noun: 'queue drop', name: '3 queue drops in the stored capture',
+    breakdown: {title: 'Queue drops', scope: 'stored capture', detail: 'One sentence.',
+      reasons: [{token: 'native_wasm_dispatch_transport_unavailable', count: 2n}],
+      actions: [{key: 'evidence', label: 'Show in Evidence', run: showEvidence}]}},
+  {key: 'failed', tone: 'neutral', count: 2, noun: ['failed', 'failed'], pressed: false, run: toggleFailed},
+  {key: 'connection', text: 'Live', tone: 'ok', dot: true, variant: 'ghost', facts: {title: 'Connection', rows: [['Broker', 'connected']]}}
+]);
+chips.renderNotice(element, {lead: 'Incomplete capture', chips: specs, actions, dismiss: {name, run}});
+chips.reasonChip('native_wasm_dispatch_budget_incomplete');   // label, raw token, glossary meaning
+chips.evidenceClassChip('observed');   // observed, declared, inferred, correlated or unknown
+chips.limitsDisclosure(['Rows come from the newest 5,000 events.']);
+chips.emptyState({title, reason, action: {label, run}, causes: [{text, applies}]});
+chips.formatCount(75511n);   // '75,511' in English: the locale grouping
+chips.formatEvidenceTime(ns);   // {text: '+12.345 s', title, exact}; timeElement and timeButton wrap it
+```
+
+- **Chips.** A chip is a counted noun (`280 sequence gaps`, `≥3 gaps` for a
+  saturated lower bound) or its own text, in a tone: `loss` (recorded loss,
+  the danger state), `limit` (a sampling or window limit, the warning state),
+  `neutral` or `ok`. It opens a `breakdown` (title, scope, one-sentence detail,
+  rows with counts, reason chips, a note and actions) or a `facts` list, runs
+  an action with an optional `aria-pressed` state, or only shows its
+  `description` tooltip. `renderChips` reconciles by key: a kept key is
+  updated in place, so an open panel, its nodes and focus survive every poll,
+  and a panel action always runs the newest callback.
+- **Reasons.** `defineReasons({token: {label, meaning, kind}})` adds glossary
+  entries (kind is loss, limit, policy or state). A reason chip shows the label
+  and the monospace token, its tooltip is the meaning, and a click copies the
+  token. An undefined token still renders, as its own words.
+- **Notices.** `renderNotice` draws one line: a lead, plain text, chips,
+  actions at the end and an optional dismiss. It wraps only when its chips do
+  not fit, so no count is cut off. Loading, disconnected and malformed states
+  keep a sentence of their own kind and are never merged with gap chips.
+- **Times.** Evidence times read relative to the store's first record: the
+  session summary's `events.first_time_ns`, over the whole store, set with
+  `setTimeOrigin(ns, 'store')`; until it answers, the earliest record read
+  (`'records'`). A cleared or replaced store starts again. Rows show
+  `+12.345 s`, `+2:05.345` or `+1:02:05.345`, truncated so a value never rounds
+  into the next unit; the title names the origin and the exact monotonic ns,
+  a details pane adds a **Monotonic (ns)** row, and a time button copies the
+  exact value. `formatEvidenceDuration` reads spans in three significant
+  digits (`32.1 ms`). The request index's `N.NNN ms` duration strings are a
+  wire format (`formatMilliseconds`), not a display formatter.
+- **Counts.** `formatCount` groups a number, a bigint or a uint64 decimal
+  string in the reader's locale. Every count in the status bar, the notices
+  and the chips uses it.
+- **Accessibility.** Every chip is a button. A panel chip carries
+  `aria-expanded` and `aria-controls`, and its panel is placed after it in the
+  DOM, so Tab moves from the chip into the panel. Escape inside a panel or on
+  its chip closes it and returns focus to the chip; a press outside or focus
+  moving elsewhere closes it where focus is. At most one floating panel is
+  open. A tooltip is a hidden description named by `aria-describedby`; it
+  shows on keyboard focus or after a short hover, stays while the pointer is
+  on it, and Escape hides it. Captured values are always inserted as text.
+
+The status bar is four slots: the connection chip (Live, Stored, Ended,
+Stopped, Degraded, Not responding, Offline or Malformed, whose facts list the
+session, backend, broker, artifact receiver, retained evidence and last
+update), the request count, one gap chip and **Local only**. The gap chip is
+the total of every class the summaries count, in the tone of the worst; a
+single class keeps its own noun (`2 sampling budgets (vm)`), and zero gaps
+draws no chip. Its breakdown has one row per class with its scope, meaning and
+reasons, says when a queue drop can overlap a sequence gap, and offers **Show
+in Evidence**, which opens Evidence's Coverage & gaps. The Traffic and VM gap
+lines are notices of one chip per class plus their limits (`newest 5,000
+events` before the request index answers, `newest 64 MiB` before the event
+index catches up) and Traffic's `N failed` chip, which is the Failed filter.
+A line leads with **Incomplete capture** and the loss tone when any class is
+loss, and with **Capture limits** and the limit tone otherwise. A dismissed line stays hidden for the session until a class it did not hold
+appears; the status bar keeps every count meanwhile.
+`node tools/check-evidence-chips.mjs` (run by `make javascript-check`)
+exercises every block in a LinkeDOM document, and the rendered suite drives
+the status bar and gap chips from the keyboard in the packaged app.
+
 ## Connected investigations
 
 Every workspace is a direct sidebar entry; none waits behind a menu. A
@@ -1601,9 +1687,9 @@ counts as queue drops. A limit marks only the surface for its category: `vm` and
 categories in Fingerprinting. The configured sampling budgets
 (`native_wasm_dispatch_*budget_incomplete`, `native_wasm_indirect_*budget_incomplete`,
 `native_js_dispatch_budget_incomplete`, `native_js_dispatch_site_budget_incomplete`,
-`native_guest_sample_limit` and `native_guest_browser_sample_budget`) read as
-"Sampling budget reached": retained observations are exact and later ones were not
-sampled. That includes the per-function and per-call-site Wasm budgets. A
+`native_guest_sample_limit` and `native_guest_browser_sample_budget`) are
+counted as sampling budgets, in the limit tone: retained observations are exact
+and later ones were not sampled. That includes the per-function and per-call-site Wasm budgets. A
 function, module, call-site, or stream refusal also keeps a compact overflow
 identity up to a ring of 32, and identities past the ring are a count; those
 records are not full observations. Each one-second window has its own ring
@@ -1625,11 +1711,13 @@ malformed label is named rather than shown. The strip is
 hidden for every other session.
 Filter reasons (`native_wasm_dispatch_filtered`, `native_wasm_indirect_filtered`,
 and their `_browser_` counterparts) are sample-policy exclusions: the
-execution was not sampled and did not consume a sample slot. The notice and
-footer count them separately from sampling budgets and from reported losses.
+execution was not sampled and did not consume a sample slot. The notice chips
+and the status bar's gap chip count them separately from sampling budgets and
+from reported losses.
 Every other reason, including transport, input, document, module, expiry,
 compiled-before-arming, capacity and parent-link reasons and any reason this
-build does not know, reads as reported lost evidence with its raw reason as text.
+build does not know, is counted as reported lost evidence, and its reason chip
+shows the raw token.
 Stored-evidence native mode forwards the event poll to the bundled Rust
 backend, so its windows and whole-store counts are the same answer; the app
 adds only its own broker state and capture mode. Every artifact list read goes
@@ -1871,6 +1959,7 @@ capture, fetch anything or change a row.
 | `session_panel.js`, `session_panel.css` | The live session start panel: start choices, startup, failure with Retry; the decision itself is native (`macos/SessionPanel.swift`) |
 | `request_stack.js` | Initiator tab: the native request or navigation call stack and task chain from `get_request_stack`, opening Sources at a frame, and the initiator chain |
 | `command_palette.js` | The ⌘ / Ctrl + K palette: provider registry, matching, ranking and caps, and its dialog controller; `app.js` supplies the built-in providers |
+| `evidence_chips.js`, `evidence_chips.css` | The shared [evidence chips](#evidence-chips): count, reason and evidence-class chips with their panels, keyed reconciliation, limits, empty states, notices, count grouping and session-relative evidence time |
 | `pane_layout.js` | Shared pointer and keyboard pane resizing, responsive constraints, and local size preferences |
 | `traffic_view.js` | Native request ledger rows, ordering, the read block and its mounted rows and URL/method/status/name search, the General coverage view, request body record wording, and the saved-capture export document |
 | `network_scope.js` | Counted browser-internal exclusions and the reversible browser-internal view filter |
@@ -2153,10 +2242,11 @@ pre-clear evidence. A refused action, or one with no answer within 15 seconds,
 stays in the notice until the next action. When the backend stops answering,
 both controls are withdrawn until a valid poll reports them again. Canvas artifact files and other saved files
 remain on disk. Detailed identifiers stay behind a disclosure. The
-captured-tab buttons are historical evidence, not an open-tab count. The footer separates missing per-process sequence IDs from
-reported queue drops, since a gap report can describe the same missing IDs. It
-counts named sampling budgets, sample-policy exclusions, and reported capture
-losses separately, with their categories, and never adds them to queue drops.
+captured-tab buttons are historical evidence, not an open-tab count. The status
+bar's gap chip separates missing per-process sequence IDs from reported queue
+drops, since a gap report can describe the same missing IDs. It counts named
+sampling budgets, sample-policy exclusions, and reported capture losses
+separately, with their categories, and never adds them to queue drops.
 The custom browser observes generated Web IDL callbacks for a selected native
 allowlist across all eight families, in addition to the lower-level Canvas,
 WebGL, and Web Audio hooks needed by internal Blink paths and selected V8 Math,

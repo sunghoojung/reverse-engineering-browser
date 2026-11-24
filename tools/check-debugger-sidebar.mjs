@@ -1142,6 +1142,26 @@ await check('showObservation waits for Show older to reach its record', async ()
   ui.close();
 });
 
+// Loss and gap flags group their counts in the locale the status bar and its
+// chips use (75,511 in English), in the flag and in its description.
+await check('loss and gap flags group their counts', async () => {
+  const chips = createRequire(import.meta.url)(join(root, 'apps/research-ui/evidence_chips.js'));
+  const store = createStore(3);
+  const answer = store.answer;
+  store.answer = parameters => ({...answer(parameters), observations_malformed: 75511});
+  const ui = mount({store, globals: {RebEvidenceChips: chips, shownSequenceGaps: () => 1234567n}});
+  ui.open();
+  await until(() => /malformed/.test(ui.text('.debugger-observation-notes')), 'the loss flags');
+  const flags = [...ui.sidebar.querySelectorAll('.debugger-observation-notes .debugger-flag')];
+  const malformed = flags.find(flag => /malformed/.test(flag.textContent));
+  const gaps = flags.find(flag => /sequence gaps/.test(flag.textContent));
+  assert.match(malformed.textContent, new RegExp(`^${chips.formatCount(75511)} malformed, not shown\\. ${chips.formatCount(75511)} records in these reads were malformed`));
+  assert.match(gaps.textContent, new RegExp(`^${chips.formatCount(1234567n)} sequence gaps\\. ${chips.formatCount(1234567n)} sequence-gap IDs in the retained window`));
+  assert.equal(malformed.title, `${chips.formatCount(75511)} records in these reads were malformed and are not shown.`);
+  if (new Intl.NumberFormat().resolvedOptions().locale.startsWith('en')) assert.match(gaps.title, /^1,234,567 sequence-gap IDs/);
+  ui.close();
+});
+
 // The compact states: the kind menu names each kind's count from the index,
 // a row's time reads from its session's first record with the exact time in
 // its tooltip, and with nothing armed and no live Console one line offers it.

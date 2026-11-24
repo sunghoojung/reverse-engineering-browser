@@ -384,14 +384,15 @@
     if (!row) { elements.detail.hidden = true; return; }
     const ids = [['session_id', 'session'], ['process_id', 'process'], ['sequence_number', 'seq'], ['navigation_id', 'nav'], ['frame_id', 'frame'], ['artifact_id', 'artifact'], ['request_id', 'request'], ['parent_event_id', 'parent']]
       .filter(([key]) => row.ids[key] !== undefined && row.ids[key] !== null && String(row.ids[key]) !== '0').map(([key, label]) => `${label} ${row.ids[key]}`).join(' · ');
-    const time = row.time_ns ? ` · ${typeof evidenceMonotonicLabel === 'function' ? evidenceMonotonicLabel(row.time_ns) : `${row.time_ns} ns`} monotonic` : '';
     const button = node('button', 'secondary-button', 'Open');
     button.type = 'button'; button.id = 'xrefs-open-row';
     button.addEventListener('click', () => openRow(row));
     const head = node('div', 'xrefs-detail-head');
     head.append(node('strong', '', row.name), button);
     elements.detail.hidden = false;
-    elements.detail.replaceChildren(head, node('p', '', `${kindLabel(row)} · ${row.state} · ${pretty(row.source)} · ${pretty(row.operation)}${time}`), node('p', '', row.detail), node('code', '', ids));
+    const facts = node('p', '', `${kindLabel(row)} · ${row.state} · ${pretty(row.source)} · ${pretty(row.operation)}`);
+    if (row.time_ns) facts.append(' · ', globalThis.RebEvidenceChips?.timeButton(row.time_ns) ?? `${row.time_ns} ns`);
+    elements.detail.replaceChildren(head, facts, node('p', '', row.detail), node('code', '', ids));
   }
 
   function render() {

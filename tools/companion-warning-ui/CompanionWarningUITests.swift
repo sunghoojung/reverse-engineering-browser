@@ -116,6 +116,9 @@ final class CompanionWarningUITests: XCTestCase {
       "REB_NATIVE_QUIET_MODE": "0",
       "REB_NATIVE_WASM_DISPATCH": "0",
       "REB_NATIVE_WASM_CALL_INDIRECT": "0",
+      // Request stacks are on by default and add --reb-request-stacks, which the
+      // launcher checks in V8 too; this also leaves promise stacks off.
+      "REB_NATIVE_REQUEST_STACKS": "0",
       "REB_LOCALHOST_ONLY": "1",
       "REB_COMPANION_WARNING_RECEIPT": directory.appendingPathComponent("launches.txt").path,
     ]

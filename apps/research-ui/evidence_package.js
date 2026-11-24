@@ -1,6 +1,5 @@
 // Cold-path presentation only. The Rust package reader owns duplicate rejection,
 // the closed metadata projection, canonical identity and guarded source reads.
-const evidencePackageMaximum = 4 * 1024 * 1024;
 const evidencePackagePageSize = 50;
 const evidencePackageResolutions = {
   included: 'Included', outside_selection: 'Outside selection',
@@ -86,7 +85,7 @@ function evidencePackageValidationResult(value) {
   const checks = ['structure', 'semantic_digest', 'references', 'metadata_profile'];
   if (!checks.every(key => ['passed', 'failed', 'not_run'].includes(value.checks[key])) ||
       !value.issues.every(issue => issue && /^[a-z_]{1,64}$/.test(issue.code) && /^[a-z_]{1,64}$/.test(issue.section) &&
-        (issue.index === null || (Number.isSafeInteger(issue.index) && issue.index >= 0 && issue.index <= 4095)))) return false;
+        (issue.index === null || (Number.isSafeInteger(issue.index) && issue.index >= 0)))) return false;
   if (value.package_id !== null && !/^reb-package-v1:sha256:[0-9a-f]{64}$/.test(value.package_id)) return false;
   return value.status !== 'valid' || (value.package_id !== null && !value.issues.length &&
     !value.issues_truncated && checks.every(key => value.checks[key] === 'passed'));
@@ -97,7 +96,7 @@ function evidencePackageError(status) {
     404: 'An exact selected identity is unavailable. Refresh the retained view and review the selection.',
     408: 'The request did not reach the local package service in time. No package was saved; retry only when you choose.',
     409: 'Export was refused: a writer may still hold a lease, the source changed, or identities conflict. No writer was stopped. Review the stores before retrying.',
-    413: 'The package or source scan exceeds a supported bound. A smaller selection cannot bypass a whole-source scan limit.',
+    413: 'A retained source row nests deeper than the 32 levels the package reader parses. No package was produced.',
     422: 'The retained source or artifact integrity check failed. No package was produced.',
     503: 'Package operations are unavailable or busy. Export requires guarded stores from updated writers and safe local files; legacy stores are unsupported. No guard was created.'})[status] || `The local package service returned HTTP ${status}.`;
 }
@@ -108,10 +107,8 @@ function evidencePackageView(document, validation) {
   if (document?.format !== 'reb-evidence-package' || document.protocol_version !== 1 ||
       document.package_id !== validation.package_id || document.redaction_profile !== 'reb-metadata-only-v1' ||
       !document.coverage || !document.provenance || !document.records ||
-      !Array.isArray(document.records.events) || document.records.events.length > 1024 ||
-      !Array.isArray(document.records.artifacts) || document.records.artifacts.length > 64 ||
-      !Array.isArray(document.relationships) || document.relationships.length > 4096 ||
-      !Array.isArray(document.gaps) || document.gaps.length > 4096) throw new Error('The validated package response is not supported by this view.');
+      !Array.isArray(document.records.events) || !Array.isArray(document.records.artifacts) ||
+      !Array.isArray(document.relationships) || !Array.isArray(document.gaps)) throw new Error('The validated package response is not supported by this view.');
   return document;
 }
 
@@ -137,8 +134,8 @@ function createEvidencePackageController({getSelection, onChange, protocol, fetc
     if (unavailable) { model.status = 'error'; model.message = unavailable; changed(); return; }
     const selection = getSelection();
     if (kind === 'export' && (!selection.events.length && !selection.artifacts.length)) return;
-    if (kind === 'file' && (!file || !Number.isSafeInteger(file.size) || file.size < 1 || file.size > evidencePackageMaximum)) {
-      clear(); model.status = 'error'; model.message = 'Choose one nonempty package file of at most 4 MiB.'; changed(); return;
+    if (kind === 'file' && (!file || !Number.isSafeInteger(file.size) || file.size < 1)) {
+      clear(); model.status = 'error'; model.message = 'Choose one nonempty package file.'; changed(); return;
     }
     const token = ++generation;
     const controller = new AbortController();
@@ -167,10 +164,10 @@ function createEvidencePackageController({getSelection, onChange, protocol, fetc
       if (kind === 'export') {
         // Only closed composite keys cross this boundary, never event objects.
         const request = new TextEncoder().encode(JSON.stringify({protocol_version: 1, profile: 'reb-metadata-only-v1', selection}));
-        bytes = await post('export', request, evidencePackageMaximum);
+        bytes = await post('export', request, Infinity);
       } else {
         bytes = new Uint8Array(await file.arrayBuffer());
-        if (bytes.byteLength !== file.size || bytes.byteLength > evidencePackageMaximum) throw new Error('The selected file changed or exceeds the byte limit.');
+        if (bytes.byteLength !== file.size) throw new Error('The selected file changed while it was read.');
       }
       if (!current() || !bytes) return;
       if (!selectionCurrent()) { clear(); return; }
@@ -225,6 +222,12 @@ function createEvidencePackagePanel({getContext, protocol = location.protocol}) 
   let visible = false;
   let viewRevision = 0;
   let selectionSignature = null;
+  // The stored range the investigation view shows, or null for the newest records.
+  let rangeEvents = null;
+  // The array the candidates were last listed from. A refresh replaces the
+  // catalog and the event window when they change and appends to the catalog
+  // otherwise, so the same array at the same length lists the same identities.
+  let listed = null;
   const getSelection = () => ({events: [...selected.events.values()], artifacts: [...selected.artifacts.values()]});
   const node = (tag, text, className = '') => { const element = document.createElement(tag); element.textContent = text; element.className = className; return element; };
   const button = (text, action) => { const element = node('button', text, 'secondary-button'); element.type = 'button'; element.addEventListener('click', action); return element; };
@@ -308,7 +311,7 @@ function createEvidencePackagePanel({getContext, protocol = location.protocol}) 
   };
   const controller = createEvidencePackageController({getSelection, protocol, onChange: renderStatus});
   const renderSelection = () => {
-    selectionSummary.textContent = `${selected.events.size} / 1,024 events · ${selected.artifacts.size} / 64 artifacts selected`;
+    selectionSummary.textContent = `${selected.events.size} ${selected.events.size === 1 ? 'event' : 'events'} · ${selected.artifacts.size} ${selected.artifacts.size === 1 ? 'artifact' : 'artifacts'} selected`;
     exportButton.disabled = Boolean(evidencePackageUnavailable(protocol)) || controller.model.status === 'loading' || (!selected.events.size && !selected.artifacts.size);
     // Keep every selected identity inspectable even when its original row leaves
     // the retained window or another candidate page/view is visible.
@@ -327,8 +330,7 @@ function createEvidencePackagePanel({getContext, protocol = location.protocol}) 
       const label = node('label', '', 'package-candidate');
       const input = document.createElement('input'); input.type = 'checkbox'; input.checked = selected[row.kind].has(row.id); input.dataset.packageKey = row.id;
       input.addEventListener('change', () => {
-        const map = selected[row.kind], maximum = row.kind === 'events' ? 1024 : 64;
-        if (input.checked && map.size >= maximum) { input.checked = false; notice.textContent = `Selection limit reached: ${maximum} ${row.kind}.`; return; }
+        const map = selected[row.kind];
         controller.clear();
         if (input.checked) map.set(row.id, row.key); else map.delete(row.id);
         renderSelection();
@@ -348,11 +350,18 @@ function createEvidencePackagePanel({getContext, protocol = location.protocol}) 
   const sync = () => {
     const context = getContext();
     if (contextKey !== context.requestId) {
-      contextKey = context.requestId; selected.events.clear(); selected.artifacts.clear(); page = 0; signature = null; controller.clear();
+      contextKey = context.requestId; selected.events.clear(); selected.artifacts.clear(); page = 0; signature = null; listed = null; controller.clear();
     }
     if (!visible) return;
-    const source = scope.value === 'artifacts' ? context.artifacts.slice(0, 500)
-      : scope.value === 'retained' ? context.events.slice(-5000) : (context.requestEvents ?? []).slice(-5000);
+    const source = scope.value === 'artifacts' ? context.artifacts
+      : scope.value === 'retained' ? rangeEvents ?? context.events : context.requestEvents ?? [];
+    const describe = () => {
+      host.querySelector('[data-package-context]').textContent = `${rows.length} selectable keys in this view. ${scope.value === 'artifacts' ? 'Every descriptor of the loaded artifact catalog.'
+        : scope.value === 'request' ? 'The native records of the selected request.' : rangeEvents ? 'The stored range the investigation view shows.'
+          : context.eventsLimited ? 'The newest stored records; Earlier and Oldest in the investigation view list older ones.' : 'Every stored record.'}`;
+    };
+    if (listed?.source === source && listed.length === source.length && listed.scope === scope.value) { describe(); return; }
+    listed = {source, length: source.length, scope: scope.value};
     const next = new Map();
     for (const value of source) {
       const kind = scope.value === 'artifacts' ? 'artifact' : 'event';
@@ -363,9 +372,9 @@ function createEvidencePackagePanel({getContext, protocol = location.protocol}) 
     }
     const newSignature = JSON.stringify([scope.value, [...next.values()].map(row => [row.id, row.label])]);
     if (signature !== newSignature) { signature = newSignature; rows = [...next.values()]; renderCandidates(); }
-    host.querySelector('[data-package-context]').textContent = `${rows.length} selectable keys in this view. ${context.eventsLimited && scope.value !== 'artifacts' ? 'Latest 5,000-event window; older records may be absent.' : 'Retained window may be incomplete.'}`;
+    describe();
   };
-  scope.addEventListener('change', () => { page = 0; signature = null; sync(); });
+  scope.addEventListener('change', () => { page = 0; signature = null; listed = null; sync(); });
   host.querySelector('[data-package-previous]').addEventListener('click', () => { page -= 1; renderCandidates(); });
   host.querySelector('[data-package-next]').addEventListener('click', () => { page += 1; renderCandidates(); });
   host.querySelector('[data-package-clear]').addEventListener('click', () => { controller.clear(); selected.events.clear(); selected.artifacts.clear(); renderCandidates(); });
@@ -401,7 +410,8 @@ function createEvidencePackagePanel({getContext, protocol = location.protocol}) 
     event.preventDefault(); event.stopPropagation(); controller.cancel(); (controller.model.origin === 'file' ? validateButton : exportButton).focus({preventScroll: true});
   });
   renderStatus(controller.model); renderSelection();
-  return {sync, controller, setVisible(value) { if (visible !== value) viewRevision += 1; visible = value; if (!value) controller.cancel(); sync(); }};
+  return {sync, controller, setVisible(value) { if (visible !== value) viewRevision += 1; visible = value; if (!value) controller.cancel(); sync(); },
+    setRange(events) { if (rangeEvents === events) return; rangeEvents = events; if (scope.value === 'retained') page = 0; listed = null; sync(); }};
 }
 
 // Investigation is a read-only projection of one range of stored records: the
@@ -473,9 +483,15 @@ function evidenceObservationOutcome(event) {
   if (event.type === 'artifact_capture_failed') return 'Capture failure recorded';
   return 'This observation does not establish completion';
 }
-function evidenceMonotonicLabel(value) {
-  const ns = BigInt(value);
-  return `${ns / 1000000n}.${String(ns % 1000000n / 1000n).padStart(3, '0')} ms`;
+// The selected request's first lifecycle record, the zero of "after request start".
+function evidenceRequestStart(request) {
+  let start = null;
+  for (const event of request?.events ?? []) {
+    if (!['request_initiated', 'request_started'].includes(event?.type) || typeof event.monotonic_time_ns !== 'string' || !/^[0-9]{1,20}$/.test(event.monotonic_time_ns)) continue;
+    const time = BigInt(event.monotonic_time_ns);
+    if (start === null || time < start) start = time;
+  }
+  return start;
 }
 function evidenceSequenceObservations(events) {
   const streams = new Map();
@@ -521,7 +537,7 @@ function evidenceObservationModel(context) {
   const artifacts = context.artifacts ?? [];
   const artifactIndex = evidenceArtifactIndex(artifacts), artifactReferences = new Map();
   const records = new Map(), sources = new Map(), duplicates = new Set();
-  let omitted = 0, queueMarkers = 0, namedMarkers = 0;
+  let omitted = 0, queueMarkers = 0, namedMarkers = 0, refusalRecords = 0;
   for (const event of window) {
     if (!isBrokerEvent(event) || ![2, 3].includes(event.protocol_version)) { omitted += 1; continue; }
     // A named reason is a capture limit in its own category, not a queue drop.
@@ -531,6 +547,8 @@ function evidenceObservationModel(context) {
     if (records.has(key)) { duplicates.add(key); continue; }
     sources.set(key, event);
     records.set(key, evidenceRecord(event));
+    // A record in place of one the broker refused stays a row, and is counted.
+    if (event.type === 'broker_refusal') refusalRecords += 1;
   }
   // Sequence observations describe the range in view, not records joined from elsewhere.
   const inView = [...records.values()];
@@ -549,18 +567,20 @@ function evidenceObservationModel(context) {
   }
   const retainedRequest = new Set([...requestKeys].filter(key => records.has(key) && !duplicates.has(key)));
   const parents = new Set(), missing = new Set();
-  let parentLimit = false, parentCycle = false;
-  // Only inspect ancestors of attached native request records.
+  let parentCycle = false;
+  // Only inspect ancestors of attached native request records. A chain ends at
+  // a root, a record not in view or a repeated identity, so it reads every link.
   for (const start of retainedRequest) {
     let key = start; const seen = new Set([key]);
-    for (let depth = 0; depth < 32; depth += 1) {
+    while (true) {
       const event = records.get(key);
       if (!event?.parent_event_id || event.parent_event_id === '0') break;
       const parent = `${event.session_id}:${event.process_id}:${event.parent_event_id}`;
       if (seen.has(parent)) { parentCycle = true; break; }
       if (!records.has(parent) || duplicates.has(parent)) { missing.add(parent); break; }
+      // A chain already walked from another request record ends as that one did.
+      if (parents.has(parent)) break;
       seen.add(parent); parents.add(parent); key = parent;
-      if (depth === 31 && records.get(key).parent_event_id !== '0') parentLimit = true;
     }
   }
   const contexts = new Set([...retainedRequest].map(key => records.get(key)).filter(event => event.navigation_id !== '0' && event.frame_id !== '0')
@@ -578,8 +598,8 @@ function evidenceObservationModel(context) {
   rows = rows.map(row => row.group === 'request' ? requestRows.shift() : row);
   const related = rows.filter(row => row.group !== 'unlinked');
   return {request: request ? {id: request.id, origin: request.origin, method: request.method, path: String(request.path ?? '').slice(0, 2048), hostOnly: request.hostOnly} : null,
-    requestKey: evidenceRequestKey(request), rows, related, omitted, queueMarkers, namedMarkers, sources,
-    missingParents: missing.size, duplicates: duplicates.size, parentLimit, parentCycle,
+    requestKey: evidenceRequestKey(request), rows, related, omitted, queueMarkers, namedMarkers, refusalRecords, sources,
+    missingParents: missing.size, duplicates: duplicates.size, parentCycle,
     limited: Boolean(context.eventsLimited || (context.events?.length ?? 0) > evidenceObservationLimit),
     sequence: evidenceSequenceObservations(inView),
     linkedArtifacts: new Set(related.filter(row => row.artifact.status === 'ready').map(row => JSON.stringify(row.artifact.identity))).size};
@@ -702,6 +722,8 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
   }
   function showRange(next) {
     range = next; page = 0; listSignature = '';
+    // The package view lists the same records, so an older range can be exported.
+    packagePanel.setRange(next?.events ?? null);
     const kept = selectedKey;
     sync();
     // Moving through the store is not an eviction, so no notice says so.
@@ -710,7 +732,26 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
   }
   for (const [direction, item] of Object.entries(rangeButtons)) item.addEventListener('click', () => moveRange(direction));
   const message = (text, outside = false) => {selectionNotice = text; outsideFilterNotice = outside; renderNotice();};
-  const facts = entries => {const dl = node('dl', '', 'evidence-record-facts'); for (const [label, value] of entries) dl.append(node('dt', label), node('dd', value)); return dl;};
+  const facts = entries => {
+    const dl = node('dl', '', 'evidence-record-facts');
+    for (const [label, value] of entries) {
+      const dd = value instanceof Node ? node('dd') : node('dd', value);
+      if (value instanceof Node) dd.append(value);
+      dl.append(node('dt', label), dd);
+    }
+    return dl;
+  };
+  // When it was recorded: session-relative, and from the selected request's
+  // start for that request's own records. The exact ns is in Provenance.
+  const recordedTime = (event, row) => {
+    const time = node('span', '', 'evidence-recorded-time');
+    time.append(RebEvidenceChips.timeButton(event.monotonic_time_ns));
+    const start = row.group === 'request' ? evidenceRequestStart(model.request) : null;
+    if (start !== null && String(start) !== event.monotonic_time_ns) {
+      time.append(node('span', ' · ', 'evidence-time-separator'), RebEvidenceChips.timeButton(event.monotonic_time_ns, {relativeTo: {ns: start, label: 'request start'}}), node('span', ' after request start', 'evidence-time-relation'));
+    }
+    return time;
+  };
   const setPane = (value, focus = false) => {
     pane = value; layout.dataset.evidencePane = value;
     for (const tab of paneTabs) {const active = tab.dataset.evidencePane === value; tab.setAttribute('aria-selected', String(active)); tab.tabIndex = active ? 0 : -1;}
@@ -745,7 +786,7 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
     observation.append(node('p', marker ? 'An operation marker was seen. Arguments, returned values, exceptions and Promise settlement are not recorded by this marker.'
       : `Bounded ${row.payload.encoding} payload${event.payload_truncated ? ' · truncated at capture' : ''}. This is retained evidence, not reconstructed content.`, 'evidence-detail-hint'));
     if (marker && event.payload_truncated) observation.append(node('p', 'The operation payload was truncated at capture.', 'evidence-detail-hint'));
-    observation.append(facts([['Outcome', row.outcome], ['Recorded time', `${evidenceMonotonicLabel(event.monotonic_time_ns)} · monotonic`], ['Observer / placement', 'Unknown']]));
+    observation.append(facts([['Outcome', row.outcome], ['Recorded time', recordedTime(event, row)], ['Observer / placement', 'Unknown']]));
     const source = node('section', '', 'evidence-detail-section'); source.append(node('h3', 'Referenced artifact'));
     if (row.artifact.artifact) {
       const artifact = row.artifact.artifact, card = node('div', '', 'evidence-artifact-card');
@@ -779,7 +820,7 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
     connection.append(actions);
     const provenance = node('details', '', 'evidence-provenance'); provenance.open = Boolean(open);
     const summary = node('summary', 'Provenance & exact identifiers'); summary.dataset.evidenceAction = 'provenance'; provenance.append(summary);
-    provenance.append(facts([['Native event', evidencePackageKeyText('event', evidencePackageKey('event', event))], ['Protocol', event.protocol_version], ['Monotonic time', `${event.monotonic_time_ns} ns`], ['Parent event', event.parent_event_id === '0' ? 'Not recorded' : event.parent_event_id], ['Request', event.request_id === '0' ? 'Not recorded' : event.request_id], ['Navigation / frame', `${event.navigation_id} / ${event.frame_id} (zero means unknown)`], ['Thread', event.thread_id], ['Tab', event.tab_id || 'Unknown'], ['Browser context', browserContextToken(event) || 'Unknown'], ['Artifact', event.artifact_id === '0' ? 'Not recorded' : `${event.session_id} / ${event.artifact_id}`], ['Artifact SHA-256', row.artifact.artifact?.sha256 || 'Unknown'], ['Producer / historical build', 'Unknown']]));
+    provenance.append(facts([['Native event', evidencePackageKeyText('event', evidencePackageKey('event', event))], ['Protocol', event.protocol_version], ['Monotonic (ns)', event.monotonic_time_ns], ['Parent event', event.parent_event_id === '0' ? 'Not recorded' : event.parent_event_id], ['Request', event.request_id === '0' ? 'Not recorded' : event.request_id], ['Navigation / frame', `${event.navigation_id} / ${event.frame_id} (zero means unknown)`], ['Thread', event.thread_id], ['Tab', event.tab_id || 'Unknown'], ['Browser context', browserContextToken(event) || 'Unknown'], ['Artifact', event.artifact_id === '0' ? 'Not recorded' : `${event.session_id} / ${event.artifact_id}`], ['Artifact SHA-256', row.artifact.artifact?.sha256 || 'Unknown'], ['Producer / historical build', 'Unknown']]));
     inspector.replaceChildren(head, observation, source, connection, provenance);
     if (focused) (inspector.querySelector(`[data-evidence-action="${focused}"]`) ?? inspector).focus({preventScroll: true});
     inspector.scrollTop = top;
@@ -815,7 +856,7 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
           const element = node('button', '', 'evidence-observation'); element.type = 'button'; element.dataset.evidenceKey = row.key; element.dataset.relationship = row.group;
           element.dataset.category = row.event.category;
           element.setAttribute('aria-current', String(row.key === selectedKey));
-          const line = node('span', '', 'evidence-observation-meta'); line.append(node('span', row.event.category.replaceAll('_', ' ')), node('time', evidenceMonotonicLabel(row.event.monotonic_time_ns)));
+          const line = node('span', '', 'evidence-observation-meta'); line.append(node('span', row.event.category.replaceAll('_', ' ')), RebEvidenceChips.timeElement(row.event.monotonic_time_ns));
           element.append(line, node('strong', row.title, titleClass(row)), node('span', row.duplicate ? 'Duplicate event identity · relationship unknown' : row.artifact.artifact?.url || (row.payload.text === row.title ? row.outcome : row.payload.text) || row.outcome, 'evidence-observation-preview'));
           element.addEventListener('click', () => {select(row.key); if (window.matchMedia('(max-width: 760px)').matches) setPane('detail', true);});
           element.addEventListener('keydown', event => {
@@ -847,7 +888,7 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
     const live = getContext();
     // Cursors do not survive a clear or another store, so neither does the range.
     if (range && (live.storeEnd == null || BigInt(live.storeEnd) < range.storeEnd)) {
-      range = null; rangeRead?.controller.abort(); rangeRead = null;
+      range = null; rangeRead?.controller.abort(); rangeRead = null; packagePanel.setRange(null);
       rangeNotice = 'The stored session was cleared or replaced. Showing its newest records.';
     }
     const context = viewContext(); model = evidenceObservationModel(context);
@@ -867,8 +908,8 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
     find('evidence-count').textContent = `${model.rows.length.toLocaleString()} observations in view`;
     find('evidence-coverage-summary').textContent = `${model.missingParents} missing parent${model.missingParents === 1 ? '' : 's'} · coverage unknown`;
     // Coverage is always unknown; the warning color is kept for retained loss observations.
-    find('evidence-coverage-summary').dataset.kind = model.missingParents || model.queueMarkers || model.namedMarkers || model.sequence.holes !== '0' || model.duplicates ? 'gap' : 'unknown';
-    find('evidence-gap-details').textContent = `${model.limited ? 'These counts cover the records in view; Oldest, Earlier and Later read the rest of the stored session. ' : 'Every stored record is in view; complete capture is not established. '}${model.queueMarkers} native queue-drop markers; ${model.namedMarkers} named capture-limit markers (sampling budgets, sample-policy exclusions, or reported losses in their own category); ${model.sequence.holes} absent sequence IDs between retained stream endpoints (not proof of capture loss); ${model.sequence.arrivalDiscontinuities} forward-jump observations in arrival order; ${model.sequence.outOfOrderArrivals} later arrivals below a prior high-water ID; ${model.missingParents} missing or ambiguous parent references in view; ${model.duplicates} duplicate identities; ${model.omitted} unsupported or unaddressable records omitted.${model.parentLimit ? ' Parent lookup stopped at its 32-link bound.' : ''}${model.parentCycle ? ' A repeated parent identity stopped lookup.' : ''} Queue markers, sequence holes and missing references can overlap and are not added into a loss total.`;
+    find('evidence-coverage-summary').dataset.kind = model.missingParents || model.queueMarkers || model.namedMarkers || model.refusalRecords || model.sequence.holes !== '0' || model.duplicates ? 'gap' : 'unknown';
+    find('evidence-gap-details').textContent = `${model.limited ? 'These counts cover the records in view; Oldest, Earlier and Later read the rest of the stored session. ' : 'Every stored record is in view; complete capture is not established. '}${model.queueMarkers} native queue-drop markers; ${model.namedMarkers} named capture-limit markers (sampling budgets, sample-policy exclusions, or reported losses in their own category); ${model.refusalRecords} broker refusal records (each stands in for a record the broker refused at validation); ${model.sequence.holes} absent sequence IDs between retained stream endpoints (not proof of capture loss); ${model.sequence.arrivalDiscontinuities} forward-jump observations in arrival order; ${model.sequence.outOfOrderArrivals} later arrivals below a prior high-water ID; ${model.missingParents} missing or ambiguous parent references in view; ${model.duplicates} duplicate identities; ${model.omitted} unsupported or unaddressable records omitted.${model.parentCycle ? ' A repeated parent identity stopped lookup.' : ''} Queue markers, refusals, sequence holes and missing references can overlap and are not added into a loss total.`;
     find('evidence-trace').disabled = model.request?.origin !== 'live' || !model.related.length;
     find('evidence-trace').title = 'Inspect the selected request’s recorded predecessor chain.';
     refreshNotice = context.error ? `Evidence refresh ${context.error === 'malformed' ? 'returned malformed records' : 'is unavailable'}. Retained observations remain visible.` : '';
@@ -904,6 +945,14 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
       if (!value) showComparison(false, false);
       packagePanel.setVisible(value && packages && !comparing); sync();
     }, showPackages, showComparison, disposeComparison,
+    // Redraws times after the session's time origin moved.
+    refreshTimes() { listSignature = ''; detailSignature = ''; if (visible && !packages) sync(); },
+    // Opens Coverage & gaps over the records in view, for the shell's gap chips.
+    showCoverage() {
+      if (packages) showPackages(false, false);
+      coverageDetails.open = true;
+      coverageDetails.querySelector('summary').focus({preventScroll: true});
+    },
     // Bounded view state only. Shared navigation may restore this without
     // retaining payloads, source text, reports or package bytes in history.
     selectedEvent: () => model?.rows.some(row => row.key === selectedKey && !row.duplicate) ? model.sources.get(selectedKey) ?? null : null,

@@ -46,14 +46,16 @@ export async function checkMagicDecoderUI(run) {
   const state = {decoderPending: false, decoderSteps: [], decoderSelectedStepId: null, decoderNoticeRevision: 0,
     decoderInputSnapshot: null, decoderNextOperationId: 1, decoderEngine: {available: true}};
   const toolsElements = {input: {value: 'deadbeef'}, inputEncoding: {value: 'text'},
-    operation: {value: 'magic-inspect'}};
+    operation: {value: 'magic-inspect'}, notice: {dataset: {}, textContent: ''}};
   const calls = [];
+  // Set to hold the next request until the page aborts it.
+  let holdNext = false;
   const ui = runInNewContext(
     section('      const decoderNativeOperations =', '      function isJwtInspection') +
     section('      function decoderBytesToBase64', '      async function refreshDecoderEngine') +
-    section('      async function appendDecoderTransform()', '      function decoderHexDump') +
-    ';({isDecoderEngine, appendDecoderTransform})', {
-      state, toolsElements, TextEncoder, TextDecoder, atob, btoa,
+    section('      function startToolsOperation(', '      function decoderHexDump') +
+    ';({isDecoderEngine, appendDecoderTransform, decoderBase64ToBytes})', {
+      state, toolsElements, TextEncoder, TextDecoder, atob, btoa, setInterval, clearInterval, AbortController,
       isPlainObject: value => value !== null && typeof value === 'object' && !Array.isArray(value),
       isSafeIntegerInRange: (value, minimum, maximum) => Number.isSafeInteger(value) && value >= minimum && value <= maximum,
       renderTools() {}, formatByteSize: value => `${value} bytes`,
@@ -61,6 +63,11 @@ export async function checkMagicDecoderUI(run) {
         assert.equal(url, '/api/decoder/actions'); assert.equal(options.method, 'POST');
         const request = JSON.parse(options.body), input = Buffer.from(request.input_base64, 'base64');
         calls.push(request);
+        if (holdNext) {
+          holdNext = false;
+          await new Promise((_, reject) => options.signal.addEventListener('abort',
+            () => reject(new DOMException('The operation was aborted.', 'AbortError'))));
+        }
         const result = run(request.operation, input);
         if (result.status !== 0) return {ok: false, json: async () => ({error: 'Authored malformed input rejected'})};
         const bytes = Buffer.from(result.stdout);
@@ -71,16 +78,23 @@ export async function checkMagicDecoderUI(run) {
           preview_truncated: bytes.length > 256, duration_us: 1})};
       },
     });
-  const engine = {protocol_version: 1, available: true, busy: false, limits: {
-    input_bytes: 1048576, output_bytes: 1048576, pipeline_steps: 16, retained_bytes: 4194304,
-    jwt_bytes: 65536, secret_bytes: 4096, json_depth: 64, json_tokens: 100000,
-    operations, jwt_algorithms: ['HS256', 'HS384', 'HS512', 'none'],
-  }};
+  const engine = {protocol_version: 2, available: true, busy: false, operations,
+    jwt_algorithms: ['HS256', 'HS384', 'HS512', 'none']};
   assert(ui.isDecoderEngine(engine));
   for (const changed of [operations.slice(0, -1), [...operations, 'invented'],
     [...operations.slice(0, -1), operations[0]]]) {
-    assert.equal(ui.isDecoderEngine({...engine, limits: {...engine.limits, operations: changed}}), false);
+    assert.equal(ui.isDecoderEngine({...engine, operations: changed}), false);
   }
+  assert.equal(ui.isDecoderEngine({...engine, protocol_version: 1}), false);
+  assert.equal(ui.isDecoderEngine({...engine, limits: {}}), false, 'version 2 has no limits');
+  // Canonical Base64 only, at any length: the shape check is one character
+  // class, which JavaScriptCore matches past the few MB a repeated group stops at.
+  for (const bad of ['YQ', 'Y===', 'YQ=A', '=YQ=', 'YQ==YQ==', 'YR==', 'YWE=\n', 'YW E'])
+    assert.throws(() => ui.decoderBase64ToBytes(bad), {name: 'TypeError'}, bad);
+  for (const good of ['', 'YQ==', 'YWE=', 'YWFh'])
+    assert.equal(Buffer.from(ui.decoderBase64ToBytes(good)).toString('base64'), good);
+  {const large = Buffer.alloc(6 * 1048576, 0xa5).toString('base64');
+    assert.equal(ui.decoderBase64ToBytes(large).byteLength, 6 * 1048576);}
   assert.equal(calls.length, 0, 'Selecting Magic never automatically runs a transform');
   await ui.appendDecoderTransform();
   assert.equal(calls.length, 1); assert.equal(state.decoderSteps.length, 1);
@@ -117,7 +131,36 @@ export async function checkMagicDecoderUI(run) {
   await ui.appendDecoderTransform();
   assert.equal(calls.length, requestCount); assert.equal(state.decoderSteps[0], completed);
   assert.match(state.decoderMessage, /unavailable/);
-  console.log('PASS exact C++/Rust/Swift/UI/OpenAPI operation parity and production chain: explicit-only Magic, preserved root/history, failed-step retention, report-byte hashing, explicit branching and unavailable/changed-input refusal (not rendered QA)');
+  state.decoderEngine.available = true;
+  // Cancel aborts the running request and keeps the chain as it was.
+  holdNext = true; toolsElements.operation.value = 'sha256';
+  const cancelled = ui.appendDecoderTransform();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(state.decoderPending, true); assert.match(state.decoderMessage, /running locally… 0 s\. Cancel/);
+  state.decoderController.abort();
+  await cancelled;
+  assert.equal(state.decoderPending, false); assert.equal(state.decoderController, null);
+  assert.match(state.decoderMessage, /was cancelled\. The chain is unchanged/);
+  assert.equal(state.decoderSteps.length, 1); assert.equal(state.decoderSteps[0], completed);
+  // A cancelled first step roots no chain, so other input runs next.
+  state.decoderInputSnapshot = null; state.decoderSteps = []; state.decoderSelectedStepId = null;
+  holdNext = true; toolsElements.input.value = 'first input';
+  const first = ui.appendDecoderTransform();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(state.decoderInputSnapshot.key, 'text\u0000first input');
+  state.decoderController.abort();
+  await first;
+  assert.equal(state.decoderInputSnapshot, null); assert.equal(state.decoderSteps.length, 0);
+  // More than 1 MiB of input and more than 16 steps, both once refused.
+  toolsElements.input.value = 'a'.repeat(2 * 1048576 + 1);
+  for (let step = 0; step < 20; step++) {
+    toolsElements.operation.value = step % 2 ? 'base64-decode' : 'base64-encode';
+    await ui.appendDecoderTransform();
+  }
+  assert.equal(state.decoderSteps.length, 20, state.decoderMessage);
+  assert.equal(state.decoderInputSnapshot.bytes, 2 * 1048576 + 1);
+  assert.equal(Buffer.from(state.decoderSteps.at(-1).output_base64, 'base64').toString(), 'a'.repeat(2 * 1048576 + 1));
+  console.log('PASS exact C++/Rust/Swift/UI/OpenAPI operation parity and production chain: explicit-only Magic, preserved root/history, failed-step retention, report-byte hashing, explicit branching, unavailable/changed-input refusal, Cancel keeping the chain or rooting none, a 2 MiB input and 20 steps (not rendered QA)');
 
   // Engine availability is separate from the notice: a probe never replaces
   // an operation's outcome, never reports ready while one runs, and a failed

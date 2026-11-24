@@ -172,12 +172,17 @@ packageAbort.abort();await packageWithinDeadline(assert.rejects(pendingRead,/can
 const packageSharedChunk=new Uint8Array(1024*1024);let packageSharedIndex=0;
 const sharedResponse=new Response(new ReadableStream({pull(stream){if(packageSharedIndex===16)stream.close();else{packageSharedChunk[17]=packageSharedIndex++;stream.enqueue(packageSharedChunk.subarray(17,18));}}},{highWaterMark:0}));
 const sharedBytes=await packageUI.evidencePackageReadBytes(sharedResponse,16);assert.deepEqual([...sharedBytes],Array.from({length:16},(_,i)=>i));assert.equal(sharedBytes.buffer.byteLength,16);
-// With no deadline, an endless fragmented reply still ends at its chunk or byte limit.
+// A package reply has no deadline, size or chunk limit: an endless fragmented
+// one is read past 65,536 chunks and, 64 bytes wide, past the 4 MiB packages
+// were once capped at, until Cancel stops it.
 for(const width of [0,1,64]) {
-  let fragmentedCancels=0;
+  let fragmentedCancels=0,pulls=0;
   const fragmented=packageUI.createEvidencePackageController({getSelection:()=>packageGolden.selection,protocol:'http:',onChange:()=>{},
-    fetcher:async()=>new Response(new ReadableStream({pull(stream){stream.enqueue(new Uint8Array(width));},cancel(){fragmentedCancels++;return new Promise(()=>{});}}))});
-  await packageWithinDeadline(fragmented.export());assert.equal(fragmented.model.status,'error');assert.match(fragmented.model.message,/limit/);assert.equal(fragmentedCancels,1);
+    fetcher:async()=>new Response(new ReadableStream({pull(stream){pulls++;stream.enqueue(new Uint8Array(width));},cancel(){fragmentedCancels++;return new Promise(()=>{});}}))});
+  const run=fragmented.export();
+  while(pulls<70000) await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(fragmented.model.status,'loading');
+  fragmented.cancel();await packageWithinDeadline(run);assert.equal(fragmented.model.status,'cancelled');assert.equal(fragmentedCancels,1);
 }
 const packageRequests=[];
 let packageSelection=structuredClone(packageGolden.selection);
@@ -226,9 +231,15 @@ for (const status of [400,404,408,409,413,422,503]) {
 }
 const packageOffline=packageUI.createEvidencePackageController({getSelection:()=>packageSelection,protocol:'reb:',onChange:()=>{},fetcher:()=>{throw new Error('Offline must not fetch');}});
 await packageOffline.export(); assert.equal(packageOffline.model.status,'error');
-let oversizedRead=false;
-await packageController.validate({size:4194305,arrayBuffer:async()=>{oversizedRead=true;return new ArrayBuffer(0);}});
-assert.equal(oversizedRead,false,'File size checked before allocation/read');
+let emptyRead=false;
+await packageController.validate({size:0,arrayBuffer:async()=>{emptyRead=true;return new ArrayBuffer(0);}});
+assert.equal(emptyRead,false,'An empty file is refused before it is read');
+// A file past the 4 MiB packages were once capped at reaches the validator whole.
+const largeFile=new Uint8Array(4194305).fill(0x20);let largeBody=null;
+const largeControl=packageUI.createEvidencePackageController({getSelection:()=>packageSelection,protocol:'http:',onChange:()=>{},
+  fetcher:async(_url,options)=>{largeBody=options.body;return Response.json(packageInvalid);}});
+await largeControl.validate({size:largeFile.length,arrayBuffer:async()=>largeFile.buffer});
+assert.equal(largeBody?.byteLength,4194305);assert.equal(largeControl.model.status,'invalid');
 const packageWrongSelection=packageUI.createEvidencePackageController({getSelection:()=>({events:packageSelection.events.slice(0,1),artifacts:[]}),protocol:'http:',onChange:()=>{},
   fetcher:async url=>url.endsWith('/export')?new Response(packageGoldenBytes):Response.json(packageValid)});
 await packageWrongSelection.export(); assert.equal(packageWrongSelection.model.status,'error'); assert.equal(packageWrongSelection.model.bytes,null);
@@ -253,7 +264,7 @@ const orderedBytes = new TextEncoder().encode(JSON.stringify(reorderedPackage));
 const orderedControl = packageUI.createEvidencePackageController({getSelection:()=>packageGolden.selection,protocol:'http:',onChange:()=>{},
   fetcher:async url=>url.endsWith('/export')?new Response(orderedBytes):Response.json(packageValid)});
 await orderedControl.export(); assert.equal(orderedControl.model.status,'ready'); assert.deepEqual(orderedControl.model.bytes,orderedBytes);
-await orderedControl.validate({size:4194305}); assert.equal(orderedControl.model.bytes,null,'An invalid new file cannot leave an older package downloadable');
+await orderedControl.validate({size:0}); assert.equal(orderedControl.model.bytes,null,'An invalid new file cannot leave an older package downloadable');
 let selectionReply;
 const changingControl = packageUI.createEvidencePackageController({getSelection:()=>packageSelection,protocol:'http:',onChange:()=>{},
   fetcher:()=>new Promise(resolve=>{selectionReply=resolve;})});
@@ -466,15 +477,26 @@ let pending=panel.defer();const escaped=panel.nodes.export.emit('click');assert.
 await panel.host.emit('keydown',{key:'Escape',preventDefault(){},stopPropagation(){}});assert.equal(pending[0].options.signal.aborted,true);
 pending[0].resolve(new Response(packageGoldenBytes));await escaped;assert.equal(panel.panel.controller.model.status,'cancelled');
 const switched=panel.nodes.export.emit('click');assert.equal(pending.length,2);panel.context={...panel.context,requestId:'other'};panel.panel.sync();
-pending[1].resolve(new Response(packageGoldenBytes));await switched;assert.equal(panel.panel.controller.model.bytes,null);assert.match(panel.nodes.selection.textContent,/0 \/ 1,024/);
+pending[1].resolve(new Response(packageGoldenBytes));await switched;assert.equal(panel.panel.controller.model.bytes,null);assert.equal(panel.nodes.selection.textContent,'0 events · 0 artifacts selected');
 await choosePackageRow(panel,0);const leaving=panel.nodes.export.emit('click');panel.panel.setVisible(false);pending[2].resolve(new Response(packageGoldenBytes));await leaving;
 assert.equal(panel.panel.controller.model.bytes,null);panel.panel.setVisible(true);panel.resume();
-// Candidate mounting is bounded, paging never selects new rows, and the artifact cap holds across pages.
+// Retained events list the stored range the investigation view shows.
+panel.nodes.scope.value='retained';await panel.nodes.scope.emit('change');
+const olderRange=Array.from({length:3},(_,index)=>({...packageGolden.records.events[0],session_id:'7',process_id:42,sequence_number:String(index+9001)}));
+panel.panel.setRange(olderRange);assert.equal(panel.nodes.candidates.children.length,3);assert.match(panel.nodes.candidates.textContent,/event 9001/);
+assert.match(panel.nodes.context.textContent,/^3 selectable keys in this view\. The stored range the investigation view shows\.$/);
+panel.panel.setRange(null);assert.doesNotMatch(panel.nodes.candidates.textContent,/event 9001/);
+// Every artifact of the catalog is a candidate, not only its first 500.
+panel.context={...panel.context,artifacts:Array.from({length:520},(_,index)=>({...packageGolden.records.artifacts[0],session_id:'7',artifact_id:String(index+1)}))};
+panel.nodes.scope.value='artifacts';await panel.nodes.scope.emit('change');
+for(let page=0;page<10;page++) await panel.nodes.next.emit('click');
+assert.equal(panel.nodes.page.textContent,'501–520 of 520');assert.match(panel.nodes.candidates.textContent,/artifact 520 /);
+// Candidate mounting is bounded to a page, paging never selects new rows, and a selection holds any number of identities across pages.
 panel.context={...panel.context,artifacts:Array.from({length:65},(_,index)=>({...packageGolden.records.artifacts[0],session_id:'7',artifact_id:String(index+1)}))};
 panel.nodes.scope.value='artifacts';await panel.nodes.scope.emit('change');assert.equal(panel.nodes.candidates.children.length,50);
 await panel.nodes.clear.emit('click');for(let index=0;index<50;index++) await choosePackageRow(panel,index);
 await panel.nodes.next.emit('click');assert.equal(panel.nodes.candidates.children.length,15);for(let index=0;index<15;index++) await choosePackageRow(panel,index);
-assert.match(panel.nodes.selection.textContent,/64 \/ 64/);assert.equal(panel.nodes.candidates.querySelectorAll('input')[14].checked,false);assert.match(panel.nodes.notice.textContent,/Selection limit/);
+assert.equal(panel.nodes.selection.textContent,'0 events · 65 artifacts selected');assert.equal(panel.nodes.candidates.querySelectorAll('input')[14].checked,true);assert.doesNotMatch(panel.nodes.notice.textContent,/limit/i);
 assert.equal(panel.nodes.selected.children[0].querySelectorAll('li').length,50);
 await panel.nodes.clear.emit('click');
 panel.context={...panel.context,requestEvents:Array.from({length:1025},(_,index)=>({...packageGolden.records.events[0],session_id:'7',process_id:42,sequence_number:String(index+1)}))};
@@ -484,8 +506,8 @@ for(let page=0;page<21;page++) {
   for(let index=0;index<panel.nodes.candidates.children.length;index++) await choosePackageRow(panel,index);
   if(page<20) await panel.nodes.next.emit('click');
 }
-assert.match(panel.nodes.selection.textContent,/1024 \/ 1,024/);assert.equal(panel.nodes.candidates.querySelectorAll('input')[24].checked,false);
-console.log('PASS package panel explicit actions, exact download bytes, native fallback, clipboard ownership, keyed refresh focus, eviction, caps, paging, Escape/navigation and stale selection (DOM fixture; not rendered QA)');
+assert.equal(panel.nodes.selection.textContent,'1025 events · 0 artifacts selected');assert.equal(panel.nodes.candidates.querySelectorAll('input')[24].checked,true);
+console.log('PASS package panel explicit actions, exact download bytes, native fallback, clipboard ownership, keyed refresh focus, eviction, every artifact and the range in view, selections of any size, paging, Escape/navigation and stale selection (DOM fixture; not rendered QA)');
 
 const trafficSource = await readFile(join(root, "apps/research-ui/traffic_view.js"), "utf8");
 const trafficUI = runInNewContext(trafficSource + ";({trafficSortedRequests,trafficWindow,renderTrafficRows,renderTrafficDetails,trafficSearchRequests,trafficTableTypeLabel,trafficTargetParts,trafficTimeLabel,TRAFFIC_ROW_LIMIT})", {
@@ -532,7 +554,10 @@ assert.equal(await comparisonController.compare(),false);assert.equal(comparison
 comparisonReply=()=>Response.json({error:'PRIVATE_CANARY',code:'resource_limit'},{status:503});assert.equal(await comparisonController.compare(),false);assert.match(comparisonController.model.message,/busy or unavailable/);assert.equal(comparisonController.model.result,previousComparison);assert(!comparisonController.model.message.includes('PRIVATE_CANARY'));
 comparisonController.select(0,comparisonFile(comparisonOriginal.replace('"process_id":42','"process_id":42,"process_id":42')));
 await comparisonController.compare();assert.match(comparisonCalls.at(-1).options.body,/"process_id":42,"process_id":42/,'Original duplicate members reach strict service unchanged');
-comparisonController.select(0,{size:4194305,arrayBuffer(){throw new Error('Oversized file read');}});const noReadCalls=comparisonCalls.length;await comparisonController.compare();assert.equal(comparisonCalls.length,noReadCalls);
+// A file past the 4 MiB packages were once capped at is read and sent whole; an empty one is never read.
+comparisonController.select(0,comparisonFile(comparisonOriginal+' '.repeat(4194305)));await comparisonController.compare();
+assert.equal(comparisonCalls.at(-1).options.body.length,comparisonCalls[0].options.body.length+4194305);
+comparisonController.select(0,{size:0,arrayBuffer(){throw new Error('Empty file read');}});const noReadCalls=comparisonCalls.length;await comparisonController.compare();assert.equal(comparisonCalls.length,noReadCalls);
 comparisonController.select(0,{size:1,arrayBuffer:async()=>new Uint8Array([255]).buffer});await comparisonController.compare();assert.equal(comparisonCalls.length,noReadCalls,'Invalid UTF-8 never dispatches');
 let finishComparisonFile;comparisonController.select(0,{size:1,arrayBuffer:()=>new Promise(resolve=>{finishComparisonFile=resolve;})});
 const cancelledComparison=comparisonController.compare();comparisonController.close();assert.equal(await cancelledComparison,false);finishComparisonFile(new Uint8Array([123]).buffer);await Promise.resolve();assert.equal(comparisonCalls.length,noReadCalls,'Retired file read cannot dispatch');
@@ -1231,7 +1256,7 @@ const pivotElements = {signalRequestProfile: new TrafficFixtureNode(), signalDet
 const signalTab = new TrafficFixtureNode("button");
 let pivotScreen;
 let pivotInspectorOpen = false;
-const signalPivots = runInNewContext(appSection("      function renderSignalRequestProfile()", "      function signalTabKey(") +
+const signalPivots = runInNewContext((await readFile(join(root, "apps/research-ui/evidence_chips.js"), "utf8")) + "\n" + appSection("      function renderSignalRequestProfile()", "      function signalTabKey(") +
   ";({renderSignalRequestProfile,renderFingerprintDetail})", {
   state: pivotState, elements: pivotElements, document: {...trafficDocument, querySelector: () => signalTab},
   textElement: (tag, className, text) => {const node = new TrafficFixtureNode(tag); node.className = className; node.textContent = text; return node;},
@@ -2784,7 +2809,7 @@ function observationFixtureContext() {
   const artifacts = [{protocol_version:1,session_id:'7',artifact_id:'9',navigation_id:'101',frame_id:'301',parent_artifact_id:'0',creator_event_id:'95',execution_context_id:'23',capture_origin:'network_response',kind:'javascript',url:'https://fixture.invalid/assets/collector.js',mime_type:'text/javascript',byte_size:observationSourceBytes.length,sha256:observationSourceHash,sensitive:false}];
   return {events,artifacts,request:{id:'evidence-investigation-request',origin:'live',method:'POST',path:'telemetry.fixture.invalid',hostOnly:true,events:events.filter(event=>event.category==='network')},eventsLimited:false};
 }
-const observationCode = (await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8')) + '\n' + packageSource;
+const observationCode = (await readFile(join(root,'apps/research-ui/evidence_chips.js'),'utf8')) + '\n' + (await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8')) + '\n' + packageSource;
 const observationUI = runInNewContext(observationCode + ';({evidenceObservationModel,evidenceRequestKey,evidenceArtifactReference,isBrokerResponse,isArtifactResponse})', {TextDecoder, Uint8Array});
 const nativeNetworkProjection = runInNewContext(observationCode + ';({requestsFromEvents,evidenceObservationOutcome,evidenceObservationLabel,evidencePayload})', {TextDecoder, Uint8Array});
 for (const disposition of ['proxy_destroyed', 'redirect_handoff']) {
@@ -2811,6 +2836,20 @@ assert.equal(observationModel.missingParents,1); assert.equal(observationModel.q
 assert.equal(observationModel.namedMarkers,0);
 const namedObservationModel = observationUI.evidenceObservationModel({...observationContext, events:[...observationContext.events, observationEvent(107,'vm','gap','native_wasm_dispatch_budget_incomplete')]});
 assert.equal(namedObservationModel.queueMarkers,1,'a named vm budget is not a queue-drop marker'); assert.equal(namedObservationModel.namedMarkers,1);
+assert.equal(observationModel.refusalRecords,0);
+{
+  // protocol/broker-refusal-v1.md: reason 5 (reserved) in the refused record's place.
+  const refused = observationEvent(108,'canvas','broker_refusal','',{resource_type:0});
+  const payload = Buffer.alloc(128);
+  payload.writeUInt16LE(1,0); payload.writeUInt16LE(128,2); payload.writeUInt16LE(5,4); payload.writeUInt16LE(1,6);
+  payload.writeUInt16LE(3,8); payload.writeUInt16LE(144,10); payload.writeUInt16LE(1,12); payload.writeUInt16LE(1,14);
+  payload.writeBigUInt64LE(1n,24); payload.writeBigUInt64LE(108n,32); payload.writeBigUInt64LE(BigInt(refused.monotonic_time_ns),40);
+  payload.writeUInt32LE(42,48); payload.writeUInt32LE(44,52);
+  Object.assign(refused,{payload:payload.toString('hex'),payload_size:128});
+  const refusalModel = observationUI.evidenceObservationModel({...observationContext, events:[...observationContext.events, refused, refused]});
+  assert.equal(refusalModel.refusalRecords,1,'a refusal record stays a row and is counted once');
+  assert(refusalModel.rows.some(row=>row.key==='7:42:108'));
+}
 assert.equal(observationModel.rows.find(row=>row.key==='7:42:102').outcome,'Outcome not recorded');
 assert.equal(observationModel.rows.find(row=>row.key==='7:42:104').artifact.status,'missing');
 assert.equal(observationModel.linkedArtifacts,1);
@@ -2835,6 +2874,11 @@ const largeObservationModel=observationUI.evidenceObservationModel(observationLa
 assert.equal(largeObservationModel.rows.length,5000);assert.equal(largeObservationModel.limited,true);assert.equal(largeObservationModel.rows[0].key,'7:42:1001');
 const observationCycle=structuredClone(observationContext);observationCycle.events[1].parent_event_id='102';
 assert.equal(observationUI.evidenceObservationModel(observationCycle).parentCycle,true);
+// A parent chain is read link by link to its root, however long: lookup stopped at 32 links.
+const chainEvents=Array.from({length:100},(_,index)=>observationEvent(index+1,'runtime','api_call','Date.now',{parent_event_id:String(index)}));
+const chainRequest=observationEvent(101,'network','request_initiated','GET chain.fixture.invalid',{parent_event_id:'100',request_id:'5'});
+const chainModel=observationUI.evidenceObservationModel({events:[...chainEvents,chainRequest],artifacts:[],request:{id:'chain',origin:'live',method:'GET',path:'chain.fixture.invalid',hostOnly:true,events:[chainRequest]}});
+assert.equal(chainModel.rows.filter(row=>row.group==='parent').length,100);assert.equal(chainModel.missingParents,0);assert.equal(chainModel.parentCycle,false);
 const observationBinary=structuredClone(observationContext);observationBinary.events[0].payload='ff';observationBinary.events[0].payload_size=1;
 assert.equal(observationUI.evidenceObservationModel(observationBinary).rows[0].payload.encoding,'hex');
 console.log('PASS Evidence observation model: contract-valid records, scoped parents, nonzero context, unknown outcomes, exact artifact identity, ambiguity, eviction and bounds');
@@ -2864,15 +2908,15 @@ function observationPanelFixture(narrow = false, options = {}) {
   const tabs=['observations','detail'].map(value=>{const tab=new ObservationNode('button');tab.dataset.evidencePane=value;return tab;});
   nodes['evidence-coverage-details'].append(new ObservationNode('summary'),nodes['evidence-coverage-popover']);
   nodes['evidence-investigation'].append(nodes['evidence-coverage-details'],layout,...tabs);layout.append(nodes['evidence-rows'],nodes['evidence-inspector']);
-  let context=observationFixtureContext(),packageVisible=false,packageCancels=0,sourceCalls=0;
+  let context=observationFixtureContext(),packageVisible=false,packageCancels=0,sourceCalls=0;const packageRanges=[];
   let comparisonFetch=options.fetcher || (async()=>Response.json(comparisonResult));
   nodes['evidence-package-mode'].append(nodes['evidence-package-panel'],nodes['evidence-comparison-section']);
   nodes['evidence-comparison-section'].append(nodes['evidence-comparison-close'],nodes['evidence-comparison-unavailable'],nodes['evidence-comparison-panel']);
-  const create=runInNewContext(observationCode+'\n'+comparisonSource+';createEvidenceWorkspace',{document,TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,setInterval,clearInterval,fetch:(...args)=>comparisonFetch(...args),location:{protocol:options.protocol||'http:'},window:{matchMedia:()=>({matches:narrow})}});
-  const panel=create({getContext:()=>context,packagePanel:{sync(){},setVisible(value){packageVisible=value;if(!value)packageCancels++;}},onTrace(){},onRequest(){},onSource(){sourceCalls++;return true;},canOpenSource:()=>true,
+  const create=runInNewContext(observationCode+'\n'+comparisonSource+';createEvidenceWorkspace',{document,Node:ObservationNode,TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,setInterval,clearInterval,fetch:(...args)=>comparisonFetch(...args),location:{protocol:options.protocol||'http:'},window:{matchMedia:()=>({matches:narrow})}});
+  const panel=create({getContext:()=>context,packagePanel:{sync(){},setVisible(value){packageVisible=value;if(!value)packageCancels++;},setRange(events){packageRanges.push(events&&events.map(event=>event.sequence_number));}},onTrace(){},onRequest(){},onSource(){sourceCalls++;return true;},canOpenSource:()=>true,
     ...(options.rangeFetch?{fetcher:(...args)=>options.rangeFetch(...args)}:{})});
   panel.setVisible(true);
-  return {panel,nodes,tabs,document,get context(){return context;},set context(value){context=value;},get packageVisible(){return packageVisible;},get packageCancels(){return packageCancels;},get sourceCalls(){return sourceCalls;}};
+  return {panel,nodes,tabs,document,get context(){return context;},set context(value){context=value;},get packageVisible(){return packageVisible;},get packageCancels(){return packageCancels;},get sourceCalls(){return sourceCalls;},packageRanges};
 }
 const observations=observationPanelFixture();
 const observationRows=()=>observations.nodes['evidence-rows'].querySelectorAll('[data-evidence-key]');
@@ -2931,6 +2975,7 @@ console.log('PASS Evidence production reconciliation: stable inspector/focus/scr
   assert.equal(nodes['evidence-range-earlier'].disabled,false,'a move while reading supersedes the read');
   answer.resolve(pageOf([observationEvent(20,'runtime','api_call','Date.now'),observationEvent(21,'runtime','api_call','performance.now')],{start:'4000',next_before:'4000',next_after:'8000'}));await settle();
   assert.equal(nodes['evidence-range-label'].textContent,'Earlier records · 44.4%–88.8% of the stored session');
+  assert.deepEqual(ranged.packageRanges.at(-1),['20','21'],'the package view lists the range in view');
   assert.deepEqual(['oldest','earlier','later','newest'].map(name=>nodes[`evidence-range-${name}`].disabled),[false,false,false,false]);
   // The request's lifecycle records were read by ID, so they stay in view with the older page.
   assert.deepEqual(rows().filter(key=>['7:42:103','7:42:106'].includes(key)),['7:42:103','7:42:106']);
@@ -2959,6 +3004,7 @@ console.log('PASS Evidence production reconciliation: stable inspector/focus/scr
   nodes['evidence-range-later'].click();assert.equal(reads.at(-1),'/api/events?after=2000&limit=5000');
   answer.resolve(pageOf([observationEvent(2,'runtime','api_call','Date.now')],{start:'2000',next_before:'2000',next_after:'9000'}));await settle();
   assert(rows().includes('7:42:100')&&rows().includes('7:42:300'));assert.equal(nodes['evidence-range-later'].disabled,true);
+  assert.equal(ranged.packageRanges.at(-1),null,'the newest window hands the package view back its own records');
   assert.equal(nodes['evidence-range-label'].textContent,'Newest records · 88.8%–100% of the stored session · updates live');
   // A superseded read changes nothing.
   nodes['evidence-range-earlier'].click();const stale=answer;nodes['evidence-range-newest'].click();

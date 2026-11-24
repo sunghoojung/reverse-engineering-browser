@@ -119,9 +119,7 @@ int Base64Value(const std::uint8_t byte, const bool url_safe) noexcept {
   return -1;
 }
 
-DecoderResult Base64Decode(std::span<const std::uint8_t> input,
-                           const bool url_safe,
-                           const std::size_t output_limit) {
+DecoderResult Base64Decode(std::span<const std::uint8_t> input, const bool url_safe) {
   if (input.empty()) {
     return Success({});
   }
@@ -137,12 +135,8 @@ DecoderResult Base64Decode(std::span<const std::uint8_t> input,
   if (url_safe && padding != 0 && input.size() % 4 != 0) {
     return Failure(DecoderStatus::kInvalidInput, "Base64URL padding is invalid");
   }
-  const std::size_t decoded_size = (meaningful_size * 6) / 8;
-  if (decoded_size > output_limit) {
-    return Failure(DecoderStatus::kOutputLimit, "Decoded output exceeds the configured byte limit");
-  }
   std::vector<std::uint8_t> output;
-  output.reserve(decoded_size);
+  output.reserve((meaningful_size * 6) / 8);
   std::uint32_t accumulator = 0;
   unsigned int bit_count = 0;
   for (std::size_t index = 0; index < meaningful_size; ++index) {
@@ -183,7 +177,7 @@ int HexValue(const std::uint8_t byte) noexcept {
   return -1;
 }
 
-DecoderResult HexDecode(std::span<const std::uint8_t> input, const std::size_t output_limit) {
+DecoderResult HexDecode(std::span<const std::uint8_t> input) {
   std::vector<std::uint8_t> digits;
   digits.reserve(input.size());
   for (std::size_t index = 0; index < input.size(); ++index) {
@@ -204,9 +198,6 @@ DecoderResult HexDecode(std::span<const std::uint8_t> input, const std::size_t o
   if (digits.size() % 2 != 0) {
     return Failure(DecoderStatus::kInvalidInput, "Hex input must contain complete byte pairs");
   }
-  if (digits.size() / 2 > output_limit) {
-    return Failure(DecoderStatus::kOutputLimit, "Decoded output exceeds the configured byte limit");
-  }
   std::vector<std::uint8_t> output;
   output.reserve(digits.size() / 2);
   for (std::size_t index = 0; index < digits.size(); index += 2) {
@@ -221,15 +212,11 @@ bool IsUrlUnreserved(const std::uint8_t byte) noexcept {
          (byte >= '0' && byte <= '9') || byte == '-' || byte == '.' || byte == '_' || byte == '~';
 }
 
-DecoderResult UrlEncode(std::span<const std::uint8_t> input, const std::size_t output_limit) {
+DecoderResult UrlEncode(std::span<const std::uint8_t> input) {
   constexpr char kHex[] = "0123456789ABCDEF";
   std::size_t encoded_size = 0;
   for (const std::uint8_t byte : input) {
     encoded_size += IsUrlUnreserved(byte) ? std::size_t{1} : std::size_t{3};
-    if (encoded_size > output_limit) {
-      return Failure(DecoderStatus::kOutputLimit,
-                     "Encoded output exceeds the configured byte limit");
-    }
   }
   std::vector<std::uint8_t> output;
   output.reserve(encoded_size);
@@ -245,10 +232,7 @@ DecoderResult UrlEncode(std::span<const std::uint8_t> input, const std::size_t o
   return Success(std::move(output));
 }
 
-DecoderResult UrlDecode(std::span<const std::uint8_t> input, const std::size_t output_limit) {
-  if (input.size() > output_limit) {
-    return Failure(DecoderStatus::kOutputLimit, "Decoded output exceeds the configured byte limit");
-  }
+DecoderResult UrlDecode(std::span<const std::uint8_t> input) {
   std::vector<std::uint8_t> output;
   output.reserve(input.size());
   for (std::size_t index = 0; index < input.size(); ++index) {
@@ -270,7 +254,15 @@ DecoderResult UrlDecode(std::span<const std::uint8_t> input, const std::size_t o
   return Success(std::move(output));
 }
 
-DecoderResult DecimalToBase36(std::span<const std::uint8_t> input, const std::size_t output_limit) {
+// Both directions convert word-sized limbs, nine decimal or six base36 digits
+// at a time, so an integer of any length costs about 1/54 of the digit-wise
+// quadratic work.
+constexpr std::uint64_t kDecimalLimb = 1'000'000'000;
+constexpr std::size_t kDecimalLimbDigits = 9;
+constexpr std::uint64_t kBase36Limb = 2'176'782'336;  // 36^6
+constexpr std::size_t kBase36LimbDigits = 6;
+
+DecoderResult DecimalToBase36(std::span<const std::uint8_t> input) {
   if (input.empty() || !IsValidUtf8(input)) {
     return Failure(DecoderStatus::kInvalidInput, "Base36 encoding requires a decimal integer");
   }
@@ -283,44 +275,54 @@ DecoderResult DecimalToBase36(std::span<const std::uint8_t> input, const std::si
   if (start == input.size()) {
     return Failure(DecoderStatus::kInvalidInput, "Base36 encoding requires a decimal integer");
   }
-  while (start + 1 < input.size() && input[start] == '0') {
-    ++start;
-  }
-  std::vector<std::uint8_t> decimal;
-  decimal.reserve(input.size() - start);
   for (std::size_t index = start; index < input.size(); ++index) {
     if (input[index] < '0' || input[index] > '9') {
       return Failure(DecoderStatus::kInvalidInput, "Base36 encoding requires a decimal integer");
     }
-    decimal.push_back(static_cast<std::uint8_t>(input[index] - '0'));
   }
-  if (std::all_of(decimal.begin(), decimal.end(),
-                  [](const std::uint8_t value) { return value == 0; })) {
+  while (start + 1 < input.size() && input[start] == '0') {
+    ++start;
+  }
+  if (input[start] == '0') {
     return Success({'0'});
+  }
+  // Most significant limb first; the first holds the digits left over from nine.
+  const std::size_t digits = input.size() - start;
+  std::vector<std::uint32_t> limbs;
+  limbs.reserve(digits / kDecimalLimbDigits + 1);
+  std::size_t position = start;
+  std::size_t width = digits % kDecimalLimbDigits;
+  if (width == 0) {
+    width = kDecimalLimbDigits;
+  }
+  while (position < input.size()) {
+    std::uint32_t limb = 0;
+    for (std::size_t index = 0; index < width; ++index) {
+      limb = limb * 10U + static_cast<std::uint32_t>(input[position++] - '0');
+    }
+    limbs.push_back(limb);
+    width = kDecimalLimbDigits;
   }
   constexpr char kDigits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
   std::vector<std::uint8_t> reversed;
-  while (!decimal.empty()) {
-    unsigned int remainder = 0;
-    std::size_t first_nonzero = decimal.size();
-    for (std::size_t index = 0; index < decimal.size(); ++index) {
-      const unsigned int value = remainder * 10U + decimal[index];
-      decimal[index] = static_cast<std::uint8_t>(value / 36U);
-      remainder = value % 36U;
-      if (first_nonzero == decimal.size() && decimal[index] != 0) {
-        first_nonzero = index;
-      }
+  std::size_t first = 0;
+  while (first < limbs.size()) {
+    std::uint64_t remainder = 0;
+    for (std::size_t index = first; index < limbs.size(); ++index) {
+      const std::uint64_t value = remainder * kDecimalLimb + limbs[index];
+      limbs[index] = static_cast<std::uint32_t>(value / kBase36Limb);
+      remainder = value % kBase36Limb;
     }
-    reversed.push_back(static_cast<std::uint8_t>(kDigits[remainder]));
-    if (reversed.size() + static_cast<std::size_t>(negative) > output_limit) {
-      return Failure(DecoderStatus::kOutputLimit,
-                     "Base36 output exceeds the configured byte limit");
+    while (first < limbs.size() && limbs[first] == 0) {
+      ++first;
     }
-    if (first_nonzero == decimal.size()) {
-      decimal.clear();
-    } else if (first_nonzero > 0) {
-      decimal.erase(decimal.begin(), decimal.begin() + static_cast<std::ptrdiff_t>(first_nonzero));
+    for (std::size_t index = 0; index < kBase36LimbDigits; ++index) {
+      reversed.push_back(static_cast<std::uint8_t>(kDigits[remainder % 36U]));
+      remainder /= 36U;
     }
+  }
+  while (reversed.size() > 1 && reversed.back() == '0') {
+    reversed.pop_back();
   }
   std::vector<std::uint8_t> output;
   output.reserve(reversed.size() + static_cast<std::size_t>(negative));
@@ -331,7 +333,7 @@ DecoderResult DecimalToBase36(std::span<const std::uint8_t> input, const std::si
   return Success(std::move(output));
 }
 
-DecoderResult Base36ToDecimal(std::span<const std::uint8_t> input, const std::size_t output_limit) {
+DecoderResult Base36ToDecimal(std::span<const std::uint8_t> input) {
   if (input.empty() || !IsValidUtf8(input)) {
     return Failure(DecoderStatus::kInvalidInput, "Base36 decoding requires an integer");
   }
@@ -344,58 +346,66 @@ DecoderResult Base36ToDecimal(std::span<const std::uint8_t> input, const std::si
   if (start == input.size()) {
     return Failure(DecoderStatus::kInvalidInput, "Base36 decoding requires an integer");
   }
-  std::vector<std::uint8_t> decimal = {0};
-  for (std::size_t index = start; index < input.size(); ++index) {
-    const std::uint8_t byte = input[index];
-    unsigned int digit = 0;
-    if (byte >= '0' && byte <= '9') {
-      digit = byte - '0';
-    } else if (byte >= 'a' && byte <= 'z') {
-      digit = byte - 'a' + 10U;
-    } else if (byte >= 'A' && byte <= 'Z') {
-      digit = byte - 'A' + 10U;
-    } else {
-      return Failure(DecoderStatus::kInvalidInput, "Base36 input contains an invalid character");
+  // Least significant limb first.
+  std::vector<std::uint32_t> limbs = {0};
+  std::size_t position = start;
+  while (position < input.size()) {
+    std::uint64_t value = 0;
+    std::uint64_t multiplier = 1;
+    for (std::size_t index = 0; index < kBase36LimbDigits && position < input.size(); ++index) {
+      const std::uint8_t byte = input[position++];
+      std::uint64_t digit = 0;
+      if (byte >= '0' && byte <= '9') {
+        digit = byte - '0';
+      } else if (byte >= 'a' && byte <= 'z') {
+        digit = byte - 'a' + 10U;
+      } else if (byte >= 'A' && byte <= 'Z') {
+        digit = byte - 'A' + 10U;
+      } else {
+        return Failure(DecoderStatus::kInvalidInput, "Base36 input contains an invalid character");
+      }
+      value = value * 36U + digit;
+      multiplier *= 36U;
     }
-    unsigned int carry = digit;
-    for (auto iterator = decimal.rbegin(); iterator != decimal.rend(); ++iterator) {
-      const unsigned int value = static_cast<unsigned int>(*iterator) * 36U + carry;
-      *iterator = static_cast<std::uint8_t>(value % 10U);
-      carry = value / 10U;
+    std::uint64_t carry = value;
+    for (auto& limb : limbs) {
+      const std::uint64_t product = static_cast<std::uint64_t>(limb) * multiplier + carry;
+      limb = static_cast<std::uint32_t>(product % kDecimalLimb);
+      carry = product / kDecimalLimb;
     }
     while (carry > 0) {
-      decimal.insert(decimal.begin(), static_cast<std::uint8_t>(carry % 10U));
-      carry /= 10U;
-    }
-    if (decimal.size() + static_cast<std::size_t>(negative) > output_limit) {
-      return Failure(DecoderStatus::kOutputLimit,
-                     "Decimal output exceeds the configured byte limit");
+      limbs.push_back(static_cast<std::uint32_t>(carry % kDecimalLimb));
+      carry /= kDecimalLimb;
     }
   }
-  const auto first_nonzero = std::find_if(decimal.begin(), decimal.end(),
-                                          [](const std::uint8_t digit) { return digit != 0; });
-  if (first_nonzero == decimal.end()) {
+  while (limbs.size() > 1 && limbs.back() == 0) {
+    limbs.pop_back();
+  }
+  if (limbs.size() == 1 && limbs[0] == 0) {
     return Success({'0'});
   }
   std::vector<std::uint8_t> output;
-  output.reserve(static_cast<std::size_t>(decimal.end() - first_nonzero) +
-                 static_cast<std::size_t>(negative));
+  output.reserve(limbs.size() * kDecimalLimbDigits + static_cast<std::size_t>(negative));
   if (negative) {
     output.push_back('-');
   }
-  for (auto iterator = first_nonzero; iterator != decimal.end(); ++iterator) {
-    output.push_back(static_cast<std::uint8_t>('0' + *iterator));
+  const std::string leading = std::to_string(limbs.back());
+  output.insert(output.end(), leading.begin(), leading.end());
+  for (auto limb = limbs.rbegin() + 1; limb != limbs.rend(); ++limb) {
+    std::array<std::uint8_t, kDecimalLimbDigits> digits{};
+    std::uint32_t value = *limb;
+    for (std::size_t index = kDecimalLimbDigits; index > 0; --index) {
+      digits[index - 1] = static_cast<std::uint8_t>('0' + value % 10U);
+      value /= 10U;
+    }
+    output.insert(output.end(), digits.begin(), digits.end());
   }
   return Success(std::move(output));
 }
 
 DecoderResult ZlibTransform(std::span<const std::uint8_t> input,
                             const bool compress,
-                            const int window_bits,
-                            const std::size_t output_limit) {
-  if (input.size() > static_cast<std::size_t>(std::numeric_limits<uInt>::max())) {
-    return Failure(DecoderStatus::kInvalidInput, "Compression input is too large");
-  }
+                            const int window_bits) {
   z_stream stream{};
   int status =
       compress ? deflateInit2(&stream, Z_BEST_SPEED, Z_DEFLATED, window_bits, 8, Z_DEFAULT_STRATEGY)
@@ -403,60 +413,62 @@ DecoderResult ZlibTransform(std::span<const std::uint8_t> input,
   if (status != Z_OK) {
     return Failure(DecoderStatus::kInternalError, "Compression engine initialization failed");
   }
-  stream.next_in = const_cast<Bytef*>(reinterpret_cast<const Bytef*>(input.data()));
-  stream.avail_in = static_cast<uInt>(input.size());
+  const auto end = [&] {
+    if (compress) {
+      deflateEnd(&stream);
+    } else {
+      inflateEnd(&stream);
+    }
+  };
+  // zlib counts input in uInt, so input larger than that is handed over in
+  // pieces; compression finishes only once the last piece is in.
+  std::size_t offered = 0;
+  const auto refill = [&] {
+    if (stream.avail_in == 0 && offered < input.size()) {
+      const std::size_t piece =
+          std::min<std::size_t>(input.size() - offered, std::numeric_limits<uInt>::max());
+      stream.next_in = const_cast<Bytef*>(reinterpret_cast<const Bytef*>(input.data() + offered));
+      stream.avail_in = static_cast<uInt>(piece);
+      offered += piece;
+    }
+  };
   std::vector<std::uint8_t> output;
   constexpr std::size_t kChunkBytes = 32U << 10U;
   std::array<std::uint8_t, kChunkBytes> chunk{};
   do {
+    refill();
     stream.next_out = chunk.data();
     stream.avail_out = static_cast<uInt>(chunk.size());
-    status = compress ? deflate(&stream, Z_FINISH) : inflate(&stream, Z_NO_FLUSH);
+    status = compress ? deflate(&stream, offered == input.size() ? Z_FINISH : Z_NO_FLUSH)
+                      : inflate(&stream, Z_NO_FLUSH);
     if (status != Z_OK && status != Z_STREAM_END && !(compress && status == Z_BUF_ERROR)) {
-      if (compress) {
-        deflateEnd(&stream);
-      } else {
-        inflateEnd(&stream);
-      }
+      end();
       return Failure(
           DecoderStatus::kInvalidInput,
           compress ? "Compression failed" : "Compressed input is malformed or truncated");
     }
     const std::size_t produced = chunk.size() - stream.avail_out;
-    if (produced > output_limit - std::min(output.size(), output_limit)) {
-      if (compress) {
-        deflateEnd(&stream);
-      } else {
-        inflateEnd(&stream);
-      }
-      return Failure(DecoderStatus::kOutputLimit,
-                     "Compression output exceeds the configured byte limit");
-    }
     output.insert(output.end(), chunk.begin(),
                   chunk.begin() + static_cast<std::ptrdiff_t>(produced));
-    if (!compress && status == Z_STREAM_END && stream.avail_in != 0) {
+    if (!compress && status == Z_STREAM_END && (stream.avail_in != 0 || offered < input.size())) {
       if (window_bits != MAX_WBITS + 16) {
-        inflateEnd(&stream);
+        end();
         return Failure(DecoderStatus::kInvalidInput, "Compressed input contains trailing data");
       }
       // Gzip permits concatenated members. Reuse the inflater's allocation,
-      // retaining unread input and the aggregate output budget across members.
+      // retaining unread input across members.
       status = inflateReset(&stream);
       if (status != Z_OK) {
-        inflateEnd(&stream);
+        end();
         return Failure(DecoderStatus::kInternalError,
                        "Compression engine could not reset for the next gzip member");
       }
     }
-    if (status == Z_BUF_ERROR && produced == 0) {
+    if (status == Z_BUF_ERROR && produced == 0 && stream.avail_in == 0 && offered == input.size()) {
       break;
     }
   } while (status != Z_STREAM_END);
-  if (compress) {
-    deflateEnd(&stream);
-  } else {
-    inflateEnd(&stream);
-  }
+  end();
   if (status != Z_STREAM_END) {
     return Failure(DecoderStatus::kInvalidInput,
                    compress ? "Compression did not finish" : "Compressed input is truncated");
@@ -464,10 +476,11 @@ DecoderResult ZlibTransform(std::span<const std::uint8_t> input,
   return Success(std::move(output));
 }
 
+// Open containers live on an explicit stack, so nesting of any depth costs
+// heap rather than the call stack, and the output grows with what it holds.
 class JsonFormatter final {
  public:
-  JsonFormatter(std::string_view input, const bool pretty, const std::size_t output_limit)
-      : input_(input), pretty_(pretty), output_limit_(output_limit) {}
+  JsonFormatter(std::string_view input, const bool pretty) : input_(input), pretty_(pretty) {}
 
   DecoderResult Run() {
     const auto bytes = std::span<const std::uint8_t>(
@@ -476,8 +489,8 @@ class JsonFormatter final {
       return Failure(DecoderStatus::kInvalidInput, "JSON input is not valid UTF-8");
     }
     SkipWhitespace();
-    if (!ParseValue(0)) {
-      return Failure(limit_reached_ ? DecoderStatus::kOutputLimit : DecoderStatus::kInvalidInput,
+    if (!ParseDocument()) {
+      return Failure(DecoderStatus::kInvalidInput,
                      error_.empty() ? "JSON input is malformed" : error_);
     }
     SkipWhitespace();
@@ -488,39 +501,11 @@ class JsonFormatter final {
   }
 
  private:
-  bool Append(const char character) {
-    if (output_.size() >= output_limit_) {
-      limit_reached_ = true;
-      error_ = "JSON output exceeds the configured byte limit";
-      return false;
+  void NewlineAndIndent(const std::size_t depth) {
+    if (pretty_) {
+      output_.push_back('\n');
+      output_.append(depth * 2, ' ');
     }
-    output_.push_back(character);
-    return true;
-  }
-
-  bool Append(const std::string_view text) {
-    if (text.size() > output_limit_ - std::min(output_.size(), output_limit_)) {
-      limit_reached_ = true;
-      error_ = "JSON output exceeds the configured byte limit";
-      return false;
-    }
-    output_.append(text);
-    return true;
-  }
-
-  bool NewlineAndIndent(const std::size_t depth) {
-    if (!pretty_) {
-      return true;
-    }
-    if (!Append('\n')) {
-      return false;
-    }
-    if (depth > (output_limit_ - std::min(output_.size(), output_limit_)) / 2) {
-      limit_reached_ = true;
-      error_ = "JSON output exceeds the configured byte limit";
-      return false;
-    }
-    return Append(std::string(depth * 2, ' '));
   }
 
   void SkipWhitespace() noexcept {
@@ -530,29 +515,99 @@ class JsonFormatter final {
     }
   }
 
-  bool Token() {
-    ++tokens_;
-    if (tokens_ > kDecoderMaxJsonTokens) {
-      error_ = "JSON token count exceeds the configured limit";
-      return false;
+  // Each pass reads one value, then closes every container that ends after
+  // it, or starts the next entry of the innermost one.
+  bool ParseDocument() {
+    std::vector<bool> objects;
+    while (true) {
+      SkipWhitespace();
+      if (position_ >= input_.size()) {
+        if (!objects.empty()) {
+          error_ = objects.back() ? "JSON object is not closed" : "JSON array is not closed";
+        }
+        return false;
+      }
+      const char open = input_[position_];
+      if (open == '{' || open == '[') {
+        const char close = open == '{' ? '}' : ']';
+        ++position_;
+        output_.push_back(open);
+        SkipWhitespace();
+        if (position_ < input_.size() && input_[position_] == close) {
+          ++position_;
+          output_.push_back(close);
+        } else {
+          objects.push_back(open == '{');
+          if (!BeginEntry(objects)) {
+            return false;
+          }
+          continue;
+        }
+      } else if (!ParseScalar()) {
+        return false;
+      }
+      while (true) {
+        if (objects.empty()) {
+          return true;
+        }
+        const bool object = objects.back();
+        SkipWhitespace();
+        if (position_ < input_.size() && input_[position_] == (object ? '}' : ']')) {
+          ++position_;
+          objects.pop_back();
+          NewlineAndIndent(objects.size());
+          output_.push_back(object ? '}' : ']');
+          continue;
+        }
+        if (position_ >= input_.size()) {
+          error_ = object ? "JSON object is not closed" : "JSON array is not closed";
+          return false;
+        }
+        if (input_[position_] != ',') {
+          error_ = object ? "JSON object entry is missing a comma"
+                          : "JSON array entry is missing a comma";
+          return false;
+        }
+        ++position_;
+        output_.push_back(',');
+        if (!BeginEntry(objects)) {
+          return false;
+        }
+        break;
+      }
     }
-    return true;
   }
 
-  bool ParseValue(const std::size_t depth) {
-    if (depth > kDecoderMaxJsonDepth) {
-      error_ = "JSON nesting exceeds the configured depth limit";
+  // Indents an entry of the innermost container and, in an object, copies
+  // its key and colon, leaving the value next.
+  bool BeginEntry(const std::vector<bool>& objects) {
+    NewlineAndIndent(objects.size());
+    if (!objects.back()) {
+      return true;
+    }
+    SkipWhitespace();
+    if (position_ >= input_.size()) {
+      error_ = "JSON object is not closed";
+      return false;
+    }
+    if (input_[position_] != '"' || !ParseString()) {
+      if (error_.empty()) {
+        error_ = "JSON object keys must be strings";
+      }
       return false;
     }
     SkipWhitespace();
-    if (position_ >= input_.size() || !Token()) {
+    if (position_ >= input_.size() || input_[position_] != ':') {
+      error_ = "JSON object key is missing a colon";
       return false;
     }
+    ++position_;
+    output_.append(pretty_ ? ": " : ":");
+    return true;
+  }
+
+  bool ParseScalar() {
     switch (input_[position_]) {
-      case '{':
-        return ParseObject(depth);
-      case '[':
-        return ParseArray(depth);
       case '"':
         return ParseString();
       case 't':
@@ -566,106 +621,14 @@ class JsonFormatter final {
     }
   }
 
-  bool ParseObject(const std::size_t depth) {
-    ++position_;
-    if (!Append('{')) {
-      return false;
-    }
-    SkipWhitespace();
-    if (position_ < input_.size() && input_[position_] == '}') {
-      ++position_;
-      return Append('}');
-    }
-    std::size_t entry_count = 0;
-    while (position_ < input_.size()) {
-      if (entry_count > 0 && !Append(',')) {
-        return false;
-      }
-      if (!NewlineAndIndent(depth + 1)) {
-        return false;
-      }
-      SkipWhitespace();
-      if (position_ >= input_.size() || input_[position_] != '"' || !Token() || !ParseString()) {
-        if (error_.empty()) {
-          error_ = "JSON object keys must be strings";
-        }
-        return false;
-      }
-      SkipWhitespace();
-      if (position_ >= input_.size() || input_[position_] != ':') {
-        error_ = "JSON object key is missing a colon";
-        return false;
-      }
-      ++position_;
-      if (!Append(pretty_ ? ": " : ":")) {
-        return false;
-      }
-      if (!ParseValue(depth + 1)) {
-        return false;
-      }
-      ++entry_count;
-      SkipWhitespace();
-      if (position_ < input_.size() && input_[position_] == '}') {
-        ++position_;
-        if (!NewlineAndIndent(depth)) {
-          return false;
-        }
-        return Append('}');
-      }
-      if (position_ >= input_.size() || input_[position_] != ',') {
-        error_ = "JSON object entry is missing a comma";
-        return false;
-      }
-      ++position_;
-    }
-    error_ = "JSON object is not closed";
-    return false;
-  }
-
-  bool ParseArray(const std::size_t depth) {
-    ++position_;
-    if (!Append('[')) {
-      return false;
-    }
-    SkipWhitespace();
-    if (position_ < input_.size() && input_[position_] == ']') {
-      ++position_;
-      return Append(']');
-    }
-    std::size_t entry_count = 0;
-    while (position_ < input_.size()) {
-      if (entry_count > 0 && !Append(',')) {
-        return false;
-      }
-      if (!NewlineAndIndent(depth + 1) || !ParseValue(depth + 1)) {
-        return false;
-      }
-      ++entry_count;
-      SkipWhitespace();
-      if (position_ < input_.size() && input_[position_] == ']') {
-        ++position_;
-        if (!NewlineAndIndent(depth)) {
-          return false;
-        }
-        return Append(']');
-      }
-      if (position_ >= input_.size() || input_[position_] != ',') {
-        error_ = "JSON array entry is missing a comma";
-        return false;
-      }
-      ++position_;
-    }
-    error_ = "JSON array is not closed";
-    return false;
-  }
-
   bool ParseString() {
     const std::size_t start = position_++;
     while (position_ < input_.size()) {
       const auto byte = static_cast<unsigned char>(input_[position_]);
       if (byte == '"') {
         ++position_;
-        return Append(input_.substr(start, position_ - start));
+        output_.append(input_.substr(start, position_ - start));
+        return true;
       }
       if (byte < 0x20U) {
         error_ = "JSON string contains an unescaped control character";
@@ -752,7 +715,8 @@ class JsonFormatter final {
         return false;
       }
     }
-    return Append(input_.substr(start, position_ - start));
+    output_.append(input_.substr(start, position_ - start));
+    return true;
   }
 
   bool ParseLiteral(const std::string_view literal) {
@@ -761,24 +725,20 @@ class JsonFormatter final {
       return false;
     }
     position_ += literal.size();
-    return Append(literal);
+    output_.append(literal);
+    return true;
   }
 
   std::string_view input_;
   bool pretty_ = false;
-  std::size_t output_limit_ = 0;
   std::size_t position_ = 0;
-  std::size_t tokens_ = 0;
-  bool limit_reached_ = false;
   std::string output_;
   std::string error_;
 };
 
-DecoderResult FormatJson(std::span<const std::uint8_t> input,
-                         const bool pretty,
-                         const std::size_t output_limit) {
+DecoderResult FormatJson(std::span<const std::uint8_t> input, const bool pretty) {
   const std::string_view text(reinterpret_cast<const char*>(input.data()), input.size());
-  return JsonFormatter(text, pretty, output_limit).Run();
+  return JsonFormatter(text, pretty).Run();
 }
 
 bool DecodeJsonString(const std::string_view input, std::size_t& position, std::string& output) {
@@ -879,49 +839,59 @@ bool DecodeJsonString(const std::string_view input, std::size_t& position, std::
   return false;
 }
 
-bool SkipMinifiedJsonValue(const std::string_view input,
-                           std::size_t& position,
-                           const std::size_t depth) {
-  if (position >= input.size() || depth > kDecoderMaxJsonDepth) {
-    return false;
-  }
-  if (input[position] == '"') {
+// Skips one value of minified JSON, keeping open containers on an explicit
+// stack as the formatter does.
+bool SkipMinifiedJsonValue(const std::string_view input, std::size_t& position) {
+  const auto key = [&] {
     std::string ignored;
-    return DecodeJsonString(input, position, ignored);
-  }
-  if (input[position] == '{' || input[position] == '[') {
-    const char open = input[position++];
-    const char close = open == '{' ? '}' : ']';
-    if (position < input.size() && input[position] == close) {
-      ++position;
-      return true;
+    return DecodeJsonString(input, position, ignored) && position < input.size() &&
+           input[position++] == ':';
+  };
+  std::vector<char> closes;
+  while (true) {
+    if (position >= input.size()) {
+      return false;
     }
-    while (position < input.size()) {
-      if (open == '{') {
-        std::string ignored;
-        if (!DecodeJsonString(input, position, ignored) || position >= input.size() ||
-            input[position++] != ':') {
-          return false;
-        }
-      }
-      if (!SkipMinifiedJsonValue(input, position, depth + 1)) {
+    if (input[position] == '"') {
+      std::string ignored;
+      if (!DecodeJsonString(input, position, ignored)) {
         return false;
       }
+    } else if (input[position] == '{' || input[position] == '[') {
+      const char close = input[position++] == '{' ? '}' : ']';
       if (position < input.size() && input[position] == close) {
         ++position;
+      } else {
+        closes.push_back(close);
+        if (close == '}' && !key()) {
+          return false;
+        }
+        continue;
+      }
+    } else {
+      while (position < input.size() && input[position] != ',' && input[position] != '}' &&
+             input[position] != ']') {
+        ++position;
+      }
+    }
+    while (true) {
+      if (closes.empty()) {
         return true;
+      }
+      if (position < input.size() && input[position] == closes.back()) {
+        ++position;
+        closes.pop_back();
+        continue;
       }
       if (position >= input.size() || input[position++] != ',') {
         return false;
       }
+      if (closes.back() == '}' && !key()) {
+        return false;
+      }
+      break;
     }
-    return false;
   }
-  while (position < input.size() && input[position] != ',' && input[position] != '}' &&
-         input[position] != ']') {
-    ++position;
-  }
-  return true;
 }
 
 std::optional<std::string> TopLevelStringProperty(const std::string_view object,
@@ -955,12 +925,12 @@ std::optional<std::string> TopLevelStringProperty(const std::string_view object,
         result = std::move(value);
       } else {
         position = value_start;
-        if (!SkipMinifiedJsonValue(object, position, 0)) {
+        if (!SkipMinifiedJsonValue(object, position)) {
           return std::nullopt;
         }
         result.reset();
       }
-    } else if (!SkipMinifiedJsonValue(object, position, 0)) {
+    } else if (!SkipMinifiedJsonValue(object, position)) {
       return std::nullopt;
     }
     if (position < object.size() && object[position] == '}') {
@@ -1383,16 +1353,11 @@ bool ReadWireVarint(const std::span<const std::uint8_t> input,
   return false;
 }
 
-DecoderResult InspectProtobuf(const std::span<const std::uint8_t> input,
-                              const std::size_t output_limit,
-                              std::size_t& field_budget) {
+DecoderResult InspectProtobuf(const std::span<const std::uint8_t> input) {
   std::string output = "{\"format\":\"reb-protobuf-wire-v1\",\"schema_known\":false,\"fields\":[";
   std::size_t position = 0;
   bool first = true;
   while (position < input.size()) {
-    if (field_budget == 0)
-      return Failure(DecoderStatus::kOutputLimit, "Protobuf field count exceeds 4096");
-    --field_budget;
     const std::size_t offset = position;
     std::uint64_t tag = 0;
     if (!ReadWireVarint(input, position, tag) || (tag >> 3U) == 0 || (tag >> 3U) > 0x1fffffffU) {
@@ -1420,9 +1385,6 @@ DecoderResult InspectProtobuf(const std::span<const std::uint8_t> input,
         return Failure(DecoderStatus::kInvalidInput,
                        "Invalid or truncated protobuf length-delimited field");
       const std::size_t size = static_cast<std::size_t>(length);
-      if (size > output_limit / 4 * 3)
-        return Failure(DecoderStatus::kOutputLimit,
-                       "Protobuf byte projection exceeds the output limit");
       const auto encoded = Base64Encode(input.subspan(position, size), false, true);
       detail = ",\"payload_offset\":" + std::to_string(position) +
                ",\"length\":" + std::to_string(length) + ",\"bytes_base64\":\"" +
@@ -1438,29 +1400,22 @@ DecoderResult InspectProtobuf(const std::span<const std::uint8_t> input,
         ",\"key_end\":" + std::to_string(key_end) + ",\"end\":" + std::to_string(position) +
         ",\"field_number\":" + std::to_string(tag >> 3U) +
         ",\"wire_type\":" + std::to_string(wire) + detail + "}";
-    if (field.size() + 2 > output_limit || output.size() > output_limit - field.size() - 2)
-      return Failure(DecoderStatus::kOutputLimit, "Protobuf report exceeds the output limit");
     output += field;
     first = false;
   }
   output += "]}";
-  if (output.size() > output_limit)
-    return Failure(DecoderStatus::kOutputLimit, "Protobuf report exceeds the output limit");
   return Success({output.begin(), output.end()});
 }
 
-DecoderResult InspectGrpcWeb(const std::span<const std::uint8_t> input,
-                             const std::size_t output_limit) {
+DecoderResult InspectGrpcWeb(const std::span<const std::uint8_t> input) {
   std::string output = "{\"format\":\"reb-grpc-web-wire-v1\",\"frames\":[";
   std::size_t position = 0;
   std::size_t count = 0;
-  std::size_t field_budget = 4096;
   bool trailers = false;
   while (position < input.size()) {
     if (trailers)
       return Failure(DecoderStatus::kInvalidInput, "gRPC-web trailers must be the last frame");
-    if (++count > 256)
-      return Failure(DecoderStatus::kOutputLimit, "gRPC-web frame count exceeds 256");
+    ++count;
     const std::size_t offset = position;
     if (input.size() - position < 5)
       return Failure(DecoderStatus::kInvalidInput, "Truncated gRPC-web envelope header");
@@ -1476,28 +1431,26 @@ DecoderResult InspectGrpcWeb(const std::span<const std::uint8_t> input,
     const auto payload = input.subspan(position, length);
     std::string body;
     if (flags == 0) {
-      const auto decoded = InspectProtobuf(payload, output_limit, field_budget);
+      const auto decoded = InspectProtobuf(payload);
       if (decoded.status != DecoderStatus::kOk)
         return decoded;
       body = "\"kind\":\"message\",\"protobuf\":" +
              std::string(decoded.output.begin(), decoded.output.end());
     } else {
       trailers = true;
-      if (payload.size() > 16384)
-        return Failure(DecoderStatus::kOutputLimit, "gRPC-web trailers exceed 16 KiB");
       for (const auto byte : payload)
         if (byte != '\r' && byte != '\n' && (byte < 0x20U || byte > 0x7eU))
           return Failure(DecoderStatus::kInvalidInput,
-                         "gRPC-web trailers must contain bounded ASCII metadata");
+                         "gRPC-web trailers must contain ASCII metadata");
       const std::string text(payload.begin(), payload.end());
       std::size_t cursor = 0;
       std::size_t headers = 0;
       body = "\"kind\":\"trailers\",\"headers\":[";
       while (cursor < text.size()) {
         const auto end = text.find("\r\n", cursor);
-        if (end == std::string::npos || ++headers > 128)
-          return Failure(DecoderStatus::kInvalidInput,
-                         "Malformed or excessive gRPC-web trailer lines");
+        if (end == std::string::npos)
+          return Failure(DecoderStatus::kInvalidInput, "Malformed gRPC-web trailer lines");
+        ++headers;
         const auto line = std::string_view(text).substr(cursor, end - cursor);
         const auto colon = line.find(':');
         if (colon == std::string_view::npos || colon == 0)
@@ -1525,34 +1478,29 @@ DecoderResult InspectGrpcWeb(const std::span<const std::uint8_t> input,
                               ",\"payload_offset\":" + std::to_string(offset + 5) +
                               ",\"length\":" + std::to_string(length) +
                               ",\"end\":" + std::to_string(position) + "," + body + "}";
-    if (frame.size() + 64 > output_limit || output.size() > output_limit - frame.size() - 64)
-      return Failure(DecoderStatus::kOutputLimit, "gRPC-web report exceeds the output limit");
     output += frame;
   }
   output += std::string("],\"trailers_present\":") + (trailers ? "true" : "false") +
             ",\"rpc_success_verified\":false}";
-  if (output.size() > output_limit)
-    return Failure(DecoderStatus::kOutputLimit, "gRPC-web report exceeds the output limit");
   return Success({output.begin(), output.end()});
 }
 
-DecoderResult InspectGrpcWebText(const std::span<const std::uint8_t> input,
-                                 const std::size_t output_limit) {
+DecoderResult InspectGrpcWebText(const std::span<const std::uint8_t> input) {
   if (input.size() % 4 != 0)
     return Failure(DecoderStatus::kInvalidInput, "gRPC-web text requires complete base64 quartets");
   std::vector<std::uint8_t> decoded;
   decoded.reserve(input.size() / 4 * 3);
   // Independently padded chunks may split envelopes at any byte boundary.
   for (std::size_t position = 0; position < input.size(); position += 4) {
-    const auto chunk = Base64Decode(input.subspan(position, 4), false, 3);
+    const auto chunk = Base64Decode(input.subspan(position, 4), false);
     if (chunk.status != DecoderStatus::kOk)
       return chunk;
     decoded.insert(decoded.end(), chunk.output.begin(), chunk.output.end());
   }
-  return InspectGrpcWeb(decoded, output_limit);
+  return InspectGrpcWeb(decoded);
 }
 
-DecoderResult InspectMagic(std::span<const std::uint8_t> input, const std::size_t output_limit) {
+DecoderResult InspectMagic(std::span<const std::uint8_t> input) {
   std::string report =
       "{\"format\":\"reb-decoder-magic-v1\",\"input_bytes\":" + std::to_string(input.size()) +
       ",\"automatic_transforms\":0,\"meaning_verified\":false,\"candidates\":[";
@@ -1577,11 +1525,9 @@ DecoderResult InspectMagic(std::span<const std::uint8_t> input, const std::size_
       });
   if (hex)
     candidate("hex-decode", "even-length ASCII hex digits; meaning unknown", "syntax-only");
-  if (!input.empty() &&
-      Base64Decode(input, false, kDecoderMaxOutputBytes).status == DecoderStatus::kOk)
+  if (!input.empty() && Base64Decode(input, false).status == DecoderStatus::kOk)
     candidate("base64-decode", "canonical base64 alphabet, length and pad bits", "syntax-only");
-  if (!input.empty() &&
-      Base64Decode(input, true, kDecoderMaxOutputBytes).status == DecoderStatus::kOk)
+  if (!input.empty() && Base64Decode(input, true).status == DecoderStatus::kOk)
     candidate("base64url-decode", "base64url alphabet, length and pad bits", "syntax-only");
   if (input.size() >= 10 && input[0] == 0x1f && input[1] == 0x8b && input[2] == 8 &&
       (input[3] & 0xe0U) == 0)
@@ -1591,10 +1537,8 @@ DecoderResult InspectMagic(std::span<const std::uint8_t> input, const std::size_
       (static_cast<unsigned int>(input[0]) * 256U + input[1]) % 31U == 0)
     candidate("zlib-decompress", "zlib CMF/FLG only; dictionary, body and checksum unverified",
               "signature-only");
-  if (!input.empty() &&
-      FormatJson(input, false, kDecoderMaxOutputBytes).status == DecoderStatus::kOk)
-    candidate("json-pretty", "bounded JSON syntax; application semantics unverified",
-              "syntax-only");
+  if (!input.empty() && FormatJson(input, false).status == DecoderStatus::kOk)
+    candidate("json-pretty", "JSON syntax; application semantics unverified", "syntax-only");
   report += "],\"utf8_valid\":";
   report += IsValidUtf8(input) ? "true" : "false";
   report += ",\"digest_shape\":";
@@ -1606,8 +1550,6 @@ DecoderResult InspectMagic(std::span<const std::uint8_t> input, const std::size_
     report += "null";
   }
   report += '}';
-  if (report.size() > output_limit)
-    return Failure(DecoderStatus::kOutputLimit, "Magic report exceeds the configured byte limit");
   return Success(std::vector<std::uint8_t>(report.begin(), report.end()));
 }
 
@@ -1711,56 +1653,31 @@ std::string_view DecoderOperationName(const DecoderOperation operation) noexcept
 }
 
 DecoderResult TransformBytes(const DecoderOperation operation,
-                             const std::span<const std::uint8_t> input,
-                             const std::size_t output_limit) {
-  if (input.size() > kDecoderMaxInputBytes || output_limit == 0 ||
-      output_limit > kDecoderMaxOutputBytes) {
-    return Failure(DecoderStatus::kInvalidInput, "Decoder byte limits are invalid or exceeded");
-  }
+                             const std::span<const std::uint8_t> input) {
   switch (operation) {
-    case DecoderOperation::kBase64Encode: {
-      const std::size_t output_size = ((input.size() + 2) / 3) * 4;
-      if (output_size > output_limit) {
-        return Failure(DecoderStatus::kOutputLimit,
-                       "Encoded output exceeds the configured byte limit");
-      }
+    case DecoderOperation::kBase64Encode:
       return Success(Base64Encode(input, false, true));
-    }
-    case DecoderOperation::kProtobufInspect: {
-      std::size_t fields = 4096;
-      return InspectProtobuf(input, output_limit, fields);
-    }
+    case DecoderOperation::kProtobufInspect:
+      return InspectProtobuf(input);
     case DecoderOperation::kGrpcWebInspect:
-      return InspectGrpcWeb(input, output_limit);
+      return InspectGrpcWeb(input);
     case DecoderOperation::kGrpcWebTextInspect:
-      return InspectGrpcWebText(input, output_limit);
+      return InspectGrpcWebText(input);
     case DecoderOperation::kMagicInspect:
-      return InspectMagic(input, output_limit);
+      return InspectMagic(input);
     case DecoderOperation::kSha256:
-      return TransformBytes(DecoderOperation::kHexEncode, Sha2Digest(JwtAlgorithm::kHs256, input),
-                            output_limit);
+      return TransformBytes(DecoderOperation::kHexEncode, Sha2Digest(JwtAlgorithm::kHs256, input));
     case DecoderOperation::kSha384:
-      return TransformBytes(DecoderOperation::kHexEncode, Sha2Digest(JwtAlgorithm::kHs384, input),
-                            output_limit);
+      return TransformBytes(DecoderOperation::kHexEncode, Sha2Digest(JwtAlgorithm::kHs384, input));
     case DecoderOperation::kSha512:
-      return TransformBytes(DecoderOperation::kHexEncode, Sha2Digest(JwtAlgorithm::kHs512, input),
-                            output_limit);
+      return TransformBytes(DecoderOperation::kHexEncode, Sha2Digest(JwtAlgorithm::kHs512, input));
     case DecoderOperation::kBase64Decode:
-      return Base64Decode(input, false, output_limit);
-    case DecoderOperation::kBase64UrlEncode: {
-      const std::size_t output_size = (input.size() * 4 + 2) / 3;
-      if (output_size > output_limit) {
-        return Failure(DecoderStatus::kOutputLimit,
-                       "Encoded output exceeds the configured byte limit");
-      }
+      return Base64Decode(input, false);
+    case DecoderOperation::kBase64UrlEncode:
       return Success(Base64Encode(input, true, false));
-    }
     case DecoderOperation::kBase64UrlDecode:
-      return Base64Decode(input, true, output_limit);
+      return Base64Decode(input, true);
     case DecoderOperation::kHexEncode: {
-      if (input.size() > output_limit / 2) {
-        return Failure(DecoderStatus::kOutputLimit, "Hex output exceeds the configured byte limit");
-      }
       constexpr char kHex[] = "0123456789abcdef";
       std::vector<std::uint8_t> output(input.size() * 2);
       for (std::size_t index = 0; index < input.size(); ++index) {
@@ -1770,46 +1687,38 @@ DecoderResult TransformBytes(const DecoderOperation operation,
       return Success(std::move(output));
     }
     case DecoderOperation::kHexDecode:
-      return HexDecode(input, output_limit);
+      return HexDecode(input);
     case DecoderOperation::kUrlEncode:
-      return UrlEncode(input, output_limit);
+      return UrlEncode(input);
     case DecoderOperation::kUrlDecode:
-      return UrlDecode(input, output_limit);
+      return UrlDecode(input);
     case DecoderOperation::kBase36Encode:
-      if (input.size() > 4U << 10U) {
-        return Failure(DecoderStatus::kInvalidInput,
-                       "Base36 integers are limited to 4 KiB of digits");
-      }
-      return DecimalToBase36(input, output_limit);
+      return DecimalToBase36(input);
     case DecoderOperation::kBase36Decode:
-      if (input.size() > 4U << 10U) {
-        return Failure(DecoderStatus::kInvalidInput,
-                       "Base36 integers are limited to 4 KiB of digits");
-      }
-      return Base36ToDecimal(input, output_limit);
+      return Base36ToDecimal(input);
     case DecoderOperation::kGzipCompress:
-      return ZlibTransform(input, true, MAX_WBITS + 16, output_limit);
+      return ZlibTransform(input, true, MAX_WBITS + 16);
     case DecoderOperation::kGzipDecompress:
-      return ZlibTransform(input, false, MAX_WBITS + 16, output_limit);
+      return ZlibTransform(input, false, MAX_WBITS + 16);
     case DecoderOperation::kZlibCompress:
-      return ZlibTransform(input, true, MAX_WBITS, output_limit);
+      return ZlibTransform(input, true, MAX_WBITS);
     case DecoderOperation::kZlibDecompress:
-      return ZlibTransform(input, false, MAX_WBITS, output_limit);
+      return ZlibTransform(input, false, MAX_WBITS);
     case DecoderOperation::kDeflateCompress:
-      return ZlibTransform(input, true, -MAX_WBITS, output_limit);
+      return ZlibTransform(input, true, -MAX_WBITS);
     case DecoderOperation::kDeflateDecompress:
-      return ZlibTransform(input, false, -MAX_WBITS, output_limit);
+      return ZlibTransform(input, false, -MAX_WBITS);
     case DecoderOperation::kJsonPretty:
-      return FormatJson(input, true, output_limit);
+      return FormatJson(input, true);
     case DecoderOperation::kJsonMinify:
-      return FormatJson(input, false, output_limit);
+      return FormatJson(input, false);
   }
   return Failure(DecoderStatus::kUnsupported, "Decoder operation is unsupported");
 }
 
 JwtInspection InspectJwt(const std::string_view token) {
-  if (token.empty() || token.size() > kDecoderMaxJwtBytes) {
-    return JwtFailure("JWT must contain between 1 byte and 64 KiB");
+  if (token.empty()) {
+    return JwtFailure("JWT is empty");
   }
   const std::size_t first_dot = token.find('.');
   const std::size_t second_dot =
@@ -1819,15 +1728,14 @@ JwtInspection InspectJwt(const std::string_view token) {
       second_dot == first_dot + 1) {
     return JwtFailure("JWT compact serialization must contain exactly three segments");
   }
-  const auto decode_segment = [](const std::string_view segment, const std::size_t limit) {
+  const auto decode_segment = [](const std::string_view segment) {
     return Base64Decode(std::span<const std::uint8_t>(
                             reinterpret_cast<const std::uint8_t*>(segment.data()), segment.size()),
-                        true, limit);
+                        true);
   };
-  DecoderResult header = decode_segment(token.substr(0, first_dot), 8U << 10U);
-  DecoderResult payload =
-      decode_segment(token.substr(first_dot + 1, second_dot - first_dot - 1), 56U << 10U);
-  DecoderResult signature = decode_segment(token.substr(second_dot + 1), 128);
+  DecoderResult header = decode_segment(token.substr(0, first_dot));
+  DecoderResult payload = decode_segment(token.substr(first_dot + 1, second_dot - first_dot - 1));
+  DecoderResult signature = decode_segment(token.substr(second_dot + 1));
   if (header.status != DecoderStatus::kOk) {
     return JwtFailure("JWT header is not canonical Base64URL: " + header.error);
   }
@@ -1837,29 +1745,28 @@ JwtInspection InspectJwt(const std::string_view token) {
   if (signature.status != DecoderStatus::kOk) {
     return JwtFailure("JWT signature is not canonical Base64URL: " + signature.error);
   }
-  DecoderResult header_minified = FormatJson(header.output, false, 8U << 10U);
-  DecoderResult payload_minified = FormatJson(payload.output, false, 56U << 10U);
+  DecoderResult header_minified = FormatJson(header.output, false);
+  DecoderResult payload_minified = FormatJson(payload.output, false);
   if (header_minified.status != DecoderStatus::kOk || header_minified.output.size() < 2 ||
       header_minified.output.front() != '{' || header_minified.output.back() != '}') {
-    return JwtFailure("JWT header must be a bounded JSON object");
+    return JwtFailure("JWT header must be a JSON object");
   }
   if (payload_minified.status != DecoderStatus::kOk || payload_minified.output.size() < 2 ||
       payload_minified.output.front() != '{' || payload_minified.output.back() != '}') {
-    return JwtFailure("JWT payload must be a bounded JSON object");
+    return JwtFailure("JWT payload must be a JSON object");
   }
   const std::string header_compact = ByteVectorToString(header_minified.output);
   bool duplicate = false;
   bool present = false;
   const std::optional<std::string> algorithm =
       TopLevelStringProperty(header_compact, "alg", duplicate, present);
-  if (!present || duplicate || !algorithm.has_value() || algorithm->empty() ||
-      algorithm->size() > 32) {
-    return JwtFailure("JWT header must contain one bounded string algorithm");
+  if (!present || duplicate || !algorithm.has_value() || algorithm->empty()) {
+    return JwtFailure("JWT header must contain one string algorithm");
   }
-  DecoderResult header_pretty = FormatJson(header.output, true, 16U << 10U);
-  DecoderResult payload_pretty = FormatJson(payload.output, true, 112U << 10U);
+  DecoderResult header_pretty = FormatJson(header.output, true);
+  DecoderResult payload_pretty = FormatJson(payload.output, true);
   if (header_pretty.status != DecoderStatus::kOk || payload_pretty.status != DecoderStatus::kOk) {
-    return JwtFailure("JWT JSON display exceeds the bounded output limit");
+    return JwtFailure("JWT JSON could not be formatted");
   }
   const JwtAlgorithm algorithm_kind = JwtAlgorithmFromName(*algorithm);
   JwtSignatureStatus signature_status = JwtSignatureStatus::kNotChecked;
@@ -1895,9 +1802,9 @@ JwtInspection VerifyJwt(const std::string_view token, const std::span<const std:
     inspection.error = "Only HS256, HS384, and HS512 signatures can be verified locally";
     return inspection;
   }
-  if (secret.empty() || secret.size() > kDecoderMaxSecretBytes) {
+  if (secret.empty()) {
     inspection.status = DecoderStatus::kInvalidInput;
-    inspection.error = "JWT HMAC secret must contain between 1 byte and 4 KiB";
+    inspection.error = "JWT HMAC secret is empty";
     return inspection;
   }
   const std::size_t second_dot = token.find('.', token.find('.') + 1);
@@ -1905,7 +1812,7 @@ JwtInspection VerifyJwt(const std::string_view token, const std::span<const std:
       Base64Decode(std::span<const std::uint8_t>(
                        reinterpret_cast<const std::uint8_t*>(token.data() + second_dot + 1),
                        token.size() - second_dot - 1),
-                   true, 128);
+                   true);
   const auto signing_input = std::span<const std::uint8_t>(
       reinterpret_cast<const std::uint8_t*>(token.data()), second_dot);
   const std::vector<std::uint8_t> expected =
@@ -1921,26 +1828,23 @@ JwtCreation CreateJwt(const std::string_view payload_json,
                       const JwtAlgorithm algorithm,
                       const std::span<const std::uint8_t> secret,
                       const std::optional<std::uint64_t> expires_at) {
-  if (payload_json.empty() || payload_json.size() > 56U << 10U) {
-    return {.status = DecoderStatus::kInvalidInput,
-            .error = "JWT payload must contain between 1 byte and 56 KiB",
-            .token = {}};
+  if (payload_json.empty()) {
+    return {.status = DecoderStatus::kInvalidInput, .error = "JWT payload is empty", .token = {}};
   }
   if (algorithm == JwtAlgorithm::kUnsupported ||
       (algorithm == JwtAlgorithm::kNone && !secret.empty()) ||
-      (algorithm != JwtAlgorithm::kNone &&
-       (secret.empty() || secret.size() > kDecoderMaxSecretBytes))) {
+      (algorithm != JwtAlgorithm::kNone && secret.empty())) {
     return {.status = DecoderStatus::kInvalidInput,
             .error = "JWT creation algorithm or HMAC secret is invalid",
             .token = {}};
   }
   const auto payload_bytes = std::span<const std::uint8_t>(
       reinterpret_cast<const std::uint8_t*>(payload_json.data()), payload_json.size());
-  DecoderResult compact_result = FormatJson(payload_bytes, false, 56U << 10U);
+  DecoderResult compact_result = FormatJson(payload_bytes, false);
   if (compact_result.status != DecoderStatus::kOk || compact_result.output.size() < 2 ||
       compact_result.output.front() != '{' || compact_result.output.back() != '}') {
     return {.status = DecoderStatus::kInvalidInput,
-            .error = "JWT payload must be a bounded JSON object",
+            .error = "JWT payload must be a JSON object",
             .token = {}};
   }
   std::string payload = ByteVectorToString(compact_result.output);
@@ -1982,11 +1886,6 @@ JwtCreation CreateJwt(const std::string_view payload_json,
   std::string token = signing_input + "." +
                       std::string(reinterpret_cast<const char*>(signature_encoded.data()),
                                   signature_encoded.size());
-  if (token.size() > kDecoderMaxJwtBytes) {
-    return {.status = DecoderStatus::kOutputLimit,
-            .error = "Created JWT exceeds the 64 KiB token limit",
-            .token = {}};
-  }
   return {.status = DecoderStatus::kOk, .error = {}, .token = std::move(token)};
 }
 

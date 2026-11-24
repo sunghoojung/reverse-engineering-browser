@@ -223,15 +223,6 @@
       "positive_zero": 0,
       "subnormal": 1
     },
-    "limits": {
-      "bytes_per_input": 262144,
-      "detail_rows": 256,
-      "manifest_bytes": 8388608,
-      "manifest_records": 8192,
-      "request_bytes": 2097152,
-      "response_bytes": 524288,
-      "samples_per_input": 65536
-    },
     "policies": {
       "accumulation": "binary64_sequential_index_order",
       "coverage": "complete_supplied_buffers_not_capture_completeness",
@@ -242,7 +233,7 @@
       "zero": "numeric_equal_bits_distinct"
     },
     "profile": "binary32-finite-steps-v1",
-    "protocol_version": 1,
+    "protocol_version": 2,
     "reference": {
       "artifact_id": null,
       "byte_length": 20,

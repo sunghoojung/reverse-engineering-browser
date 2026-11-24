@@ -1,7 +1,8 @@
 // The shipped Run offline dialog (apps/research-ui/wasm_runner.js) in a DOM
 // model: it is offered only for Wasm artifacts, sends nothing until the
 // researcher confirms, sends the confirmation and the chosen inputs, renders
-// the outcome and import calls, and inserts captured names and values as text.
+// the outcome, import calls and the first bytes of each stored read, and
+// inserts captured names and values as text.
 // Not rendered QA; rendered acceptance is test42 in the packaged-app gate.
 // Requires: npm ci --prefix tools/ui-startup-deps --ignore-scripts --no-audit --no-fund
 import assert from 'node:assert/strict';
@@ -39,12 +40,18 @@ if (document.createElement('select').value === undefined) {
   }});
 }
 const posts = [];
+const pages = [];
 let answer = null;
+let page = {status: 200, body: {schema: 'wasm-run-memory-v1', hex: '0a000000'}};
 const sha = 'a'.repeat(64);
 const markup = '<img src=x onerror=alert(1)>';
 const context = createContext({
-  window, document, console, AbortController, setTimeout, clearTimeout, JSON, Number, String, Map, Error, TypeError,
+  window, document, console, AbortController, setTimeout, clearTimeout, setInterval, clearInterval, Date, JSON, Number, String, Map, Error, TypeError,
   fetch: async (url, init = {}) => {
+    if (url.startsWith('/api/wasm/runs/memory?')) {
+      pages.push(url);
+      return new Response(JSON.stringify(page.body), {status: page.status});
+    }
     if (url.startsWith('/api/wasm/functions?')) {
       return new Response(JSON.stringify({schema: 'wasm-function-index-v1', artifact_id: '9', status: 'decoded',
         functions: [[1, 10, 20, 0], [2, 20, 40, 1]], names: [[2, markup]]}));
@@ -93,7 +100,7 @@ answer = {status: 200, body: {schema: 'wasm-run-v1', run_id: 'wr-1', provenance:
   function: {index: 2, export: markup, byte_offset: 20, byte_end: 40}, results: null, fuel_consumed: 12, elapsed_ms: 1,
   import_calls_total: 1, import_calls_truncated: false, stored: true,
   import_calls: [{sequence: 0, function_index: 0, module: markup, field: 'now', args: [{type: 'i32', value: markup}], args_truncated: false, outcome: 'trapped', results: null}],
-  memory_reads: [{offset: 0, length: 4, status: 'read', sha256: 'b'.repeat(64), hex: '0a000000'}]}};
+  memory_reads: [{offset: 0, length: 4, status: 'read', sha256: 'b'.repeat(64)}, {offset: 65536, length: 4, status: 'out_of_bounds', sha256: null}]}};
 runButton.dispatchEvent(new window.Event('click'));
 for (let i = 0; i < 10; i += 1) await nextTurn();
 assert.equal(posts.length, 1);
@@ -108,29 +115,38 @@ assert.equal(output.hidden, false);
 assert.equal(node.querySelector('.wasm-run-outcome').textContent, 'Import trapped · call phase');
 assert.match(output.textContent, /Import calls · 1 attempted/);
 assert.match(output.textContent, /trapped \(no stub value\)/);
+// A read's bytes are fetched from the run's stored memory, one preview each;
+// a read out of bounds has none to fetch.
+assert.deepEqual(pages, ['/api/wasm/runs/memory?run_id=wr-1&read=0&length=64']);
 assert.match(output.textContent, /0:4 · read · 0a000000/);
+assert.match(output.textContent, /65536:4 · out_of_bounds(?! ·)/);
 assert.equal(node.querySelector('img'), null, 'Captured values in the record stay text');
 // The result follows the fields, below the dialog's visible area.
 // Compared as a boolean: printing two DOM nodes on failure walks the whole tree.
 assert.ok(scrolled.at(-1)?.element === output, 'The result is scrolled into view');
 assert.equal(scrolled.at(-1)?.options?.block, 'start');
 
-// A record trimmed for size says so: an emptied call list is not "No import
-// was called", and size_trimmed is shown.
-answer = {status: 200, body: {...answer.body, import_calls: [], import_calls_total: 256, import_calls_truncated: true,
-  size_trimmed: ['import_calls: first 0 of 256 recorded calls', `imports: first 3 of 40 ${markup}`]}};
+// More import calls than the record keeps: the title says how many were
+// attempted and how many are listed.
+const call = answer.body.import_calls[0];
+answer = {status: 200, body: {...answer.body, import_calls: [call, {...call, sequence: 1}], import_calls_total: 300, import_calls_truncated: true}};
 runButton.dispatchEvent(new window.Event('click'));
 for (let i = 0; i < 10; i += 1) await nextTurn();
-assert.doesNotMatch(output.textContent, /No import was called/);
-assert.match(output.textContent, /import calls were omitted to fit the record/);
-assert.match(output.textContent, /Trimmed for size.*first 0 of 256 recorded calls; imports: first 3 of 40/s);
-assert.equal(node.querySelector('img'), null, 'A trimming note stays text');
-const untrimmed = {...answer.body, import_calls: [], import_calls_total: 0, import_calls_truncated: false, size_trimmed: []};
-answer = {status: 200, body: untrimmed};
+assert.match(output.textContent, /Import calls · 300 attempted, first 2 recorded/);
+// A preview that cannot be read says why, as text.
+page = {status: 500, body: {error: `The memory snapshot ${markup} is missing`}};
 runButton.dispatchEvent(new window.Event('click'));
 for (let i = 0; i < 10; i += 1) await nextTurn();
+assert.match(output.textContent, /0:4 · read · bytes unavailable: The memory snapshot .* is missing/);
+assert.equal(node.querySelector('img'), null, 'A preview failure stays text');
+// A record that was not stored has no bytes to fetch.
+const fetched = pages.length;
+answer = {status: 200, body: {...answer.body, import_calls: [], import_calls_total: 0, import_calls_truncated: false, stored: false, store_error: 'disk full'}};
+runButton.dispatchEvent(new window.Event('click'));
+for (let i = 0; i < 10; i += 1) await nextTurn();
+assert.equal(pages.length, fetched);
+assert.match(output.textContent, /0:4 · read · bytes not stored/);
 assert.match(output.textContent, /No import was called/);
-assert.doesNotMatch(output.textContent, /Trimmed for size/);
 
 // A refusal is shown as the server words it; nothing is rendered as a result.
 answer = {status: 409, body: {error: 'The artifact’s SHA-256 differs from the request; nothing ran'}};
@@ -145,7 +161,7 @@ assert.equal(output.textContent, '', 'A failed run leaves no stale result behind
 byLabel('Arguments').value = 'seven';
 runButton.dispatchEvent(new window.Event('click'));
 for (let i = 0; i < 5; i += 1) await nextTurn();
-assert.equal(posts.length, 4);
+assert.equal(posts.length, 5);
 assert.match(error.textContent, /Argument 1/);
 // Without a server message, the status decides whether code may have run.
 assert.match(wasmRunFailureText(409), /Nothing ran/);
@@ -156,7 +172,7 @@ byLabel('Arguments').value = 'i32 7, i32 5';
 answer = {status: 500, body: {}};
 runButton.dispatchEvent(new window.Event('click'));
 for (let i = 0; i < 10; i += 1) await nextTurn();
-assert.equal(posts.length, 5);
+assert.equal(posts.length, 6);
 assert.match(error.textContent, /may have run/);
 assert.doesNotMatch(error.textContent, /Nothing ran/);
-console.log('Run offline dialog: confirmation gate, request, outcome and inert captured text verified');
+console.log('Run offline dialog: confirmation gate, request, outcome, read previews and inert captured text verified');

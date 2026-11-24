@@ -309,6 +309,7 @@ pub struct Tally {
     queue_drops_saturated: bool,
     named_gaps: Vec<NamedGap>,
     named_positions: HashMap<(String, String), usize>,
+    broker_refusals: Vec<crate::broker_refusal::RefusalCount>,
     malformed_lines: u64,
 }
 impl Tally {
@@ -326,6 +327,9 @@ impl Tally {
         stream.0 = stream.0.min(sequence);
         stream.1 = stream.1.max(sequence);
         stream.2.insert(sequence);
+        if let Some((category, reason)) = crate::broker_refusal::reason(event) {
+            crate::broker_refusal::count(&mut self.broker_refusals, category, reason, 1);
+        }
         if event["type"] != "gap" {
             return Ok(());
         }
@@ -392,6 +396,7 @@ impl Tally {
                 })
                 .collect(),
         );
+        document["broker_refusals"] = crate::broker_refusal::counts_json(&self.broker_refusals);
     }
 }
 
@@ -884,14 +889,16 @@ pub fn events_document(
     document
 }
 
-/// Puts the decoded Wasm observation or JavaScript invocation object beside
-/// each payload of an event page, as every page that returns events shows it.
+/// Puts the decoded Wasm observation, JavaScript invocation or broker refusal
+/// object beside each payload of an event page, as every page that returns
+/// events shows it.
 /// Debugger observations are decoded by the filtered and waiting reads only
 /// (`request_stack::ObservationSites`): the UI's polling window does not use
 /// them, and they would grow its body by a third.
 pub(crate) fn annotate_events(events: &mut [Value]) {
     crate::vm_opcode::annotate_wasm_observations(events);
     crate::js_invocation::annotate(events);
+    crate::broker_refusal::annotate(events);
 }
 
 /// The waiting read stops at this many concurrent callers rather than queue.

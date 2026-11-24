@@ -16,8 +16,10 @@
       // integer; include/reb/wasm_guest.hpp kWasmGuestSampleIndexLimit.
       const WASM_GUEST_SAMPLE_INDEX_LIMIT = 2 ** 31 - 1;
 
+      // A broker_refusal stands in for a record the broker never accepted, so
+      // it is no signal of its category.
       function fingerprintEventsFromEvents(events) {
-        return events.filter(event => fingerprintSignalCategories.has(event.category));
+        return events.filter(event => fingerprintSignalCategories.has(event.category) && event.type !== 'broker_refusal');
       }
       const eventTypes = {
         1: new Set([
@@ -45,7 +47,7 @@
           'script_identity', 'capture_exclusion', 'tab_set', 'request_tab_link', 'navigation_initiator_stack',
           'navigation_initiator_link', 'async_task_stack',
           'request_extension_link', 'request_watch_match', 'listener_dispatch', 'timer_observation',
-          'csp_violation', 'exception_observation', 'dom_mutation', 'memory_cache_reuse',
+          'csp_violation', 'exception_observation', 'dom_mutation', 'memory_cache_reuse', 'broker_refusal',
           'debugger_attached', 'debugger_paused', 'debugger_resumed', 'debugger_breakpoint'
         ])
       };
@@ -298,43 +300,113 @@
       }
 
       function namedGapItems(gaps, describe) {
-        const items = gaps.slice(0, 4).map(gap => `${describe(gap)}${gap.count > 1n ? ` ×${gap.count}` : ''}`);
-        if (gaps.length > 4) items.push(`${gaps.length - 4} more ${gaps.length === 5 ? 'reason' : 'reasons'}`);
+        const items = gaps.slice(0, 4).map(gap => `${describe(gap)}${gap.count > 1n ? ` ×${RebEvidenceChips.formatCount(gap.count)}` : ''}`);
+        if (gaps.length > 4) items.push(`${RebEvidenceChips.formatCount(gaps.length - 4)} more ${gaps.length === 5 ? 'reason' : 'reasons'}`);
         return items.join('; ');
       }
 
-      // Scoped coverage sentences; the raw reason is always shown as text.
-      function namedGapNotice(gaps, scope) {
-        const budgets = gaps.filter(gap => samplingBudgetGapLabels.has(gap.reason));
-        const filters = gaps.filter(gap => samplePolicyFilterGapLabels.has(gap.reason));
-        const losses = gaps.filter(gap => !samplingBudgetGapLabels.has(gap.reason) && !samplePolicyFilterGapLabels.has(gap.reason));
-        const messages = [];
-        if (losses.length) {
-          const categories = [...new Set(losses.map(gap => gap.category))].join('/');
-          messages.push(`Capture reported lost ${categories} evidence in ${scope}: ${namedGapItems(losses, gap => gap.reason)}.`);
+      // The glossary for reason chips: each named gap's label and its one-line
+      // meaning. A reason not listed here is a reported loss and renders as
+      // its own words.
+      globalThis.RebEvidenceChips?.defineReasons(Object.fromEntries([
+        ...[...samplingBudgetGapLabels].map(([reason, label]) => [reason, {label: `${label} budget`, kind: 'limit',
+          meaning: wasmWindowBudgetReasons.has(reason)
+            ? 'This second\'s sampling window filled: retained samples are exact, later executions keep only a compact overflow identity (past its ring, a count), and the next second samples again.'
+            : 'The sampling budget filled: retained observations are exact and later ones were not sampled.'}]),
+        ...[...samplePolicyFilterGapLabels].map(([reason, label]) => [reason, {label: `${label} excluded`, kind: 'policy',
+          meaning: 'The sample policy excluded these executions: none was sampled or took a sample slot.'}]),
+        ['service_worker_end_lost', {label: 'Service worker end lost', kind: 'loss',
+          meaning: 'A service worker request\'s end record was lost, so its row reads End lost instead of Pending.'}]
+      ]));
+
+      // Every class of missing or limited evidence the summaries count, one
+      // entry per class and per named category, for the status bar's gap chip
+      // and the Traffic and VM notices. A zero count is no entry, and a
+      // saturated count is a lower bound.
+      const namedGapClassDefinitions = [
+        {kind: 'lost', tone: 'loss', noun: ['lost', 'lost'], label: 'Reported lost',
+          matches: gap => !samplingBudgetGapLabels.has(gap.reason) && !samplePolicyFilterGapLabels.has(gap.reason),
+          detail: 'A capture stage reported this evidence as lost.'},
+        {kind: 'budget', tone: 'limit', noun: ['sampling budget', 'sampling budgets'], label: 'Sampling budgets',
+          matches: gap => samplingBudgetGapLabels.has(gap.reason),
+          detail: 'Retained observations are exact; later ones were not sampled.'},
+        {kind: 'policy', tone: 'limit', noun: ['policy exclusion', 'policy exclusions'], label: 'Sample policy',
+          matches: gap => samplePolicyFilterGapLabels.has(gap.reason),
+          detail: 'The sample policy excluded these executions; none took a sample slot.'}
+      ];
+      function captureGapClasses({sequenceGaps = 0n, queueDrops = 0n, malformedLines = 0, namedGaps = [], brokerRefusals = []} = {}) {
+        const classes = [];
+        if (sequenceGaps > 0n) {
+          classes.push({key: 'sequence', tone: 'loss', count: sequenceGaps, atLeast: state.sequenceGapsSaturated === true,
+            noun: ['sequence gap', 'sequence gaps'], label: 'Sequence gaps',
+            detail: 'Sequence IDs absent between the first and last record of a process; a late arrival can still close one.'});
         }
-        if (filters.length) {
-          messages.push(`Sample policy excluded observations in ${scope}: ${namedGapItems(filters, gap => `${samplePolicyFilterGapLabels.get(gap.reason)} (${gap.reason})`)}. Those executions were not sampled and did not consume a sample slot.`);
+        if (queueDrops > 0n) {
+          classes.push({key: 'drops', tone: 'loss', count: queueDrops, atLeast: state.queueDropsSaturated === true,
+            noun: ['queue drop', 'queue drops'], label: 'Queue drops',
+            detail: 'Records a full native queue dropped; they can overlap sequence gaps.'});
         }
-        if (budgets.length) {
-          messages.push(`Sampling budget reached in ${scope} for ${namedGapItems(budgets, gap => `${samplingBudgetGapLabels.get(gap.reason)} (${gap.reason})`)}. Retained observations are exact; later ones were not sampled.`);
-          if (budgets.some(gap => wasmWindowBudgetReasons.has(gap.reason))) {
-            messages.push('Wasm sampling is paced per second: executions past a full window or function allowance keep a compact identity in an overflow record, up to the ring, and identities past the ring are a count on that record, not another full observation. The next second samples again.');
+        if (malformedLines > 0) {
+          classes.push({key: 'unreadable', tone: 'loss', count: BigInt(malformedLines), atLeast: false,
+            noun: ['unreadable line', 'unreadable lines'], label: 'Unreadable lines',
+            detail: 'Stored lines that are not valid events were skipped; no count includes them.'});
+        }
+        for (const definition of namedGapClassDefinitions) {
+          const matching = namedGaps.filter(definition.matches);
+          for (const category of [...new Set(matching.map(gap => gap.category))]) {
+            const gaps = matching.filter(gap => gap.category === category);
+            classes.push({key: `${definition.kind}:${category}`, tone: definition.tone, count: namedGapTotal(gaps), atLeast: false,
+              noun: definition.noun, suffix: `(${category})`, label: `${definition.label} · ${category}`, detail: definition.detail,
+              reasons: gaps.map(gap => ({token: gap.reason, count: gap.count}))});
           }
         }
-        return messages.join(' ');
+        // Each record the broker refused at validation is lost but for the
+        // broker_refusal standing in for it (protocol/broker-refusal-v1.md).
+        for (const category of [...new Set(brokerRefusals.map(refusal => refusal.category))]) {
+          const refusals = brokerRefusals.filter(refusal => refusal.category === category);
+          classes.push({key: `refused:${category}`, tone: 'loss', count: namedGapTotal(refusals), atLeast: false,
+            noun: ['refused record', 'refused records'], suffix: `(${category})`, label: `Refused by the broker · ${category}`,
+            detail: 'The broker refused these records at validation. A broker_refusal record stands in for each; the refused payload was not stored.',
+            reasons: refusals.map(refusal => ({token: refusal.reason, count: refusal.count, kind: 'loss',
+              ...brokerRefusalReasonLabels.get(refusal.reason)}))});
+        }
+        return classes;
       }
 
-      function namedGapStatusLabel(gaps) {
-        const parts = [];
-        const push = (matching, singular, plural) => {
-          const total = namedGapTotal(matching);
-          if (total > 0n) parts.push(`${total} ${total === 1n ? singular : plural} (${[...new Set(matching.map(gap => gap.category))].join('/')})`);
-        };
-        push(gaps.filter(gap => samplingBudgetGapLabels.has(gap.reason)), 'sampling budget reached', 'sampling budgets reached');
-        push(gaps.filter(gap => samplePolicyFilterGapLabels.has(gap.reason)), 'sample policy exclusion', 'sample policy exclusions');
-        push(gaps.filter(gap => !samplingBudgetGapLabels.has(gap.reason) && !samplePolicyFilterGapLabels.has(gap.reason)), 'reported capture loss', 'reported capture losses');
-        return parts.map(part => ` · ${part}`).join('');
+      // The summaries' scope as a panel heading.
+      function eventCountScopeTitle() {
+        return state.eventCountScope === 'bounded_tail' ? 'newest 64 MiB'
+          : state.eventCountScope === 'store' ? 'stored capture' : 'visible events';
+      }
+
+      // A chip that opens one class: its scope, its meaning and its reasons.
+      function captureGapClassChip(gapClass, extra = {}) {
+        const scope = eventCountScopeLabel();
+        const text = `${gapClass.atLeast ? '≥' : ''}${RebEvidenceChips.formatCount(gapClass.count)} ${gapClass.count === 1n ? gapClass.noun[0] : gapClass.noun[1]}${gapClass.suffix ? ` ${gapClass.suffix}` : ''}`;
+        return {key: gapClass.key, tone: gapClass.tone, text, name: `${text} in ${scope}`,
+          breakdown: {title: gapClass.label, scope: eventCountScopeTitle(), detail: gapClass.detail, reasons: gapClass.reasons ?? [],
+            actions: extra.actions ?? []}};
+      }
+
+      // The status bar's one gap chip: the total of every class, in the tone
+      // of the worst, opening one row per class. Nothing when every count is
+      // zero. A single class keeps its own noun.
+      function captureGapStatusChip(classes, actions = []) {
+        if (!classes.length) return null;
+        if (classes.length === 1) {
+          const single = captureGapClassChip(classes[0], {actions});
+          return {...single, key: 'gaps', prefer: 'above'};
+        }
+        const total = classes.reduce((sum, gapClass) => sum + gapClass.count, 0n);
+        const atLeast = classes.some(gapClass => gapClass.atLeast);
+        const text = `${atLeast ? '≥' : ''}${RebEvidenceChips.formatCount(total)} gaps`;
+        const overlap = classes.some(gapClass => gapClass.key === 'drops') && classes.some(gapClass => gapClass.key === 'sequence');
+        return {key: 'gaps', tone: classes.some(gapClass => gapClass.tone === 'loss') ? 'loss' : 'limit', text, prefer: 'above',
+          name: `${text} in ${eventCountScopeLabel()}`,
+          breakdown: {title: 'Capture gaps', scope: eventCountScopeTitle(),
+            rows: classes.map(gapClass => ({label: gapClass.label, count: gapClass.count, atLeast: gapClass.atLeast, tone: gapClass.tone,
+              detail: gapClass.detail, reasons: gapClass.reasons})),
+            note: overlap ? 'Counts can overlap: a queue drop can also leave a sequence gap.' : '', actions}};
       }
 
       function isCaptureTotal(value) {
@@ -351,6 +423,10 @@
 
       function shownNamedGaps() {
         return Array.isArray(state.namedGaps) ? state.namedGaps : namedGapsFromEvents(state.events);
+      }
+
+      function shownBrokerRefusals() {
+        return Array.isArray(state.brokerRefusals) ? state.brokerRefusals : brokerRefusalsFromEvents(state.events);
       }
 
       // queue_drops weighs each named marker as one (protocol/http-api.md). Those
@@ -374,6 +450,9 @@
         state.queueDropsSaturated = body.queue_drops_saturated === true;
         state.namedGaps = Array.isArray(body.named_gaps)
           ? body.named_gaps.map(gap => ({category: gap.category, reason: gap.reason, count: BigInt(gap.count)})) : null;
+        state.brokerRefusals = Array.isArray(body.broker_refusals)
+          ? body.broker_refusals.map(refusal => ({category: refusal.category, reason: refusal.reason,
+            count: BigInt(refusal.count)})) : null;
         state.eventCountScope = body.event_window?.scope ??
           (state.sequenceGaps !== null && state.queueDrops !== null ? 'store' : 'rendered_window');
         state.eventsLimited = body.event_window?.events_limited ?? body.count >= 5000;
@@ -385,22 +464,14 @@
         state.eventMalformedLines = body.event_window?.malformed_lines ?? 0;
       }
 
-      function eventGapLabel(gapCount, reportedDrops, namedGaps = []) {
-        const gaps = `${state.sequenceGapsSaturated ? 'at least ' : ''}${gapCount}`;
-        const drops = `${state.queueDropsSaturated ? 'at least ' : ''}${reportedDrops}`;
-        return `${gaps} sequence-gap IDs (${eventCountScopeLabel()})` +
-          (reportedDrops > 0n ? ` · ${drops} reported queue ${reportedDrops === 1n ? 'drop' : 'drops'} (may overlap)` : '') +
-          namedGapStatusLabel(namedGaps);
-      }
-
       // namedGaps must already be limited to fingerprint categories.
       function fingerprintCoverageNotice(eventsLimited, displayLimited, displayLimit, gapCount, reportedDrops, scope = 'the stored capture', namedGaps = []) {
         const limits = [];
         if (eventsLimited) limits.push('the event window is capped');
-        if (displayLimited) limits.push(`only the newest ${displayLimit} matching events are rendered`);
+        if (displayLimited) limits.push(`only the newest ${RebEvidenceChips.formatCount(displayLimit)} matching events are rendered`);
         if (scope === 'the scanned tail') limits.push('only the newest 64 MiB is scanned');
-        if (gapCount > 0n) limits.push(`${state.sequenceGapsSaturated ? 'at least ' : ''}${gapCount} sequence-gap IDs were observed in ${scope}`);
-        if (reportedDrops > 0n) limits.push(`${state.queueDropsSaturated ? 'at least ' : ''}${reportedDrops} queue drops were reported in ${scope} (may overlap sequence gaps)`);
+        if (gapCount > 0n) limits.push(`${state.sequenceGapsSaturated ? 'at least ' : ''}${RebEvidenceChips.formatCount(gapCount)} sequence-gap IDs were observed in ${scope}`);
+        if (reportedDrops > 0n) limits.push(`${state.queueDropsSaturated ? 'at least ' : ''}${RebEvidenceChips.formatCount(reportedDrops)} queue drops were reported in ${scope} (may overlap sequence gaps)`);
         const filters = namedGaps.filter(gap => samplePolicyFilterGapLabels.has(gap.reason));
         const losses = namedGaps.filter(gap => !samplingBudgetGapLabels.has(gap.reason) && !samplePolicyFilterGapLabels.has(gap.reason));
         const budgets = namedGaps.filter(gap => samplingBudgetGapLabels.has(gap.reason));
@@ -1202,13 +1273,102 @@
           u64(40) < BigInt(length) && u64(64) + BigInt(length) <= uint64Max && bytes.slice(96).some(b => b !== 0) ? {} : null;
       }
 
+      // protocol/broker-refusal-v1.md: the record the broker stores in place of
+      // one it refused at validation. The same rules as IsValidBrokerRefusal
+      // in src/capture/event.cpp; null for a record any reader refuses.
+      const brokerRefusalReasons = ['protocol_version', 'header_size', 'process_id', 'payload_size', 'reserved',
+        'category', 'type', 'flags', 'network_class', 'typed_payload'];
+      // A refusal's reason chip carries its own label and meaning rather than
+      // a glossary entry: tokens such as type and reserved are common words a
+      // named gap could also use.
+      const brokerRefusalReasonLabels = new Map([
+        ['protocol_version', {label: 'Protocol version', meaning: 'The record was not event protocol version 3, so its place could not be read; the refusal is on the broker\'s own stream.'}],
+        ['header_size', {label: 'Header size', meaning: 'The record did not have a 144-byte header, so its place could not be read; the refusal is on the broker\'s own stream.'}],
+        ['process_id', {label: 'Reserved process ID', meaning: 'The record claimed process 4294967295, which the broker reserves for its own stream.'}],
+        ['payload_size', {label: 'Payload size', meaning: 'The record declared more than 128 payload bytes.'}],
+        ['reserved', {label: 'Reserved bytes', meaning: 'A reserved header field or record byte was not zero.'}],
+        ['category', {label: 'Unknown category', meaning: 'The record had a category this protocol does not define.'}],
+        ['type', {label: 'Unknown type', meaning: 'The record had a type this protocol does not define, or was a broker_refusal, which only the broker writes.'}],
+        ['flags', {label: 'Unknown flag', meaning: 'The record had a flag this protocol does not define.'}],
+        ['network_class', {label: 'Network class', meaning: 'The record had a scheme class or loader kind it cannot carry.'}],
+        ['typed_payload', {label: 'Typed payload', meaning: 'The record failed its type\'s payload validator.'}]
+      ]);
+      const brokerRefusalCategories = ['unknown', 'canvas', 'webgl', 'web_audio', 'navigator', 'permissions',
+        'storage', 'webrtc', 'wasm', 'network', 'vm', 'artifact', 'runtime'];
+      const brokerProcessId = 0xffffffff;
+      function decodeBrokerRefusal(event) {
+        if (event?.type !== 'broker_refusal' || event.protocol_version !== 3 || event.payload_size !== 128 ||
+            event.payload_encoding !== 'hex' || typeof event.payload !== 'string' || !/^[0-9a-f]{256}$/i.test(event.payload) ||
+            event.payload_truncated !== false || event.flags !== 0 || Object.hasOwn(event, 'scheme_class') ||
+            Object.hasOwn(event, 'loader_kind') ||
+            ['browser_context_id_high', 'browser_context_id_low', 'encoded_data_length', 'decoded_body_length']
+              .some(key => event[key] !== '0') ||
+            ['status_code', 'error_code', 'resource_type', 'initiator_request_id', 'initiator_process_id']
+              .some(key => event[key] !== 0)) return null;
+        const bytes = bytesFromHex(event.payload);
+        const view = new DataView(bytes.buffer);
+        const u64 = offset => view.getBigUint64(offset, true);
+        const reason = view.getUint16(4, true), identity = view.getUint16(6, true);
+        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || reason < 1 ||
+            reason > brokerRefusalReasons.length || bytes.slice(56).some(byte => byte !== 0)) return null;
+        const refused = {
+          protocol_version: view.getUint16(8, true), header_size: view.getUint16(10, true),
+          category: view.getUint16(12, true), type: view.getUint16(14, true), payload_size: view.getUint32(16, true),
+          flags: view.getUint16(20, true), scheme_class: bytes[22], loader_kind: bytes[23],
+          sequence_number: String(u64(32)), monotonic_time_ns: String(u64(40)),
+          process_id: view.getUint32(48, true), thread_id: view.getUint32(52, true)
+        };
+        const category = brokerRefusalCategories[refused.category] ?? 'unknown';
+        if (event.category !== category) return null;
+        // Every check before the reason passed and the reason's own failed.
+        const holds = (check, passed) => reason === check ? !passed : reason < check || passed;
+        if (!holds(1, refused.protocol_version === 3) || !holds(2, refused.header_size === 144) ||
+            !holds(3, refused.process_id !== brokerProcessId) || !holds(4, refused.payload_size <= 128) ||
+            !holds(6, category !== 'unknown')) return null;
+        const received = String(u64(24));
+        const brokerStream = reason <= 3;
+        const placed = brokerStream
+          ? identity === 2 && event.process_id === brokerProcessId && event.thread_id === 0 &&
+            event.sequence_number !== '0' && event.monotonic_time_ns === received && event.tab_id === 0 &&
+            ['navigation_id', 'frame_id', 'artifact_id', 'parent_event_id', 'request_id'].every(key => event[key] === '0')
+          : identity === 1 && event.process_id === refused.process_id && event.thread_id === refused.thread_id &&
+            event.sequence_number === refused.sequence_number && event.monotonic_time_ns === refused.monotonic_time_ns;
+        return placed ? {
+          reason: brokerRefusalReasons[reason - 1], identity: brokerStream ? 'broker' : 'refused',
+          received_monotonic_time_ns: received, refused
+        } : null;
+      }
+
+      function brokerRefusalsFromEvents(events) {
+        const refusals = [];
+        for (const event of events) {
+          const decoded = event?.type === 'broker_refusal' ? decodeBrokerRefusal(event) : null;
+          if (!decoded) continue;
+          const existing = refusals.find(refusal => refusal.category === event.category && refusal.reason === decoded.reason);
+          if (existing) existing.count += 1n;
+          else refusals.push({category: event.category, reason: decoded.reason, count: 1n});
+        }
+        return refusals;
+      }
+
+      function isBrokerRefusalList(value) {
+        if (!Array.isArray(value)) return false;
+        const keys = new Set();
+        return value.every(refusal => isPlainObject(refusal) && Object.keys(refusal).length === 3 &&
+          brokerRefusalCategories.includes(refusal.category) && brokerRefusalReasons.includes(refusal.reason) &&
+          isCaptureTotal(refusal.count) && refusal.count !== '0' &&
+          !keys.has(`${refusal.category}:${refusal.reason}`) && keys.add(`${refusal.category}:${refusal.reason}`));
+      }
+
       function isBrokerEvent(event) {
         if (!isPlainObject(event) || !Number.isInteger(event.protocol_version)) return false;
         const payloadLimit = event.protocol_version === 1 ? 48
           : event.protocol_version === 2 || event.protocol_version === 3 ? 128 : null;
         if (payloadLimit === null || !eventTypes[event.protocol_version]?.has(event.type)) return false;
         if (!eventCategories.has(event.category)) return false;
-        if (event.protocol_version >= 2 && (event.category === 'unknown' || event.type === 'unknown')) return false;
+        // Only a refusal of a record with an unknown category files under it.
+        if (event.protocol_version >= 2 && (event.category === 'unknown' && event.type !== 'broker_refusal' ||
+          event.type === 'unknown')) return false;
         if (!isSafeIntegerInRange(event.payload_size, 0, payloadLimit)) return false;
         if (event.payload_encoding !== 'hex' || typeof event.payload !== 'string') return false;
         if (event.payload.length !== event.payload_size * 2 || !/^[0-9a-f]*$/i.test(event.payload)) return false;
@@ -1248,6 +1408,7 @@
             decodeWasmOverflow(event) !== null) &&
           (event.type !== 'js_dispatch_observation' || decodeNativeJsObservation(event) !== null) &&
           (event.type !== 'memory_cache_reuse' || decodeMemoryCacheReuse(event) !== null) &&
+          (event.type !== 'broker_refusal' || decodeBrokerRefusal(event) !== null) &&
           (!event.type.startsWith('js_invocation_') || decodeNativeJsInvocation(event) !== null) &&
           (!['wasm_guest_dispatch','wasm_guest_invocation'].includes(event.type) || decodeNativeGuestRecord(event) !== null);
       }
@@ -1273,6 +1434,7 @@
             // Each listed marker is inside queue_drops, so an honest total covers them.
             (body.queue_drops === undefined || body.queue_drops_saturated === true ||
               BigInt(body.queue_drops) >= body.named_gaps.reduce((total, gap) => total + BigInt(gap.count), 0n)))) &&
+          (body.broker_refusals === undefined || isBrokerRefusalList(body.broker_refusals)) &&
           (body.canvas_render_captures === undefined ||
             (body.capture_mode === 'demo' &&
               Array.isArray(body.canvas_render_captures) &&
@@ -1360,65 +1522,54 @@
           body.artifacts.every(isArtifact);
       }
 
-      function isRepeaterRequest(request, resolved = false) {
-        if (!isPlainObject(request) || !isBoundedText(request.url, 8 * 1024) ||
-            !isBoundedText(request.method, resolved ? 32 : 256) ||
-            !Array.isArray(request.headers) || request.headers.length > 64 ||
-            !isBoundedText(request.body, 64 * 1024) ||
-            !isSafeIntegerInRange(request.timeout_ms, 100, 30000)) return false;
-        let headerBytes = 0;
-        const token = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
-        const forbidden = new Set(['authorization', 'cookie', 'proxy-authorization', 'set-cookie',
-          'connection', 'content-length', 'host', 'transfer-encoding']);
-        if (!request.headers.every(header => {
-          if (!isPlainObject(header) || !isBoundedText(header.name, 128) ||
-              !isBoundedText(header.value, 2 * 1024) || !token.test(header.name) ||
-              forbidden.has(header.name.toLowerCase())) return false;
-          headerBytes += utf8ByteLength(header.name) + utf8ByteLength(header.value);
-          return headerBytes <= 16 * 1024;
-        })) return false;
-        if (!resolved) return request.url.length > 0 && request.method.length > 0;
-        if (!/^[A-Z][!#$%&'*+.^_`|~0-9A-Z-]{0,31}$/.test(request.method)) return false;
-        try {
-          const url = new URL(request.url);
-          return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !url.hash &&
-            (!['GET', 'HEAD'].includes(request.method) || request.body === '');
-        } catch { return false; }
-      }
-
+      // Mirrors the backend's workspace::normalize for an API Collection. Names,
+      // header names and method templates keep their bounds; contents, counts
+      // and folder depth have none, and `limits` records what an older host
+      // wrote, so a document written under other limits still reads.
       function isApiCollection(collection) {
         const exactKeys = (value, keys) => isPlainObject(value) &&
           Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+        const controls = /[\x00-\x1f\x7f]/u;
         const validName = value => isBoundedText(value, 128) && value.trim() === value &&
-          value.length > 0 && !value.includes('/') && !/[\x00-\x1f\x7f]/u.test(value);
+          value.length > 0 && !value.includes('/') && !controls.test(value);
         const validVariables = value => {
-          if (!Array.isArray(value) || value.length > 32) return false;
-          let bytes = 0;
+          if (!Array.isArray(value)) return false;
           const names = new Set();
           return value.every(variable => {
-            if (!exactKeys(variable, ['name', 'value']) || !isBoundedText(variable.name, 64) ||
+            if (!exactKeys(variable, ['name', 'value']) || typeof variable.name !== 'string' ||
                 !/^[A-Za-z_][A-Za-z0-9_.-]*$/u.test(variable.name) || names.has(variable.name) ||
-                !isBoundedText(variable.value, 4 * 1024) || /[\x00-\x1f\x7f]/u.test(variable.value)) return false;
+                typeof variable.value !== 'string' || controls.test(variable.value)) return false;
             names.add(variable.name);
-            bytes += utf8ByteLength(variable.name) + utf8ByteLength(variable.value);
-            return bytes <= 32 * 1024;
+            return true;
           });
         };
-        const limits = {
-          folders: 32, requests: 128, folder_depth: 4, variables_per_scope: 32,
-          variable_bytes_per_scope: 32 * 1024, request_body_bytes: 64 * 1024,
-          document_bytes: 2 * 1024 * 1024
+        // The HTTP client computes framing and connection headers; credentials
+        // and cookies are kept as the researcher wrote them.
+        const framing = new Set(['connection', 'content-length', 'host', 'keep-alive', 'proxy-connection',
+          'te', 'trailer', 'transfer-encoding', 'upgrade']);
+        const validHeaders = value => {
+          if (!Array.isArray(value)) return false;
+          const names = new Set();
+          return value.every(header => {
+            if (!exactKeys(header, ['name', 'value']) || !isBoundedText(header.name, 128) ||
+                !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(header.name) || typeof header.value !== 'string' ||
+                controls.test(header.value)) return false;
+            const lower = header.name.toLowerCase();
+            if (framing.has(lower) || names.has(lower)) return false;
+            names.add(lower);
+            return true;
+          });
         };
+        const validTemplate = (value, maximumBytes) => typeof value === 'string' &&
+          utf8ByteLength(value) <= maximumBytes && value.trim() === value && value.length > 0 && !controls.test(value);
         if (!exactKeys(collection, ['contract_version', 'document_kind', 'generation', 'updated_at_ms',
           'folders', 'requests', 'limits']) || collection.contract_version !== 1 ||
           collection.document_kind !== 'api-collection' ||
           !isSafeIntegerInRange(collection.generation, 0, Number.MAX_SAFE_INTEGER) ||
           !isSafeIntegerInRange(collection.updated_at_ms, 0, Number.MAX_SAFE_INTEGER) ||
-          !isPlainObject(collection.limits) || Object.keys(collection.limits).length !== Object.keys(limits).length ||
-          Object.entries(limits).some(([name, limit]) => collection.limits[name] !== limit) ||
-          !Array.isArray(collection.folders) || collection.folders.length < 1 || collection.folders.length > 32 ||
-          !Array.isArray(collection.requests) || collection.requests.length > 128 ||
-          utf8ByteLength(JSON.stringify(collection)) > 2 * 1024 * 1024) return false;
+          !isPlainObject(collection.limits) ||
+          !Array.isArray(collection.folders) || collection.folders.length < 1 ||
+          !Array.isArray(collection.requests)) return false;
         const folderIds = new Set();
         const folderNames = new Set();
         const folders = new Map();
@@ -1433,17 +1584,22 @@
         const root = folders.get(1);
         if (!root || root.name !== 'API Collection' || root.parent_id !== null ||
             collection.folders.some(folder => folder.id !== 1 && folder.parent_id === null)) return false;
+        // A walk toward the root stops at a folder already known to reach it,
+        // so a hierarchy of any depth is checked in linear time and a cycle is
+        // found on the walk that enters it.
+        const reachesRoot = new Set([1]);
         for (const folder of collection.folders) {
           const siblingKey = `${folder.parent_id ?? 'root'}\u0000${folder.name.toLocaleLowerCase()}`;
           if (folderNames.has(siblingKey)) return false;
           folderNames.add(siblingKey);
+          const walked = new Set();
           let current = folder;
-          const seen = new Set([current.id]);
-          let depth = 0;
-          while (current.parent_id !== null) {
-            if (seen.has(current.parent_id) || !folders.has(current.parent_id) || ++depth > 4) return false;
-            seen.add(current.parent_id); current = folders.get(current.parent_id);
+          while (!reachesRoot.has(current.id)) {
+            if (walked.has(current.id) || !folders.has(current.parent_id)) return false;
+            walked.add(current.id);
+            current = folders.get(current.parent_id);
           }
+          for (const id of walked) reachesRoot.add(id);
         }
         const requestIds = new Set();
         const requestNames = new Set();
@@ -1451,9 +1607,10 @@
           if (!exactKeys(request, ['id', 'folder_id', 'name', 'url', 'method', 'headers', 'body',
             'timeout_ms', 'variables', 'created_at_ms', 'updated_at_ms']) ||
               !isSafeIntegerInRange(request.id, 1, Number.MAX_SAFE_INTEGER) || requestIds.has(request.id) ||
-              !folderIds.has(request.folder_id) || !validName(request.name) || !isRepeaterRequest(request) ||
-              /[\x00-\x1f\x7f]/u.test(request.url) || /[\x00-\x1f\x7f]/u.test(request.method) ||
-              !validVariables(request.variables) ||
+              !folderIds.has(request.folder_id) || !validName(request.name) ||
+              !validTemplate(request.url, Infinity) || !validTemplate(request.method, 256) ||
+              !validHeaders(request.headers) || typeof request.body !== 'string' ||
+              !isSafeIntegerInRange(request.timeout_ms, 100, 30000) || !validVariables(request.variables) ||
               !isSafeIntegerInRange(request.created_at_ms, 0, Number.MAX_SAFE_INTEGER) ||
               !isSafeIntegerInRange(request.updated_at_ms, request.created_at_ms, Number.MAX_SAFE_INTEGER)) return false;
           const nameKey = `${request.folder_id}\u0000${request.name.toLocaleLowerCase()}`;
@@ -2146,9 +2303,9 @@
           let total = 0;
           for (const count of codes.values()) total += count;
           const byCode = [...codes].sort((left, right) => right[1] - left[1] || (left[0] < right[0] ? -1 : 1))
-            .map(([code, count]) => `${code} ${count.toLocaleString('en-US')}`).join(', ');
+            .map(([code, count]) => `${code} ${RebEvidenceChips.formatCount(count)}`).join(', ');
           vmAnalysisFailureNotices.set(document, total === 0 ? ''
-            : `${total.toLocaleString('en-US')} ${total === 1 ? 'artifact' : 'artifacts'} could not be analyzed (${byCode}).`);
+            : `${RebEvidenceChips.formatCount(total)} ${total === 1 ? 'artifact' : 'artifacts'} could not be analyzed (${byCode}).`);
         }
         return vmAnalysisFailureNotices.get(document);
       }
@@ -2719,7 +2876,8 @@
             (omission.omitted_records === undefined || isSafeIntegerInRange(omission.omitted_records, 1, Number.MAX_SAFE_INTEGER))) ||
           classification.classification_version !== 1 ||
           !isSafeIntegerInRange(classification.site_count, 0, 4294967295) ||
-          !Array.isArray(classification.sites) || classification.sites.length > 256 ||
+          // Producers before VM detector 1.13.0 listed at most 256 sites; every site is listed since.
+          !Array.isArray(classification.sites) ||
           classification.omitted_site_count !== classification.site_count - classification.sites.length ||
           !vmWorkspaceExact(classification.role_counts, ['interpreter-candidate', 'multiplexer', 'other']) ||
           !vmWorkspaceExact(classification.kind_counts, vmDispatchKinds)) return false;
@@ -2735,9 +2893,10 @@
         if (!vmWorkspaceExact(inventory, ['ranking_version', 'site_count', 'br_table_count', 'call_indirect_count',
           'omitted_site_count', 'selected_byte_offset', 'candidates']) || inventory.ranking_version !== 1 ||
           !['site_count', 'br_table_count', 'call_indirect_count', 'omitted_site_count'].every(key =>
-            isSafeIntegerInRange(inventory[key], 0, 1000000)) ||
+            isSafeIntegerInRange(inventory[key], 0, Number.MAX_SAFE_INTEGER)) ||
           inventory.site_count !== inventory.br_table_count + inventory.call_indirect_count ||
-          !Array.isArray(inventory.candidates) || inventory.candidates.length > 256 ||
+          // Producers before VM detector 1.13.0 listed at most 256 sites; every site is listed since.
+          !Array.isArray(inventory.candidates) ||
           inventory.site_count !== inventory.candidates.length + inventory.omitted_site_count) return false;
         const offsets = new Set();
         for (const site of inventory.candidates) {
@@ -2880,7 +3039,9 @@
           arming.version !== 1 || !(arming.source_sha256 === null || vmWorkspaceDigest(arming.source_sha256)) ||
           !(arming.source_length === null || isSafeIntegerInRange(arming.source_length, 0, 0xffffffff)) ||
           (arming.source_sha256 === null) !== (arming.source_length === null) ||
-          !Array.isArray(arming.sites) || arming.sites.length > 256 || !Array.isArray(arming.refused) || arming.refused.length > 64 ||
+          // A site file arms at most 256 sites, its record's one-byte slot. Every refused site is
+          // listed since producer 2.20.0; earlier ones listed 64 and counted the rest.
+          !Array.isArray(arming.sites) || arming.sites.length > 256 || !Array.isArray(arming.refused) ||
           !isSafeIntegerInRange(arming.omitted_refused_count, 0, Number.MAX_SAFE_INTEGER) ||
           (arming.omitted_refused_count > 0 && arming.refused.length !== 64)) return false;
         const seen = new Set();

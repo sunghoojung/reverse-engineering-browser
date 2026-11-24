@@ -389,68 +389,101 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       function setNetworkNotice(kind, message) {
-        if (elements.networkNotice.dataset.kind !== kind) elements.networkNotice.dataset.kind = kind;
-        if (elements.networkNotice.textContent !== message) elements.networkNotice.textContent = message;
-        elements.networkNotice.hidden = false;
+        const notice = elements.networkNotice;
+        if (notice.dataset.kind !== kind) notice.dataset.kind = kind;
+        if (notice.firstElementChild || notice.textContent !== message) notice.textContent = message;
+        notice.hidden = false;
+      }
+
+      // A capture notice the researcher dismissed stays hidden for this
+      // session until a class of gap it did not hold appears; the status
+      // bar's gap chip keeps every count meanwhile.
+      const dismissedCaptureNotices = new Map();
+      const captureNoticeSession = () => `${state.sessionMode}:${state.events[0]?.session_id ?? ''}`;
+      function captureNoticeDismissed(id, keys) {
+        const dismissed = dismissedCaptureNotices.get(id);
+        if (!dismissed) return false;
+        if (dismissed.session !== captureNoticeSession() || !keys.length || keys.some(key => !dismissed.keys.has(key))) {
+          dismissedCaptureNotices.delete(id);
+          return false;
+        }
+        return true;
+      }
+      function dismissCaptureNotice(id, keys, element, focusTarget) {
+        dismissedCaptureNotices.set(id, {session: captureNoticeSession(), keys: new Set(keys)});
+        const focused = element.contains(document.activeElement);
+        element.hidden = true;
+        if (focused) focusTarget?.focus({preventScroll: true});
+      }
+
+      // One chip per gap class, each opening its scope, meaning and reasons.
+      // A gap line's dot and wash take the tone of its worst class, as the status bar's gap chip does.
+      function captureNoticeTone(classes) {
+        return classes.some(gapClass => gapClass.tone === 'loss') ? 'loss' : 'limit';
+      }
+
+      function captureNoticeSpec(classes, limits = [], extra = []) {
+        const loss = classes.some(gapClass => gapClass.tone === 'loss');
+        return {lead: loss ? 'Incomplete capture' : classes.length || limits.length ? 'Capture limits' : '',
+          chips: [...classes.map(gapClass => captureGapClassChip(gapClass)), ...limits, ...extra],
+          actions: classes.length ? [{key: 'evidence', label: 'Show in Evidence', run: showCaptureGapsInEvidence}] : []};
       }
 
       // Both refresh paths project the same status so neither can erase the other's gaps.
       // Summaries describe the scanned store/tail, independently of either rendered window.
-      // A healthy capture leaves this line hidden. Window, target-mode, and
-      // Network.enable explanations stay in the README; only gaps and failures show here.
+      // A healthy capture leaves this line hidden. Loading, disconnected and
+      // malformed states keep a sentence of their own kind; gaps, limits and
+      // failed requests are one line of chips.
       function renderNetworkNotice() {
-        const gapCount = shownSequenceGaps();
-        const reportedDrops = shownQueueDrops();
-        const messages = [];
-        let kind = 'empty';
-        if (state.eventFailureKind === 'malformed') {
-          kind = 'malformed';
-          messages.push('The broker returned malformed event data.');
-        } else if (state.broker === 'unavailable') {
-          kind = 'disconnected';
-          messages.push(state.connection === 'unresponsive'
-            ? 'The local evidence broker did not answer within 10 seconds.'
-            : 'The local evidence broker is disconnected.');
+        const notice = elements.networkNotice;
+        if (state.eventFailureKind === 'malformed') return setNetworkNotice('malformed', 'The broker returned malformed event data.');
+        if (state.broker === 'unavailable') {
+          return setNetworkNotice('disconnected', state.connection === 'unresponsive'
+            ? 'The local evidence broker did not answer within 10 seconds.' : 'The local evidence broker is disconnected.');
         }
+        const chips = globalThis.RebEvidenceChips;
+        if (!chips) { notice.hidden = true; return; }
+        const classes = captureGapClasses({sequenceGaps: shownSequenceGaps(), queueDrops: shownQueueDrops(),
+          malformedLines: state.eventMalformedLines ?? 0, namedGaps: namedGapsIn(shownNamedGaps(), networkGapCategories),
+          brokerRefusals: namedGapsIn(shownBrokerRefusals(), networkGapCategories)});
         // The request index lists the whole session, so window caps do not limit Traffic rows.
         const indexed = state.trafficIndex?.answer?.() ?? null;
-        if (state.eventsLimited && !indexed) {
-          if (kind === 'empty') kind = 'gap';
-          messages.push('Traffic shows requests from the newest 5,000 evidence events until the request index answers. Older events remain on disk, and Evidence reads them with Earlier and Oldest.');
+        const scope = eventCountScopeTitle();
+        const limits = [];
+        if ((state.eventsLimited || state.networkEventsLimited) && !indexed) {
+          const window = chips.formatCount(5000);
+          limits.push({key: 'window', tone: 'limit', text: `newest ${window} events`, name: `Rows come from the newest ${window} events`,
+            breakdown: {title: 'Event window', scope, detail: `Until the request index answers, rows come from the newest ${window} evidence events${state.networkEventsLimited ? ', so older lifecycle records can be missing' : ''}. Evidence reads older ones with Earlier and Oldest.`}});
         }
-        if (state.networkEventsLimited && !indexed) messages.push('The network event window is capped; older request lifecycle evidence may be incomplete.');
         if (state.eventCountScope === 'bounded_tail') {
-          if (kind === 'empty') kind = 'gap';
           // The event index counts the whole store once it catches up (scope store).
-          messages.push(indexed ? 'Gap and drop counts cover only the newest 64 MiB of stored evidence until the event index catches up; the request list covers the whole session.'
-            : 'Only the newest 64 MiB of stored evidence is scanned until the event index catches up; counts and both windows exclude the older prefix.');
+          limits.push({key: 'scan', tone: 'limit', text: 'newest 64 MiB', name: 'Counts cover the newest 64 MiB of stored evidence',
+            breakdown: {title: 'Scanned evidence', scope, detail: indexed
+              ? 'Until the event index catches up, gap and drop counts cover only the newest 64 MiB; the request list covers the whole session.'
+              : 'Until the event index catches up, only the newest 64 MiB is scanned; counts and both windows leave out the older records.'}});
         }
-        if (gapCount > 0n) {
-          if (kind === 'empty') kind = 'gap';
-          messages.push(`${state.sequenceGapsSaturated ? 'at least ' : ''}${gapCount} sequence-gap IDs were observed in ${eventCountScopeLabel()}; late arrivals may overlap. Native evidence may be incomplete.`);
+        const failed = indexed ? indexed.document.failed : trafficFailedRequestCount(state.requests);
+        const extra = failed > 0 ? [{key: 'failed', tone: 'neutral', count: failed, noun: ['failed', 'failed'],
+          name: `${chips.formatCount(failed)} failed ${failed === 1 ? 'request' : 'requests'}: show only failed requests`,
+          pressed: Boolean(state.trafficFlags?.failed), run: toggleFailedRequests}] : [];
+        const keys = [...classes, ...limits].map(item => item.key);
+        if ((!keys.length && !extra.length) || captureNoticeDismissed('traffic', keys)) {
+          notice.hidden = true;
+          if (notice.firstChild) notice.replaceChildren();
+          return;
         }
-        if (reportedDrops > 0n) {
-          if (kind === 'empty') kind = 'gap';
-          messages.push(`The queue reports ${state.queueDropsSaturated ? 'at least ' : ''}${reportedDrops} dropped ${reportedDrops === 1n ? 'event' : 'events'}${gapCount > 0n ? '; counts may overlap sequence gaps' : `; no sequence jump is visible in ${eventCountScopeLabel()}`}.`);
-        }
-        if (state.eventMalformedLines > 0) {
-          if (kind === 'empty') kind = 'gap';
-          messages.push(`${state.eventMalformedLines} unreadable ${state.eventMalformedLines === 1 ? 'line was' : 'lines were'} skipped in ${eventCountScopeLabel()}.`);
-        }
-        const networkLimits = namedGapNotice(namedGapsIn(shownNamedGaps(), networkGapCategories), eventCountScopeLabel());
-        if (networkLimits) {
-          if (kind === 'empty') kind = 'gap';
-          messages.push(networkLimits);
-        }
+        notice.dataset.kind = keys.length ? 'gap' : 'empty';
+        notice.dataset.tone = captureNoticeTone(classes);
+        chips.renderNotice(notice, {...captureNoticeSpec(classes, limits, extra),
+          dismiss: keys.length ? {name: 'Dismiss this notice; the status bar keeps the gap count',
+            run: () => dismissCaptureNotice('traffic', keys, notice, elements.requestFilter)} : null});
+        notice.hidden = false;
+      }
 
-        const failedNotice = indexed ? indexed.document.failed > 0 ? `Failed requests: ${indexed.document.failed}.` : ''
-          : trafficFailedRequestNotice(state.requests);
-        if (failedNotice) messages.push(failedNotice);
-        if (messages.length) setNetworkNotice(kind, messages.join(' '));
-        else {
-          elements.networkNotice.hidden = true;
-          if (elements.networkNotice.textContent) elements.networkNotice.textContent = '';
-        }
+      // The failed chip is the Failed filter, pressed or not.
+      function toggleFailedRequests() {
+        document.querySelector('.request-flag[data-flag="failed"]')?.click();
+        renderNetworkNotice();
       }
 
       function textElement(tag, className, value) {
@@ -473,6 +506,18 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         elements.vmNotice.dataset.kind = kind;
         elements.vmNotice.textContent = message;
         elements.vmNotice.hidden = false;
+      }
+
+      // The VM notice's gap line: its sentence, if any, then one chip per class.
+      function setVmChipNotice(kind, text, classes, dismissible = false) {
+        const notice = elements.vmNotice;
+        notice.dataset.kind = kind;
+        notice.dataset.tone = captureNoticeTone(classes);
+        const keys = classes.map(gapClass => gapClass.key);
+        globalThis.RebEvidenceChips?.renderNotice(notice, {...captureNoticeSpec(classes), text,
+          dismiss: dismissible && keys.length ? {name: 'Dismiss this notice; the status bar keeps the gap count',
+            run: () => { dismissCaptureNotice('vm', keys, notice, elements.vmList); renderVmLab(); }} : null});
+        notice.hidden = false;
       }
 
       function requestOriginLabel(origin) {
@@ -599,8 +644,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         return label.charAt(0).toUpperCase() + label.slice(1);
       }
 
-      function formatSignalOffset(nanoseconds) {
-        return nanoseconds < 1000000n ? `+${nanoseconds} ns` : formatMilliseconds(nanoseconds, '+');
+      function signalEventTime(event) {
+        const element = RebEvidenceChips.timeElement(integerText(event, 'monotonic_time_ns'));
+        element.classList.add('signal-event-time');
+        return element;
       }
 
       function matchingSignalProfileFamily(event) {
@@ -1215,7 +1262,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           ['tab', tabId],
           ['category', event.category],
           ['operation', event.type],
-          ['monotonic time', `${integerText(event, 'monotonic_time_ns')} ns`],
+          ['time', RebEvidenceChips.formatEvidenceTime(integerText(event, 'monotonic_time_ns')).text],
+          ['monotonic (ns)', integerText(event, 'monotonic_time_ns')],
           ['navigation', integerText(event, 'navigation_id')],
           ['frame', integerText(event, 'frame_id')],
           ['thread', String(event.thread_id)],
@@ -1475,7 +1523,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           primary.append(
             textElement('span', 'signal-category-badge', fingerprintSignalLabels.get(event.category) ?? event.category),
             textElement('span', 'signal-event-operation', decodePayload(event) || signalTypeLabel(event.type)),
-            textElement('span', 'signal-event-time', formatSignalOffset(integerValue(event, 'monotonic_time_ns') - firstTime))
+            signalEventTime(event)
           );
           if (row.dataset.new === 'true') primary.append(textElement('span', 'signal-new-badge', 'New'));
           const meta = document.createElement('span');
@@ -1642,50 +1690,61 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         elements.capture.classList.toggle('idle', (idle || ended) && !offline && !artifactOffline);
         elements.capture.querySelector('span:last-child').textContent = captureLabel;
         elements.capture.setAttribute('aria-label', `${modeLabel}: ${captureLabel}`);
-        elements.broker.classList.toggle('offline', offline);
-        elements.broker.classList.toggle('idle', !offline && (connecting || idle || preview));
-        elements.broker.textContent = connecting ? 'connecting to evidence'
-          : offline ? state.connection === 'unresponsive' ? 'broker not responding' : 'broker unavailable'
-            : live ? 'broker connected' : idle ? 'no capture session'
-              : preview ? 'standalone preview' : 'demo evidence loaded';
-        elements.sampleStatus.textContent = live
-          ? offline
-            ? state.requests.length ? 'last requests retained' : state.events.length ? 'last live evidence retained' : 'no live evidence'
-            : artifactOffline ? 'artifact capture offline'
-            : 'sample rows hidden'
-          : idle || preview ? 'no bundled evidence' : 'developer evidence';
-        if (!state.lastUpdatedLabel) {
-          elements.updated.textContent = connecting ? 'waiting for evidence'
-            : offline ? state.events.length ? 'last valid evidence retained' : 'no live evidence'
-              : artifactOffline ? 'artifact capture unavailable'
-              : live ? 'waiting for live evidence' : idle || preview ? 'start a live capture' : 'deterministic evidence loaded';
-        } else {
-          elements.updated.textContent = state.lastUpdatedLabel;
-        }
+        renderStatusBar({live, idle, preview, connecting, ended, brokerOffline, artifactOffline});
         document.title = live ? 'Origin Trace - Live Session'
           : idle ? 'Origin Trace' : preview ? 'Origin Trace - Preview' : 'Origin Trace - Demo Evidence';
       }
 
-      // Splits the status bar's gap label into one span per clause, so each
-      // carries its own state: recorded loss reads as a failure, a sampling
-      // limit as a caution and a zero count as meta. The text is unchanged;
-      // a clause count that disagrees with the label leaves it plain.
-      function markGapClauses(gapCount, reportedDrops, namedGaps = []) {
-        const node = elements.gaps;
-        if (typeof node.replaceChildren !== 'function' || typeof namedGapTotal !== 'function') return;
-        const named = (matching, kind) => namedGapTotal(matching) > 0n ? [kind] : [];
-        const kinds = [gapCount > 0n ? 'loss' : '', ...(reportedDrops > 0n ? ['loss'] : []),
-          ...named(namedGaps.filter(gap => samplingBudgetGapLabels.has(gap.reason)), 'limit'),
-          ...named(namedGaps.filter(gap => samplePolicyFilterGapLabels.has(gap.reason)), 'limit'),
-          ...named(namedGaps.filter(gap => !samplingBudgetGapLabels.has(gap.reason) && !samplePolicyFilterGapLabels.has(gap.reason)), 'loss')];
-        const clauses = node.textContent.split(' · ');
-        if (clauses.length !== kinds.length) return;
-        node.replaceChildren(...clauses.map((clause, index) => {
-          const span = document.createElement('span');
-          span.textContent = index ? ` · ${clause}` : clause;
-          if (kinds[index]) span.dataset.kind = kinds[index];
-          return span;
-        }));
+      // The status bar, left to right: the connection, the request count, one
+      // gap chip (only when a count is not zero) and the local-only mark.
+      // Each long form, such as "broker connected" or the update time, is in
+      // the connection chip's panel rather than on the bar.
+      function renderStatusBar({live, idle, preview, connecting, ended, brokerOffline, artifactOffline}) {
+        const chips = globalThis.RebEvidenceChips;
+        if (!chips) return;
+        const failed = ['malformed', 'unresponsive', 'unreachable'].includes(state.connection);
+        const [label, tone] = failed
+          ? [state.connection === 'malformed' ? 'Malformed' : state.connection === 'unresponsive' ? 'Not responding' : 'Offline', 'loss']
+          : connecting ? ['Connecting…', 'neutral']
+            : ended ? ['Ended', 'neutral']
+              : live ? brokerOffline ? ['Offline', 'loss'] : artifactOffline ? ['Degraded', 'limit']
+                : state.captureStopped ? ['Stopped', 'neutral'] : ['Live', 'ok']
+                : idle ? [state.events.length ? 'Stored' : 'Idle', 'neutral']
+                  : [preview ? 'Preview' : 'Demo', 'neutral'];
+        const backend = state.connection === 'malformed' ? 'returned malformed event data'
+          : state.connection === 'unresponsive' ? 'did not answer within 10 seconds'
+            : state.connection === 'unreachable' ? 'unreachable' : connecting ? 'connecting' : 'answering';
+        const session = ended ? 'Ended live session, opened for review'
+          : live ? state.captureStopped ? 'Live session, capture stopped' : 'Live session'
+            : idle ? state.events.length ? 'Stored capture, no live session' : 'No session'
+              : preview ? 'Standalone preview, no backend' : 'Deterministic developer evidence';
+        const rows = [['Session', session], ['Backend', backend]];
+        if (live && !failed && !connecting) rows.push(['Broker', brokerOffline ? state.connection === 'unresponsive' ? 'not responding' : 'unavailable' : 'connected']);
+        if (live && state.artifactReceiverConfigured) rows.push(['Artifacts', artifactOffline ? 'receiver offline; new scripts and Wasm are not stored' : 'receiver connected']);
+        if (failed || brokerOffline) rows.push(['Evidence', state.requests.length || state.events.length ? 'last valid evidence retained' : 'none read']);
+        if (state.lastUpdatedLabel?.startsWith('updated ')) rows.push(['Updated', state.lastUpdatedLabel.slice('updated '.length)]);
+        chips.renderChips(elements.broker, [{key: 'connection', text: label, tone, dot: true, variant: 'ghost', prefer: 'above',
+          name: `Connection: ${label}`, facts: {title: 'Connection', rows}}]);
+        elements.broker.dataset.state = tone;
+        renderStatusGaps();
+      }
+
+      // The gap chip covers the summaries' scope (the whole stored capture
+      // once the event index has caught up). Zero gaps draws nothing; any
+      // non-zero count shows, and a saturated one reads ≥.
+      function renderStatusGaps() {
+        const chips = globalThis.RebEvidenceChips;
+        if (!chips || typeof captureGapClasses !== 'function') return;
+        const classes = state.sessionMode === 'preview' ? [] : captureGapClasses({sequenceGaps: shownSequenceGaps(), queueDrops: shownQueueDrops(),
+          malformedLines: state.eventMalformedLines ?? 0, namedGaps: shownNamedGaps(), brokerRefusals: shownBrokerRefusals()});
+        chips.renderChips(elements.gaps, [captureGapStatusChip(classes, [{key: 'evidence', label: 'Show in Evidence', run: showCaptureGapsInEvidence}])]);
+        elements.gaps.hidden = classes.length === 0;
+      }
+
+      // Evidence's Coverage & gaps panel, over every record in view.
+      function showCaptureGapsInEvidence() {
+        showScreen('evidence');
+        evidenceWorkspace.showCoverage?.();
       }
 
       function resetRequestSelection() {
@@ -1717,17 +1776,18 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           elements.requestCountLabel.textContent = 'requests read yet';
           return;
         }
-        elements.requestCount.textContent = visibleCount.toLocaleString('en-US');
+        const count = value => globalThis.RebEvidenceChips?.formatCount(value) ?? String(value);
+        elements.requestCount.textContent = count(visibleCount);
         if (scope === 'session') {
           elements.requestCountLabel.textContent = visibleCount === loadedCount ? loadedCount === 1 ? 'request' : 'requests'
-            : `of ${loadedCount.toLocaleString('en-US')} ${loadedCount === 1 ? 'request' : 'requests'}`;
+            : `of ${count(loadedCount)} ${loadedCount === 1 ? 'request' : 'requests'}`;
           return;
         }
         const loadedLabel = loadedCount === 1 ? 'request loaded' : 'requests loaded';
         const suffix = state.eventsLimited ? ' · event window capped' : '';
         elements.requestCountLabel.textContent = visibleCount === loadedCount
           ? `${loadedLabel}${suffix}`
-          : `of ${loadedCount} ${loadedCount === 1 ? 'request' : 'requests'} loaded${suffix}`;
+          : `of ${count(loadedCount)} ${loadedCount === 1 ? 'request' : 'requests'} loaded${suffix}`;
       }
 
       function vmField(label, value) {
@@ -1888,7 +1948,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           return section;
         }
         const roles = classification.role_counts;
-        section.append(textElement('p', '', `${vmCountText(classification.site_count, 'classified site')}: ${vmCountText(roles['interpreter-candidate'], 'cursor-loop interpreter candidate')}, ${vmCountText(roles.multiplexer, 'router')}, ${roles.other} other. ${classification.sites.length} listed; ${classification.omitted_site_count} omitted from this bounded list.`));
+        section.append(textElement('p', '', `${vmCountText(classification.site_count, 'classified site')}: ${vmCountText(roles['interpreter-candidate'], 'cursor-loop interpreter candidate')}, ${vmCountText(roles.multiplexer, 'router')}, ${roles.other} other. ${classification.omitted_site_count ? `${classification.sites.length} listed; ${classification.omitted_site_count} more were not listed by the earlier detector that produced this document.` : 'Every classified site is listed.'}`));
         for (const omission of classification.omissions) {
           const count = omission.omitted_records === undefined ? '' : ` ${vmCountText(omission.omitted_records, 'record')} omitted.`;
           section.append(textElement('p', 'vm-workspace-notice', `${omission.reason}: ${omission.detail}${count}`));
@@ -1971,7 +2031,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           section.append(textElement('p', '', 'No module-wide dispatch inventory is retained in this document.'));
           return section;
         }
-        section.append(textElement('p', '', `${vmCountText(inventory.site_count, 'module site')}: ${inventory.br_table_count} br_table, ${inventory.call_indirect_count} call_indirect. ${vmCountText(inventory.candidates.length, 'ranked site')} retained; ${inventory.omitted_site_count} omitted from this bounded list.`));
+        section.append(textElement('p', '', `${vmCountText(inventory.site_count, 'module site')}: ${inventory.br_table_count} br_table, ${inventory.call_indirect_count} call_indirect. ${inventory.omitted_site_count ? `${vmCountText(inventory.candidates.length, 'ranked site')} retained; ${inventory.omitted_site_count} more were not listed by the earlier detector that produced this document.` : 'Every site is ranked and listed.'}`));
         section.append(textElement('p', '', 'Candidate dispatchers are ranked by loop shape, then by br_table arm count or call_indirect element fanout. Arm counts exclude the default. Unique branch targets cluster repeated Wasm labels. A small br_table is a CFF/relooper candidate, a large br_table is a handler-table candidate, and call_indirect is an indirect funcref candidate. None of these is a proven guest opcode ISA. This inventory does not invent registers, a stack, or a guest PC.'));
         const retainedRows = vmOpcodeRows(workspace);
         const classificationLabel = classification => classification === 'cff-helper-candidate' ? 'CFF / relooper candidate'
@@ -1990,7 +2050,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
               ? 'Selector index to Wasm branch target. Samples are absent, so this is a handler-table candidate, not a proven guest opcode ISA. No guest PC, register, or stack is inferred.'
               : 'Static CFF or relooper arms. No guest opcode, guest PC, register, or stack is inferred.';
           // Rank and the heuristic label stay in the collapsed summary. Opening
-          // every row is not usable once the bounded list reaches 256 sites.
+          // every row is not usable once a module lists hundreds of sites.
           row.append(textElement('summary', '', `#${rank} · ${selected ? 'Default · ' : ''}f${site.function_index} · ${site.kind} · ${count} · byte ${site.byte_offset} · ${classification}${vmDispatchShapeSuffix(workspace, site.byte_offset)}`));
           if (selected) row.open = true;
           row.append(textElement('p', 'vm-effect-detail', `${classification} · ${vmDispatchEvidenceText(site)} · body ${site.function_body_size} bytes · loop depth ${site.loop_depth} · IP-like read/write pattern ${site.ip_like ? 'present' : 'absent'}. ${honesty}`));
@@ -2632,7 +2692,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         for (const row of arming.refused) {
           panel.append(textElement('p', 'vm-effect-detail', `Not armed: ${row.instruction} at byte ${row.byte_offset} (${row.reason})`));
         }
-        if (arming.omitted_refused_count) panel.append(textElement('p', 'vm-workspace-notice', `${arming.omitted_refused_count} more refused sites are not listed.`));
+        if (arming.omitted_refused_count) panel.append(textElement('p', 'vm-workspace-notice', `${arming.omitted_refused_count} more refused sites were not listed by the earlier detector that produced this document.`));
         if (arming.file !== null) panel.append(textElement('pre', 'vm-effect-detail vm-evidence-audit', arming.file));
       }
 
@@ -3138,6 +3198,16 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         renderVmWasmSampling();
       }
 
+      // A finding row's provenance line: its evidence time, source process and
+      // thread, or the analyzed artifact.
+      function vmRowMeta(finding) {
+        if (finding.analysis) return textElement('span', 'vm-row-meta', `Code analysis · artifact ${finding.sourceArtifactId}`);
+        const time = RebEvidenceChips.formatEvidenceTime(finding.monotonicTimeNs);
+        const meta = textElement('span', 'vm-row-meta', `${time.text} · source p${finding.processId}:t${finding.threadId} · category vm`);
+        meta.title = time.title;
+        return meta;
+      }
+
       let renderedVmFindings = null;
       let renderedVmWorkspace = null;
       function vmSessionSourceRefreshKey() { const finding=(state.vmFindings??[]).find(item=>item.findingId===state.selectedVmFindingId); const artifact=vmSourceArtifactForFinding(state.artifacts??[],finding,state.vmAnalysisSelection); const sessionId=artifact?.session_id??''; return [sessionId,(state.artifacts??[]).filter(item=>String(item.session_id)===String(sessionId)).map(item=>item.artifact_id).join(',')]; }
@@ -3155,7 +3225,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         renderVmSessionStatus();
         renderVmWasmSampling();
         const gapCount = shownSequenceGaps();
-        const vmLimits = namedGapNotice(namedGapsIn(shownNamedGaps(), vmGapCategories), eventCountScopeLabel());
+        const vmRefusals = namedGapsIn(shownBrokerRefusals(), vmGapCategories);
+        const vmNamed = captureGapClasses({namedGaps: namedGapsIn(shownNamedGaps(), vmGapCategories), brokerRefusals: vmRefusals});
+        const vmClasses = captureGapClasses({sequenceGaps: gapCount, namedGaps: namedGapsIn(shownNamedGaps(), vmGapCategories),
+          brokerRefusals: vmRefusals});
         const failures = state.vmAnalysisStatus === 'ready' ? vmAnalysisFailureNotice(state.vmAnalysisDocument) : '';
         const withFailures = message => failures ? `${message} ${failures}` : message;
         if (state.broker === 'connecting') {
@@ -3175,13 +3248,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           const plain = omitted > 0 ? ` ${omitted.toLocaleString('en-US')} analyzed ${omitted === 1 ? 'artifact shows' : 'artifacts show'} no VM structure.` : '';
           const failed = failures ? ` ${failures}` : '';
           const empty = state.vmAnalysisSelection ? `No VM candidates are linked to this exact captured response body.${plain}${failed} Unlinked, legacy and session-wide findings are not shown.` : `No VM findings yet.${plain}${failed} The lab waits for observed or explicitly inferred evidence.`;
-          setVmNotice(vmLimits || failures ? 'gap' : 'empty', vmLimits ? `${empty} ${vmLimits}` : empty);
-        } else if (gapCount > 0n || vmLimits || failures) {
-          setVmNotice('gap', [
-            gapCount > 0n ? `${gapCount} event ${gapCount === 1n ? 'gap may' : 'gaps may'} make VM coverage incomplete (observed sequence jumps in ${eventCountScopeLabel()}).` : '',
-            vmLimits,
-            failures
-          ].filter(Boolean).join(' '));
+          if (vmNamed.length) setVmChipNotice('gap', empty, vmNamed);
+          else setVmNotice(failures ? 'gap' : 'empty', empty);
+        } else if (vmClasses.length && !captureNoticeDismissed('vm', vmClasses.map(gapClass => gapClass.key))) {
+          setVmChipNotice('gap', failures, vmClasses, true);
+        } else if (failures) {
+          setVmNotice('gap', failures);
         } else if (state.vmAnalysisSelection) {
           const selection = state.vmAnalysisSelection;
           setVmNotice('ready', `Exact captured response body · request ${selection.request_id} · session ${selection.root_event.session_id} · process ${selection.root_event.process_id} · root ${selection.root_event.sequence_number}. This link does not establish execution or guest semantics.`);
@@ -3215,7 +3287,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           row.append(
             textElement('span', 'vm-row-title', finding.analysis ? 'VM patterns in source' : finding.label),
             textElement('span', 'vm-kind', finding.analysis ? 'Code analysis' : finding.kind),
-            textElement('span', 'vm-row-meta', finding.analysis ? `Code analysis · artifact ${finding.sourceArtifactId}` : `t ${finding.monotonicTimeNs} ns · source p${finding.processId}:t${finding.threadId} · category vm`),
+            vmRowMeta(finding),
             textElement('span', 'vm-row-correlation', `operation ${finding.kind} · finding ${finding.findingId} · investigation ${finding.investigationId} · ${finding.hostRuntime} · ${finding.confidence}`)
           );
           row.addEventListener('click', () => {
@@ -3777,7 +3849,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           const end = Number(coverage.store_end);
           notes.push(`indexing ${end ? Math.floor(Number(coverage.indexed_end) * 100 / end) : 0}%`);
         }
-        if (coverage.malformed_records !== '0') notes.push(`${coverage.malformed_records} unreadable records`);
+        if (coverage.malformed_records !== '0') notes.push(`${globalThis.RebEvidenceChips?.formatCount(coverage.malformed_records) ?? coverage.malformed_records} unreadable records`);
         return notes.join(' · ');
       }
 
@@ -4919,9 +4991,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         const step = model.step;
         const facts = document.createElement('dl'); facts.className = 'trace-facts';
-        const identifierLabels = new Set(['Session', 'Process', 'Event', 'Frame', 'Request', 'Artifact']);
+        const identifierLabels = new Set(['Session', 'Process', 'Event', 'Frame', 'Request', 'Artifact', 'Monotonic (ns)']);
         const identifiers = document.createElement('dl'); identifiers.className = 'trace-facts';
         const traceFactValue = (label, value) => {
+          if (value instanceof Node) { const dd = document.createElement('dd'); dd.append(value); return dd; }
           if (!identifierLabels.has(label)) return textElement('dd', '', String(value));
           const dd = document.createElement('dd'); dd.className = 'trace-fact-id';
           const raw = String(value);
@@ -4943,7 +5016,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         [
           ['Relationship', step.relation.replaceAll('_', ' ')],
           ['Link type', traceLinkClass(step).detail],
-          ['Time (monotonic ns)', step.monotonic_time_ns],
+          ['Time', RebEvidenceChips.timeButton(step.monotonic_time_ns)],
+          ['Monotonic (ns)', step.monotonic_time_ns],
           ['Session', step.event.session_id], ['Process', step.event.process_id],
           ['Event', step.event.sequence_number], ['Frame', step.frame_id],
           ['Request', step.request_id], ['Artifact', step.artifact_id]
@@ -5236,12 +5310,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           throw new TypeError(`${label} must map variable names to text values.`);
         }
         const entries = Object.entries(variables).sort(([left], [right]) => left.localeCompare(right));
-        let bytes = 0;
-        if (entries.length > 32 || entries.some(([name, value]) => {
-          bytes += utf8ByteLength(name) + utf8ByteLength(value);
-          return !/^[A-Za-z_][A-Za-z0-9_.-]*$/u.test(name) || utf8ByteLength(name) > 64 ||
-            utf8ByteLength(value) > 4 * 1024 || /[\x00-\x1f\x7f]/u.test(value) || bytes > 32 * 1024;
-        })) throw new TypeError(`${label} exceeds the 32-variable or 32 KiB scope limit.`);
+        if (entries.some(([name, value]) => !/^[A-Za-z_][A-Za-z0-9_.-]*$/u.test(name) ||
+          /[\x00-\x1f\x7f]/u.test(value))) {
+          throw new TypeError(`${label} need names that start with a letter or underscore, and values without control characters.`);
+        }
         return entries.map(([name, value]) => ({name, value}));
       }
 
@@ -5264,11 +5336,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const framing = new Set(['connection', 'content-length', 'host', 'keep-alive', 'proxy-connection',
           'te', 'trailer', 'transfer-encoding', 'upgrade']);
         const entries = Object.entries(headers);
-        if (entries.length > 64 || entries.some(([name, headerValue]) =>
+        if (entries.some(([name, headerValue]) =>
           !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(name) || framing.has(name.toLowerCase()) ||
-            utf8ByteLength(name) > 128 || utf8ByteLength(headerValue) > 64 * 1024 ||
-            /[\x00-\x1f\x7f]/u.test(headerValue)
-        )) throw new TypeError('Request headers must be at most 64 valid names with values of at most 64 KiB; Host, Content-Length, Connection, Transfer-Encoding and hop-by-hop headers belong to the HTTP client.');
+            utf8ByteLength(name) > 128 || /[\x00-\x1f\x7f]/u.test(headerValue)
+        )) throw new TypeError('Request headers need valid names of at most 128 bytes and values without control characters; Host, Content-Length, Connection, Transfer-Encoding and hop-by-hop headers belong to the HTTP client.');
         return entries.map(([name, headerValue]) => ({name, value: headerValue}));
       }
 
@@ -5327,12 +5398,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (state.apiCollectionRefreshing || (state.apiCollectionSaving && !conflictReload) || location.protocol === 'file:') return false;
         state.apiCollectionRefreshing = true;
         const version = state.apiCollectionVersion;
-        const controller = new AbortController();
-        const deadline = setTimeout(() => controller.abort(), 15000);
         if (!state.apiCollectionLoaded) setCollectionNotice('loading', 'Loading your local collection…');
         try {
           const headers = !force && state.apiCollectionEtag ? {'If-None-Match': state.apiCollectionEtag} : {};
-          const response = await fetch('/api/api-collection', {cache: 'no-store', headers, signal: controller.signal});
+          const response = await fetch('/api/api-collection', {cache: 'no-store', headers});
           if (version !== state.apiCollectionVersion) return false;
           if (response.status === 304) return true;
           if (!response.ok) throw new Error(`Collection store returned ${response.status}`);
@@ -5363,10 +5432,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         } catch (error) {
           if (version !== state.apiCollectionVersion) return false;
           state.apiCollectionEtag = null;
-          setCollectionNotice('error', `Collection load failed: ${controller.signal.aborted ? 'timed out' : error.message}. The last valid collection and your edits remain visible.`);
+          setCollectionNotice('error', `Collection load failed: ${error.message}. The last valid collection and your edits remain visible.`);
           return false;
         } finally {
-          clearTimeout(deadline);
           state.apiCollectionRefreshing = false;
           renderApiCollection();
         }
@@ -5379,14 +5447,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         state.apiCollectionSaving = true;
         state.apiCollectionVersion += 1;
-        const controller = new AbortController();
-        const deadline = setTimeout(() => controller.abort(), 15000);
         setCollectionNotice('saving', 'Saving collection changes locally…');
         renderApiCollection();
         try {
           const response = await fetch('/api/api-collection/actions', {
             method: 'POST', cache: 'no-store', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(collectionReplacement(folders, requests)), signal: controller.signal
+            body: JSON.stringify(collectionReplacement(folders, requests))
           });
           const body = await response.json();
           if (response.status === 409) {
@@ -5407,10 +5473,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           return true;
         } catch (error) {
           state.apiCollectionEtag = null;
-          setCollectionNotice('error', `Save could not be confirmed: ${controller.signal.aborted ? 'timed out' : error.message}. Your edits are retained. Retry load before saving again.`);
+          setCollectionNotice('error', `Save could not be confirmed: ${error.message}. Your edits are retained. Retry load before saving again.`);
           return false;
         } finally {
-          clearTimeout(deadline);
           state.apiCollectionSaving = false;
           renderApiCollection();
         }
@@ -6646,7 +6711,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           nodes.push(logs);
         }
         if (run.result_truncated || run.logs_truncated) nodes.push(textElement('p', 'experiment-privacy',
-          `${run.result_truncated ? 'The result' : 'A log entry'} nests deeper than 256 levels or could not be serialized; those values are marked.`));
+          `${run.result_truncated ? 'The result' : 'A log entry'} could not be serialized; those values are marked.`));
         analystElements.result.replaceChildren(...nodes);
       }
 
@@ -6755,29 +6820,25 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           keys.every(key => Object.hasOwn(value, key));
       }
 
+      // Version 2 has no limits: inputs, outputs, chains, tokens and secrets
+      // have no fixed size.
       function isDecoderEngine(value) {
-        if (!decoderHasExactKeys(value, ['protocol_version', 'available', 'busy', 'limits']) ||
-            value.protocol_version !== 1 || typeof value.available !== 'boolean' || typeof value.busy !== 'boolean') return false;
-        const limits = value.limits;
-        if (!decoderHasExactKeys(limits, ['input_bytes', 'output_bytes', 'pipeline_steps', 'retained_bytes',
-          'jwt_bytes', 'secret_bytes', 'json_depth', 'json_tokens', 'operations', 'jwt_algorithms'])) return false;
-        if (limits.input_bytes !== 1048576 || limits.output_bytes !== 1048576 || limits.pipeline_steps !== 16 ||
-            limits.retained_bytes !== 4194304 || limits.jwt_bytes !== 65536 || limits.secret_bytes !== 4096 ||
-            limits.json_depth !== 64 || limits.json_tokens !== 100000) return false;
-        return Array.isArray(limits.operations) && limits.operations.length === decoderNativeOperations.size &&
-          limits.operations.every(operation => decoderNativeOperations.has(operation)) &&
-          new Set(limits.operations).size === decoderNativeOperations.size &&
-          Array.isArray(limits.jwt_algorithms) && limits.jwt_algorithms.length === decoderAlgorithms.size &&
-          limits.jwt_algorithms.every(algorithm => decoderAlgorithms.has(algorithm)) &&
-          new Set(limits.jwt_algorithms).size === decoderAlgorithms.size;
+        if (!decoderHasExactKeys(value, ['protocol_version', 'available', 'busy', 'operations', 'jwt_algorithms']) ||
+            value.protocol_version !== 2 || typeof value.available !== 'boolean' || typeof value.busy !== 'boolean') return false;
+        return Array.isArray(value.operations) && value.operations.length === decoderNativeOperations.size &&
+          value.operations.every(operation => decoderNativeOperations.has(operation)) &&
+          new Set(value.operations).size === decoderNativeOperations.size &&
+          Array.isArray(value.jwt_algorithms) && value.jwt_algorithms.length === decoderAlgorithms.size &&
+          value.jwt_algorithms.every(algorithm => decoderAlgorithms.has(algorithm)) &&
+          new Set(value.jwt_algorithms).size === decoderAlgorithms.size;
       }
 
       function isDecoderTransform(value, request) {
         if (!decoderHasExactKeys(value, ['protocol_version', 'ok', 'operation_id', 'operation', 'input_bytes',
           'output_bytes', 'output_base64', 'utf8_text', 'hex_preview', 'preview_truncated', 'duration_us'])) return false;
         if (value.protocol_version !== 1 || value.ok !== true || value.operation_id !== request.operation_id ||
-            value.operation !== request.operation || !isSafeIntegerInRange(value.input_bytes, 0, 1048576) ||
-            !isSafeIntegerInRange(value.output_bytes, 0, 1048576) ||
+            value.operation !== request.operation || !isSafeIntegerInRange(value.input_bytes, 0, Number.MAX_SAFE_INTEGER) ||
+            !isSafeIntegerInRange(value.output_bytes, 0, Number.MAX_SAFE_INTEGER) ||
             !isSafeIntegerInRange(value.duration_us, 1, Number.MAX_SAFE_INTEGER) ||
             (value.utf8_text !== null && typeof value.utf8_text !== 'string') || typeof value.hex_preview !== 'string' ||
             !/^(?:[0-9a-f]{2})*$/u.test(value.hex_preview) || typeof value.preview_truncated !== 'boolean') return false;
@@ -6793,11 +6854,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       function isJwtInspection(value) {
         return resultHasOptionalReason(value, ['protocol_version', 'ok', 'algorithm', 'signature_status', 'header_json',
           'payload_json', 'token_bytes', 'signature_bytes', 'error', 'duration_us'], 'application_failed') && value.protocol_version === 1 &&
-          typeof value.ok === 'boolean' && typeof value.algorithm === 'string' && value.algorithm.length <= 128 &&
+          typeof value.ok === 'boolean' && typeof value.algorithm === 'string' &&
           ['not_checked', 'verified', 'invalid', 'unsigned', 'unsupported'].includes(value.signature_status) &&
-          typeof value.header_json === 'string' && utf8ByteLength(value.header_json) <= 65536 &&
-          typeof value.payload_json === 'string' && utf8ByteLength(value.payload_json) <= 65536 &&
-          isSafeIntegerInRange(value.token_bytes, 0, 65536) && isSafeIntegerInRange(value.signature_bytes, 0, 65536) &&
+          typeof value.header_json === 'string' && typeof value.payload_json === 'string' &&
+          isSafeIntegerInRange(value.token_bytes, 0, Number.MAX_SAFE_INTEGER) &&
+          isSafeIntegerInRange(value.signature_bytes, 0, Number.MAX_SAFE_INTEGER) &&
           (value.error === null || (typeof value.error === 'string' && utf8ByteLength(value.error) <= 4096)) &&
           isSafeIntegerInRange(value.duration_us, 1, Number.MAX_SAFE_INTEGER);
       }
@@ -6805,7 +6866,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       function isJwtCreation(value) {
         return resultHasOptionalReason(value, ['protocol_version', 'ok', 'token', 'error', 'duration_us'], 'application_failed') &&
           value.protocol_version === 1 && typeof value.ok === 'boolean' && typeof value.token === 'string' &&
-          utf8ByteLength(value.token) <= 65536 &&
           (value.error === null || (typeof value.error === 'string' && utf8ByteLength(value.error) <= 4096)) &&
           isSafeIntegerInRange(value.duration_us, 1, Number.MAX_SAFE_INTEGER);
       }
@@ -6818,8 +6878,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         return btoa(binary);
       }
 
+      // JavaScriptCore stops matching a repeated group past a few million
+      // characters, which refused any step with more than about 4 MiB of
+      // output, so the shape is one character class and the round trip below
+      // proves the padding canonical.
       function decoderBase64ToBytes(value) {
-        if (typeof value !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value)) {
+        if (typeof value !== 'string' || value.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/u.test(value)) {
           throw new TypeError('Base64 input must be canonical and contain no whitespace.');
         }
         let binary;
@@ -6847,7 +6911,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (toolsElements.inputEncoding.value === 'text') bytes = new TextEncoder().encode(toolsElements.input.value);
         else if (toolsElements.inputEncoding.value === 'base64') bytes = decoderBase64ToBytes(toolsElements.input.value.trim());
         else bytes = decoderHexToBytes(toolsElements.input.value);
-        if (bytes.byteLength > 1048576) throw new TypeError('Input exceeds the 1 MiB decoder limit.');
         return bytes;
       }
 
@@ -6923,7 +6986,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             `<textarea>${text.replaceAll('<', '&#60;').replaceAll('>', '&#62;')}</textarea>`, 'text/html'
           ).body.firstElementChild.textContent;
         const output = new TextEncoder().encode(transformed);
-        if (output.byteLength > 1048576) throw new TypeError('HTML entity output exceeds the 1 MiB limit.');
         return {
           protocol_version: 1, ok: true, operation_id: state.decoderNextOperationId,
           operation, input_bytes: input.byteLength, output_bytes: output.byteLength,
@@ -6933,10 +6995,28 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         };
       }
 
+      // A decoder or JWT request runs until it finishes or Cancel aborts it,
+      // which stops the native decoder. Only the notice changes each second,
+      // so focus stays on Cancel.
+      function startToolsOperation(label) {
+        const controller = new AbortController();
+        const started = Date.now();
+        const show = () => {
+          setToolsNotice('running', `${label}… ${Math.floor((Date.now() - started) / 1000)} s. Cancel stops the native decoder.`);
+          toolsElements.notice.dataset.kind = state.decoderStatus;
+          toolsElements.notice.textContent = state.decoderMessage;
+        };
+        show();
+        const ticker = setInterval(show, 1000);
+        return {controller, finish: () => clearInterval(ticker)};
+      }
+
       async function appendDecoderTransform() {
         if (state.decoderPending) return;
+        const operation = toolsElements.operation.value;
+        let run = null;
+        let pinned = false;
         try {
-          if (state.decoderSteps.length >= 16) throw new TypeError('The 16-step chain limit was reached.');
           if (state.decoderInputSnapshot && state.decoderInputSnapshot.key !== decoderCurrentInputKey()) {
             throw new TypeError('Input changed. Reset the chain before using the new bytes.');
           }
@@ -6952,11 +7032,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           }
           if (!state.decoderInputSnapshot) {
             state.decoderInputSnapshot = {key: decoderCurrentInputKey(), base64: decoderBytesToBase64(input), bytes: input.byteLength};
+            pinned = true;
           }
-          const operation = toolsElements.operation.value;
           const operationId = state.decoderNextOperationId;
           state.decoderPending = true;
-          setToolsNotice('running', `${operation.replaceAll('-', ' ')} is running locally…`);
+          run = startToolsOperation(`${operation.replaceAll('-', ' ')} is running locally`);
+          state.decoderController = run.controller;
           renderTools();
           const request = {protocol_version: 1, action: 'transform', operation_id: operationId,
             operation, input_base64: decoderBytesToBase64(input)};
@@ -6965,23 +7046,27 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           else {
             if (!state.decoderEngine.available) throw new TypeError('The native decoder engine is unavailable.');
             const response = await fetch('/api/decoder/actions', {method: 'POST', cache: 'no-store',
-              headers: {'Content-Type': 'application/json'}, body: JSON.stringify(request)});
+              headers: {'Content-Type': 'application/json'}, body: JSON.stringify(request), signal: run.controller.signal});
             const body = await response.json();
             if (!response.ok) throw new Error(body.error || `Decoder service returned ${response.status}`);
             if (!isDecoderTransform(body, request)) throw new TypeError('Decoder service returned a malformed or mismatched result.');
             result = body;
           }
           const prefix = state.decoderSteps.slice(0, branchIndex + 1);
-          const retained = (state.decoderInputSnapshot?.bytes ?? 0) + prefix.reduce((sum, step) => sum + step.output_bytes, 0) + result.output_bytes;
-          if (retained > 4194304) throw new TypeError('This result would exceed the 4 MiB retained-chain limit.');
           const step = {...result, id: operationId};
           state.decoderSteps = [...prefix, step];
           state.decoderNextOperationId += 1;
           state.decoderSelectedStepId = step.id;
           setToolsNotice('ready', `${operation.replaceAll('-', ' ')} completed: ${formatByteSize(result.input_bytes)} to ${formatByteSize(result.output_bytes)}.`);
         } catch (error) {
-          setToolsNotice('error', error.message);
+          // A first step that fails or is cancelled leaves no chain, so the
+          // input it would have rooted stays editable.
+          if (pinned) state.decoderInputSnapshot = null;
+          if (error?.name === 'AbortError') setToolsNotice('ready', `${operation.replaceAll('-', ' ')} was cancelled. The chain is unchanged.`);
+          else setToolsNotice('error', error.message);
         } finally {
+          run?.finish();
+          state.decoderController = null;
           state.decoderPending = false;
           renderTools();
         }
@@ -7016,17 +7101,21 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       function renderDecoder() {
-        toolsElements.engineBadge.textContent = state.decoderEngine.available ? (state.decoderEngine.busy ? 'Engine busy' : 'Native engine ready') : 'Engine unavailable';
-        toolsElements.engineBadge.dataset.kind = state.decoderEngine.available ? state.decoderEngine.busy ? 'busy' : '' : 'offline';
+        // The probe's busy flag is as old as the probe; this page's own
+        // running request keeps the engine busy until it ends.
+        const engineBusy = state.decoderEngine.busy || state.decoderPending || state.jwtPending;
+        toolsElements.engineBadge.textContent = state.decoderEngine.available ? (engineBusy ? 'Engine busy' : 'Native engine ready') : 'Engine unavailable';
+        toolsElements.engineBadge.dataset.kind = state.decoderEngine.available ? engineBusy ? 'busy' : '' : 'offline';
         let parsedInput = null;
         let inputError = null;
         try { parsedInput = state.decoderInputSnapshot ? decoderBase64ToBytes(state.decoderInputSnapshot.base64) : decoderParseInput(); }
         catch (error) { inputError = error.message; }
         toolsElements.inputBadge.textContent = inputError ? 'Invalid input' : formatByteSize(parsedInput.byteLength);
         toolsElements.inputBadge.dataset.kind = inputError ? 'error' : '';
-        toolsElements.pipelineBadge.textContent = `${state.decoderSteps.length} / 16`;
-        toolsElements.append.disabled = state.decoderPending || state.decoderSteps.length >= 16 || Boolean(inputError) ||
+        toolsElements.pipelineBadge.textContent = `${state.decoderSteps.length.toLocaleString()} ${state.decoderSteps.length === 1 ? 'step' : 'steps'}`;
+        toolsElements.append.disabled = state.decoderPending || Boolean(inputError) ||
           (!state.decoderEngine.available && !toolsElements.operation.value.startsWith('html-'));
+        toolsElements.cancel.disabled = !state.decoderController;
         toolsElements.useField.disabled = !state.selectedField || state.decoderPending;
         toolsElements.reset.disabled = state.decoderPending || (!state.decoderInputSnapshot && !state.decoderSteps.length);
         toolsElements.removeAfter.disabled = state.decoderPending || state.decoderSelectedStepId === null;
@@ -7055,7 +7144,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         toolsElements.outputBadge.textContent = selected ? formatByteSize(selected.byteLength) : 'No output';
         toolsElements.outputBadge.dataset.kind = selected ? '' : 'offline';
         toolsElements.selectedBytes.textContent = selected ? formatByteSize(selected.byteLength) : '0 B';
-        toolsElements.retainedBytes.textContent = `${formatByteSize(decoderRetainedBytes())} / 4 MiB`;
+        toolsElements.retainedBytes.textContent = formatByteSize(decoderRetainedBytes());
         toolsElements.duration.textContent = step ? `${step.duration_us.toLocaleString()} µs` : 'Not run';
         toolsElements.copyOutput.disabled = !selected;
         toolsElements.viewButtons.forEach(button => button.setAttribute('aria-pressed', String(button.dataset.decoderView === state.decoderView)));
@@ -7068,6 +7157,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         toolsElements.jwtInspect.disabled = state.jwtPending;
         toolsElements.jwtVerify.disabled = state.jwtPending;
         toolsElements.jwtCreate.disabled = state.jwtPending;
+        toolsElements.jwtCancel.disabled = toolsElements.jwtCreateCancel.disabled = !state.jwtController;
         toolsElements.jwtUnsignedRow.hidden = toolsElements.jwtAlgorithm.value !== 'none';
         toolsElements.jwtCreateSecret.disabled = toolsElements.jwtAlgorithm.value === 'none';
         toolsElements.jwtExpiry.disabled = false;
@@ -7186,20 +7276,22 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
 
       async function runJwtAction(action) {
         if (state.jwtPending) return;
+        let run = null;
         try {
           const token = toolsElements.jwtToken.value.trim();
           if (!token) throw new TypeError('Enter a compact JWT first.');
           state.jwtPending = true;
-          setToolsNotice('running', action === 'jwt_verify' ? 'Verifying the HMAC signature locally…' : 'Decoding the JWT locally…');
-          renderTools();
           if (action === 'jwt_verify' && toolsElements.jwtSecret.value.length === 0) {
             throw new TypeError('HMAC verification needs a secret. The previous inspection is unchanged.');
           }
+          run = startToolsOperation(action === 'jwt_verify' ? 'Verifying the HMAC signature locally' : 'Decoding the JWT locally');
+          state.jwtController = run.controller;
+          renderTools();
           const request = action === 'jwt_verify'
             ? {protocol_version: 1, action, token, secret: toolsElements.jwtSecret.value}
             : {protocol_version: 1, action, token};
           const response = await fetch('/api/decoder/actions', {method: 'POST', cache: 'no-store',
-            headers: {'Content-Type': 'application/json'}, body: JSON.stringify(request)});
+            headers: {'Content-Type': 'application/json'}, body: JSON.stringify(request), signal: run.controller.signal});
           const body = await response.json();
           if (!response.ok) throw new Error(body.error || `Decoder service returned ${response.status}`);
           if (!isJwtInspection(body)) throw new TypeError('Decoder service returned a malformed JWT result.');
@@ -7208,8 +7300,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             ? (action === 'jwt_verify' ? 'JWT signature check completed locally.' : 'JWT decoded without checking its signature.')
             : (body.error || 'JWT inspection failed.'));
         } catch (error) {
-          setToolsNotice('error', error.message);
+          if (error?.name === 'AbortError') setToolsNotice('ready', 'JWT inspection was cancelled. The previous inspection is unchanged.');
+          else setToolsNotice('error', error.message);
         } finally {
+          run?.finish();
+          state.jwtController = null;
           toolsElements.jwtSecret.value = '';
           state.jwtPending = false;
           renderTools();
@@ -7218,6 +7313,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
 
       async function createJwtToken() {
         if (state.jwtPending) return;
+        let run = null;
         try {
           const algorithm = toolsElements.jwtAlgorithm.value;
           let expiration = null;
@@ -7229,10 +7325,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             algorithm, secret: algorithm === 'none' ? '' : toolsElements.jwtCreateSecret.value,
             expires_in_seconds: expiration, allow_unsigned_confirmed: algorithm === 'none' && toolsElements.jwtConfirmUnsigned.checked};
           state.jwtPending = true;
-          setToolsNotice('running', 'Creating the test JWT locally…');
+          run = startToolsOperation('Creating the test JWT locally');
+          state.jwtController = run.controller;
           renderTools();
           const response = await fetch('/api/decoder/actions', {method: 'POST', cache: 'no-store',
-            headers: {'Content-Type': 'application/json'}, body: JSON.stringify(request)});
+            headers: {'Content-Type': 'application/json'}, body: JSON.stringify(request), signal: run.controller.signal});
           const body = await response.json();
           if (!response.ok) throw new Error(body.error || `Decoder service returned ${response.status}`);
           if (!isJwtCreation(body) || !body.ok || !body.token) throw new TypeError(body.error || 'Decoder service returned a malformed created token.');
@@ -7240,12 +7337,17 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           toolsElements.jwtConfirmUnsigned.checked = false;
           setToolsNotice('ready', `${algorithm} test token created locally. Its signature has not been trusted automatically.`);
         } catch (error) {
-          setToolsNotice('error', error.message);
+          if (error?.name === 'AbortError') setToolsNotice('ready', 'Test token creation was cancelled.');
+          else setToolsNotice('error', error.message);
+          run?.finish();
+          state.jwtController = null;
           toolsElements.jwtCreateSecret.value = '';
           state.jwtPending = false;
           renderTools();
           return;
         }
+        run.finish();
+        state.jwtController = null;
         toolsElements.jwtCreateSecret.value = '';
         state.jwtPending = false;
         await runJwtAction('jwt_inspect');
@@ -9664,6 +9766,64 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
       }
 
+      // Evidence times are relative to the store's first record, which the
+      // session summary reads over the whole store (first_time_ns). Until it
+      // answers, the earliest record read stands in. A cleared or replaced
+      // store starts again; a failed read is retried after 30 seconds.
+      let timeOriginRead = null;
+      function noteEvidenceTimeOrigin(networkEvents) {
+        const chips = globalThis.RebEvidenceChips;
+        if (!chips) return;
+        const records = [...state.events, ...(Array.isArray(networkEvents) ? networkEvents : [])];
+        const end = /^[0-9]{1,20}$/.test(state.eventStoreEnd ?? '') ? BigInt(state.eventStoreEnd) : null;
+        const key = `${state.sessionMode}:${records[0]?.session_id ?? ''}`;
+        const replaced = !timeOriginRead || timeOriginRead.key !== key || (end !== null && timeOriginRead.end !== null && end < timeOriginRead.end);
+        if (replaced) {
+          timeOriginRead = {key, end, at: 0, pending: false, done: false};
+          if (chips.timeOrigin()) { chips.setTimeOrigin(null); timeOriginChanged(); }
+        }
+        timeOriginRead.end = end;
+        if (!records.length) return;
+        let earliest = null;
+        for (const event of records) {
+          const time = event?.monotonic_time_ns;
+          if (typeof time !== 'string' || !/^[0-9]{1,20}$/.test(time)) continue;
+          const value = BigInt(time);
+          if (earliest === null || value < earliest) earliest = value;
+        }
+        const origin = chips.timeOrigin();
+        if (earliest !== null && origin?.basis !== 'store' && (!origin || earliest < origin.ns)) {
+          chips.setTimeOrigin(earliest, 'records');
+          if (origin) timeOriginChanged();
+        }
+        const read = timeOriginRead;
+        if (read.done || read.pending || Date.now() - read.at < 30000 || typeof fetch !== 'function') return;
+        read.pending = true;
+        read.at = Date.now();
+        fetch('/api/session/summary', {cache: 'no-store', signal: AbortSignal.timeout(30000)})
+          .then(response => response.ok ? response.json() : null)
+          .then(summary => {
+            const first = summary?.events?.first_time_ns;
+            if (timeOriginRead !== read || typeof first !== 'string' || !/^[0-9]{1,20}$/.test(first)) return;
+            read.done = true;
+            const before = chips.timeOrigin();
+            if (before?.basis === 'store' && before.ns === BigInt(first)) return;
+            chips.setTimeOrigin(first, 'store');
+            timeOriginChanged();
+          })
+          .catch(() => {})
+          .finally(() => { read.pending = false; });
+      }
+
+      // Redraws the views that show evidence times after the origin moved.
+      function timeOriginChanged() {
+        renderedVmFindings = null;
+        renderVmLab();
+        evidenceWorkspace.refreshTimes?.();
+        if (!document.querySelector('#screen-signals').hidden) renderFingerprintActivity();
+        if (!document.querySelector('#screen-backtrace').hidden) renderBacktrace();
+      }
+
       // The event poll alone decides the connection state, and it is bounded:
       // a backend that does not answer within 10 seconds is shown as not
       // responding (renderNetworkNotice names the same limit). The reads that
@@ -9720,6 +9880,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             if (!currentSignalKeys.has(key)) state.signalNewKeys.delete(key);
           }
           acceptEventWindow(body);
+          noteEvidenceTimeOrigin(body.network_events);
           const vmModel = vmFindingsFromEvents(state.events);
           state.eventVmFindings = vmModel.findings;
           state.vmFindings = vmVisibleFindings(state);
@@ -9742,8 +9903,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
               : state.sessionMode === 'demo' ? 'deterministic developer evidence loaded' : 'start a live capture'
             : (state.events.length > 0 ? 'last valid evidence retained' : 'no live evidence');
           renderShellStatus();
-          elements.gaps.textContent = eventGapLabel(shownSequenceGaps(), shownQueueDrops(), shownNamedGaps());
-          if (typeof markGapClauses === 'function') markGapClauses(shownSequenceGaps(), shownQueueDrops(), shownNamedGaps());
           renderNetworkNotice();
           renderRequests();
           renderInspector();
@@ -9830,6 +9989,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         state.sequenceGaps = 0n;
         state.queueDrops = 0n;
         state.namedGaps = [];
+        state.brokerRefusals = [];
         state.eventCountScope = 'rendered_window';
         state.networkEventsAvailable = false;
         state.networkEventsLimited = false;
@@ -9848,7 +10008,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         state.selectedField = null;
         state.lastUpdatedLabel = 'start a live capture';
         renderShellStatus();
-        elements.gaps.textContent = eventGapLabel(0n, 0n);
         setNetworkNotice('empty', 'No evidence is bundled. Start a live capture to populate the workspace.');
         renderRequests();
         renderEvidence();
@@ -10548,6 +10707,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         event.preventDefault();
         appendDecoderTransform();
       });
+      toolsElements.cancel.addEventListener('click', () => state.decoderController?.abort());
+      toolsElements.jwtCancel.addEventListener('click', () => state.jwtController?.abort());
+      toolsElements.jwtCreateCancel.addEventListener('click', () => state.jwtController?.abort());
       let decoderInputRenderFrame = 0;
       const scheduleDecoderInputRender = () => {
         if (decoderInputRenderFrame) return;

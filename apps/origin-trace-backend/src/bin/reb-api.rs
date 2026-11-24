@@ -97,10 +97,10 @@ enum Action {
         omit_content: bool,
         /// Also list the content reads (get_artifact_text, search_artifact_text,
         /// search_wasm_inspection, export_requests_har, and the offline Wasm
-        /// runs run_wasm_function and get_wasm_runs, which also need
-        /// --allow-effects to run) and lay out request and response bodies
-        /// with get_source_format. Their results are captured content
-        /// that goes to the model provider. Not authorization.
+        /// runs run_wasm_function, get_wasm_runs and get_wasm_run_memory, the
+        /// first of which also needs --allow-effects) and lay out request and
+        /// response bodies with get_source_format. Their results are captured
+        /// content that goes to the model provider. Not authorization.
         #[arg(long, conflicts_with = "omit_content")]
         allow_content: bool,
         /// One ordered level in place of the individual flags: read-only, ask,
@@ -1104,10 +1104,10 @@ async fn exchange(
         });
     }
     let mut bytes = Vec::new();
-    let response_limit = if export_package && status.is_success() {
-        origin_trace_backend::evidence_package::MAX_BYTES
-    } else if compare && status.is_success() {
-        origin_trace_backend::evidence_comparison::MAX_RESULT_BYTES
+    // An exported package is validated whole before it is written, and a
+    // comparison page is parsed whole, so both are read at any size.
+    let response_limit = if (export_package || compare) && status.is_success() {
+        usize::MAX
     } else {
         MEMORY_RESPONSE_BYTES
     };
@@ -1138,11 +1138,7 @@ async fn exchange(
                     unreadable: true,
                 });
             }
-            return Err(if export_package {
-                "Evidence package response exceeds its byte limit"
-            } else if compare {
-                "Evidence comparison response exceeds its byte limit"
-            } else if status.is_success() {
+            return Err(if status.is_success() {
                 "API response exceeds the 64 MiB a result is read into memory to omit content and summarize. Narrow the read with the operation's view, filter, limit or paging parameters"
             } else {
                 "API response exceeds 64 MiB"
@@ -1652,6 +1648,7 @@ mod tests {
             "get_wasm_functions",
             "get_wasm_function_graph",
             "get_wasm_runs",
+            "get_wasm_run_memory",
             "get_wasm_identification",
             "get_wasm_pseudocode",
             "get_wasm_module_diff",
@@ -2040,7 +2037,8 @@ mod tests {
         assert_eq!(operation.1, "/api/evidence/packages/validate");
         let detail = describe(&spec, operation, None).unwrap();
         assert_self_contained(&detail);
-        assert_eq!(detail["x-max-body-bytes"], 4 * 1024 * 1024);
+        // A package of any size is read; 2^53 - 1 is the unbounded marker.
+        assert_eq!(detail["x-max-body-bytes"], 9007199254740991u64);
         assert_eq!(detail["x-reb-execution"]["effects"], json!(["analysis"]));
         assert_eq!(detail["x-reb-execution-policy"]["automatic_retry"], "never");
         assert!(detail.get("actions").is_none());

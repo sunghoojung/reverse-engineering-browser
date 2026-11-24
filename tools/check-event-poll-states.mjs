@@ -77,7 +77,7 @@ function harness() {
     refreshArtifacts: async () => {},
     refreshVmAnalysis: async () => { calls.vm += 1; if (holdVm) await holdVm.promise; }
   };
-  const api = runInNewContext(`${models}\n${section('      async function refresh()', '      function useStandalonePreview()')}\n` +
+  const api = runInNewContext(`${models}\n${section('      // Evidence times are relative to the store', '      function useStandalonePreview()')}\n` +
     `${section('      async function performCaptureAction(', "      elements.signalStopCapture.addEventListener('click'")}\n` +
     ';({refresh, performCaptureAction, setEventConnection})', context);
   const next = path => {

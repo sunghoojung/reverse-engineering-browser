@@ -86,15 +86,21 @@ timestamps change only when request content changes.
 The fixed root folder has ID `1` and the name `API Collection`. The document is
 strictly validated before it replaces the last valid collection:
 
-- at most 32 folders and 128 requests;
-- at most four nested folder levels;
-- unique case-insensitive sibling folder and request names;
-- at most 32 variables and 32 KiB of variable text per scope;
-- at most 64 headers per request, each value at most 64 KiB;
-- at most 64 KiB per request body and 2 MiB for the complete document;
+- unique case-insensitive sibling folder and request names of at most 128
+  bytes, header names of at most 128 bytes and method templates of at most
+  256 bytes;
 - 100 millisecond to 30 second request timeouts;
 - no cycles, missing parents, duplicate IDs, controls in names, or malformed
   timestamps.
+
+The collection holds the researcher's own templates, so nothing else is
+bounded: any number of folders, requests, headers and variables, folders
+nested to any depth, and URLs, header values, variable values, bodies and the
+document of any size. The store is read and written whole, and a save's body
+is parsed as it arrives. `limits` is an empty object. A document written
+under the earlier limits, which recorded them there, still reads, and its
+next save records the empty object. Loads and saves wait for their answer
+with no client deadline.
 
 Credential, cookie and browser headers such as `Authorization`, `Cookie`,
 `Origin`, `Referer` and `User-Agent` are kept as written, so an authenticated

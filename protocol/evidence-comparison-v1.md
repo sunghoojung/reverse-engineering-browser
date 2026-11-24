@@ -14,16 +14,17 @@ reb-api call compare_evidence_packages --base-url http://127.0.0.1:8765 \
 The request is a JSON object with `left` and `right` package documents,
 `normalization_profile: "reb-declared-metadata-v1"`, and a nonempty unique
 `facets` array selected from `artifacts`, `coverage`, `events`, `gaps`,
-`provenance`, `relationships`, and `selection`. Optional `offset` defaults to 0;
-`limit` defaults to 50 and must be 1–100. Explicit null is invalid.
+`provenance`, `relationships`, and `selection`. Optional `offset` defaults to 0
+and is any nonnegative integer; `limit` defaults to 50 and must be 1–100.
+Explicit null is invalid.
 
 ## Meaning and identity
 
 The existing strict validator checks both original JSON package object tokens,
 including duplicate and escaped duplicate members, supported profiles, closed
 metadata fields, semantic digests, scoped references, gaps and coverage.
-Malformed, unsupported, contradictory, oversized or invalid packages fail the
-comparison. Rehashing forbidden fields does not authorize them. Unknown original
+Malformed, unsupported, contradictory or invalid packages fail the
+comparison; a package of any size compares. Rehashing forbidden fields does not authorize them. Unknown original
 fields and input values never appear in error messages.
 
 Normalization is the existing package semantic serialization profile: object
@@ -41,10 +42,11 @@ records. Local candidate counts do not establish that any candidate is related.
 
 Rows say `equal_declared_metadata`, `changed_declared_metadata`, `left_only`, or
 `right_only`. Each has exact input package/facet/key references and a stable row
-ID. Changed record fields include bounded scalar values; nested object/array
+ID. Changed record fields include their scalar values; nested object/array
 changes show their type/count and refer back to the original facet. Those
-summaries do not establish nested equality. At most 12 changed fields are
-shown; any omitted changed fields are counted explicitly.
+summaries do not establish nested equality. Every changed field is listed, and
+`differences_omitted` is always 0; earlier revisions listed 12 and counted the
+rest there.
 
 `selected_metadata_equal` compares only the requested representation, not the
 recording. It is null when record-only facets contain no rows. A left/right-only
@@ -71,51 +73,51 @@ not established even for identical metadata. Unsupported profiles/regimes are
 rejected, never silently coerced into a comparable profile. Supplied complete
 source scans and selection coverage never become complete-capture claims.
 
-## Bounds and effects
+## Resources and effects
 
-- Entire original request: 8 MiB + 4 KiB, one Content-Length and no
-  Transfer-Encoding; existing 5-second body deadline and loopback trust checks.
-- Each nested original package object token: at most 4 MiB. RawValue borrows the
+- The request and each nested original package object token are of any size,
+  with one Content-Length and no Transfer-Encoding; the body deadline grows by
+  a second per 16 MiB, and loopback trust checks apply. RawValue borrows each
   token instead of deserializing and reserializing it. No escaped JSON-string
-  wrapper or expansion is used. Leading/trailing envelope whitespace is part of
-  the outer limit; whitespace inside a package token counts against its limit.
-- Framing depth at most 33 before RawValue scanning. Each original independently
-  retains the validator's 32-level, 200,000-node, 4,096-byte string, 1,024-event,
-  64-artifact, 4,096-reference and 4,096-gap limits.
-- Options are bounded before materialization: profile token 128 bytes, facet
-  token 512 bytes, paging token five bytes. Unknown/duplicate outer keys fail.
-- Comparison reserves one of the existing two package permits with immediate
-  try-admission before reading its body. At most two comparison bodies/work items
-  can be retained; active validate/export work shares that same capacity. Full
-  capacity returns HTTP 503/resource_limit before ingestion, with no large-body
-  queue and no automatic retry. Closed admission returns dependency_unavailable.
-  A client still uploading after early rejection can observe a transport error.
-  Admission then waits for a slot of the four-operation I/O pool, with no
-  deadline.
+  wrapper or expansion is used.
+- Framing depth at most 33 before RawValue scanning, and each original at most
+  the validator's 32 levels: the package reader recurses once per level, and
+  no valid package nests deeper. Each original has any number of nodes,
+  records, references and gaps, and strings of any length.
+- Options are checked before materialization: profile token 128 bytes and facet
+  token 512 bytes, which their fixed values fit. Unknown/duplicate outer keys
+  fail.
+- Comparison acquires one of the existing two package permits before reading its
+  body, so at most two comparison bodies/work items are retained; active
+  validate/export work shares that same capacity. A later request waits for a
+  permit, with no admission deadline, and its body is read once it has one.
+  Closed admission returns dependency_unavailable. Admission then waits for a
+  slot of the four-operation I/O pool, with no deadline. Earlier revisions
+  refused a request past 8 MiB + 4 KiB or an original past 4 MiB, and answered
+  a third comparison with HTTP 503/resource_limit.
   The reserved package permit transfers into the blocking worker and remains
   owned until it finishes even if the caller disconnects. A body timeout,
   interrupted body or admission failure drops the permit without starting work.
   Comparison has no work deadline: it runs until it is done, and a request
   that goes away stops it between steps with HTTP 499 `cancelled`. Producers
   before this revision stopped it at 10 seconds with HTTP 408.
-- At most 2,181 logical rows, 100 retained response rows, 12 differences per row,
-  and 512 KiB encoded output. Output serialization enforces the bound while
-  writing. Offset is 0–2,181. A beyond-end page is empty, not a missing result.
-- No cross product: bounded maps and sorted full-key union, O(n log n) matching;
-  canonicalization/validation operate on independently bounded package trees.
+- Any number of logical rows, at most 100 response rows per page, and every
+  changed field of a row. A page past the end is empty, not a missing result.
+  Earlier revisions stopped at 2,181 rows, 12 differences per row and 512 KiB
+  of output.
+- No cross product: maps and a sorted full-key union, O(n log n) matching.
   Indexes borrow validated records. The engine retains only the requested page,
-  summary counts and bounded keys, not all result rows. Memory is bounded per
-  admitted operation by these input/tree/key/output limits, with at most two
-  comparison bodies/work items. Other routes retain their existing ingestion
-  policies; no global HTTP request-concurrency claim is made.
+  summary counts and keys, not all result rows. Memory grows with the two
+  packages, with at most two comparison bodies/work items held at a time.
+  Other routes retain their existing ingestion policies; no global HTTP
+  request-concurrency claim is made.
 
 The operation reads no configured evidence stores or raw artifacts, resolves no
 URLs, creates no helper, executes no code, changes no capture controls, and does
 not persist or automatically export anything. It cannot upgrade D10 supplied
 validity into D11 cooperative stopped-store verification. Errors use the shared
-code/details envelope. No HTTP success result is produced after work/output
-budget exhaustion. Offset paging repeats the bounded inert comparison; it does
-not create server state.
+code/details envelope. No HTTP success result is produced after cancellation.
+Offset paging repeats the inert comparison; it does not create server state.
 
 ## Secondary UI integration
 
@@ -123,9 +125,9 @@ Load `evidence_comparison.js` after `evidence_package.js`. Mount an empty host
 inside an explicitly opened secondary package-tools disclosure with
 `RebEvidenceComparison.mount(host, {fetcher: fetch})`. Mount is idempotent and
 returns `close`, `clear`, and `dispose`; closing retires active work without
-resubmission. The controller shares the existing bounded response reader and
-sends original valid-UTF-8 file bytes without JSON normalization. Two nonempty
-files are required, each capped at 4 MiB before reading. Selection, cancellation,
+resubmission. The controller shares the existing package response reader,
+which reads a result whole, and sends original valid-UTF-8 file bytes of any
+size without JSON normalization. Two nonempty files are required. Selection, cancellation,
 closing and disposal invalidate delayed file/body/service results. Failed paging
 preserves the last understandable result. Response IDs must match both selected
 original package IDs before results can render. Text is inert DOM content.

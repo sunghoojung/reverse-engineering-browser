@@ -215,12 +215,12 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       switch requestURL.path {
       case "", "/", "/index.html":
         response = (try Data(contentsOf: indexURL), "text/html; charset=utf-8", 200, [:])
-      case "/app.css", "/wasm_readable.css", "/xrefs_view.css", "/wasm_runner.css", "/entropy_map.css", "/wasm_identification.css", "/block_graph.css", "/wasm_diff_view.css", "/value_flow_view.css", "/flow_graph.css", "/flow_workspace.css", "/agent_panel.css", "/session_panel.css", "/debugger_sidebar.css", "/debugger_pause.css":
+      case "/app.css", "/wasm_readable.css", "/xrefs_view.css", "/wasm_runner.css", "/entropy_map.css", "/wasm_identification.css", "/block_graph.css", "/wasm_diff_view.css", "/value_flow_view.css", "/flow_graph.css", "/flow_workspace.css", "/agent_panel.css", "/session_panel.css", "/debugger_sidebar.css", "/debugger_pause.css", "/evidence_chips.css":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(String(requestURL.path.dropFirst()))),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/block_graph.js", "/wasm_readable.js", "/block_graph_layout.js", "/wasm_diff_view.js", "/graph_layout_client.js", "/flow_graph.js", "/flow_graph_model.js", "/flow_graph_layout.js", "/flow_graph_worker.js", "/flow_timeline.js", "/flow_workspace.js", "/pane_layout.js", "/app.js", "/agent_panel.js", "/session_panel.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_format.js", "/code_view.js", "/source_facts.js", "/source_search.js", "/source_tree.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/wasm_function_names.js", "/invocation_sites.js", "/entropy_map.js", "/wasm_identification.js", "/wasm_inspection.js", "/request_stack.js", "/traffic_view.js", "/traffic_payload.js", "/traffic_index.js", "/traffic_filter.js", "/traffic_columns.js", "/traffic_overview.js", "/traffic_copy.js", "/network_scope.js", "/request_tabs.js", "/traffic_response.js", "/traffic_headers.js", "/traffic_cookies.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/value_flow_view.js", "/wasm_runner.js", "/native_console_completion.js", "/native_console.js", "/debugger_sidebar.js", "/debugger_pause.js":
+      case "/block_graph.js", "/wasm_readable.js", "/block_graph_layout.js", "/wasm_diff_view.js", "/graph_layout_client.js", "/flow_graph.js", "/flow_graph_model.js", "/flow_graph_layout.js", "/flow_graph_worker.js", "/flow_timeline.js", "/flow_workspace.js", "/pane_layout.js", "/app.js", "/agent_panel.js", "/session_panel.js", "/command_palette.js", "/evidence_chips.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_format.js", "/code_view.js", "/source_facts.js", "/source_search.js", "/source_tree.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/wasm_function_names.js", "/invocation_sites.js", "/entropy_map.js", "/wasm_identification.js", "/wasm_inspection.js", "/request_stack.js", "/traffic_view.js", "/traffic_payload.js", "/traffic_index.js", "/traffic_filter.js", "/traffic_columns.js", "/traffic_overview.js", "/traffic_copy.js", "/network_scope.js", "/request_tabs.js", "/traffic_response.js", "/traffic_headers.js", "/traffic_cookies.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/value_flow_view.js", "/wasm_runner.js", "/native_console_completion.js", "/native_console.js", "/debugger_sidebar.js", "/debugger_pause.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
@@ -245,7 +245,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           "error": "Metadata packages are unavailable in stored-evidence native mode. Open a live workspace or the browser development UI.",
           "code": "dependency_unavailable", "details": [:]
         ]), "application/json; charset=utf-8", 503, [:])
-      case "/api/wasm/runs":
+      case "/api/wasm/runs", "/api/wasm/runs/memory":
         // Offline runs execute in the Rust backend's interpreter, which the
         // stored-evidence scheme does not host.
         response = (try JSONSerialization.data(withJSONObject: [
@@ -321,8 +321,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           profileResponse.1,
           profileResponse.2
         )
-      case "/api/artifacts":
-        response = (try artifactsResponse(for: requestURL), "application/json; charset=utf-8", 200, [:])
       case "/api/analysis/vm":
         response = (try vmAnalysisResponse(for: requestURL), "application/json; charset=utf-8", 200, [:])
       default:
@@ -393,16 +391,11 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     )
   }
 
+  /// The collection holds the researcher's own request templates, as many,
+  /// as deep and as large as they make, so it records no limits, as in the
+  /// Rust backend's workspace::Kind::Collection.
   private func apiCollectionLimits() -> [String: Int] {
-    [
-      "folders": 32,
-      "requests": 128,
-      "folder_depth": 4,
-      "variables_per_scope": 32,
-      "variable_bytes_per_scope": 32 * 1_024,
-      "request_body_bytes": 64 * 1_024,
-      "document_bytes": 2 * 1_024 * 1_024,
-    ]
+    [:]
   }
 
   private func emptyApiCollection() -> [String: Any] {
@@ -466,11 +459,10 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 
   private func normalizeApiCollectionVariables(_ value: Any?) throws -> [[String: Any]] {
-    guard let values = value as? [[String: Any]], values.count <= 32 else {
+    guard let values = value as? [[String: Any]] else {
       throw LocalHTTPError(status: 400, message: "API Collection variables are invalid")
     }
     var names = Set<String>()
-    var totalBytes = 0
     var normalized: [[String: Any]] = []
     normalized.reserveCapacity(values.count)
     for variable in values {
@@ -480,12 +472,12 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       let name = try apiCollectionText(
         variable["name"],
         label: "API Collection variable name",
-        maximumBytes: 64
+        maximumBytes: Int.max
       )
       let variableValue = try apiCollectionText(
         variable["value"],
         label: "API Collection variable value",
-        maximumBytes: 4 * 1_024,
+        maximumBytes: Int.max,
         allowEmpty: true
       )
       guard name.range(of: #"^[A-Za-z_][A-Za-z0-9_.-]*$"#, options: .regularExpression) != nil,
@@ -496,17 +488,13 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           message: "API Collection variable name is invalid or duplicated"
         )
       }
-      totalBytes += name.utf8.count + variableValue.utf8.count
-      guard totalBytes <= 32 * 1_024 else {
-        throw LocalHTTPError(status: 400, message: "API Collection variable scope exceeds 32 KiB")
-      }
       normalized.append(["name": name, "value": variableValue])
     }
     return normalized.sorted { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }
   }
 
   private func normalizeApiCollectionHeaders(_ value: Any?) throws -> [[String: Any]] {
-    guard let values = value as? [[String: Any]], values.count <= 64 else {
+    guard let values = value as? [[String: Any]] else {
       throw LocalHTTPError(status: 400, message: "API Collection request headers are invalid")
     }
     // The HTTP client computes framing and connection headers; credentials and
@@ -530,7 +518,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       let headerValue = try apiCollectionText(
         header["value"],
         label: "API Collection request header value",
-        maximumBytes: 64 * 1_024,
+        maximumBytes: Int.max,
         allowEmpty: true
       )
       let lowerName = name.lowercased()
@@ -603,8 +591,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     guard !name.contains("/") else {
       throw LocalHTTPError(status: 400, message: "API Collection request names cannot contain slashes")
     }
-    guard let body = request["body"] as? String, body.utf8.count <= 64 * 1_024 else {
-      throw LocalHTTPError(status: 400, message: "API Collection request body exceeds 64 KiB")
+    guard let body = request["body"] as? String else {
+      throw LocalHTTPError(status: 400, message: "API Collection request body must be text")
     }
     let timeout = try apiCollectionInteger(
       request["timeout_ms"],
@@ -625,7 +613,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       "url": try apiCollectionText(
         request["url"],
         label: "API Collection request URL template",
-        maximumBytes: 8 * 1_024,
+        maximumBytes: Int.max,
         trim: true
       ),
       "method": try apiCollectionText(
@@ -665,15 +653,16 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       ),
       try apiCollectionInteger(collection["contract_version"], label: "API Collection contract") == 1,
       collection["document_kind"] as? String == "api-collection",
-      let limits = collection["limits"] as? [String: Any],
-      NSDictionary(dictionary: limits).isEqual(to: apiCollectionLimits())
+      // A document written under other limits still reads; the next save
+      // records these.
+      collection["limits"] is [String: Any]
     else {
       throw LocalHTTPError(status: 400, message: "API Collection document contract is unsupported")
     }
     let generation = try apiCollectionInteger(collection["generation"], label: "API Collection generation")
     let updatedAt = try apiCollectionInteger(collection["updated_at_ms"], label: "API Collection update time")
-    guard let rawFolders = collection["folders"] as? [Any], 1...32 ~= rawFolders.count,
-      let rawRequests = collection["requests"] as? [Any], rawRequests.count <= 128
+    guard let rawFolders = collection["folders"] as? [Any], !rawFolders.isEmpty,
+      let rawRequests = collection["requests"] as? [Any]
     else {
       throw LocalHTTPError(status: 400, message: "API Collection counts are invalid")
     }
@@ -692,27 +681,28 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     else {
       throw LocalHTTPError(status: 400, message: "API Collection root folder is invalid")
     }
+    // A walk toward the root stops at a folder already known to reach it, so
+    // a hierarchy of any depth is checked in linear time and a cycle is found
+    // on the walk that enters it.
+    var reached: Set<Int> = [1]
     var siblingNames = Set<String>()
     for folder in folders {
-      let identifier = folder["id"] as! Int
       let parent = folder["parent_id"] as? Int
       let siblingKey = "\(parent.map(String.init) ?? "root")\u{0}\((folder["name"] as! String).lowercased())"
       guard siblingNames.insert(siblingKey).inserted else {
         throw LocalHTTPError(status: 400, message: "API Collection folder name is duplicated")
       }
-      var seen = Set([identifier])
+      var walked: Set<Int> = []
       var current = folder
-      var depth = 0
-      while let parentID = current["parent_id"] as? Int {
-        guard let parentFolder = foldersByID[parentID], seen.insert(parentID).inserted else {
+      while !reached.contains(current["id"] as! Int) {
+        guard walked.insert(current["id"] as! Int).inserted,
+          let parentID = current["parent_id"] as? Int, let parentFolder = foldersByID[parentID]
+        else {
           throw LocalHTTPError(status: 400, message: "API Collection folder hierarchy is invalid")
         }
         current = parentFolder
-        depth += 1
-        guard depth <= 4 else {
-          throw LocalHTTPError(status: 400, message: "API Collection folder depth exceeds four levels")
-        }
       }
+      reached.formUnion(walked)
     }
     var requestIDs = Set<Int>()
     var requestNames = Set<String>()
@@ -735,10 +725,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       "requests": requests.sorted { ($0["id"] as! Int) < ($1["id"] as! Int) },
       "limits": apiCollectionLimits(),
     ]
-    let encoded = try JSONSerialization.data(withJSONObject: normalized, options: [])
-    guard encoded.count <= 2 * 1_024 * 1_024 else {
-      throw LocalHTTPError(status: 400, message: "API Collection document exceeds 2 MiB")
-    }
     if generation == 0 {
       guard updatedAt == 0, folders.count == 1,
         (root["variables"] as? [Any])?.isEmpty == true, requests.isEmpty
@@ -767,27 +753,22 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     defer { Darwin.close(descriptor) }
     var metadata = stat()
     guard fstat(descriptor, &metadata) == 0,
-      (metadata.st_mode & S_IFMT) == S_IFREG,
-      metadata.st_size <= 2 * 1_024 * 1_024
+      (metadata.st_mode & S_IFMT) == S_IFREG
     else {
-      throw LocalHTTPError(status: 500, message: "API Collection store must be a bounded regular file")
+      throw LocalHTTPError(status: 500, message: "API Collection store must be a regular file")
     }
     do {
-      let maximumBytes = 2 * 1_024 * 1_024
       var data = Data()
-      data.reserveCapacity(min(Int(metadata.st_size), maximumBytes))
-      var buffer = [UInt8](repeating: 0, count: 16 * 1_024)
-      while data.count <= maximumBytes {
-        let requested = min(buffer.count, maximumBytes + 1 - data.count)
-        let count = Darwin.read(descriptor, &buffer, requested)
+      data.reserveCapacity(Int(metadata.st_size))
+      var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
+      while true {
+        let count = Darwin.read(descriptor, &buffer, buffer.count)
         if count < 0 {
+          if errno == EINTR { continue }
           throw LocalHTTPError(status: 500, message: "API Collection store could not be read")
         }
         if count == 0 { break }
         data.append(buffer, count: count)
-      }
-      guard data.count <= maximumBytes else {
-        throw LocalHTTPError(status: 500, message: "API Collection store exceeds 2 MiB")
       }
       return try decodeApiCollection(data)
     } catch let error as LocalHTTPError where error.status == 500 {
@@ -812,9 +793,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 
   private func apiCollectionRequestBody(_ request: URLRequest) throws -> Data {
-    try requestBody(
-      request, label: "API Collection action", maximumBytes: 2 * 1_024 * 1_024 + 64 * 1_024
-    )
+    try requestBody(request, label: "API Collection action", maximumBytes: nil)
   }
 
   /// A request body read whole; nil `maximumBytes` reads one of any size.
@@ -857,9 +836,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private func writeApiCollection(_ collection: [String: Any], lease: NativeWorkspaceLease) throws {
     var data = try apiCollectionData(collection)
     data.append(0x0a)
-    guard data.count <= 2 * 1_024 * 1_024 else {
-      throw LocalHTTPError(status: 400, message: "API Collection store exceeds 2 MiB")
-    }
     try lease.write(data)
   }
 
@@ -885,7 +861,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       label: "Expected API Collection generation"
     )
     let lease = try NativeWorkspaceLease(
-      at: apiCollectionStoreURL, label: "API Collection", maximumBytes: 2 * 1_024 * 1_024
+      at: apiCollectionStoreURL, label: "API Collection", maximumBytes: nil
     )
     defer { lease.close() }
     let current = try decodeApiCollection(lease.read())
@@ -1680,11 +1656,9 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   ) {
     let action: [String: Any]
     do {
-      let body = try apiCollectionRequestBody(request)
-      guard body.count <= 1_536 * 1_024,
-        let parsed = try JSONSerialization.jsonObject(with: body) as? [String: Any]
-      else {
-        throw LocalHTTPError(status: 400, message: "Decoder action body is malformed or oversized")
+      let body = try requestBody(request, label: "Decoder action", maximumBytes: nil)
+      guard let parsed = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+        throw LocalHTTPError(status: 400, message: "Decoder action body is malformed")
       }
       action = parsed
     } catch let error as LocalHTTPError {
@@ -1896,23 +1870,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       domain: "OriginTrace",
       code: 3,
       userInfo: [NSLocalizedDescriptionKey: message]
-    )
-  }
-
-  private func artifactsResponse(for requestURL: URL) throws -> Data {
-    let requestedLimit = URLComponents(url: requestURL, resolvingAgainstBaseURL: false)?
-      .queryItems?
-      .first(where: { $0.name == "limit" })?
-      .value
-      .flatMap(Int.init) ?? 500
-    let limit = min(max(requestedLimit, 1), 5000)
-    let privateFields = Set(["content_path"])
-    let artifacts = try artifactEntries().suffix(limit).map { artifact in
-      artifact.filter { !privateFields.contains($0.key) }
-    }
-    return try JSONSerialization.data(
-      withJSONObject: ["count": artifacts.count, "artifacts": artifacts],
-      options: []
     )
   }
 
@@ -3572,7 +3529,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
               fields: document.querySelectorAll('.field-row').length,
               artifacts: document.querySelectorAll('.source-tree-row[data-artifact-id]').length,
               sourceLines: document.querySelectorAll('.source-line').length,
-              broker: document.querySelector('#broker-status')?.textContent,
+              broker: document.querySelector('#broker-status .ev-chip-text')?.textContent,
               retiredLiveControlsAbsent: !Object.hasOwn(state, 'debuggerSession') &&
                 !document.querySelector('#websocket-inspector, #runtime-hook-traffic, #request-memory-pivot'),
               nativeWorkspace: window.__rebSmokeNativeWorkspace,

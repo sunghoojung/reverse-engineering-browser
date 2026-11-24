@@ -8,8 +8,8 @@ operation; its independently padded chunks are not necessarily one ordinary
 base64 entity. Run is explicit, and normal Decoder history keeps original input
 and completed steps intact when a later step fails.
 
-The same operations are available in the existing bounded native worker and
-local decoder API:
+The same operations are available in the existing native worker and local
+decoder API:
 
 ```sh
 build/reb-decoder transform protobuf-inspect < message.bin
@@ -19,8 +19,9 @@ build/reb-decoder transform grpc-web-text-inspect < response.txt
 
 There is no server request, schema download, `.proto` code generation, captured
 code execution, replay or credential use. Raw values can be private and remain
-local. Existing decoder HTTP/CLI/native bridges, CPU-time limit, worker
-isolation, input/output limits and source-history provenance apply unchanged.
+local. Existing decoder HTTP/CLI/native bridges, cancellation, worker isolation
+and source-history provenance apply unchanged. Reports keep every field, frame
+and trailer line, of any count.
 
 ## Protobuf report
 
@@ -56,8 +57,7 @@ trimmed or normalized.
 
 Trailers preserve ordered lowercase metadata names and exact values (including
 leading spaces and repeated keys). Lines are CRLF-terminated without an extra
-blank terminator. Control/non-ASCII bytes, malformed keys or excessive trailers
-fail. Trailers must be last; data or another trailer frame afterward is refused.
+blank terminator. Control/non-ASCII bytes or malformed keys fail. Trailers must be last; data or another trailer frame afterward is refused.
 A stream with no body trailers can still be inspected and reports
 trailers_present:false, since HTTP response headers are not part of these bytes.
 `rpc_success_verified:false` is always explicit: a displayed grpc-status value

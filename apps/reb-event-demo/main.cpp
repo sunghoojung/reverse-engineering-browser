@@ -17,6 +17,7 @@
 #include "components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "components/reverse_engineering_browser/common/native_worker_observation.h"
 #include "components/reverse_engineering_browser/common/native_worker_source.h"
+#include "reb/broker_refusal.hpp"
 #include "reb/event.hpp"
 #include "reb/spsc_ring.hpp"
 
@@ -78,7 +79,8 @@ bool CheckEventJson() {
                                           std::numeric_limits<std::uint64_t>::max(),
                                           std::numeric_limits<std::uint64_t>::max(),
                                           std::numeric_limits<std::uint64_t>::max());
-  event.header.process_id = std::numeric_limits<std::uint32_t>::max();
+  // The widest producer process ID; the next is the broker's own.
+  event.header.process_id = reb::kBrokerProcessId - 1;
   event.header.thread_id = std::numeric_limits<std::uint32_t>::max();
   event.header.tab_id = std::numeric_limits<std::uint32_t>::max();
   event.header.navigation_id = std::numeric_limits<std::uint64_t>::max();
@@ -99,7 +101,7 @@ bool CheckEventJson() {
   constexpr std::string_view kPrefix =
       "{\"protocol_version\":3,\"session_id\":\"18446744073709551615\","
       "\"sequence_number\":\"18446744073709551615\",\"monotonic_time_ns\":\"18446744073709551615\","
-      "\"process_id\":4294967295,\"thread_id\":4294967295,\"tab_id\":4294967295,"
+      "\"process_id\":4294967294,\"thread_id\":4294967295,\"tab_id\":4294967295,"
       "\"navigation_id\":\"18446744073709551615\",\"frame_id\":\"18446744073709551615\","
       "\"artifact_id\":\"18446744073709551615\",\"parent_event_id\":\"18446744073709551615\","
       "\"request_id\":\"18446744073709551615\",\"browser_context_id_high\":"

@@ -24,37 +24,89 @@ async function REBExecuteAnalyst(input, selectedBytes, userFunction) {
   const textOf = value => {
     try { return String(value); } catch { return "<unavailable>"; }
   };
-  // Results and logs are kept whole. Only nesting is bounded, because each
-  // level is a frame of this recursion and of JSON.stringify.
+  // Results and logs are kept whole at any depth. Values are copied and then
+  // written as JSON with explicit stacks, not recursion, so nesting costs
+  // heap rather than frames of this realm's stack.
   const serialize = value => {
     const seen = new WeakSet();
     let truncated = false;
-    const clone = (candidate, depth) => {
+    const leaf = candidate => {
       if (candidate === null || typeof candidate === "boolean" || typeof candidate === "number") return candidate;
       if (typeof candidate === "string") return candidate;
       if (typeof candidate === "bigint") return `${candidate}n`;
       if (typeof candidate === "undefined") return "[undefined]";
       if (typeof candidate === "symbol") return textOf(candidate);
       if (typeof candidate === "function") return `[Function ${textOf(candidate.name || "anonymous")}]`;
-      if (depth >= 256) { truncated = true; return "[MaxDepth]"; }
-      if (seen.has(candidate)) return "[Circular]";
-      seen.add(candidate);
-      let keys;
-      try { keys = Reflect.ownKeys(candidate); } catch { return "[Uninspectable]"; }
-      const output = Array.isArray(candidate) ? [] : {};
-      for (const rawKey of keys) {
-        const key = typeof rawKey === "symbol" ? textOf(rawKey) : rawKey;
-        let descriptor;
-        try { descriptor = Object.getOwnPropertyDescriptor(candidate, rawKey); } catch { descriptor = null; }
-        if (!descriptor) output[key] = "[Unavailable]";
-        else if (!("value" in descriptor)) output[key] = "[Accessor not invoked]";
-        else output[key] = clone(descriptor.value, depth + 1);
+      return undefined;
+    };
+    // Each pending copy: the source, and where its copy goes in its parent.
+    const copy = candidate => {
+      const root = {value: undefined};
+      const pending = [[candidate, root, "value"]];
+      while (pending.length) {
+        const [source, parent, slot] = pending.pop();
+        const primitive = leaf(source);
+        if (primitive !== undefined) { parent[slot] = primitive; continue; }
+        if (seen.has(source)) { parent[slot] = "[Circular]"; continue; }
+        seen.add(source);
+        let keys;
+        try { keys = Reflect.ownKeys(source); } catch { parent[slot] = "[Uninspectable]"; continue; }
+        const output = Array.isArray(source) ? [] : Object.create(null);
+        parent[slot] = output;
+        // Pushed in reverse so the first key is copied first, as recursion did.
+        const children = [];
+        for (const rawKey of keys) {
+          const key = typeof rawKey === "symbol" ? textOf(rawKey) : rawKey;
+          let descriptor;
+          try { descriptor = Object.getOwnPropertyDescriptor(source, rawKey); } catch { descriptor = null; }
+          if (!descriptor) output[key] = "[Unavailable]";
+          else if (!("value" in descriptor)) output[key] = "[Accessor not invoked]";
+          else {
+            if (!(key in output)) output[key] = null;
+            children.push([descriptor.value, output, key]);
+          }
+        }
+        for (let index = children.length - 1; index >= 0; index -= 1) pending.push(children[index]);
       }
-      return output;
+      return root.value;
+    };
+    // JSON text of a copy: plain arrays and null-prototype objects whose
+    // leaves are JSON primitives. Array holes are written as null, as
+    // JSON.stringify writes them. Punctuation and keys are Token instances,
+    // which no copied value can be.
+    class Token { constructor(text) { this.text = text; } }
+    const comma = new Token(","), colon = new Token(":"), closeArray = new Token("]"), closeObject = new Token("}");
+    const write = copied => {
+      const parts = [];
+      const pending = [copied];
+      while (pending.length) {
+        const next = pending.pop();
+        if (next instanceof Token) { parts.push(next.text); continue; }
+        if (next === null || typeof next !== "object") { parts.push(JSON.stringify(next) ?? "null"); continue; }
+        const items = [];
+        if (Array.isArray(next)) {
+          parts.push("[");
+          for (let index = 0; index < next.length; index += 1) {
+            if (index) items.push(comma);
+            items.push(index in next ? next[index] : null);
+          }
+          items.push(closeArray);
+        } else {
+          parts.push("{");
+          for (const key of Object.keys(next)) {
+            if (items.length) items.push(comma);
+            items.push(new Token(JSON.stringify(key)), colon, next[key]);
+          }
+          items.push(closeObject);
+        }
+        for (let index = items.length - 1; index >= 0; index -= 1) pending.push(items[index]);
+      }
+      return parts.join("");
     };
     let text;
-    try { text = JSON.stringify(clone(value, 0)); } catch { text = '"[Unserializable]"'; truncated = true; }
-    if (text === undefined) text = '"[undefined]"';
+    try {
+      text = write(copy(value));
+    } catch { text = '"[Unserializable]"'; truncated = true; }
     return {text, truncated};
   };
   const deepFreeze = value => {

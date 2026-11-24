@@ -1,0 +1,176 @@
+/* Evidence chips (evidence_chips.js). Colors come only from the shell
+   tokens in app.css, so both themes follow them. Tones: loss is recorded
+   loss (the danger state), limit a sampling or window limit (the warning
+   state), neutral a plain count and ok a healthy state. */
+:root { --evidence-declared: var(--rp-iris); }
+
+.ev-icon { width: 10px; height: 10px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+
+.ev-chip-wrap, .ev-reason-wrap, .ev-class-wrap, .ev-time-wrap, .ev-limits { display: inline-flex; min-width: 0; max-width: 100%; }
+.ev-chip {
+  --tone: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--tone) 38%, transparent);
+  border-radius: var(--control-radius, 6px);
+  background: color-mix(in srgb, var(--tone) 9%, transparent);
+  color: var(--tone);
+  font: 500 11px/1 var(--sans);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transition: background-color 150ms ease, border-color 150ms ease;
+}
+.ev-chip[data-tone="neutral"] { --tone: var(--muted); border-color: var(--line); background: transparent; }
+.ev-chip[data-tone="loss"] { --tone: var(--state-danger); }
+.ev-chip[data-tone="limit"] { --tone: var(--state-warn); }
+.ev-chip[data-tone="ok"] { --tone: var(--state-ok); }
+.ev-chip:hover, .ev-chip[aria-expanded="true"] { background: color-mix(in srgb, var(--tone) 18%, transparent); }
+.ev-chip[data-tone="neutral"]:hover, .ev-chip[data-tone="neutral"][aria-expanded="true"] { background: var(--panel-3); color: var(--text); }
+.ev-chip[aria-pressed="true"] { border-color: var(--tone); background: color-mix(in srgb, var(--tone) 22%, transparent); }
+.ev-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ev-chip-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ev-chip-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: currentColor; }
+.ev-chip-chevron { width: 9px; height: 9px; opacity: 0.8; transition: transform 150ms ease; }
+.ev-chip[aria-expanded="true"] .ev-chip-chevron { transform: rotate(180deg); }
+/* A ghost chip is a quiet label (the status bar's connection) that still
+   opens its panel. */
+.ev-chip[data-variant="ghost"] { border-color: transparent; background: transparent; }
+.ev-chip[data-variant="ghost"]:hover, .ev-chip[data-variant="ghost"][aria-expanded="true"] { background: var(--panel-3); }
+
+/* Panels float beside their chip and stay after it in the DOM, so they
+   inherit nothing a dense strip sets on its text. */
+.ev-panel {
+  position: fixed;
+  z-index: 1000;
+  min-width: 220px;
+  max-width: min(380px, calc(100vw - 16px));
+  overflow: auto;
+  padding: 8px 10px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  box-shadow: 0 8px 24px var(--shadow);
+  color: var(--text);
+  font: 11px/1.45 var(--sans);
+  white-space: normal;
+  text-align: left;
+  cursor: auto;
+}
+.ev-panel-head { display: flex; align-items: baseline; gap: 10px; padding-bottom: 6px; }
+.ev-panel-title { flex: 1 1 auto; min-width: 0; font-weight: 600; }
+.ev-panel-scope { flex: none; color: var(--faint); font-size: 10px; }
+.ev-panel-lede { margin: 0 0 6px; color: var(--muted); }
+.ev-panel-rows { margin: 0; padding: 0; list-style: none; }
+.ev-panel-row { --tone: var(--muted); padding: 6px 0; border-top: 1px solid var(--line-soft); }
+.ev-panel-row[data-tone="loss"] { --tone: var(--state-danger); }
+.ev-panel-row[data-tone="limit"] { --tone: var(--state-warn); }
+.ev-panel-line { display: flex; align-items: baseline; gap: 8px; }
+.ev-panel-label { flex: 1 1 auto; min-width: 0; display: inline-flex; align-items: baseline; gap: 6px; }
+.ev-panel-label::before { content: ""; width: 6px; height: 6px; flex: none; align-self: center; border-radius: 50%; background: var(--tone); }
+.ev-panel-count { flex: none; color: var(--text); font-variant-numeric: tabular-nums; }
+.ev-panel-detail { margin: 2px 0 0 12px; color: var(--muted); }
+.ev-panel-reasons { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+.ev-panel-row .ev-panel-reasons { margin: 5px 0 0 12px; }
+.ev-panel-reason { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ev-panel-reason > .ev-reason-wrap { flex: 1 1 auto; }
+.ev-panel-reason > .ev-panel-count { color: var(--muted); }
+.ev-panel-note { margin: 6px 0 0; padding-top: 6px; border-top: 1px solid var(--line-soft); color: var(--muted); }
+.ev-panel-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; margin: 0; }
+.ev-panel-facts dt { color: var(--muted); }
+.ev-panel-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.ev-panel-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.ev-panel-action { height: 24px; padding: 0 10px; font-size: 11px; }
+
+.ev-reason {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 6px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 3px 6px;
+  border: 1px solid var(--line-soft);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font: 11px/1.3 var(--sans);
+  text-align: left;
+}
+.ev-reason:hover { border-color: var(--line); }
+.ev-reason:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ev-reason-token { min-width: 0; color: var(--faint); font: 10px/1.3 var(--mono); overflow-wrap: anywhere; }
+
+.ev-class {
+  --tone: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border: 1px solid color-mix(in srgb, var(--tone) 40%, transparent);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--tone);
+  font: 500 10px/1 var(--sans);
+  letter-spacing: 0.02em;
+}
+.ev-class[data-class="observed"] { --tone: var(--evidence-observed); }
+.ev-class[data-class="declared"] { --tone: var(--evidence-declared); }
+.ev-class[data-class="inferred"] { --tone: var(--evidence-inferred); }
+.ev-class[data-class="correlated"] { --tone: var(--evidence-correlated); }
+.ev-class[data-class="unknown"] { --tone: var(--evidence-unknown); }
+.ev-class:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.ev-tip {
+  position: fixed;
+  z-index: 1100;
+  max-width: min(320px, calc(100vw - 16px));
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-3);
+  box-shadow: 0 6px 18px var(--shadow);
+  color: var(--text);
+  font: 11px/1.4 var(--sans);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.ev-time { font-variant-numeric: tabular-nums; }
+.ev-time-button { padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-decoration: underline dotted color-mix(in srgb, currentColor 45%, transparent); text-underline-offset: 3px; }
+.ev-time-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+
+.ev-limits-button { display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 6px; border: 1px solid transparent; border-radius: var(--control-radius, 6px); background: transparent; color: var(--muted); font: 11px/1 var(--sans); }
+.ev-limits-button:hover, .ev-limits-button[aria-expanded="true"] { background: var(--panel-3); color: var(--text); }
+.ev-limits-button .ev-icon { width: 12px; height: 12px; }
+.ev-limits-list { margin: 0; padding-left: 16px; display: grid; gap: 4px; color: var(--text); }
+
+.ev-empty { display: grid; justify-items: start; gap: 6px; max-width: 52ch; padding: 16px; }
+.ev-empty-title { margin: 0; color: var(--text); font: 600 13px/1.3 var(--sans); }
+.ev-empty-reason { margin: 0; color: var(--muted); font: 12px/1.45 var(--sans); }
+.ev-empty-action { margin-top: 2px; }
+.ev-empty-why { display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; background: transparent; color: var(--muted); font: 11px/1.4 var(--sans); }
+.ev-empty-why:hover { color: var(--text); }
+.ev-empty-why[aria-expanded="true"] .ev-icon { transform: rotate(180deg); }
+.ev-empty-causes { margin: 0; padding-left: 16px; display: grid; gap: 3px; color: var(--muted); font: 11px/1.45 var(--sans); }
+.ev-empty-causes [data-applies="true"] { color: var(--text); }
+.ev-empty-applies { display: inline-block; margin-right: 6px; padding: 0 5px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); font: 500 10px/16px var(--sans); }
+
+/* A notice line: lead, plain text, chips, then actions at the end. It
+   wraps to a second line only when its chips do not fit, so no count is
+   ever cut off. */
+.ev-notice { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
+.ev-notice-lead { flex: none; color: var(--text); font-weight: 600; }
+.ev-notice-text { min-width: 0; color: var(--muted); }
+.ev-notice-chips { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
+.ev-notice-actions { display: inline-flex; align-items: center; gap: 2px; margin-left: auto; }
+.ev-notice-action { height: 22px; padding: 0 8px; border: 1px solid transparent; border-radius: var(--control-radius, 6px); background: transparent; color: var(--accent); font: 500 11px/1 var(--sans); white-space: nowrap; }
+.ev-notice-action:hover { background: var(--panel-3); }
+.ev-notice-dismiss { width: 22px; height: 22px; display: grid; place-items: center; padding: 0; border: 0; border-radius: var(--control-radius, 6px); background: transparent; color: var(--faint); }
+.ev-notice-dismiss:hover { background: var(--panel-3); color: var(--text); }
+.ev-notice-dismiss .ev-icon { width: 10px; height: 10px; }
+:is(.ev-notice-action, .ev-notice-dismiss):focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }

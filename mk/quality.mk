@@ -6,8 +6,8 @@ wire-decoder-check: $(WIRE_DECODER_EXECUTABLE)
 	node tools/check-wire-decoder.mjs $(WIRE_DECODER_EXECUTABLE) $(WIRE_DECODER_CHECK_FLAGS)
 
 MAGIC_DECODER_EXECUTABLE ?= $(DECODER_BINARY)
-magic-decoder-check: $(MAGIC_DECODER_EXECUTABLE) $(BUILD_DIR)/check-magic-decoder-limits
-	node tools/check-magic-decoder.mjs $(MAGIC_DECODER_EXECUTABLE) $(MAGIC_DECODER_CHECK_FLAGS) --limits=$(BUILD_DIR)/check-magic-decoder-limits
+magic-decoder-check: $(MAGIC_DECODER_EXECUTABLE) $(BUILD_DIR)/check-decoder-scale
+	node tools/check-magic-decoder.mjs $(MAGIC_DECODER_EXECUTABLE) $(MAGIC_DECODER_CHECK_FLAGS) --scale=$(BUILD_DIR)/check-decoder-scale
 
 native-tests: $(NATIVE_TEST_BINARIES)
 	@set -e; for test_binary in $(NATIVE_TEST_BINARIES); do "$$test_binary"; done
@@ -52,6 +52,8 @@ check: native-wasm-golden-check wasm-readable-values-check native-js-golden-chec
 		REB_SOURCE_FACTS_TEST_WORKER="$(abspath $(or $(CARGO_TARGET_DIR),apps/deobfuscator-worker/target))/debug/reb-deobfuscator-worker")
 	$(call ignored-rust-test,--test http,js_invocation_sites_real_worker_resolves_names_and_positions,\
 		REB_SOURCE_FACTS_TEST_WORKER="$(abspath $(or $(CARGO_TARGET_DIR),apps/deobfuscator-worker/target))/debug/reb-deobfuscator-worker")
+	$(call ignored-rust-test,--test http,decoder_real_worker_holds_inputs_of_any_size_over_http_and_cli,\
+		REB_DECODER_TEST_WORKER="$(abspath $(DECODER_BINARY))")
 
 # Owned dispatch-shape fixtures: each checked-in .wasm must be exactly what the
 # pinned wat development dependency builds from its .wat source, and every
@@ -357,6 +359,7 @@ clean:
 javascript-check: capture-completeness-check $(UI_STARTUP_DEPS)
 	@command -v node >/dev/null 2>&1 || { echo "Node.js is not installed" >&2; exit 1; }
 	@set -e; for source in apps/research-ui/*.js apps/runtime-hook-demo/*.mjs tools/*.mjs tools/*.cjs; do node --check "$$source"; done
+	node tools/check-evidence-chips.mjs
 	node tools/check-vm-request-linkage-ui.mjs
 	node tools/check-traffic-capture.mjs
 	node tools/check-traffic-selection-work.mjs

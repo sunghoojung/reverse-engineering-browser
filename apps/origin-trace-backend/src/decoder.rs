@@ -46,7 +46,7 @@ impl Decoder {
         }
     }
     pub fn state(&self) -> Value {
-        json!({"protocol_version":1,"available":worker::executable(&self.path),"busy":self.lock.try_lock().is_err(),"limits":{"input_bytes":1048576,"output_bytes":1048576,"pipeline_steps":16,"retained_bytes":4194304,"jwt_bytes":65536,"secret_bytes":4096,"json_depth":64,"json_tokens":100000,"operations":OPERATIONS,"jwt_algorithms":["HS256","HS384","HS512","none"]}})
+        json!({"protocol_version":2,"available":worker::executable(&self.path),"busy":self.lock.try_lock().is_err(),"operations":OPERATIONS,"jwt_algorithms":["HS256","HS384","HS512","none"]})
     }
     pub async fn action(&self, value: &Value) -> Result<Value> {
         validation::schema("DecoderAction", value, 400)?;
@@ -60,34 +60,36 @@ impl Decoder {
                 if !OPERATIONS.contains(&op) {
                     return Err(Error::bad("Decoder transform is not allowlisted"));
                 }
-                let encoded =
-                    validation::text(&value["input_base64"], "Decoder input", 1398108, true, true)?;
+                let encoded = validation::text(
+                    &value["input_base64"],
+                    "Decoder input",
+                    usize::MAX,
+                    true,
+                    true,
+                )?;
                 input = STANDARD
                     .decode(encoded)
                     .map_err(|_| Error::bad("Decoder input must be canonical Base64"))?;
-                if input.len() > 1048576 {
-                    return Err(Error::bad("Decoder input exceeds 1 MiB"));
-                }
                 args.extend(["transform".into(), op.into()]);
             }
             "jwt_inspect" => {
                 args.push("jwt-inspect".into());
-                input = validation::text(&value["token"], "JWT", 65536, true, true)?
+                input = validation::text(&value["token"], "JWT", usize::MAX, true, true)?
                     .as_bytes()
                     .to_vec();
             }
             "jwt_verify" => {
                 args.push("jwt-verify".into());
                 input = frame(&[
-                    validation::text(&value["token"], "JWT", 65536, true, true)?.as_bytes(),
-                    validation::text(&value["secret"], "JWT HMAC secret", 4096, false, true)?
+                    validation::text(&value["token"], "JWT", usize::MAX, true, true)?.as_bytes(),
+                    validation::text(&value["secret"], "JWT HMAC secret", usize::MAX, false, true)?
                         .as_bytes(),
                 ]);
             }
             "jwt_create" => {
                 let alg = validation::text(&value["algorithm"], "JWT algorithm", 16, false, false)?;
                 let secret =
-                    validation::text(&value["secret"], "JWT HMAC secret", 4096, true, true)?;
+                    validation::text(&value["secret"], "JWT HMAC secret", usize::MAX, true, true)?;
                 if alg == "none" {
                     if value["allow_unsigned_confirmed"] != true || !secret.is_empty() {
                         return Err(Error::bad(
@@ -113,8 +115,14 @@ impl Decoder {
                 };
                 args.extend(["jwt-create".into(), alg.into(), expiry]);
                 input = frame(&[
-                    validation::text(&value["payload_json"], "JWT payload", 57344, true, true)?
-                        .as_bytes(),
+                    validation::text(
+                        &value["payload_json"],
+                        "JWT payload",
+                        usize::MAX,
+                        true,
+                        true,
+                    )?
+                    .as_bytes(),
                     secret.as_bytes(),
                 ]);
             }
@@ -126,10 +134,10 @@ impl Decoder {
                     .with_code(Code::DependencyUnavailable),
             );
         }
-        // One decoder runs at a time, and a request waits its turn. Its own
-        // CPU-time limit stops runaway work; a wall-clock deadline would only
-        // refuse it on a busy machine. A request that goes away drops this
-        // future, which leaves the queue or kills the decoder.
+        // One decoder runs at a time, and a request waits its turn. A decode
+        // runs as long as its input needs, with no deadline or CPU-time limit
+        // that would refuse real work on a busy machine. A request that goes
+        // away drops this future, which leaves the queue or kills the decoder.
         let _guard = self.lock.lock().await;
         let output = worker::run(
             Command::new(&self.path)
@@ -138,36 +146,24 @@ impl Decoder {
                 .env("LC_ALL", "C")
                 .env("PATH", "/usr/bin:/bin"),
             &input,
-            Some(if action == "transform" {
-                1048576
-            } else {
-                262144
-            }),
+            None,
             None,
         )
         .await?;
-        // The decoder limits its own CPU time, and the kernel ends it with
-        // SIGXCPU when an input needs more.
         if let Some(signal) = output.signal {
-            return Err(if signal == libc::SIGXCPU {
-                Error::new(
-                    422,
-                    "The native decoder reached its two-second CPU-time limit",
-                )
-                .with_code(Code::ResourceLimit)
-            } else {
-                Error::new(
-                    422,
-                    format!("The native decoder stopped on signal {signal}"),
-                )
-            });
+            return Err(Error::new(
+                422,
+                format!("The native decoder stopped on signal {signal}"),
+            ));
         }
         if !output.success {
+            // Exit 2 is the decoder refusing its input; any other status is
+            // the decoder failing.
             return Err(Error::new(
-                if output.exit_code == Some(3) || action != "transform" {
-                    422
-                } else {
+                if output.exit_code == Some(2) && action == "transform" {
                     400
+                } else {
+                    422
                 },
                 if output.stderr.is_empty() {
                     "Native decoder rejected the operation".into()
@@ -211,10 +207,11 @@ impl Decoder {
         }
     }
 }
+/// Each part as an 8-byte big-endian length and its bytes.
 fn frame(parts: &[&[u8]]) -> Vec<u8> {
     let mut output = Vec::new();
     for part in parts {
-        output.extend_from_slice(&(part.len() as u32).to_be_bytes());
+        output.extend_from_slice(&(part.len() as u64).to_be_bytes());
         output.extend_from_slice(part);
     }
     output

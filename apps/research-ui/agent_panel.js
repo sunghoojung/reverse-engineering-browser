@@ -1673,6 +1673,7 @@
     if (!response) return;
     const empty = !transcript.rows().length;
     ingestRows(response.rows ?? []);
+    noteUnreadable(response);
     // After a new conversation the model has none of these rows; say so as turning on does.
     if (empty && response.rows?.length) transcript.add({id: rowId('n'), role: 'notice', text: 'Earlier rows from this session. They are shown here and not resent to the model.'});
     view.olderBefore = response.before;
@@ -1803,7 +1804,14 @@
   }
 
   // What the graph shows is also what the local transcript keeps.
-  function persist(row) { call('transcriptAppend', {row}).catch(() => {}); }
+  function persist(row) {
+    call('transcriptAppend', {row}).catch(error => appendNotice(`This row is shown but was not saved to the local transcript: ${bridgeFailure(error)}`, 'error'));
+  }
+  // Lines a torn write left in the file are skipped by count, never silently.
+  function noteUnreadable(page) {
+    const count = Number(page?.unreadable) || 0;
+    if (count) transcript.add({id: rowId('n'), role: 'notice', kind: 'error', text: `${count} unreadable ${count === 1 ? 'line' : 'lines'} of the local transcript ${count === 1 ? 'was' : 'were'} skipped here.`});
+  }
   function handleRuntimeEvent(event) {
     if (event.type === 'tool' && event.state !== 'running') {
       persist({role: 'tool', id: event.id, turnId: event.turnId, name: event.name, arguments: event.arguments, state: event.state,
@@ -1972,6 +1980,7 @@
         ingestRows(restored);
         transcript.add({id: rowId('n'), role: 'notice', text: 'Earlier rows from this session. They are shown here and not resent to the model.'});
       }
+      noteUnreadable(page);
       await call('panel', {visible: true});
     } catch (error) {
       appendNotice(bridgeFailure(error), 'error');
@@ -2112,11 +2121,8 @@
     const turnId = rowId('turn');
     const pins = view.pins.map(item => ({label: item.label, text: item.text, truncated: item.truncated, totalBytes: item.totalBytes}));
     const context = selectionContext();
-    // Composer text and pins as the panel limits them, with room for encoding.
-    if (utf8Bytes(text) + utf8Bytes(context) + pins.reduce((total, pin) => total + utf8Bytes(pin.text), 0) > 1024 * 1024) {
-      appendNotice('This turn is larger than 1 MiB. Remove a pin or shorten the question.', 'error');
-      return;
-    }
+    // A turn has no size cap of its own: what the model's context window
+    // cannot take, the provider refuses, and its error ends the turn visibly.
     try {
       const pinRows = view.pins.map(item => ({label: item.label, bytes: item.bytes, truncated: item.truncated}));
       view.running = true;

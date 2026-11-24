@@ -5,6 +5,7 @@
 //! Small per-record summaries are reused on a sliding tail; JSON trees are kept
 //! only for the two independent newest-event windows.
 use crate::{
+    broker_refusal::{self, RefusalCount},
     error::{Error, Result},
     evidence,
 };
@@ -32,6 +33,8 @@ pub struct EventWindow {
     pub queue_drops: u64,
     pub queue_drops_saturated: bool,
     pub named_gaps: Vec<NamedGap>,
+    /// Records the broker refused at validation, by category and reason.
+    pub broker_refusals: Vec<RefusalCount>,
     pub coverage: Value,
 }
 
@@ -81,6 +84,8 @@ struct Record {
     drops: u64,
     // Category and reason; rare, so boxed to keep ordinary summaries small.
     named_gap: Option<Box<(String, String)>>,
+    // Category and reason of a broker refusal; rare as well.
+    refusal: Option<Box<(String, &'static str)>>,
     network: bool,
     event: Option<Value>,
 }
@@ -210,6 +215,8 @@ impl EventWindowCache {
                 } else {
                     (0, None)
                 };
+                let refusal = broker_refusal::reason(&event)
+                    .map(|(category, reason)| Box::new((category.to_owned(), reason)));
                 snapshot.records.push(Record {
                     start: snapshot.start + position as u64,
                     end: snapshot.start + end as u64,
@@ -218,6 +225,7 @@ impl EventWindowCache {
                     sequence,
                     drops,
                     named_gap,
+                    refusal,
                     network: is_network(&event),
                     event: None,
                 });
@@ -419,6 +427,7 @@ fn summarize(
         queue_drops: 0,
         queue_drops_saturated: false,
         named_gaps: Vec::new(),
+        broker_refusals: Vec::new(),
         coverage: Value::Null,
     };
     let mut marks: HashMap<(u64, u64), (u64, u64, HashSet<u64>)> = HashMap::new();
@@ -453,6 +462,9 @@ fn summarize(
                     });
                 }
             }
+        }
+        if let Some(refusal) = &record.refusal {
+            broker_refusal::count(&mut window.broker_refusals, &refusal.0, refusal.1, 1);
         }
         let keep_general = index >= general_start;
         let keep_network = record.network

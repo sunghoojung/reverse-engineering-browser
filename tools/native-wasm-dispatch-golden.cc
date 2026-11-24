@@ -10,6 +10,7 @@
 #include <string_view>
 
 #include "../browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_wasm_dispatch.h"
+#include "reb/broker_refusal.hpp"
 #include "reb/event.hpp"
 #include "reb/wasm_dispatch.hpp"
 
@@ -42,7 +43,9 @@ int main(int argc, char** argv) {
     native.header.session_id = native.header.sequence_number = native.header.monotonic_time_ns =
         native.header.frame_id = native.header.artifact_id =
             std::numeric_limits<std::uint64_t>::max();
-    native.header.process_id = native.header.thread_id = std::numeric_limits<std::uint32_t>::max();
+    // The widest producer process ID; the next is the broker's own.
+    native.header.process_id = reb::kBrokerProcessId - 1;
+    native.header.thread_id = std::numeric_limits<std::uint32_t>::max();
   } else if (mode == "function")
     payload.function_index = 1;
   else if (mode == "count")
@@ -137,8 +140,8 @@ int main(int argc, char** argv) {
       native.header.session_id = native.header.sequence_number = native.header.monotonic_time_ns =
           native.header.frame_id = native.header.artifact_id =
               std::numeric_limits<std::uint64_t>::max();
-      native.header.process_id = native.header.thread_id =
-          std::numeric_limits<std::uint32_t>::max();
+      native.header.process_id = reb::kBrokerProcessId - 1;
+      native.header.thread_id = std::numeric_limits<std::uint32_t>::max();
     } else if (kind == "table")
       indirect.table_index = 1;
     else if (kind == "offset")

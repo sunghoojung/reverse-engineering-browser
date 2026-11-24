@@ -178,8 +178,9 @@ authorization.
 
 `x-reb-mcp.content_reads` names the operations whose purpose is captured
 content, `get_artifact_text`, `search_artifact_text`, `search_wasm_inspection`
-and `export_requests_har`, and the offline Wasm runs `run_wasm_function` and
-`get_wasm_runs`, since running captured code discloses what it computes. They are listed only
+and `export_requests_har`, and the offline Wasm runs `run_wasm_function`,
+`get_wasm_runs` and `get_wasm_run_memory`, since running captured code
+discloses what it computes. They are listed only
 with `--allow-content` (which `full` sets, and which conflicts with
 `--omit-content`), and a call without it is refused before any request. With
 it, `get_source_format` also lays out request and response bodies. Content is
@@ -389,10 +390,11 @@ below `--allow-content`. See [WASM pseudocode](wasm-pseudocode-v1.md).
 
 `run_wasm_function` projects `POST /api/wasm/runs`: one confirmed run of one
 function of a captured module in the backend's `wasmi` interpreter, with every
-import stubbed. Running captured code is a content read, so MCP lists it, and
-`get_wasm_runs` (`GET /api/wasm/runs`, the stored derived records), only with
-`--allow-content` (`x-reb-mcp.content_reads`, which only `--permission full`
-sets). Running is also effectful (`code-execution`, `filesystem-write`), so it
+import stubbed. Running captured code is a content read, so MCP lists it,
+`get_wasm_runs` (`GET /api/wasm/runs`, the stored derived records) and
+`get_wasm_run_memory` (`GET /api/wasm/runs/memory`, the bytes of one read, in
+pages) only with `--allow-content` (`x-reb-mcp.content_reads`, which only
+`--permission full` sets). Running is also effectful (`code-execution`, `filesystem-write`), so it
 needs `--allow-effects` too, and the server refuses a body without
 `confirm_offline_execution: true` before reading the artifact. See
 [WASM run v1](wasm-run-v1.md).
@@ -731,6 +733,7 @@ plain message:
 | `queue_drops` | Records lost to a full queue, beyond named gap markers. |
 | `sequence_gaps` | Sequence numbers missing inside the stored events. |
 | `named_gap` | A producer named why it stopped, with `category`, `reason` and `count`. A reason containing `budget` or `limit` means a sampling budget filled. A Wasm reason ending in `filtered` is a sample-policy exclusion: that execution was not sampled and did not take a slot. |
+| `broker_refusal` | Severity `error`: the broker refused `count` records of `category` at validation, for `reason`, the first check they failed ([broker refusal v1](broker-refusal-v1.md#reasons)). Each is lost except for the `broker_refusal` record in its place. A capture bug. |
 | `browser_internal_excluded` | Capture counted `chrome:`, `devtools:` and other browser-internal requests, requests WebUI renderers sent (`webui_request`), or WebUI renderers, instead of recording them; `count` is the requests. Not a gap. |
 | `no_tab_traffic_excluded` | Capture counted extension-worker requests, DevTools loads, requests of service workers no page used in this browser, and browser-initiated prefetches with no page, instead of recording them; `count` is the requests. Not a gap. `REB_CAPTURE_EXTENSION_TRAFFIC=1` records the extension requests instead. |
 | `memory_cache_reuse_not_recorded` | Renderers from an earlier build counted memory-cache reuses past their 4,096 records per capture configuration instead of recording them; `count` is the reuses. Not a gap. Current renderers record every reuse, so it appears only for such evidence. Reuses in pages that are not ordinary (an SVG image's own document or a page popup), which no tab owns, are the separate `non_ordinary_page_reuse` exclusion. |
@@ -1148,19 +1151,19 @@ schema to claim an endpoint or authorization mechanism that is not implemented.
 ## Inert evidence package validation
 
 `POST /api/evidence/packages/validate` (`validate_evidence_package`) accepts a
-bounded supplied package directly. It returns `valid`, `invalid`, or
+supplied package of any size directly. It returns `valid`, `invalid`, or
 `unsupported` validation data with `origin: untrusted_input` and
 `authenticity: not_established`; HTTP 200 alone does not imply validity.
 Duplicate JSON keys are rejected before HTTP or CLI materialization. See
 [Evidence Package v1](evidence-package-v1.md) for the closed metadata schema,
-canonical serialization/digest, limits, safe issues, and provenance boundaries.
+canonical serialization/digest, nesting depth, safe issues, and provenance boundaries.
 No source store or artifact content is accessed, and no export is implied.
 
 
 ## Guarded evidence package export
 
 `POST /api/evidence/packages/export` (`export_evidence_package`) reads an exact
-bounded event/artifact selection from the configured local stores. It requires
+event/artifact selection of any size from the configured local stores. It requires
 updated producer guard files and stopped relevant writers, fully scans requested
 sources, verifies complete selected blobs, and emits closed metadata with honest
 coverage and unknown historical provenance. Empty selection reads no sources.
@@ -1170,7 +1173,7 @@ included. Source/guard aliases and unsafe store permissions fail closed.
 Use `reb-api call export_evidence_package --body-file selection.json --output
 selected.reb-evidence.json` with the usual endpoint option. See
 [Evidence Package v1](evidence-package-v1.md#selected-stopped-store-export) for
-request shape, safe persistence, exact limits, lease compatibility and stable
+request shape, safe persistence, resources, lease compatibility and stable
 error reasons. Backend event clear now also requires matching exclusive guards
 for all existing configured outputs; legacy unguarded clear returns 503.
 
@@ -1192,10 +1195,10 @@ offsets (end exclusive) of the summaries' scope, `scan_limit`, separate
 cut-through record prefix is omitted, not parsed as a new record.
 
 The summaries cover the whole store. The event index
-(`events.jsonl.events-v1`, layout `reb-event-index-v1/6`) folds every appended
-record into per-stream sequence bounds, the drop total, every named gap pair
-and the unreadable-line count, so a poll reads them without scanning the
-store. Once the index has caught up, `scope` is `"store"`, `scan_start` is
+(`events.jsonl.events-v1`, layout `reb-event-index-v1/7`) folds every appended
+record into per-stream sequence bounds, the drop total, every named gap pair,
+every broker refusal pair and the unreadable-line count, so a poll reads them
+without scanning the store. Once the index has caught up, `scope` is `"store"`, `scan_start` is
 `"0"` and `scan_end` is where the index ends, which can be far past
 `scan_limit`; both windows then end at that same record boundary, so a record
 counted is a record the windows could show. The index reads only complete
@@ -1223,6 +1226,13 @@ budget is exhausted, rather than freezing speculative losses.
 A canonical positive unsigned decimal gap-marker payload contributes its value
 to queue drops, otherwise the marker weighs one. Drop totals may overlap gaps.
 The respective `_saturated` flags distinguish clamping at u64 maximum.
+
+`broker_refusals` lists every `(category, reason)` pair of the
+[broker refusal](broker-refusal-v1.md) records in the same scope, in
+first-seen order, with a canonical decimal `count`. A filtered read lists them
+in its scan order. A refusal is neither a queue drop nor a named gap. A
+refusal in the refused record's place counts that record's sequence number
+as seen, so it leaves no sequence gap.
 
 Malformed or incomplete JSON in the scanned records fails the refresh; the UI
 retains its last valid data. A complete final record without a newline is valid.
@@ -1271,6 +1281,17 @@ fails. The decode reads that record only. It does not build an opcode
 workspace or open the module, so a module the detector never admits still
 has rows here. It does not recover a
 guest PC or a sample the payload does not store.
+
+A `broker_refusal` record includes `broker_refusal` beside the hex `payload`
+on every read that returns events. `status` `decoded` carries:
+- `reason`, the first check the refused record failed;
+- `identity`: `refused` when the header carries the refused record's place,
+  `broker` when it carries the broker's own stream;
+- `received_monotonic_time_ns`;
+- `refused`, the refused header fields as read.
+
+`status` `invalid` carries no fields and the record is not counted
+([rules](broker-refusal-v1.md#record)).
 
 `js_invocation_start`, `js_invocation_settle` and `js_invocation_request`
 include `js_invocation` beside the hex `payload`, decoded with the rules of

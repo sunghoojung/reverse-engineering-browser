@@ -51,6 +51,11 @@ message, listing, document-start record and transcript entry whole, pages
 drained reads, ends the connection's lifetime, and lists the bounds that
 remain.
 
+[Broker refusal v1](broker-refusal-v1.md) defines the record the event broker
+stores in place of one it refused at validation: the reason, the refused
+header fields as read, never the refused bytes, and how it closes the refused
+record's sequence hole.
+
 [Native debugger pause v1](native-debugger-pause-v1.md) defines the pausing
 debugger: its command socket, the one confirmed document, breakpoints,
 stepping, bounded ephemeral paused values, the visible lease that resumes a
@@ -374,8 +379,8 @@ observations lived in the removed debugger actions, and its schema left
 [feature design](../docs/product/request-field-provenance-v1.md) remains a
 historical record.
 
-[Float32 Comparison v1](float32-comparison-v1.md) defines explicit bounded binary32
-inputs, exact bits, finite metrics and completeness policies.
+[Float32 Comparison v1](float32-comparison-v1.md) defines explicit binary32
+inputs of any size, exact bits, finite metrics and completeness policies.
 
 [Supplied Evidence Comparison v1](evidence-comparison-v1.md) defines the read-only
 comparison of two strictly validated metadata packages, exact scoped references,
@@ -437,7 +442,8 @@ by script text key and UTF-16 anchor, with activation and parent activation.
 The numeric type is defined once per language: `reb::EventType` in
 `include/reb/event.hpp` and `reb::NativeProbeType` in the overlay's
 `common/native_probe_event.h`, kept equal by static assertions. JSON readers
-use the names.
+use the names. Type 53 is written only by the broker, so it has no overlay
+counterpart.
 
 | Type | Name | Payload | Contract |
 | --- | --- | --- | --- |
@@ -475,6 +481,7 @@ use the names.
 | 50 | `request_extension_link` | `include/reb/tab_link.hpp` | [native network v3](native-network-v3.md#request_extension_link-type-50) |
 | 51 | `script_compiled` | `include/reb/compiled_script.hpp` | [native compiled scripts](native-compiled-scripts-v2.md) |
 | 52 | `memory_cache_reuse` | `include/reb/network_scope.hpp` | [native network v3](native-network-v3.md#memory_cache_reuse-type-52) |
+| 53 | `broker_refusal` | `include/reb/broker_refusal.hpp` | [broker refusal v1](broker-refusal-v1.md) |
 | 66 | `debugger_attached` | `include/reb/debugger_pause.hpp` | [native debugger pause v1](native-debugger-pause-v1.md) |
 | 67 | `debugger_paused` | `include/reb/debugger_pause.hpp` | [native debugger pause v1](native-debugger-pause-v1.md) |
 | 68 | `debugger_resumed` | `include/reb/debugger_pause.hpp` | [native debugger pause v1](native-debugger-pause-v1.md) |

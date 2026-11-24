@@ -18,6 +18,7 @@
 //! A third index maps each request root of the signal store to its newest
 //! request signal profile, so Traffic's Signals finds a profile of any age.
 use crate::{
+    broker_refusal::{self, RefusalCount},
     error::{Error, Result},
     event_window::{self, NamedGap},
     index_db::{self, Indexed, Position, SqlResult},
@@ -38,8 +39,8 @@ pub const EDGES_SUFFIX: &str = ".edges-v1";
 pub const PROFILES_SUFFIX: &str = ".profiles-v1";
 /// The second layout adds the gap totals, the third the summary's counts,
 /// the fourth the debugger threads, the fifth their counts per kind, the
-/// sixth the flow graph's record kind.
-const EVENTS_FORMAT: &str = "reb-event-index-v1/6";
+/// sixth the broker refusals, the seventh the flow graph's record kind.
+const EVENTS_FORMAT: &str = "reb-event-index-v1/7";
 const EDGES_FORMAT: &str = "reb-edge-index-v1";
 const PROFILES_FORMAT: &str = "reb-signal-profile-index-v1";
 /// The largest event or edge record a trace reads.
@@ -76,6 +77,10 @@ pub(crate) const EVENT_SCHEMA: &str = "
         PRIMARY KEY(session, process)) WITHOUT ROWID;
     CREATE TABLE IF NOT EXISTS named_gaps(ordinal INTEGER PRIMARY KEY, category TEXT NOT NULL,
         reason TEXT NOT NULL, count INTEGER NOT NULL, UNIQUE(category, reason));
+    -- Records the broker refused at validation (protocol/broker-refusal-v1.md).
+    CREATE TABLE IF NOT EXISTS broker_refusals(ordinal INTEGER PRIMARY KEY,
+        category TEXT NOT NULL, reason TEXT NOT NULL, count INTEGER NOT NULL,
+        UNIQUE(category, reason));
     CREATE TABLE IF NOT EXISTS totals(id INTEGER PRIMARY KEY CHECK (id = 0),
         drops INTEGER NOT NULL, drops_saturated INTEGER NOT NULL, malformed INTEGER NOT NULL,
         events INTEGER NOT NULL DEFAULT 0, first_ns INTEGER, last_ns INTEGER);
@@ -258,6 +263,7 @@ struct Stream {
 struct EventFold {
     streams: HashMap<(i64, i64), Stream>,
     named: Vec<((String, String), u64)>,
+    refusals: Vec<RefusalCount>,
     drops: u64,
     drops_saturated: bool,
     malformed: u64,
@@ -521,6 +527,9 @@ impl index_db::Fold for EventFold {
                 if counted {
                     self.summary.record(&event);
                     thread_record(transaction, &event, start)?;
+                    if let Some((category, reason)) = broker_refusal::reason(&event) {
+                        broker_refusal::count(&mut self.refusals, category, reason, 1);
+                    }
                 }
                 self.record(transaction, &reference, &event, start, end, counted)
             }
@@ -585,6 +594,20 @@ impl index_db::Fold for EventFold {
                 )
                 .sql()?
                 .execute(params![category, reason, count as i64])
+                .sql()?;
+        }
+        for refusal in self.refusals.drain(..) {
+            transaction
+                .prepare_cached(
+                    "INSERT INTO broker_refusals(category, reason, count) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(category, reason) DO UPDATE SET count = count + excluded.count",
+                )
+                .sql()?
+                .execute(params![
+                    refusal.category,
+                    refusal.reason,
+                    refusal.count as i64
+                ])
                 .sql()?;
         }
         let (drops, saturated, malformed): (i64, bool, i64) = transaction
@@ -830,6 +853,8 @@ pub struct Totals {
     pub queue_drops_saturated: bool,
     /// In first-seen order.
     pub named_gaps: Vec<NamedGap>,
+    /// In first-seen order.
+    pub broker_refusals: Vec<RefusalCount>,
     pub malformed_lines: u64,
 }
 
@@ -871,6 +896,31 @@ pub fn totals(connection: &Connection, position: &Position) -> Result<Totals> {
         .sql()?
         .collect::<rusqlite::Result<Vec<_>>>()
         .sql()?;
+    let broker_refusals = connection
+        .prepare_cached("SELECT category, reason, count FROM broker_refusals ORDER BY ordinal")
+        .sql()?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? as u64,
+            ))
+        })
+        .sql()?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .sql()?
+        .into_iter()
+        .filter_map(|(category, reason, count)| {
+            let reason = broker_refusal::REASONS
+                .into_iter()
+                .find(|known| *known == reason)?;
+            Some(RefusalCount {
+                category,
+                reason,
+                count,
+            })
+        })
+        .collect();
     let (queue_drops, queue_drops_saturated, malformed_lines) = connection
         .query_row(
             "SELECT drops, drops_saturated, malformed FROM totals WHERE id = 0",
@@ -891,6 +941,7 @@ pub fn totals(connection: &Connection, position: &Position) -> Result<Totals> {
         queue_drops,
         queue_drops_saturated,
         named_gaps,
+        broker_refusals,
         malformed_lines,
     })
 }
@@ -1668,5 +1719,68 @@ mod tests {
             .read(&store, 1, crate::app::validate_event, None)
             .unwrap();
         assert_eq!(grown.sequence_gaps, window.sequence_gaps);
+    }
+
+    /// Broker refusals count by category and reason in first-seen order, in
+    /// the index as in the window, and a refusal in the refused record's place
+    /// leaves no sequence hole. A refusal whose fields disagree counts nothing.
+    #[test]
+    fn broker_refusals_match_the_window_and_fill_their_place() {
+        use crate::broker_refusal::tests::record;
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("events.jsonl");
+        let call = |sequence: u64| {
+            json!({"protocol_version":3,"session_id":"1","sequence_number":sequence.to_string(),
+                "monotonic_time_ns":"1","navigation_id":"0","frame_id":"0","artifact_id":"0",
+                "request_id":"0","process_id":7,"category":"canvas","type":"api_call",
+                "payload_encoding":"hex","payload":"","payload_size":0})
+        };
+        let mut invalid = record(6, 5, "canvas");
+        invalid["thread_id"] = json!(9);
+        let rows = [
+            call(1),
+            record(2, 5, "canvas"),
+            call(3),
+            record(4, 1, "canvas"),
+            record(5, 6, "webgl"),
+            invalid,
+            call(7),
+        ];
+        let text: String = rows.iter().map(|row| format!("{row}\n")).collect();
+        std::fs::write(&store, &text).unwrap();
+        let mut indexes = Indexes::new(
+            &store,
+            &root.path().join("trace.jsonl"),
+            &root.path().join("signals.jsonl"),
+        );
+        let totals = indexes.event_totals(far()).unwrap().unwrap();
+        let window = crate::event_window::EventWindowCache::default()
+            .read(&store, 1, crate::app::validate_event, None)
+            .unwrap();
+        assert_eq!(totals.broker_refusals, window.broker_refusals);
+        let counted: Vec<_> = totals
+            .broker_refusals
+            .iter()
+            .map(|refusal| (refusal.category.as_str(), refusal.reason, refusal.count))
+            .collect();
+        assert_eq!(
+            counted,
+            [
+                ("canvas", "reserved", 1),
+                ("canvas", "protocol_version", 1),
+                ("unknown", "category", 1)
+            ]
+        );
+        // Process 7 holds 1 to 7 but 4, whose refusal took the broker's stream.
+        assert_eq!((totals.sequence_gaps, window.sequence_gaps), (1, 1));
+        let mut more = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&store)
+            .unwrap();
+        use std::io::Write;
+        writeln!(more, "{}", record(8, 5, "canvas")).unwrap();
+        let grown = indexes.event_totals(far()).unwrap().unwrap();
+        assert_eq!(grown.broker_refusals[0].count, 2);
+        assert_eq!(grown.sequence_gaps, 1);
     }
 }

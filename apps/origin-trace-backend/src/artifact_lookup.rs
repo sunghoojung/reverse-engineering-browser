@@ -752,7 +752,6 @@ mod tests {
             evidence::find_artifact(root.path(), "2").unwrap()["url"],
             url
         );
-        assert_eq!(evidence::artifacts(root.path(), 10).unwrap().len(), 2);
         let filter = crate::artifact_query::ArtifactFilter::default();
         let page =
             crate::artifact_query::read(root.path(), &filter, crate::event_query::Cursor::Tail, 10)

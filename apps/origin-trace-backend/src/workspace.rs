@@ -41,39 +41,11 @@ impl Kind {
             Self::Analyst => "files",
         }
     }
-    /// The Analyst library has no byte limit: it holds the researcher's own
-    /// scripts and notes, and grows with them.
-    fn maximum(self) -> usize {
-        match self {
-            Self::Collection => 2 * 1024 * 1024,
-            Self::Analyst => usize::MAX,
-        }
-    }
-    /// What `limits` records. The Analyst library has none, so it is empty.
+    /// What `limits` records. Both documents hold the researcher's own
+    /// folders, request templates, scripts and notes, as many, as deep and as
+    /// large as they make, so it is empty.
     pub fn limits(self) -> Value {
-        match self {
-            Self::Collection => {
-                json!({"folders":32,"requests":128,"folder_depth":4,"variables_per_scope":32,"variable_bytes_per_scope":32768,"request_body_bytes":65536,"document_bytes":2097152})
-            }
-            Self::Analyst => json!({}),
-        }
-    }
-    /// A Collection replays its requests and is bounded like one; the
-    /// Analyst library holds the researcher's own folders and files, as many
-    /// and as deep as they make.
-    fn shape(self) -> Shape {
-        match self {
-            Self::Collection => Shape {
-                folders: 32,
-                items: 128,
-                depth: 4,
-            },
-            Self::Analyst => Shape {
-                folders: usize::MAX,
-                items: usize::MAX,
-                depth: usize::MAX,
-            },
-        }
+        json!({})
     }
     pub fn empty(self) -> Value {
         let mut folder = json!({"id":1,"name":self.root(),"parent_id":null});
@@ -83,33 +55,6 @@ impl Kind {
         json!({"contract_version":1,"document_kind":self.document(),"generation":0,"updated_at_ms":0,"folders":[folder],self.items():[],"limits":self.limits()})
     }
 }
-struct Shape {
-    folders: usize,
-    items: usize,
-    depth: usize,
-}
-/// One variable scope's bounds.
-pub struct Scope {
-    pub count: usize,
-    pub name_bytes: usize,
-    pub value_bytes: usize,
-    pub total_bytes: usize,
-}
-/// A Collection folder's or request's variables.
-const COLLECTION_SCOPE: Scope = Scope {
-    count: 32,
-    name_bytes: 64,
-    value_bytes: 4096,
-    total_bytes: 32768,
-};
-/// An analyst run's private variables: the researcher's own values, of any
-/// number and size.
-pub const ANALYST_SCOPE: Scope = Scope {
-    count: usize::MAX,
-    name_bytes: usize::MAX,
-    value_bytes: usize::MAX,
-    total_bytes: usize::MAX,
-};
 pub struct Store {
     pub path: PathBuf,
     pub kind: Kind,
@@ -119,7 +64,7 @@ impl Store {
         Self { path, kind }
     }
     fn read(&self) -> Result<Value> {
-        self.decode(durable::read_private(&self.path, self.kind.maximum())?)
+        self.decode(durable::read_private(&self.path, usize::MAX)?)
     }
     fn decode(&self, bytes: Option<Vec<u8>>) -> Result<Value> {
         match bytes {
@@ -156,7 +101,7 @@ impl Store {
             MAX_SAFE_INTEGER,
         )?;
         let lease = Lease::acquire(&self.path)?;
-        let current = self.decode(lease.read(kind.maximum())?)?;
+        let current = self.decode(lease.read(usize::MAX)?)?;
         if current["generation"] != generation {
             return Err(Error::conflict(format!(
                 "{} changed in another window; refresh before saving",
@@ -167,14 +112,13 @@ impl Store {
                 current["generation"].as_u64().unwrap(),
             )));
         }
-        let shape = kind.shape();
-        let folders = array(&request["folders"], shape.folders, "Workspace folders")?
+        let folders = array(&request["folders"], "Workspace folders")?
             .iter()
             .map(|v| folder(kind, v))
             .collect::<Result<Vec<_>>>()?;
         let mut values = Vec::new();
         let now = validation::now_ms();
-        for raw in array(&request[items], shape.items, "Workspace items")? {
+        for raw in array(&request[items], "Workspace items")? {
             let mut value = item(kind, raw, false)?;
             let previous = current[items]
                 .as_array()
@@ -202,20 +146,14 @@ impl Store {
         }
         let mut bytes = serde_json::to_vec(&candidate)?;
         bytes.push(b'\n');
-        if bytes.len() > kind.maximum() {
-            return Err(
-                Error::bad("Workspace store exceeds its byte limit").with_code(Code::ResourceLimit)
-            );
-        }
         lease.write(&bytes)?;
         Ok(candidate)
     }
 }
-fn array<'a>(value: &'a Value, limit: usize, label: &str) -> Result<&'a Vec<Value>> {
+fn array<'a>(value: &'a Value, label: &str) -> Result<&'a Vec<Value>> {
     value
         .as_array()
-        .filter(|a| a.len() <= limit)
-        .ok_or_else(|| Error::bad(format!("{label} are invalid or oversized")))
+        .ok_or_else(|| Error::bad(format!("{label} are invalid")))
 }
 fn id(value: &Value, label: &str) -> Result<u64> {
     validation::integer(value, label, 1, MAX_SAFE_INTEGER)
@@ -230,41 +168,33 @@ fn name(value: &Value, label: &str) -> Result<String> {
     }
     Ok(s.into())
 }
-pub fn variables(value: &Value, scope: &Scope, object: bool) -> Result<Value> {
+/// A variable scope: an analyst run's object, or a Collection folder's or
+/// request's list. The researcher's own values, of any number and size.
+pub fn variables(value: &Value, object: bool) -> Result<Value> {
     let pairs: Vec<_> = if object {
         value
             .as_object()
-            .filter(|o| o.len() <= scope.count)
-            .ok_or_else(|| Error::bad("Variables are invalid or oversized"))?
+            .ok_or_else(|| Error::bad("Variables are invalid"))?
             .iter()
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect()
     } else {
         let mut pairs = Vec::new();
-        for v in array(value, scope.count, "Variables")? {
+        for v in array(value, "Variables")? {
             validation::fields(v, &["name", "value"], "Variable")?;
             pairs.push((
-                validation::text(&v["name"], "Variable name", scope.name_bytes, false, false)?
-                    .into(),
+                validation::text(&v["name"], "Variable name", usize::MAX, false, false)?.into(),
                 v["value"].clone(),
             ));
         }
         pairs
     };
     let mut seen = BTreeMap::new();
-    let mut total = 0usize;
     for (key, value) in pairs {
-        if key.len() > scope.name_bytes
-            || !validation::variable_name(&key)
-            || seen.contains_key(&key)
-        {
+        if !validation::variable_name(&key) || seen.contains_key(&key) {
             return Err(Error::bad("Variable name is invalid or duplicated"));
         }
-        let value = validation::text(&value, "Variable value", scope.value_bytes, true, object)?;
-        total = total.saturating_add(key.len() + value.len());
-        if total > scope.total_bytes {
-            return Err(Error::bad("Variable scope exceeds its byte limit"));
-        }
+        let value = validation::text(&value, "Variable value", usize::MAX, true, object)?;
         seen.insert(key, value.to_owned());
     }
     if object {
@@ -293,10 +223,10 @@ pub fn headers(value: &Value) -> Result<Value> {
     ];
     let mut seen = BTreeSet::new();
     let mut output = Vec::new();
-    for v in array(value, 64, "Request headers")? {
+    for v in array(value, "Request headers")? {
         validation::fields(v, &["name", "value"], "Request header")?;
         let name = validation::text(&v["name"], "Request header name", 128, false, false)?;
-        let value = validation::text(&v["value"], "Request header value", 65_536, true, false)?;
+        let value = validation::text(&v["value"], "Request header value", usize::MAX, true, false)?;
         let lower = name.to_ascii_lowercase();
         if !name
             .bytes()
@@ -325,7 +255,7 @@ fn folder(kind: Kind, value: &Value) -> Result<Value> {
     };
     let mut folder = json!({"id":id(&value["id"],"Folder ID")?,"name":name(&value["name"],"Folder name")?,"parent_id":parent});
     if kind == Kind::Collection {
-        folder["variables"] = variables(&value["variables"], &COLLECTION_SCOPE, false)?;
+        folder["variables"] = variables(&value["variables"], false)?;
     }
     Ok(folder)
 }
@@ -354,7 +284,8 @@ fn item(kind: Kind, value: &Value, metadata: bool) -> Result<Value> {
     let mut result = json!({"id":id(&value["id"],"Item ID")?,"folder_id":id(&value["folder_id"],"Item folder ID")?,"name":name(&value["name"],"Item name")?});
     match kind {
         Kind::Collection => {
-            for (field, limit) in [("url", 8192), ("method", 256)] {
+            // A method template is a token; a URL template is as long as it is.
+            for (field, limit) in [("url", usize::MAX), ("method", 256)] {
                 let text = validation::text(&value[field], field, limit, false, false)?.trim();
                 if text.is_empty() {
                     return Err(Error::bad(format!("{field} is required")));
@@ -364,7 +295,7 @@ fn item(kind: Kind, value: &Value, metadata: bool) -> Result<Value> {
             result["body"] = json!(validation::text(
                 &value["body"],
                 "Request body",
-                65536,
+                usize::MAX,
                 true,
                 true
             )?);
@@ -375,7 +306,7 @@ fn item(kind: Kind, value: &Value, metadata: bool) -> Result<Value> {
                 30000
             )?);
             result["headers"] = headers(&value["headers"])?;
-            result["variables"] = variables(&value["variables"], &COLLECTION_SCOPE, false)?;
+            result["variables"] = variables(&value["variables"], false)?;
         }
         Kind::Analyst => {
             let kind = validation::text(&value["kind"], "File kind", 32, false, false)?;
@@ -448,7 +379,6 @@ pub fn normalize(kind: Kind, value: &Value) -> Result<Value> {
     if value["contract_version"] != 1
         || value["document_kind"] != kind.document()
         || !value["limits"].is_object()
-        || (kind == Kind::Collection && value["limits"] != kind.limits())
     {
         return Err(Error::bad("Workspace document contract is unsupported"));
     }
@@ -464,12 +394,11 @@ pub fn normalize(kind: Kind, value: &Value) -> Result<Value> {
         0,
         MAX_SAFE_INTEGER,
     )?;
-    let shape = kind.shape();
-    let mut folders = array(&value["folders"], shape.folders, "Workspace folders")?
+    let mut folders = array(&value["folders"], "Workspace folders")?
         .iter()
         .map(|v| folder(kind, v))
         .collect::<Result<Vec<_>>>()?;
-    let mut values = array(&value[items], shape.items, "Workspace items")?
+    let mut values = array(&value[items], "Workspace items")?
         .iter()
         .map(|v| item(kind, v, true))
         .collect::<Result<Vec<_>>>()?;
@@ -487,45 +416,30 @@ pub fn normalize(kind: Kind, value: &Value) -> Result<Value> {
         return Err(Error::bad("Workspace root folder is invalid"));
     }
     let mut names = BTreeSet::new();
-    // Each folder's depth is measured once: a walk toward the root stops at
-    // a folder already measured, so a hierarchy of any depth is checked in
-    // linear time and a cycle is found on the walk that enters it.
-    let mut depths = BTreeMap::new();
+    // A walk toward the root stops at a folder already known to reach it, so
+    // a hierarchy of any depth is checked in linear time and a cycle is found
+    // on the walk that enters it.
+    let mut reached = BTreeSet::new();
     for folder in &folders {
         let identifier = folder["id"].as_u64().unwrap();
         if identifier != 1 && folder["parent_id"].is_null() {
             return Err(Error::bad("Workspace has multiple root folders"));
         }
-        let mut path = Vec::new();
         let mut walked = BTreeSet::new();
         let mut current = identifier;
-        let mut depth = loop {
-            if let Some(&known) = depths.get(&current) {
-                break known;
-            }
+        while !reached.contains(&current) {
             if !walked.insert(current) {
                 return Err(Error::bad("Workspace folder hierarchy is invalid"));
             }
             let Some(parent) = by_id[&current]["parent_id"].as_u64() else {
-                depths.insert(current, 0);
-                break 0;
+                break;
             };
             if !by_id.contains_key(&parent) {
                 return Err(Error::bad("Workspace folder hierarchy is invalid"));
             }
-            path.push(current);
             current = parent;
-        };
-        for measured in path.into_iter().rev() {
-            depth += 1;
-            if depth > shape.depth {
-                return Err(Error::bad(format!(
-                    "Workspace folder depth exceeds {} levels",
-                    shape.depth
-                )));
-            }
-            depths.insert(measured, depth);
         }
+        reached.append(&mut walked);
         let key = (
             folder["parent_id"].as_u64(),
             folder["name"]
@@ -562,9 +476,6 @@ pub fn normalize(kind: Kind, value: &Value) -> Result<Value> {
     folders.sort_by_key(|v| v["id"].as_u64());
     values.sort_by_key(|v| v["id"].as_u64());
     let output = json!({"contract_version":1,"document_kind":kind.document(),"generation":generation,"updated_at_ms":updated,"folders":folders,items:values,"limits":kind.limits()});
-    if serde_json::to_vec(&output)?.len() > kind.maximum() {
-        return Err(Error::bad("Workspace document exceeds its byte limit"));
-    }
     if generation == 0
         && (updated != 0
             || output["folders"] != kind.empty()["folders"]

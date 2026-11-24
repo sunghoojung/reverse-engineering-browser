@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {runInNewContext} from 'node:vm';
+import {createRequire} from 'node:module';
+
+const {parseHTML} = createRequire(new URL('ui-startup-deps/', import.meta.url))('linkedom');
 
 const source = await readFile(new URL('../apps/research-ui/traffic_view.js', import.meta.url), 'utf8');
 const plain = value => JSON.parse(JSON.stringify(value));
@@ -50,24 +53,30 @@ for (const state of ['missing','loading','error','empty']) {
 }
 console.log('PASS saved reb-traffic-capture-v1 export copy: synthetic credentials/URLs/JSON/form/plain/binary preservation, nonmutating explicit redaction, original-byte equality and limitation disclosure (offline exporter library; no live UI)');
 
-// Native failed-request notices.
+// Native failed-request notices: the production notice, chips and models in
+// a LinkeDOM document (no rendering or focus).
 {
-  const models = await readFile(new URL('../apps/research-ui/evidence_models.js', import.meta.url), 'utf8');
-  const app = await readFile(new URL('../apps/research-ui/app.js', import.meta.url), 'utf8');
-  const start=app.indexOf('      function renderNetworkNotice()');
+  const ui = name => readFile(new URL(`../apps/research-ui/${name}`, import.meta.url), 'utf8');
+  const [models, app, chips] = await Promise.all(['evidence_models.js', 'app.js', 'evidence_chips.js'].map(ui));
+  const start=app.indexOf('      // A capture notice the researcher dismissed');
   const end=app.indexOf('      function textElement(',start);
   assert(start>=0 && end>start);
-  const state={sessionMode:'live',broker:'connected',events:[{category:'network',type:'request_completed',error_code:0,session_id:'1',process_id:1,sequence_number:'1'}],requests:[]};
-  let notice;
-  const networkNotice={hidden:false,textContent:'',dataset:{}};
+  const {window} = parseHTML('<!doctype html><html><body><div id="network-notice"></div><input id="filter"><button class="request-flag" data-flag="failed" aria-pressed="false">Failed</button></body></html>');
+  const document = window.document;
+  const state={sessionMode:'live',broker:'connected',connection:'connected',events:[{category:'network',type:'request_completed',error_code:0,session_id:'1',process_id:1,sequence_number:'1'}],requests:[],trafficFlags:{}};
+  const networkNotice=document.getElementById('network-notice');
+  const failedFlag=document.querySelector('.request-flag');
+  failedFlag.addEventListener('click',()=>{state.trafficFlags={...state.trafficFlags,failed:!state.trafficFlags.failed};failedFlag.setAttribute('aria-pressed',String(state.trafficFlags.failed));});
   const assertQuiet=()=>{assert.equal(networkNotice.hidden,true);assert.equal(networkNotice.textContent,'');};
-  const standingProse=/CDP capture|debugger is disconnected/;
+  const standingProse=/CDP capture|debugger is disconnected|Failed requests:/;
   const helperStart=source.indexOf('function trafficRequestFailed(');
   const helperEnd=source.indexOf('function renderTrafficRows(',helperStart);
-  const checks=runInNewContext(source.slice(helperStart,helperEnd)+'\n'+models+'\n'+app.slice(start,end)+';({renderNetworkNotice,trafficRequestFailed,trafficFailedRequestCount,trafficFailedRequestNotice})',{
-    state,TextEncoder,shownSequenceGaps:()=>0n,shownQueueDrops:()=>0n,eventCountScopeLabel:()=>"authored fixture",elements:{networkNotice},
-    setNetworkNotice(kind,text){notice={kind,text};networkNotice.hidden=false;networkNotice.textContent=text;networkNotice.dataset.kind=kind;}
-  });
+  const context={state,TextEncoder,document,window,globalThis:null,navigator:{},setTimeout,clearTimeout,
+    shownSequenceGaps:()=>0n,shownQueueDrops:()=>0n,shownNamedGaps:()=>[],eventCountScopeLabel:()=>'authored fixture',
+    elements:{networkNotice,requestFilter:document.getElementById('filter')},showCaptureGapsInEvidence(){}};
+  context.globalThis=context;
+  runInNewContext(chips,context);
+  const checks=runInNewContext(source.slice(helperStart,helperEnd)+'\n'+models+'\n'+app.slice(start,end)+';({renderNetworkNotice,trafficRequestFailed,trafficFailedRequestCount})',context);
   // Native rows from requestsFromEvents: request_failed sets failed and the Failed status label.
   const loadingFailed={id:'row-failed-1',path:'https://example.com/logo.png',method:'GET',status:'failed',failed:true,operation:'request_failed'};
   const nativeFailed={id:'row-failed-2',path:'https://example.com/asset',method:'GET',status:'failed',failed:true,operation:'request_failed'};
@@ -81,26 +90,35 @@ console.log('PASS saved reb-traffic-capture-v1 export copy: synthetic credential
   assert.equal(checks.trafficRequestFailed(httpError),false,'An HTTP error status is not the Failed row');
   assert.equal(checks.trafficRequestFailed({error_code:0,status:200,failed:false,path:'https://example.com/quiet'}),false);
   assert.equal(checks.trafficRequestFailed({type:'gap',dropped_connections:4}),false);
-  assert.equal(checks.trafficFailedRequestNotice([ok,httpError]),'');
-  assert.equal(checks.trafficFailedRequestNotice([ok,loadingFailed]),'Failed requests: 1.');
+  assert.equal(checks.trafficFailedRequestCount([ok,httpError]),0);
   assert.equal(checks.trafficFailedRequestCount([loadingFailed,nativeFailed,ok,httpError]),2);
   const eventsBefore=JSON.stringify(state.events);
   state.requests=[ok,loadingFailed];
   checks.renderNetworkNotice();
-  assert.equal(notice.kind,'empty','A failed HTTP row does not become a capture gap');
-  assert.match(notice.text,/Failed requests: 1\./);
-  assert.doesNotMatch(notice.text,/queue reports|Dropped:/);
-  assert.doesNotMatch(notice.text, standingProse);
+  const failedChip=()=>networkNotice.querySelector('.ev-chip[data-key="failed"]');
+  assert.equal(networkNotice.dataset.kind,'empty','A failed HTTP row does not become a capture gap');
+  assert.equal(networkNotice.hidden,false);
+  assert.equal(failedChip().textContent,'1 failed');
+  assert.equal(failedChip().getAttribute('aria-label'),'1 failed request: show only failed requests');
+  assert.equal(failedChip().getAttribute('aria-pressed'),'false');
+  assert.equal(networkNotice.querySelector('.ev-notice-lead').hidden,true,'Failed rows alone are not an incomplete capture');
+  assert.equal(networkNotice.querySelector('.ev-notice-dismiss'),null,'Only a gap line can be dismissed');
+  assert.doesNotMatch(networkNotice.textContent,/queue reports|Dropped:|sequence gap/);
+  assert.doesNotMatch(networkNotice.textContent, standingProse);
   assert.equal(JSON.stringify(state.events),eventsBefore);
   assert.equal(state.events[0].error_code,0);
+  // The chip is the Failed filter.
+  failedChip().click();
+  assert.equal(state.trafficFlags.failed,true);
+  assert.equal(failedChip().getAttribute('aria-pressed'),'true','The chip shows the filter it applies');
   state.requests=[ok,loadingFailed,nativeFailed];
   checks.renderNetworkNotice();
-  assert.equal(notice.kind,'empty');
-  assert.match(notice.text,/Failed requests: 2\./);
+  assert.equal(networkNotice.dataset.kind,'empty');
+  assert.equal(failedChip().textContent,'2 failed');
   state.requests=[ok,httpError];
   checks.renderNetworkNotice();
   assertQuiet();
-  console.log('PASS native failed-row notices without changing queue or error counters');
+  console.log('PASS native failed-row notices without changing queue or error counters: one chip that is the Failed filter (LinkeDOM model)');
 }
 
 // Native scope buttons label tabs by a known domain, else a positional fallback.

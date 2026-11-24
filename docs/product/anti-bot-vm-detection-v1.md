@@ -283,6 +283,13 @@ its parent. The removed `max_artifact_bytes`, `max_js_*` and `max_wasm_*`
 limits are absent from its profile, so its profile digest differs; earlier
 documents that carry them remain valid.
 
+Producer `1.13.0` lists every site of an artifact's dispatch classification,
+in byte order, and every decoded site of a Wasm module's dispatch inventory,
+ranked. Earlier producers listed the 256 strongest or best ranked and counted
+the rest in `omitted_site_count`, which a Wasm inventory also reported as a
+`dispatch-inventory-limit` coverage omission. `omitted_site_count` is now
+always 0, no such omission is added, and the profile digest is unchanged.
+
 The generic JavaScript signal families include:
 
 - a persistent loop with switch, function-array, object-map, or indirect

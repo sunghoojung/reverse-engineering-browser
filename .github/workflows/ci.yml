@@ -155,10 +155,13 @@ jobs:
           REB_PYTHON=/tmp/reb-python-export/bin/python \
             node tools/check-python-client-project.mjs --providers
 
+  # Job timeouts only stop a hung job, so each sits well above its slowest
+  # good run. A Rust-scoped ubuntu-check with a cold release compile takes
+  # about 25 minutes.
   ubuntu-check:
     name: ubuntu-check
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
 
     steps:
       - name: Check out repository
@@ -276,7 +279,7 @@ jobs:
   macos-check:
     name: macos-check
     runs-on: macos-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
 
     steps:
       - name: Check out repository
@@ -420,7 +423,7 @@ jobs:
   macos-rendered-ui:
     name: macos-rendered-ui
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Check out repository

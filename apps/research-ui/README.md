@@ -64,6 +64,11 @@ The Findings view uses compact CodeBrowser-style docks: Program Trees holds
 captured findings, Symbol Tree lists the selected finding's retained handlers,
 the central Handler listing drives the linked evidence inspector, and analysis
 tools use a bottom tab strip. The layout keeps the Rosé Pine Moon palette.
+Findings list before the opcode workspace and its host links are read. Until
+then Symbol Tree and the Host event positions card say they are loading, and
+the tree and the finding's detail are `aria-busy`, rather than reporting no
+handlers or no proven link; a failed read names the failure. A poll that
+revalidates an unchanged workspace changes nothing on screen.
 Symbols and the up/down toolbar navigate the same selection. The literal handler
 filter matches retained source offsets, opcodes and labels; selecting a symbol
 clears an excluding filter. Arrow keys, Home and End navigate visible listing
@@ -2143,9 +2148,12 @@ otherwise by the origin of its first document artifact: a retained HTML response
 internals start collapsed. A folder chain with one folder child reads as one row
 (`a/b/c`). Files show their plain name, eval code `VM<id>` as in DevTools, with
 a mask icon tinted by type and the two-letter kind code kept as its text. The
-artifact ID is in the muted meta column, the tooltip and Details; same-named
-siblings add a muted query, session or frame suffix, or their artifact ID when nothing else differs. Extension names are not captured,
-so extensions show their ID.
+artifact ID is in the muted meta column, the tooltip and Details. The name
+takes its width first; an ID that does not fit in what is left loses its leading
+digits, which neighboring IDs share, and a navigator narrower than 200 px hides
+it. Same-named siblings add a muted query, session or frame suffix, or their
+artifact ID when nothing else differs. Extension names are not captured, so
+extensions show their ID.
 
 Only rows near the viewport are mounted; the focused row stays mounted while
 scrolled away. One row is in the Tab order. Up/Down move through rows, Right
@@ -3830,8 +3838,9 @@ do not generalize; unsupported inputs are retained without execution. See
 functions as the offline `origin-trace-vm-pack` CLI. Import local JSON, specify
 exact interpreter artifact IDs for comparison, then explicitly apply or compare.
 No imported code executes. Invalid schema, stale digests and undeclared source
-families are rejected. Cancel, Clear, bounded preview and complete report download
-are available. The local Rust HTTP backend is required; native stored-evidence
+families are rejected. A request runs until it is done or **Cancel** stops it,
+with its elapsed seconds in the status; Clear, the whole report and complete
+report download are available. The local Rust HTTP backend is required; native stored-evidence
 mode explains how to use the backend or CLI. See the
 [versioned pack contract](../../protocol/vm-analysis-pack-v1.md) for limits and
 agent-facing `vm_pack_apply`/`vm_pack_compare` routes.
@@ -3921,9 +3930,10 @@ Analysis content scrolls within the dock and ends at its wrapping bottom tabs.
 
 Analysis packs and Opcode ledger put local file selection and structured results
 first. Expand **Compare two builds** for the comparison workspace inputs and
-exact artifact IDs. Pack reports show bounded ranking/comparison tables;
-**Inspect raw report JSON** retains the original preview and the export keeps
-the complete exact response. Numeric identities too large for exact browser
+exact artifact IDs. Pack reports show paged ranking/comparison tables whose
+cells show the start of a long value and whose inspector shows all of it;
+**Inspect raw report JSON** shows the whole original response in the shared
+code view and the export keeps the complete exact response. Numeric identities too large for exact browser
 number display are labeled **See exact JSON**, never silently rounded.
 
 Ledger JSON editors are collapsed beneath coverage. **Create empty ledger**

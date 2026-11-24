@@ -40,10 +40,6 @@ pub(crate) mod javascript;
 
 pub(crate) const CLASSIFICATION_VERSION: u32 = 1;
 pub(crate) const MAX_LISTED_SITES: usize = 256;
-/// Symbolic nodes per function. Analysis already rejects modules over one
-/// million instructions, so this is a memory guard; past it every site of the
-/// function is an honest unknown with a counted omission.
-const MAX_NODES: usize = 1 << 20;
 const MAX_TRACE_DEPTH: u8 = 16;
 const MAX_EXPRESSION_CHARS: usize = 160;
 /// Fewer equality tests are ordinary branching, not a selector ladder.
@@ -862,10 +858,6 @@ fn ends_flow(op: &Operator<'_>) -> bool {
 
 impl<'a> Facts<'a> {
     fn node(&mut self, node: Node) -> NodeId {
-        if self.nodes.len() >= MAX_NODES {
-            self.nodes_exhausted = true;
-            return UNKNOWN;
-        }
         if !self.memory.push(&mut self.nodes, node) {
             self.nodes_exhausted = true;
             return UNKNOWN;
@@ -2240,10 +2232,13 @@ pub(crate) struct Classified {
 
 /// The one work meter for all classifier work on an artifact, JavaScript or
 /// Wasm: every loop over bytes, writes, stores, sites or slots charges it with
-/// the work it actually does, and retained index memory is charged against a
-/// separate byte bound. Once either bound is reached, classification stops;
-/// sites found but not classified and regions or functions not examined are
-/// counted into a visible omission, never dropped silently.
+/// the work it actually does, and retained index memory is charged separately.
+/// An analysis meter has no budget: each query's step bound keeps a site's
+/// work constant, so classifying an artifact of any size stays linear in its
+/// sites. A caller that sets a budget (`with_limits`) stops classification
+/// when it is reached; sites found but not classified and regions or
+/// functions not examined are counted into a visible omission, never dropped
+/// silently.
 ///
 /// The meter is distinct from each query's logical step budget, which
 /// replays memoized cost so results never depend on query order. A memo hit
@@ -2314,15 +2309,12 @@ impl Drop for Memory {
     }
 }
 
-/// Work units per artifact. Each unit is a byte scanned, a write, store, slot
-/// or site visited, or one trace step.
-pub(crate) const MAX_ARTIFACT_WORK: u64 = 1_000_000_000;
-/// Index and symbolic-trace memory retained at once per artifact.
-pub(crate) const MAX_RETAINED_BYTES: u64 = 128 << 20;
-
 impl Meter {
+    /// Counts work and retained memory without refusing any. Each unit of
+    /// work is a byte scanned, a write, store, slot or site visited, or one
+    /// trace step.
     pub fn new() -> Self {
-        Self::with_limits(MAX_ARTIFACT_WORK, MAX_RETAINED_BYTES)
+        Self::with_limits(u64::MAX, u64::MAX)
     }
 
     pub fn with_limits(limit: u64, retained_limit: u64) -> Self {
@@ -2447,31 +2439,37 @@ impl Meter {
     }
 }
 
-/// Classify every `br_table`, `call_indirect`, `return_call_indirect` and
-/// equality ladder in a module. None only when the module does not decode.
-///
-/// Every function is simulated first, under the meter. Sites are then ranked
-/// module-wide by dispatch strength, loop-enclosed sites with a load-derived
-/// selector first, and classified in that order, so trivial noise elsewhere
-/// cannot exhaust the meter before a real interpreter is reached.
-pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
-    let auxiliary = Memory::new(meter);
-    // Validator metadata and parser-owned vectors are bounded by the encoded
-    // module, separate from the explicitly reserved table and symbolic indexes.
-    if !meter.charge(bytes.len() as u64) || !auxiliary.keep(bytes.len() as u64 * 4) {
-        meter.count_unexamined(1);
-        return Some(Classified {
-            javascript: None,
-            sites: Vec::new(),
-            omissions: meter.omissions("functions"),
-        });
-    }
-    let tables = crate::vm::wasm_tables::Tables::parse_under(bytes, meter);
-    let tables = tables.as_ref();
+/// What classification keeps of a function once its symbolic facts are
+/// dropped: the summary a caller's trace consults and, for a function with
+/// dispatch sites or comparisons, what links it to other functions.
+struct Summary {
+    index: u32,
+    /// Dispatch sites and comparison ladders still to classify.
+    candidates: u64,
+    /// Direct callees, sorted and distinct.
+    callees: Vec<u32>,
+    /// (table, type) of each indirect call, sorted and distinct.
+    indirect: Vec<(u32, u32)>,
+    /// The result is a cursor fetch at a position the function advances.
+    fetch: Option<Source>,
+    /// Every value the function returns is a constant.
+    terminal: bool,
+}
+
+/// Walks the module's function bodies in order and simulates each one
+/// `wanted` accepts, typed by the validator while the module validates.
+/// Returns the exported functions and the export section's offset, or None
+/// when the module does not parse.
+fn each_function<'a>(
+    bytes: &[u8],
+    tables: Option<&crate::vm::wasm_tables::Tables>,
+    meter: &'a Meter,
+    mut wanted: impl FnMut(u32) -> bool,
+    mut visit: impl FnMut(u32, (usize, usize), Option<Facts<'a>>),
+) -> Option<(BTreeSet<u32>, Option<usize>)> {
     let mut validator = Some(Validator::new_with_features(WasmFeatures::all()));
     let mut imported = 0u32;
     let mut defined = 0u32;
-    let mut functions = Vec::new();
     let mut exports = BTreeSet::new();
     let mut export_offset = None;
     for payload in Parser::new(0).parse_all(bytes) {
@@ -2505,8 +2503,7 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
             Payload::CodeSectionEntry(body) => {
                 let index = imported + defined;
                 defined += 1;
-                if meter.exhausted() {
-                    meter.count_unexamined(1);
+                if !wanted(index) {
                     continue;
                 }
                 let function =
@@ -2521,69 +2518,128 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
                         .map_or(0, |(params, _)| params.len() as u32),
                 };
                 let range = body.range();
-                match Facts::simulate(&body, function, params, meter) {
-                    Some(facts) => {
-                        let pending = facts.dispatch.len() as u64;
-                        if !auxiliary.push(&mut functions, (index, (range.start, range.end), facts))
-                        {
-                            meter.count_unclassified(pending);
-                            meter.count_unexamined(1);
-                        }
-                    }
-                    None if meter.exhausted() => meter.count_unexamined(1),
-                    None => (),
-                }
+                visit(
+                    index,
+                    (range.start, range.end),
+                    Facts::simulate(&body, function, params, meter),
+                );
             }
             _ => (),
         }
     }
-    // Helpers whose result is a cursor fetch they advance themselves. Only
-    // callees of functions with dispatch sites are summarized, once each in
-    // index order. Their memoized local traces are then discarded, so a site
-    // query never depends on whether a summary ran first.
-    let positions = functions
+    Some((exports, export_offset))
+}
+
+/// Classify every `br_table`, `call_indirect`, `return_call_indirect` and
+/// equality ladder in a module. None only when the module does not decode.
+///
+/// Memory stays proportional to one function plus the sites found. A first
+/// pass simulates each function and keeps only its summary. Callee fetch
+/// summaries, table reachability and threaded chains are then resolved
+/// module-wide. A second pass simulates each function with sites again and
+/// classifies them before the next function. Sites are ordered module-wide by
+/// dispatch strength (loop-enclosed sites with a load-derived selector
+/// first), then function and offset. A caller's work budget is spent in
+/// function order.
+pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
+    let auxiliary = Memory::new(meter);
+    // Validator metadata and parser-owned vectors are bounded by the encoded
+    // module, separate from the explicitly reserved table and symbolic indexes.
+    if !meter.charge(bytes.len() as u64) || !auxiliary.keep(bytes.len() as u64 * 4) {
+        meter.count_unexamined(1);
+        return Some(Classified {
+            javascript: None,
+            sites: Vec::new(),
+            omissions: meter.omissions("functions"),
+        });
+    }
+    let tables = crate::vm::wasm_tables::Tables::parse_under(bytes, meter);
+    let tables = tables.as_ref();
+    let mut summaries = Vec::new();
+    let (exports, export_offset) = each_function(
+        bytes,
+        tables,
+        meter,
+        |_| {
+            let exhausted = meter.exhausted();
+            if exhausted {
+                meter.count_unexamined(1);
+            }
+            !exhausted
+        },
+        |index, _, facts| match facts {
+            Some(facts) => {
+                let mut summary = Summary {
+                    index,
+                    candidates: 0,
+                    callees: Vec::new(),
+                    indirect: Vec::new(),
+                    fetch: facts.fetch_summary(),
+                    terminal: facts.terminal(),
+                };
+                if (!facts.dispatch.is_empty() || !facts.compares.is_empty())
+                    && meter.charge(facts.nodes.len() as u64)
+                {
+                    summary.candidates = (facts.dispatch.len() + facts.ladders().len()) as u64;
+                    for node in &facts.nodes {
+                        if let Node::Call {
+                            callee: Some(callee),
+                            ..
+                        } = node
+                        {
+                            summary.callees.push(*callee);
+                        }
+                    }
+                    summary.callees.sort_unstable();
+                    summary.callees.dedup();
+                    for dispatch in &facts.dispatch {
+                        if let DispatchOp::CallIndirect { table, ty, .. } = dispatch.op {
+                            summary.indirect.push((table, ty));
+                        }
+                    }
+                    summary.indirect.sort_unstable();
+                    summary.indirect.dedup();
+                }
+                let kept =
+                    64 + summary.callees.len() as u64 * 4 + summary.indirect.len() as u64 * 8;
+                if !auxiliary.keep(kept) || !auxiliary.push(&mut summaries, summary) {
+                    meter.count_unclassified(facts.dispatch.len() as u64);
+                    meter.count_unexamined(1);
+                }
+            }
+            None if meter.exhausted() => meter.count_unexamined(1),
+            None => (),
+        },
+    )?;
+    let positions = summaries
         .iter()
         .enumerate()
-        .map(|(position, (index, _, _))| (*index, position))
+        .map(|(position, summary)| (summary.index, position))
         .collect::<HashMap<_, _>>();
     // Defined functions placed in each table with each call type, which an
     // indirect call of that (table, type) can reach; None when too many.
     let mut members = BTreeMap::<(u32, u32), Option<BTreeSet<u32>>>::new();
     let mut callees = BTreeSet::new();
-    for (_, _, facts) in &functions {
-        if facts.dispatch.is_empty() && facts.compares.is_empty() {
-            continue;
-        }
-        if !meter.charge(facts.nodes.len() as u64) {
-            break;
-        }
-        for node in &facts.nodes {
-            if let Node::Call {
-                callee: Some(callee),
-                ..
-            } = node
-                && positions.contains_key(callee)
-                && !callees.contains(callee)
-                && auxiliary.keep(64)
-            {
+    for summary in &summaries {
+        for callee in &summary.callees {
+            if positions.contains_key(callee) && !callees.contains(callee) && auxiliary.keep(64) {
                 callees.insert(*callee);
             }
         }
-        for dispatch in &facts.dispatch {
-            let (DispatchOp::CallIndirect { table, ty, .. }, Some(tables)) = (&dispatch.op, tables)
-            else {
-                continue;
-            };
-            if members.contains_key(&(*table, *ty)) || !auxiliary.keep(128) {
+        let Some(tables) = tables else {
+            continue;
+        };
+        for &(table, ty) in &summary.indirect {
+            if members.contains_key(&(table, ty)) || !auxiliary.keep(128) {
                 continue;
             }
             // An expanded table too large to place is an honest limit.
-            let reachable = if tables.oversized.contains(table) {
+            let reachable = if tables.oversized.contains(&table) {
                 None
             } else {
                 let mut reachable = BTreeSet::new();
-                let matching = tables.matching_slots(*table, *ty, meter);
-                let placed = tables.slots.get(table).map_or(&[][..], Vec::as_slice);
+                let matching = tables.matching_slots(table, ty, meter);
+                let placed = tables.slots.get(&table).map_or(&[][..], Vec::as_slice);
                 for slot in matching.iter().flat_map(|matching| matching.0.iter()) {
                     if !meter.charge(1) || reachable.len() > MAX_CHAIN_HANDLERS {
                         break;
@@ -2598,27 +2654,26 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
                 }
                 (reachable.len() <= MAX_CHAIN_HANDLERS).then_some(reachable)
             };
-            members.insert((*table, *ty), reachable);
+            members.insert((table, ty), reachable);
         }
     }
     for reachable in members.values().flatten() {
         callees.extend(reachable.iter().copied());
     }
+    // Helpers whose result is a cursor fetch they advance themselves, and
+    // handlers that only return constants. Each summary was taken on fresh
+    // facts, so a site query never depends on whether a summary ran first.
     let mut fetchers = HashMap::new();
     let mut terminals = BTreeSet::new();
     for callee in callees {
-        if meter.exhausted() {
-            break;
-        }
-        let facts = &functions[positions[&callee]].2;
-        if let Some(source) = facts.fetch_summary()
+        let summary = &summaries[positions[&callee]];
+        if let Some(source) = summary.fetch
             && auxiliary.keep(64)
         {
             fetchers.insert(callee, source);
-        } else if facts.terminal() && auxiliary.keep(32) {
+        } else if summary.terminal && auxiliary.keep(32) {
             terminals.insert(callee);
         }
-        facts.local_memo.borrow_mut().clear();
     }
     // A chain is threaded through a cursor when every handler its indirect
     // call can reach returns a fetch at a position it advances itself, or
@@ -2649,63 +2704,69 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
     }
     let fetchers = std::rc::Rc::new(fetchers);
     let chains = std::rc::Rc::new(chains);
-    for (_, _, facts) in &mut functions {
-        facts.fetchers = fetchers.clone();
-        facts.chains = chains.clone();
-    }
-    let mut candidates = Vec::new();
-    for (position, (_, _, facts)) in functions.iter().enumerate() {
-        for (dispatch, entry) in facts.dispatch.iter().enumerate() {
-            let strength = facts.strength(entry.selector, entry.offset);
-            if !auxiliary.push(
-                &mut candidates,
-                (
-                    strength,
-                    position,
-                    entry.offset,
-                    Candidate::Dispatch(dispatch),
-                ),
-            ) {
-                meter.count_unclassified(1);
-            }
-        }
-        for (subject, compares) in facts.ladders() {
-            let first = &facts.compares[compares[0]];
-            let strength = facts.strength(first.subject, first.offset);
-            if !auxiliary.push(
-                &mut candidates,
-                (
-                    strength,
-                    position,
-                    first.offset,
-                    Candidate::Ladder(subject, compares),
-                ),
-            ) {
-                meter.count_unclassified(1);
-            }
-        }
-    }
-    candidates.sort_unstable_by_key(|(strength, position, offset, _)| {
-        (std::cmp::Reverse(*strength), *position, *offset)
-    });
     let mut sites = Vec::new();
-    for (_, position, _, candidate) in candidates {
-        let (index, body, facts) = &functions[position];
-        if meter.exhausted() {
-            meter.count_unclassified(1);
-            continue;
-        }
-        match classify_candidate(facts, *index, *body, tables, &members, candidate, meter) {
-            Some(site) => {
-                if meter.retain(site.retained_bytes()) {
-                    sites.push(site);
-                } else {
+    each_function(
+        bytes,
+        tables,
+        meter,
+        |index| {
+            let Some(summary) = positions.get(&index).map(|at| &summaries[*at]) else {
+                return false;
+            };
+            if summary.candidates > 0 && meter.exhausted() {
+                meter.count_unclassified(summary.candidates);
+                return false;
+            }
+            summary.candidates > 0
+        },
+        |index, body, facts| {
+            let position = positions[&index];
+            let Some(mut facts) = facts else {
+                meter.count_unclassified(summaries[position].candidates);
+                return;
+            };
+            facts.fetchers = fetchers.clone();
+            facts.chains = chains.clone();
+            let memory = Memory::new(meter);
+            let mut candidates = Vec::new();
+            for (dispatch, entry) in facts.dispatch.iter().enumerate() {
+                let strength = facts.strength(entry.selector, entry.offset);
+                if !memory.push(
+                    &mut candidates,
+                    (strength, entry.offset, Candidate::Dispatch(dispatch)),
+                ) {
                     meter.count_unclassified(1);
                 }
             }
-            None => meter.count_unclassified(1),
-        }
-    }
+            for (subject, compares) in facts.ladders() {
+                let first = &facts.compares[compares[0]];
+                let strength = facts.strength(first.subject, first.offset);
+                if !memory.push(
+                    &mut candidates,
+                    (strength, first.offset, Candidate::Ladder(subject, compares)),
+                ) {
+                    meter.count_unclassified(1);
+                }
+            }
+            candidates.sort_unstable_by_key(|(strength, offset, _)| {
+                (std::cmp::Reverse(*strength), *offset)
+            });
+            for (strength, offset, candidate) in candidates {
+                if meter.exhausted() {
+                    meter.count_unclassified(1);
+                    continue;
+                }
+                match classify_candidate(&facts, index, body, tables, &members, candidate, meter) {
+                    Some(site) if meter.retain(site.retained_bytes()) => {
+                        sites.push(((std::cmp::Reverse(strength), position, offset), site));
+                    }
+                    _ => meter.count_unclassified(1),
+                }
+            }
+        },
+    )?;
+    sites.sort_by_key(|(order, _)| *order);
+    let mut sites = sites.into_iter().map(|(_, site)| site).collect::<Vec<_>>();
     if sites.is_empty() && !meter.exhausted() && exports.len() >= 2 {
         sites.push(Site {
             strength: 0,

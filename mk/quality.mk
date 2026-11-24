@@ -255,7 +255,7 @@ native-proxy-policy-check: $(NATIVE_PROXY_POLICY_TEST)
 
 lint: format-check shellcheck python-check javascript-check repository-check workflow-check
 	cargo fmt --check --manifest-path apps/origin-trace-backend/Cargo.toml
-	cargo clippy --locked --manifest-path apps/origin-trace-backend/Cargo.toml -- -D warnings
+	cargo clippy --locked --all-targets --manifest-path apps/origin-trace-backend/Cargo.toml -- -D warnings
 	cargo fmt --check --manifest-path apps/deobfuscator-worker/Cargo.toml
 	cargo clippy --locked --all-targets --manifest-path apps/deobfuscator-worker/Cargo.toml -- -D warnings
 	cargo fmt --check --manifest-path apps/js-lexer/Cargo.toml

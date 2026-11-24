@@ -45,7 +45,7 @@ Unrequested stores are not inspected. An empty selection performs no store read
 and says only `empty_selection`, never empty or disabled capture.
 
 The package is normalized, assigned its semantic ID, and checked by the shared
-validator while the same whole-operation deadline and all leases remain held.
+validator while all leases remain held.
 Source row order, selector order, source paths and omitted payload-only changes
 do not affect metadata identity. The package contains no export clock or source
 file hash. Historical nulls, unknown capture state and missing references are
@@ -97,26 +97,29 @@ abort instead of returning an old inode as a new snapshot. Advisory leases
 coordinate supported REB writers; they do not authenticate evidence or defeat a
 malicious same-user/privileged writer restoring metadata. Only ordinary local
 regular filesystems are supported. A kernel read can still block: cooperative
-deadlines and bounded work are not a hard cancellation guarantee.
+cancellation and bounded work are not a hard cancellation guarantee.
 
 ### Export limits and errors
 
 - Events: 64 MiB complete scan, 100000 nonempty rows, 4096 bytes per row including
   its separator. Manifest: 16 MiB, 10000 rows, 8192 bytes per row.
-- Each selected blob: 16 MiB; distinct verified bytes: 128 MiB; fixed 64 KiB read
-  buffer. Zero-byte artifacts still require their empty-content hash.
+- Each selected blob is hashed whole, whatever its size or the sum of them, in
+  a fixed 64 KiB read buffer. Zero-byte artifacts still require their
+  empty-content hash.
 - Retained source indexes/projections: 32 MiB with conservative preallocation
   accounting. Relationships and gaps: 4096 each. Package bytes: 4 MiB.
 - The same parsed-node, depth, string and cardinality bounds apply to source
-  rows and output. One ten-second cooperative deadline covers the whole export,
-  including parse, scans, hashes, projection, canonicalization and final validation.
-  Two package operations share the existing bounded I/O pool; total permit wait
-  is separately capped at one second. Disconnects do not release running permits.
+  rows and output. The export has no deadline. A request that goes away stops
+  it between reads, including parse, scans, hashes, projection, canonicalization
+  and final validation, and its permits return. Two package operations share the
+  existing bounded I/O pool and wait for it without a deadline. Earlier revisions
+  stopped an export at ten seconds and a permit wait at one second.
 
 Errors use fixed messages and empty details, with explicit shared reason codes:
 400 `invalid_request`; 404 `target_unavailable` for missing selected identities;
 409 `state_conflict` for active leases, changed sources or duplicate/conflicting
-identities; 413 `resource_limit`; 408 `timeout`; 422 `protocol_error` for malformed
+identities; 413 `resource_limit`; 408 `timeout` for a stalled request body; 499
+`cancelled` when the request goes away; 422 `protocol_error` for malformed
 source, hash/length mismatch or inconsistent references; and 503
 `dependency_unavailable` for missing guards/sources, unsafe files or unsupported
 safe-open platforms. Existing request-body transport size statuses are unchanged.
@@ -207,7 +210,8 @@ Artifact metadata contains the schema whitelist, including a nonzero key,
 protocol 1, native IDs, nullable execution context, capture origin/kind,
 canonical decimal byte size, lowercase SHA-256, sensitivity,
 `verification: sha256_verified_at_export`, and `content: omitted`. Byte size is
-at most 16777216. Legacy absent provenance is null execution context plus
+any canonical unsigned 64-bit decimal; packages up to this revision named at
+most 16777216. Legacy absent provenance is null execution context plus
 `capture_origin: unknown`. Kind/sensitivity/origin/context combinations must
 match the native artifact contract. URL, MIME, content path, arbitrary metadata,
 and bytes are forbidden. Verification is only an untrusted exporter assertion.
@@ -318,15 +322,14 @@ added to this semantic document.
 Validation is bounded to a 4 MiB body, 200000 parsed nodes, depth 32, and 4096
 UTF-8 bytes per string. There are at most 1024 events, 64 artifacts, 4096
 relationships, and 4096 gaps, with the same selector bounds. Results contain at
-most 64 issues and 64 KiB. Runtime also enforces its bounded concurrency and
-two-second cooperative CPU budget; these are not hard process-kill guarantees.
-The fixed embedded validation schema is initialized before that per-input
-budget starts, including when another caller is initializing it. Parsing,
-validation and canonicalization of supplied metadata still share the same
-two seconds. Comparison and export keep their existing whole-work deadlines.
-Parsed resource-limit or CPU-budget exhaustion produces safe `invalid` result
-data with `resource_limit`; request-body read/admission deadlines remain HTTP
-408. Large object-array uniqueness is checked semantically rather than through
+most 64 issues and 64 KiB. Runtime also enforces its bounded concurrency.
+There is no CPU budget or deadline: a valid package is bounded by the limits
+above, so validation, comparison and export run until done, and a request that
+goes away stops them with HTTP 499 `cancelled`. Earlier revisions shared a
+two-second budget across parsing, validation and canonicalization. The fixed
+embedded validation schema is initialized before any supplied package is read.
+Parsed resource-limit exhaustion produces safe `invalid` result data with
+`resource_limit`; a stalled request body remains HTTP 408. Large object-array uniqueness is checked semantically rather than through
 quadratic JSON Schema `uniqueItems`. Body framing limits retain the existing
 HTTP transport error behavior. All application errors reuse the existing
 [HTTP error contract](http-api.md); supplied-package failures are safe result

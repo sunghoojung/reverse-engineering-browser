@@ -19,8 +19,8 @@ build/reb-decoder transform grpc-web-text-inspect < response.txt
 
 There is no server request, schema download, `.proto` code generation, captured
 code execution, replay or credential use. Raw values can be private and remain
-local. Existing decoder HTTP/CLI/native bridges, timeout, worker isolation,
-input/output limits and source-history provenance apply unchanged.
+local. Existing decoder HTTP/CLI/native bridges, CPU-time limit, worker
+isolation, input/output limits and source-history provenance apply unchanged.
 
 ## Protobuf report
 
@@ -67,7 +67,7 @@ semantics. Binary metadata and percent-encoded grpc-message values stay inert.
 ## Bounds and verification
 
 Existing limits: 1 MiB input/output, 16 explicit steps, 4 MiB retained history,
-two-second bounded worker. Additional limits: 4096 fields shared across all
+two seconds of worker CPU time. Additional limits: 4096 fields shared across all
 messages, 256 gRPC-web envelopes and 16 KiB/128 lines of trailer metadata. No
 partial output is returned after any malformed or over-budget record.
 

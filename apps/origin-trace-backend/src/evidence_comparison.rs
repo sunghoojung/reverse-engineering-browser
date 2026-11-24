@@ -9,7 +9,10 @@ use serde_json::{Value, json, value::RawValue};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    time::{Duration, Instant},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 pub const MAX_REQUEST_BYTES: usize = 2 * evidence_package::MAX_BYTES + 4096;
@@ -72,9 +75,10 @@ fn invalid() -> Error {
 fn exhausted() -> Error {
     Error::new(400, "Evidence comparison resource limit exceeded").with_code(Code::ResourceLimit)
 }
-fn check(deadline: Instant) -> Result<()> {
-    if Instant::now() >= deadline {
-        Err(Error::new(408, "Evidence comparison deadline exceeded").with_code(Code::Timeout))
+/// A comparison has no deadline; it stops only when its request goes away.
+fn check(cancelled: &AtomicBool) -> Result<()> {
+    if cancelled.load(Ordering::Relaxed) {
+        Err(Error::cancelled("The evidence comparison"))
     } else {
         Ok(())
     }
@@ -278,15 +282,16 @@ fn row(
 }
 /// No configured stores, filesystem, URL resolution, helper or network access.
 pub fn compare_bytes(raw: &[u8]) -> Result<Vec<u8>> {
-    compare_bytes_at(raw, Instant::now() + Duration::from_secs(10))
+    compare_bytes_cancellable(raw, Arc::default())
 }
-pub(crate) fn compare_bytes_at(raw: &[u8], deadline: Instant) -> Result<Vec<u8>> {
-    check(deadline)?;
+/// `compare_bytes` for a request that can go away.
+pub(crate) fn compare_bytes_cancellable(raw: &[u8], cancelled: Arc<AtomicBool>) -> Result<Vec<u8>> {
+    check(&cancelled)?;
     let request = request(raw)?;
-    let left = evidence_package::validated_normalized_bytes(request.left)?;
-    check(deadline)?;
-    let right = evidence_package::validated_normalized_bytes(request.right)?;
-    check(deadline)?;
+    let left = evidence_package::validated_normalized_bytes(request.left, cancelled.clone())?;
+    check(&cancelled)?;
+    let right = evidence_package::validated_normalized_bytes(request.right, cancelled.clone())?;
+    check(&cancelled)?;
     let comparison_id = format!(
         "reb-comparison-v1:sha256:{}",
         digest(
@@ -321,7 +326,7 @@ pub(crate) fn compare_bytes_at(raw: &[u8], deadline: Instant) -> Result<Vec<u8>>
         total += 1;
     };
     for facet in &request.facets {
-        check(deadline)?;
+        check(&cancelled)?;
         if facet == "events" || facet == "artifacts" {
             fn index<'a>(p: &'a Value, facet: &str) -> BTreeMap<String, &'a Value> {
                 p["records"][facet]
@@ -344,7 +349,7 @@ pub(crate) fn compare_bytes_at(raw: &[u8], deadline: Instant) -> Result<Vec<u8>>
             let b_local = local(&b);
             let keys: BTreeSet<&String> = a.keys().chain(b.keys()).collect();
             for key in keys {
-                check(deadline)?;
+                check(&cancelled)?;
                 let av = a.get(key).copied();
                 let bv = b.get(key).copied();
                 let candidates = match (av, bv) {
@@ -365,21 +370,21 @@ pub(crate) fn compare_bytes_at(raw: &[u8], deadline: Instant) -> Result<Vec<u8>>
             ));
         }
     }
-    check(deadline)?;
+    check(&cancelled)?;
     let next =
         (request.offset.saturating_add(page.len()) < total).then_some(request.offset + page.len());
     let result = json!({"protocol_version":1,"comparison_id":comparison_id,"normalization_profile":PROFILE,"left_package_id":left["package_id"],"right_package_id":right["package_id"],"facets":request.facets,"package_metadata_equal":left["package_id"] == right["package_id"],"selected_metadata_equal":(total > 0).then_some(counts["changed_declared_metadata"] == 0 && counts["left_only"] == 0 && counts["right_only"] == 0),"comparability":{"observer_regime":"unknown","capture_coverage":"unknown_or_partial","behavior":"not_established","timing":"not_established"},"limitations":LIMITATIONS,"coverage":{"left":left["coverage"],"right":right["coverage"]},"counts":counts,"page":{"offset":request.offset,"limit":request.limit,"total":total,"next_offset":next},"rows":page});
-    serialize_result(&result, deadline)
+    serialize_result(&result, &cancelled)
 }
-fn serialize_result(result: &Value, deadline: Instant) -> Result<Vec<u8>> {
-    struct Output {
+fn serialize_result(result: &Value, cancelled: &AtomicBool) -> Result<Vec<u8>> {
+    struct Output<'a> {
         bytes: Vec<u8>,
-        deadline: Instant,
+        cancelled: &'a AtomicBool,
     }
-    impl std::io::Write for Output {
+    impl std::io::Write for Output<'_> {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
             if self.bytes.len().saturating_add(bytes.len()) > MAX_RESULT_BYTES
-                || Instant::now() >= self.deadline
+                || self.cancelled.load(Ordering::Relaxed)
             {
                 return Err(std::io::Error::other("Comparison output bound"));
             }
@@ -392,12 +397,12 @@ fn serialize_result(result: &Value, deadline: Instant) -> Result<Vec<u8>> {
     }
     let mut output = Output {
         bytes: Vec::new(),
-        deadline,
+        cancelled,
     };
     serde_json::to_writer(&mut output, result)
-        .map_err(|_| check(deadline).err().unwrap_or_else(exhausted))?;
+        .map_err(|_| check(cancelled).err().unwrap_or_else(exhausted))?;
     let bytes = output.bytes;
-    check(deadline)?;
+    check(cancelled)?;
     Ok(bytes)
 }
 
@@ -405,15 +410,17 @@ fn serialize_result(result: &Value, deadline: Instant) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     #[test]
-    fn serialization_deadline_keeps_timeout_and_byte_exhaustion_keeps_resource_limit() {
+    fn serialization_cancellation_keeps_cancelled_and_byte_exhaustion_keeps_resource_limit() {
         // Exercise the writer failure mapping directly, beyond the comparison's
-        // preflight deadline guard. No successful partial output escapes.
-        let timeout = serialize_result(&json!(null), Instant::now()).unwrap_err();
-        assert_eq!(timeout.status, 408);
-        assert_eq!(serde_json::to_value(timeout).unwrap()["code"], "timeout");
+        // preflight cancellation check. No successful partial output escapes.
+        let cancelled = serialize_result(&json!(null), &AtomicBool::new(true)).unwrap_err();
+        assert_eq!(cancelled.status, 499);
+        assert_eq!(
+            serde_json::to_value(cancelled).unwrap()["code"],
+            "cancelled"
+        );
         let oversized = json!("x".repeat(MAX_RESULT_BYTES));
-        let limit =
-            serialize_result(&oversized, Instant::now() + Duration::from_secs(10)).unwrap_err();
+        let limit = serialize_result(&oversized, &AtomicBool::new(false)).unwrap_err();
         assert_eq!(limit.status, 400);
         assert_eq!(
             serde_json::to_value(limit).unwrap()["code"],
@@ -536,7 +543,9 @@ mod tests {
             PROFILE
         );
         assert!(compare_bytes(oversized.as_bytes()).is_err());
-        assert!(compare_bytes_at(raw.as_bytes(), Instant::now()).is_err());
+        assert!(
+            compare_bytes_cancellable(raw.as_bytes(), Arc::new(AtomicBool::new(true))).is_err()
+        );
     }
     fn sized_package(events: usize, artifacts: usize, session: &str) -> Value {
         let mut p = golden();

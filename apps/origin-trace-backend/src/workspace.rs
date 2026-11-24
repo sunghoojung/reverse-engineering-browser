@@ -49,14 +49,30 @@ impl Kind {
             Self::Analyst => usize::MAX,
         }
     }
+    /// What `limits` records. The Analyst library has none, so it is empty.
     pub fn limits(self) -> Value {
         match self {
             Self::Collection => {
                 json!({"folders":32,"requests":128,"folder_depth":4,"variables_per_scope":32,"variable_bytes_per_scope":32768,"request_body_bytes":65536,"document_bytes":2097152})
             }
-            Self::Analyst => {
-                json!({"folders":32,"files":64,"folder_depth":4,"variables":32,"variable_value_bytes":4096,"variable_bytes":16384})
-            }
+            Self::Analyst => json!({}),
+        }
+    }
+    /// A Collection replays its requests and is bounded like one; the
+    /// Analyst library holds the researcher's own folders and files, as many
+    /// and as deep as they make.
+    fn shape(self) -> Shape {
+        match self {
+            Self::Collection => Shape {
+                folders: 32,
+                items: 128,
+                depth: 4,
+            },
+            Self::Analyst => Shape {
+                folders: usize::MAX,
+                items: usize::MAX,
+                depth: usize::MAX,
+            },
         }
     }
     pub fn empty(self) -> Value {
@@ -67,6 +83,33 @@ impl Kind {
         json!({"contract_version":1,"document_kind":self.document(),"generation":0,"updated_at_ms":0,"folders":[folder],self.items():[],"limits":self.limits()})
     }
 }
+struct Shape {
+    folders: usize,
+    items: usize,
+    depth: usize,
+}
+/// One variable scope's bounds.
+pub struct Scope {
+    pub count: usize,
+    pub name_bytes: usize,
+    pub value_bytes: usize,
+    pub total_bytes: usize,
+}
+/// A Collection folder's or request's variables.
+const COLLECTION_SCOPE: Scope = Scope {
+    count: 32,
+    name_bytes: 64,
+    value_bytes: 4096,
+    total_bytes: 32768,
+};
+/// An analyst run's private variables: the researcher's own values, of any
+/// number and size.
+pub const ANALYST_SCOPE: Scope = Scope {
+    count: usize::MAX,
+    name_bytes: usize::MAX,
+    value_bytes: usize::MAX,
+    total_bytes: usize::MAX,
+};
 pub struct Store {
     pub path: PathBuf,
     pub kind: Kind,
@@ -124,17 +167,14 @@ impl Store {
                 current["generation"].as_u64().unwrap(),
             )));
         }
-        let folders = array(&request["folders"], 32, "Workspace folders")?
+        let shape = kind.shape();
+        let folders = array(&request["folders"], shape.folders, "Workspace folders")?
             .iter()
             .map(|v| folder(kind, v))
             .collect::<Result<Vec<_>>>()?;
         let mut values = Vec::new();
         let now = validation::now_ms();
-        for raw in array(
-            &request[items],
-            if kind == Kind::Collection { 128 } else { 64 },
-            "Workspace items",
-        )? {
+        for raw in array(&request[items], shape.items, "Workspace items")? {
             let mut value = item(kind, raw, false)?;
             let previous = current[items]
                 .as_array()
@@ -190,40 +230,39 @@ fn name(value: &Value, label: &str) -> Result<String> {
     }
     Ok(s.into())
 }
-pub fn variables(
-    value: &Value,
-    name_limit: usize,
-    total_limit: usize,
-    object: bool,
-) -> Result<Value> {
+pub fn variables(value: &Value, scope: &Scope, object: bool) -> Result<Value> {
     let pairs: Vec<_> = if object {
         value
             .as_object()
-            .filter(|o| o.len() <= 32)
+            .filter(|o| o.len() <= scope.count)
             .ok_or_else(|| Error::bad("Variables are invalid or oversized"))?
             .iter()
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect()
     } else {
         let mut pairs = Vec::new();
-        for v in array(value, 32, "Variables")? {
+        for v in array(value, scope.count, "Variables")? {
             validation::fields(v, &["name", "value"], "Variable")?;
             pairs.push((
-                validation::text(&v["name"], "Variable name", name_limit, false, false)?.into(),
+                validation::text(&v["name"], "Variable name", scope.name_bytes, false, false)?
+                    .into(),
                 v["value"].clone(),
             ));
         }
         pairs
     };
     let mut seen = BTreeMap::new();
-    let mut total = 0;
+    let mut total = 0usize;
     for (key, value) in pairs {
-        if key.len() > name_limit || !validation::variable_name(&key) || seen.contains_key(&key) {
+        if key.len() > scope.name_bytes
+            || !validation::variable_name(&key)
+            || seen.contains_key(&key)
+        {
             return Err(Error::bad("Variable name is invalid or duplicated"));
         }
-        let value = validation::text(&value, "Variable value", 4096, true, object)?;
-        total += key.len() + value.len();
-        if total > total_limit {
+        let value = validation::text(&value, "Variable value", scope.value_bytes, true, object)?;
+        total = total.saturating_add(key.len() + value.len());
+        if total > scope.total_bytes {
             return Err(Error::bad("Variable scope exceeds its byte limit"));
         }
         seen.insert(key, value.to_owned());
@@ -286,7 +325,7 @@ fn folder(kind: Kind, value: &Value) -> Result<Value> {
     };
     let mut folder = json!({"id":id(&value["id"],"Folder ID")?,"name":name(&value["name"],"Folder name")?,"parent_id":parent});
     if kind == Kind::Collection {
-        folder["variables"] = variables(&value["variables"], 64, 32768, false)?;
+        folder["variables"] = variables(&value["variables"], &COLLECTION_SCOPE, false)?;
     }
     Ok(folder)
 }
@@ -336,7 +375,7 @@ fn item(kind: Kind, value: &Value, metadata: bool) -> Result<Value> {
                 30000
             )?);
             result["headers"] = headers(&value["headers"])?;
-            result["variables"] = variables(&value["variables"], 64, 32768, false)?;
+            result["variables"] = variables(&value["variables"], &COLLECTION_SCOPE, false)?;
         }
         Kind::Analyst => {
             let kind = validation::text(&value["kind"], "File kind", 32, false, false)?;
@@ -425,18 +464,15 @@ pub fn normalize(kind: Kind, value: &Value) -> Result<Value> {
         0,
         MAX_SAFE_INTEGER,
     )?;
-    let mut folders = array(&value["folders"], 32, "Workspace folders")?
+    let shape = kind.shape();
+    let mut folders = array(&value["folders"], shape.folders, "Workspace folders")?
         .iter()
         .map(|v| folder(kind, v))
         .collect::<Result<Vec<_>>>()?;
-    let mut values = array(
-        &value[items],
-        if kind == Kind::Collection { 128 } else { 64 },
-        "Workspace items",
-    )?
-    .iter()
-    .map(|v| item(kind, v, true))
-    .collect::<Result<Vec<_>>>()?;
+    let mut values = array(&value[items], shape.items, "Workspace items")?
+        .iter()
+        .map(|v| item(kind, v, true))
+        .collect::<Result<Vec<_>>>()?;
     let by_id: BTreeMap<u64, &Value> = folders
         .iter()
         .map(|f| (f["id"].as_u64().unwrap(), f))
@@ -451,23 +487,44 @@ pub fn normalize(kind: Kind, value: &Value) -> Result<Value> {
         return Err(Error::bad("Workspace root folder is invalid"));
     }
     let mut names = BTreeSet::new();
+    // Each folder's depth is measured once: a walk toward the root stops at
+    // a folder already measured, so a hierarchy of any depth is checked in
+    // linear time and a cycle is found on the walk that enters it.
+    let mut depths = BTreeMap::new();
     for folder in &folders {
         let identifier = folder["id"].as_u64().unwrap();
-        let mut seen = BTreeSet::from([identifier]);
-        let mut current = folder;
-        let mut depth = 0;
         if identifier != 1 && folder["parent_id"].is_null() {
             return Err(Error::bad("Workspace has multiple root folders"));
         }
-        while let Some(parent) = current["parent_id"].as_u64() {
-            if !seen.insert(parent) || !by_id.contains_key(&parent) {
+        let mut path = Vec::new();
+        let mut walked = BTreeSet::new();
+        let mut current = identifier;
+        let mut depth = loop {
+            if let Some(&known) = depths.get(&current) {
+                break known;
+            }
+            if !walked.insert(current) {
                 return Err(Error::bad("Workspace folder hierarchy is invalid"));
             }
-            current = by_id[&parent];
-            depth += 1;
-            if depth > 4 {
-                return Err(Error::bad("Workspace folder depth exceeds four levels"));
+            let Some(parent) = by_id[&current]["parent_id"].as_u64() else {
+                depths.insert(current, 0);
+                break 0;
+            };
+            if !by_id.contains_key(&parent) {
+                return Err(Error::bad("Workspace folder hierarchy is invalid"));
             }
+            path.push(current);
+            current = parent;
+        };
+        for measured in path.into_iter().rev() {
+            depth += 1;
+            if depth > shape.depth {
+                return Err(Error::bad(format!(
+                    "Workspace folder depth exceeds {} levels",
+                    shape.depth
+                )));
+            }
+            depths.insert(measured, depth);
         }
         let key = (
             folder["parent_id"].as_u64(),

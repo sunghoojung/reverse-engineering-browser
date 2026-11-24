@@ -679,6 +679,20 @@ final class OriginTraceRenderedUITests: XCTestCase {
     try await assertFullyVisible(ui, ".vm-workbench-tabs", "\(context) analysis tabs")
   }
 
+  // Program Trees lists findings before the opcode workspace behind the Symbol
+  // Tree and handler listing, and its host links, arrive; each arrival
+  // rebuilds the detail. A test that selects a finding and reads its analysis
+  // waits until the detail and the tree are no longer busy, not only for the
+  // findings.
+  @MainActor
+  private func openVmFindings(_ ui: Harness) async throws {
+    try await show(ui, "vm")
+    try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+    try await ui.waitUntil("document.querySelector('#vm-detail[aria-busy=\"false\"]') !== null && " +
+      "document.querySelector('#vm-symbol-list[aria-busy=\"false\"]') !== null",
+      "the opcode workspace and host links behind the selected finding did not load")
+  }
+
   @MainActor
   private func setVmAnalysisExpanded(_ ui: Harness, _ expanded: Bool) async throws {
     let toggle = try await ui.json("""
@@ -698,8 +712,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     ]
     for size in sizes {
       let ui = try await prepare(size)
-      try await show(ui, "vm")
-      try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await openVmFindings(ui)
       try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 107")
       try await setVmAnalysisExpanded(ui, false)
@@ -785,8 +798,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     ]
     for size in sizes {
       let ui = try await prepare(size)
-      try await show(ui, "vm")
-      try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await openVmFindings(ui)
       try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 107")
       try await setVmAnalysisExpanded(ui, false)
@@ -810,8 +822,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     ]
     for size in sizes {
       let ui = try await prepare(size)
-      try await show(ui, "vm")
-      try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await openVmFindings(ui)
       try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 18446744073709551615")
       try await assertCompleteCompactFindings(ui, size.name)
@@ -1029,6 +1040,24 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.key(53, "\u{1B}")
       let cleared = try await ui.value("document.querySelector('#source-tree-filter').value === '' && document.querySelectorAll('#source-tree [data-artifact-id]').length > 1") as? Bool
       XCTAssertEqual(cleared, true, "\(size.name): Escape clears the filter and restores the tree")
+      // A 20-digit artifact ID never squeezes the name it labels: the ID takes
+      // what the name leaves and keeps its last digits, and the row's title
+      // keeps it whole.
+      try await ui.click("#source-tree-filter")
+      try await ui.type("18446744073709551615")
+      let wide = try await ui.json("""
+        (() => { const row = document.querySelector('#source-tree [data-artifact-id="18446744073709551615"]');
+          const raw = row?.querySelector('.source-tree-raw'), meta = row?.querySelector('.source-tree-meta');
+          return {found: Boolean(row), name: raw?.textContent ?? '', nameClipped: raw ? raw.scrollWidth > raw.clientWidth + 1 : true,
+            metaWidth: meta?.clientWidth ?? 0, metaDirection: meta ? getComputedStyle(meta).direction : '', title: row?.title ?? ''}; })()
+        """)
+      XCTAssertEqual(wide["found"] as? Bool, true, "\(size.name): the golden artifact is a Sources file: \(wide)")
+      XCTAssertEqual(wide["nameClipped"] as? Bool, false, "\(size.name): a 20-digit ID leaves its name whole: \(wide)")
+      XCTAssertEqual(wide["metaDirection"] as? String, "rtl", "\(size.name): a clipped ID loses its leading digits: \(wide)")
+      XCTAssertTrue((wide["title"] as? String ?? "").contains("artifact 18446744073709551615"), "\(size.name): the row's title names the whole ID: \(wide)")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) sources wide artifact ID")
+      try await ui.screenshot("sources-tree-wide-id-\(size.name)")
+      try await ui.key(53, "\u{1B}")
       try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"303\"]")
       try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('retainedLine')", "retained source did not render")
       let source = try await ui.value("document.querySelector('#source-code').innerText") as? String ?? ""
@@ -1072,8 +1101,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     ]
     for size in sizes {
       let ui = try await prepare(size)
-      try await show(ui, "vm")
-      try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await openVmFindings(ui)
       try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 107")
       try await assertFullyVisible(ui, "#vm-symbol-list .vm-symbol-row", "\(size.name) symbol tree")
@@ -1193,8 +1221,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
   func test8VmHostLinksSpacing() async throws {
     for size in windowSizes {
       let ui = try await prepare(size)
-      try await show(ui, "vm")
-      try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await openVmFindings(ui)
       try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 107")
       try await setVmAnalysisExpanded(ui, false)
@@ -1230,8 +1257,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     ]
     for size in sizes {
       let ui = try await prepare(size)
-      try await show(ui, "vm")
-      try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await openVmFindings(ui)
       try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 107")
       try await assertFullyVisible(ui, "#vm-symbol-list .vm-symbol-row", "\(size.name) symbol tree")
@@ -3272,6 +3298,53 @@ final class OriginTraceRenderedUITests: XCTestCase {
       "(async () => { const body = {action: 'replace_local_analyst_workspace', expected_generation: \(generation), " +
       "folders: (await fetch('/api/local-analyst', {cache: 'no-store'}).then(response => response.json())).folders, files: JSON.parse(\(String(reflecting: files)))}; " +
       "return (await fetch('/api/local-analyst/actions', \(post))).status; })()")
+    try await returnToHarness(ui, harnessURL)
+  }
+
+  // The packaged decoder runs one request at a time with no deadline. A queue
+  // that lasts seconds, longer than the two a request once had, is answered
+  // in full, and requests the page abandons leave the queue at once.
+  @MainActor
+  func test21bDecoderQueueHasNoDeadline() async throws {
+    let ui = try Harness()
+    try await ui.waitForInitialLoad()
+    let harnessURL = try XCTUnwrap(ui.webView.url)
+    ui.webView.load(URLRequest(url: try XCTUnwrap(URL(string: "reb://app/index.html?native=1"))))
+    try await ui.waitUntil("location.protocol === 'reb:' && document.readyState === 'complete' && typeof state === 'object'",
+      timeout: 30, "the bundled workspace did not load")
+    let result = try await ui.json(
+      """
+      (async () => {
+        const bytes = new Uint8Array(768 * 1024);
+        for (let offset = 0; offset < bytes.length; offset += 65536) crypto.getRandomValues(bytes.subarray(offset, offset + 65536));
+        let binary = '';
+        for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+        const input = btoa(binary);
+        const send = (id, signal) => fetch('/api/decoder/actions', {method: 'POST', cache: 'no-store', signal,
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({protocol_version: 1, action: 'transform', operation_id: id, operation: 'gzip-compress', input_base64: input})})
+          .then(response => response.status, () => 'aborted');
+        let started = performance.now();
+        const queued = await Promise.all(Array.from({length: 160}, (_, index) => send(index + 1)));
+        const queuedMs = Math.round(performance.now() - started);
+        const controller = new AbortController();
+        const abandoned = Array.from({length: 150}, (_, index) => send(index + 1, controller.signal));
+        await new Promise(resolve => setTimeout(resolve, 300));
+        controller.abort();
+        const stopped = await Promise.all(abandoned);
+        started = performance.now();
+        const next = await send(1);
+        const nextMs = Math.round(performance.now() - started);
+        return {answered: queued.filter(status => status === 200).length, statuses: [...new Set(queued)].join(','), queuedMs,
+          aborted: stopped.filter(status => status === 'aborted').length, next, nextMs};
+      })()
+      """)
+    print("decoder queue in the packaged app: \(result)")
+    XCTAssertEqual(result["answered"] as? Int, 160, "every queued request is answered: \(result)")
+    XCTAssertGreaterThan(result["aborted"] as? Int ?? 0, 0, "the page abandoned queued requests: \(result)")
+    XCTAssertEqual(result["next"] as? Int, 200, "the next request is answered: \(result)")
+    // The abandoned queue would take seconds to drain if it still ran.
+    XCTAssertLessThan(result["nextMs"] as? Int ?? .max, 1_500, "abandoned requests left the queue: \(result)")
     try await returnToHarness(ui, harnessURL)
   }
 

@@ -2619,10 +2619,14 @@ while True:
     with (root / 'requests.jsonl').open('a') as log:
         log.write(json.dumps({'operation':operation,'target':target,'source':source}) + '\n')
     count, kind, flags, wire_status = 0, 11, 0, 0
-    # A slow browser answer, to hold an exchange open.
+    # A slow browser answer, to hold an exchange open. A test removes the
+    # file whenever later answers should be quick, even while this request
+    # is arriving, so it is read once and a missing file holds nothing.
     delay = root / ('slow-listing' if operation == 1 else 'slow-command')
-    if delay.exists():
+    try:
         time.sleep(float(delay.read_text() or '1'))
+    except FileNotFoundError:
+        pass
     # A command that runs until the owner's Stop names it, as the bridge
     # forwards one while the command is in flight.
     stopped = operation in (2, 3) and (root / 'endless-command').exists()

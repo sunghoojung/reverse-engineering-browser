@@ -58,11 +58,16 @@ final class CompanionWarningUITests: XCTestCase {
     defer { if app.state != .notRunning { app.terminate() } }
 
     let first = failureDetail(assertStartupFailure(app))
+    // The web panel can expose its title in more than one accessibility
+    // element, so reopen is measured against the failure as first shown.
+    let shownTitles = app.staticTexts.matching(identifier: failureTitle).count
     attachScreenshot(app, name: "modal-reopen-initial-failure")
     let firstPID = try reopenApplication()
     let secondPID = try reopenApplication()
     XCTAssertEqual(firstPID, secondPID, "Reopen must address the existing app instance")
-    XCTAssertEqual(app.staticTexts.matching(identifier: failureTitle).count, 1,
+    XCTAssertEqual(app.staticTexts.matching(identifier: failureTitle).count, shownTitles,
+                   "Reopen must not show a second live-session failure")
+    XCTAssertEqual(app.buttons.matching(identifier: "Retry").count, 1,
                    "Reopen must not show a second live-session failure")
     XCTAssertEqual(failureDetail(app), first, "Reopen must not replace the open failure with another session")
     attachScreenshot(app, name: "modal-reopen-single-failure")

@@ -2445,8 +2445,10 @@ var(--panel);
         #screen-traffic .traffic-grid[data-detail-open="true"] .request-window > .request-not-kept { order: 0; flex: 0 0 auto; }
         #screen-traffic .traffic-grid[data-detail-open="true"] .request-not-kept-toggle { display: inline-block; }
         /* The counts flow as text beside the buttons, as the ledger has no line
-           to spare; only a count stays whole. */
+           to spare. Kept whole here, they took a width that pushed a button to
+           a row the list cut off. */
         #screen-traffic .traffic-grid[data-detail-open="true"] #request-window-status { display: block; flex: 1 1 150px; }
+        #screen-traffic .traffic-grid[data-detail-open="true"] #request-window-status > .request-window-count { white-space: normal; }
         #screen-traffic .traffic-grid[data-detail-open="true"] .request-not-kept[data-expanded="false"] .request-not-kept-text { display: none; }
         #screen-traffic .traffic-grid[data-detail-open="true"] .request-not-kept[data-expanded="true"] .request-not-kept-text {
           position: fixed; z-index: 5; width: min(420px, calc(100vw - 140px)); padding: 6px 8px;

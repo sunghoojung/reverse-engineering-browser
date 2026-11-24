@@ -932,9 +932,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
-  // The Traffic footer's counts, such as "98.0 kB transferred ·", each stay on
-  // one line. The footer sits below the rows and inside the list, whatever its
-  // height.
+  // Where the Traffic footer's counts are separate boxes, each, such as
+  // "98.0 kB transferred ·", stays on one line. The footer sits below the rows
+  // and inside the list, whatever its height.
   @MainActor
   private func assertFooterItemsWhole(_ ui: Harness, _ context: String) async throws {
     let footer = try await ui.json("""
@@ -949,7 +949,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
       """)
     print("RENDERED_UI_TRAFFIC_FOOTER \(context) \(footer)")
     XCTAssertEqual(footer["counts"] as? Int, 3, "\(context): requests, transferred and resources are separate counts: \(footer)")
-    XCTAssertEqual(footer["broken"] as? [String] ?? ["unreadable"], [], "\(context): a footer count broke across lines: \(footer)")
+    if footer["display"] as? String == "flex" {
+      XCTAssertEqual(footer["broken"] as? [String] ?? ["unreadable"], [], "\(context): a footer count broke across lines: \(footer)")
+    }
     XCTAssertLessThanOrEqual(footer["rowsBottom"] as? Double ?? .infinity, (footer["footerTop"] as? Double ?? 0) + 1,
       "\(context): the footer covers no row: \(footer)")
     XCTAssertLessThanOrEqual(footer["footerBottom"] as? Double ?? .infinity, (footer["paneBottom"] as? Double ?? 0) + 1,

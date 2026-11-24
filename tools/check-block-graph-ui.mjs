@@ -727,9 +727,11 @@ globalThis.create = createBlockGraphView;`, context);
   const nodes = Array.from({length: count}, (_, id) => ({id, kind: 'wasm', context: 0, status: 'resolved', function_index: id, sha256: SHA, artifact_id: '9', url: 'https://wasm.test/m.wasm', script_id: 3, hits: 1, entries: id ? 0 : 1, leaves: 2 * id + 1 < count ? 0 : 1}));
   const edges = [];
   for (let id = 1; id < count; id += 1) edges.push({from: (id - 1) >> 1, to: id, kind: 'call', count: 1, crosses: []});
-  const doc = {schema: 'flow-graph-v1', session_id: '1', evidence: 'observed', complete: true, coverage: {stopped: 'end'},
-    stacks: {records: {request_initiator_stack: 1}, not_walked: {}, distinct: 1, occurrences: 1}, truncated: {}, limits: {}, not_shown: {},
-    contexts: [{id: 0, process_id: 1, execution_context_id: '7', origin: 'https://wasm.test', origins: [], frame_ids: [], tab_ids: [], counts: {}}], nodes, edges, paths: []};
+  // One page of a complete generation (flow-graph-v2).
+  const doc = {schema: 'flow-graph-v2', session_id: '1', generation: '1', evidence: 'observed', complete: true, cursor: 0, next_cursor: null, node_count: count, edge_count: edges.length,
+    coverage: {caught_up: true, artifacts_caught_up: true, folded_bytes: '64', store_end: '64', malformed_records: 0},
+    stacks: {records: {request_initiator_stack: 1}, not_walked: {}, distinct: 1, occurrences: 1, decoded: 1}, not_shown: [],
+    contexts: [{id: 0, first_node: 0, process_id: 1, execution_context_id: '7', origin: 'https://wasm.test', origins: [], frame_ids: [], tab_ids: [], counts: {}}], nodes, edges};
   const layouts = [];
   const fetch = async (url, init = {}) => {
     if (String(url).startsWith('/api/flow-graph')) return {ok: true, status: 200, json: async () => doc};
@@ -744,8 +746,9 @@ globalThis.create = createBlockGraphView;`, context);
   const context = {document, window, Event, location: {protocol: 'http:'}, addEventListener: () => {}, fetch, performance, console,
     requestAnimationFrame: fn => setTimeout(() => fn(performance.now()), 0), cancelAnimationFrame: clearTimeout, setTimeout, clearTimeout, queueMicrotask,
     getComputedStyle: () => ({getPropertyValue: () => ''}), innerHeight: 800, innerWidth: 1180, devicePixelRatio: 1, dispatchEvent: () => true,
-    URLSearchParams, AbortController, AbortSignal, DOMException};
-  const scripts = ['graph_layout_client.js', 'block_graph.js', 'request_stack.js', 'flow_graph_layout.js', 'flow_graph.js'];
+    URLSearchParams, AbortController, AbortSignal, DOMException, MessageChannel};
+  // No Worker here, so the Graph pane's pipeline runs on this thread.
+  const scripts = ['graph_layout_client.js', 'block_graph.js', 'request_stack.js', 'flow_graph_model.js', 'flow_graph_layout.js', 'flow_graph_worker.js', 'flow_graph.js'];
   runInNewContext(`${(await Promise.all(scripts.map(name => readFile(new URL(`../apps/research-ui/${name}`, import.meta.url), 'utf8')))).join('\n')}
 globalThis.create = createFlowGraphPanel;`, context);
   const settle = () => new Promise(resolve => setTimeout(resolve, 0));
@@ -763,6 +766,8 @@ globalThis.create = createFlowGraphPanel;`, context);
   for (let i = 0; i < 200 && !layouts.length; i++) await settle();
   assert.equal(layouts.length, 1);
   assert.equal(layouts[0].body.graphs[0].nodes.length, count, 'asked, the whole realm is sent');
+  // The pipeline says it is running once the request is out.
+  for (let i = 0; i < 200 && triskel.textContent !== 'Cancel'; i++) await settle();
   assert.equal(triskel.textContent, 'Cancel');
   assert.match($('.flow-graph-engine-run').textContent, /^Laying out with Triskel \u00b7 \d+ s$/);
   assert($('.flow-graph-state').hidden, 'the layered layout stays drawn meanwhile');
@@ -788,8 +793,13 @@ globalThis.create = createFlowGraphPanel;`, context);
   // view is read back from the transform the cards are drawn at.
   const {document, window, Event} = parseHTML('<!doctype html><html><body><div id="flow"></div></body></html>');
   window.HTMLElement.prototype.scrollIntoView ??= function scrollIntoView() {};
-  const transforms = [];
-  const recording = new Proxy({}, {get: (_, key) => key === 'measureText' ? text => ({width: 6.6 * String(text).length}) : key === 'setTransform' ? (...a) => transforms.push(a) : () => {}, set: () => true});
+  // The canvas's transforms in call order, with a mark where a frame clears
+  // the whole stage.
+  const calls = [];
+  const recording = new Proxy({}, {get: (_, key) => key === 'measureText' ? text => ({width: 6.6 * String(text).length})
+    : key === 'setTransform' ? (...a) => calls.push(a)
+    : key === 'fillRect' ? (x, y, w, h) => { if (!x && !y && w === rect.width && h === rect.height) calls.push('clear'); }
+    : () => {}, set: () => true});
   const quiet = new Proxy({}, {get: (_, key) => key === 'measureText' ? () => ({width: 6.6}) : () => {}, set: () => true});
   window.HTMLCanvasElement.prototype.getContext = function getContext() { return this.classList.contains('flow-graph-canvas') ? recording : quiet; };
   // A call tree of 63 Wasm functions in one realm, which nothing folds, far
@@ -797,20 +807,22 @@ globalThis.create = createFlowGraphPanel;`, context);
   const count = 63, SHA = 'b'.repeat(64);
   const nodes = Array.from({length: count}, (_, id) => ({id, kind: 'wasm', context: 0, status: 'resolved', function_index: id, sha256: SHA, artifact_id: '9', url: 'https://wasm.test/m.wasm', script_id: 3, hits: 1, entries: id ? 0 : 1, leaves: 2 * id + 1 < count ? 0 : 1}));
   const edges = Array.from({length: count - 1}, (_, index) => ({from: index >> 1, to: index + 1, kind: 'call', count: 1, crosses: []}));
-  const doc = {schema: 'flow-graph-v1', session_id: '1', evidence: 'observed', complete: true, coverage: {stopped: 'end'},
-    stacks: {records: {request_initiator_stack: 1}, not_walked: {}, distinct: 1, occurrences: 1}, truncated: {}, limits: {}, not_shown: {},
-    contexts: [{id: 0, process_id: 1, execution_context_id: '7', origin: 'https://wasm.test', origins: [], frame_ids: [], tab_ids: [], counts: {}}], nodes, edges, paths: []};
+  const doc = {schema: 'flow-graph-v2', session_id: '1', generation: '1', evidence: 'observed', complete: true, cursor: 0, next_cursor: null, node_count: count, edge_count: edges.length,
+    coverage: {caught_up: true, artifacts_caught_up: true, folded_bytes: '64', store_end: '64', malformed_records: 0},
+    stacks: {records: {request_initiator_stack: 1}, not_walked: {}, distinct: 1, occurrences: 1, decoded: 1}, not_shown: [],
+    contexts: [{id: 0, first_node: 0, process_id: 1, execution_context_id: '7', origin: 'https://wasm.test', origins: [], frame_ids: [], tab_ids: [], counts: {}}], nodes, edges};
   const fetch = async url => (String(url).startsWith('/api/flow-graph') ? {ok: true, status: 200, json: async () => doc} : {ok: false, status: 503, json: async () => ({})});
   const context = {document, window, Event, location: {protocol: 'http:'}, addEventListener: () => {}, fetch, performance, console,
     requestAnimationFrame: fn => setTimeout(() => fn(performance.now()), 0), cancelAnimationFrame: clearTimeout, setTimeout, clearTimeout, queueMicrotask,
     getComputedStyle: () => ({getPropertyValue: () => ''}), innerHeight: 800, innerWidth: 1180, devicePixelRatio: 1, dispatchEvent: () => true,
-    URLSearchParams, AbortController, AbortSignal, DOMException};
-  const scripts = ['graph_layout_client.js', 'block_graph.js', 'request_stack.js', 'flow_graph_layout.js', 'flow_graph.js'];
-  // The layouts the panel is given, for the drawing's size.
+    URLSearchParams, AbortController, AbortSignal, DOMException, MessageChannel};
+  // No Worker here, so the Graph pane's pipeline runs on this thread.
+  const scripts = ['graph_layout_client.js', 'block_graph.js', 'request_stack.js', 'flow_graph_model.js', 'flow_graph_layout.js', 'flow_graph_worker.js', 'flow_graph.js'];
+  // The layouts the pipeline draws, for the drawing's size.
   runInNewContext(`${(await Promise.all(scripts.map(name => readFile(new URL(`../apps/research-ui/${name}`, import.meta.url), 'utf8')))).join('\n')}
 globalThis.laidOut = [];
-const runAsync = flowGraphLayout.runAsync;
-flowGraphLayout.runAsync = async (...args) => { const layout = await runAsync(...args); laidOut.push(layout); return layout; };
+const layered = flowGraphLayout.layered;
+flowGraphLayout.layered = (...args) => { const result = layered(...args); laidOut.push(result.layout); return result; };
 globalThis.create = createFlowGraphPanel;`, context);
   const settle = () => new Promise(resolve => setTimeout(resolve, 0));
   const host = document.querySelector('#flow');
@@ -823,9 +835,9 @@ globalThis.create = createFlowGraphPanel;`, context);
   for (let i = 0; i < 200 && !/layout/i.test(host.querySelector('.flow-graph-engine')?.textContent ?? ''); i++) await settle();
   assert.match(host.querySelector('.flow-graph-engine').textContent, /^Layered layout/, 'the tree is drawn with the layered layout');
   const {width: W, height: H} = context.laidOut.at(-1);
-  // draw() clears at the identity, sets the view's transform, then returns to
-  // the identity for screen text.
-  const drawn = async () => { for (let i = 0; i < 4; i++) await settle(); const [z, , , , e, f] = transforms.at(-2); return {x: -e / z, y: -f / z, z}; };
+  // draw() clears the stage at the identity, then sets the view's transform
+  // for the drawing before any screen text.
+  const drawn = async () => { for (let i = 0; i < 4; i++) await settle(); const [z, , , , e, f] = calls[calls.lastIndexOf('clear') + 1]; return {x: -e / z, y: -f / z, z}; };
   const near = (got, want, what) => assert(Math.abs(got - want) < 1e-6 * Math.max(1, Math.abs(want)), `${what}: ${got}, wanted ${want}`);
   // On each axis: the share of the drawing a view keeps on the stage.
   const keep = (z, size, screen) => Math.min(size, screen / z / 2);

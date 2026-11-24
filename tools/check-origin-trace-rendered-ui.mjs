@@ -26,6 +26,13 @@ const report = join(root, 'build/rendered-ui-qa');
 const usage = 'usage: node tools/check-origin-trace-rendered-ui.mjs [--only <testName>]';
 const argv = process.argv.slice(2);
 const maximumHeight = process.env.REB_RENDERED_UI_MAX_HEIGHT;
+// A session folder (events.jsonl, origin-trace.jsonl, request-signals.jsonl,
+// artifacts) that test45FlowGraphPane also opens in the Graph pane, served by
+// a second packaged backend: how a large session draws in WebKit.
+const flowStores = process.env.REB_RENDERED_UI_FLOW_STORES;
+if (flowStores !== undefined) {
+  for (const name of ['events.jsonl', 'artifacts']) assert(existsSync(join(flowStores, name)), `REB_RENDERED_UI_FLOW_STORES has no ${name}`);
+}
 if (maximumHeight !== undefined) {
   assert(/^\d+$/.test(maximumHeight) && Number.isSafeInteger(Number(maximumHeight)) && Number(maximumHeight) >= 560,
     'REB_RENDERED_UI_MAX_HEIGHT must be an integer of at least 560 CSS pixels');
@@ -110,6 +117,7 @@ async function waitForFile(path, child, timeout = 30000) {
 const temporary = await mkdtemp(join(tmpdir(), 'reb-rendered-ui-'));
 let backend;
 let failingBackend;
+let flowBackend;
 let agentStandIn;
 const agentRequests = [];
 let log = '';
@@ -244,6 +252,19 @@ fetch("/getcaptcha");
   assert.equal(failure.status, 503);
   assert.match((await failure.json()).error, /analysis-worker-failed: spawn \(1 omitted artifacts\)/);
 
+  let flowURL = null;
+  if (flowStores !== undefined) {
+    const flowRoot = join(temporary, 'flow-fixture'), flowEndpoint = join(flowRoot, 'endpoint');
+    await mkdir(flowRoot, {recursive: true});
+    flowBackend = spawn(join(host, 'Contents/MacOS/OriginTraceBackend'), ['--host', '127.0.0.1', '--port', '0',
+      '--endpoint-file', flowEndpoint, '--store', join(flowStores, 'events.jsonl'), '--trace-store', join(flowStores, 'origin-trace.jsonl'),
+      '--signal-store', join(flowStores, 'request-signals.jsonl'), '--artifacts', join(flowStores, 'artifacts'),
+      '--api-collection', join(flowRoot, 'collection.json'), '--local-analyst', join(flowRoot, 'analyst.json'),
+      '--js-invocation-site-store', join(flowRoot, 'sites.json')],
+    {cwd: temporary, stdio: 'ignore'});
+    flowURL = `${await waitForFile(flowEndpoint, flowBackend, 300000)}/?native=1`;
+  }
+
   const missingBrave = join(temporary, 'no-brave', 'Brave Browser Development.app', 'Contents', 'MacOS', 'Brave Browser Development');
   const derived = join(root, 'build/rendered-ui-derived');
   log += await run('xcodebuild', ['build-for-testing', '-project', join(harness, 'OriginTraceRenderedUITests.xcodeproj'),
@@ -269,6 +290,7 @@ fetch("/getcaptcha");
     CommandLineArguments: ['--ui-url', uiURL, '--api-collection', stores.apiCollection, '--local-analyst', stores.localAnalyst],
     EnvironmentVariables: {
       ...(maximumHeight === undefined ? {} : {REB_RENDERED_UI_MAX_HEIGHT: maximumHeight}),
+      ...(flowURL === null ? {} : {REB_RENDERED_UI_FLOW_URL: flowURL}),
       REB_DISABLE_AUTOMATIC_LIVE_SESSION: '1',
       // An explicit Brave that does not exist: Start in the start panel fails
       // at once and nothing launches, whatever Brave this machine has.
@@ -388,6 +410,7 @@ fetch("/getcaptcha");
 } finally {
   await writeFile(join(report, 'xcodebuild.log'), log).catch(() => {});
   if (failingBackend && failingBackend.exitCode === null) failingBackend.kill('SIGTERM');
+  if (flowBackend && flowBackend.exitCode === null) flowBackend.kill('SIGTERM');
   agentStandIn?.close();
   if (backend && backend.exitCode === null) backend.kill('SIGTERM');
   // Stop any app instance still running from this relocated copy.

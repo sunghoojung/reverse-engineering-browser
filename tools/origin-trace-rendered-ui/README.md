@@ -77,6 +77,23 @@ ends. [`probes.js`](probes.js) scrolls an unmounted row into view before a click
 finds it. The Response test also checks that pretty print uses the Oxc layout
 and that a clicked token reports its raw range.
 
+`test45FlowGraphPane` opens the Flow Graph pane at both sizes and checks that
+the heading's title, stack count and state are whole and clear of the tools,
+that an empty timeline keeps only its head, that a card selected from the
+keyboard reads its stacks and the footer keeps their count whole, that V
+draws the lineage and V again returns, that Details counts nothing it does not
+list, and that Fit shows the whole session (screenshots `flow-graph-*`, Fit in
+both themes). With `REB_RENDERED_UI_FLOW_STORES` naming a session folder
+(`events.jsonl`, `origin-trace.jsonl`, `request-signals.jsonl`, `artifacts`),
+the driver serves it from a second packaged backend and the test opens that
+session too, printing how long the pane took to draw and the longest gap
+between page tasks while it read the session (`RENDERED_UI_FLOW` lines):
+
+```sh
+REB_RENDERED_UI_FLOW_STORES=/path/to/session DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  node tools/check-origin-trace-rendered-ui.mjs --only test45FlowGraphPane
+```
+
 `test29RendererAnsweredRows` opens a `memory_cache_reuse` row from its own
 renderer stream and a request its service worker ended without a response.
 At both sizes the first reads `(memory cache)` with its status and a General
@@ -534,6 +551,8 @@ names; their pixel dimensions and the viewport log show the actual size.
 Environment passed to the hosted bundle through the `.xctestrun`:
 
 - `REB_RENDERED_UI_MAX_HEIGHT`: optional maximum requested viewport height
+- `REB_RENDERED_UI_FLOW_URL`: the second backend's UI when the driver has
+  `REB_RENDERED_UI_FLOW_STORES`, which `test45FlowGraphPane` also opens
 - `REB_RENDERED_UI_OUTPUT`: screenshot directory
 - `REB_RENDERED_UI_PROBES`: absolute path of `probes.js`
 - `REB_RENDERED_UI_EXPECT`: JSON with the fixture's hostile markers and counts

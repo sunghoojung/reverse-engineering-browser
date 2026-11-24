@@ -390,10 +390,11 @@ async function flowTimelinePage(url, signal) {
 /**
  * The timeline view. `onSelect(selection | null)` and `onFollow(selection)` report the chosen
  * sample, call or request to the workspace, `onPartial(partial)` follows
- * every read, and `describeRequest(process, request)` names a renderer
- * request when the app lists it.
+ * every read, `onState(kind)` follows each change of read state, and
+ * `describeRequest(process, request)` names a renderer request when the
+ * app lists it.
  */
-function createFlowTimeline({root, onSelect, onFollow, onPartial, describeRequest}) {
+function createFlowTimeline({root, onSelect, onFollow, onPartial, onState = () => {}, describeRequest}) {
   const limits = FLOW_TIMELINE_LIMITS;
   root.classList.add('flow-timeline');
   // The read banner: partial reads, bounds, refresh failures and Read more.
@@ -435,12 +436,14 @@ function createFlowTimeline({root, onSelect, onFollow, onPartial, describeReques
   let scan = noScan();
 
   function setState(kind, title = '', text = '', retry = false) {
+    const changed = kind !== status;
     status = kind;
     root.dataset.state = kind;
     state.hidden = kind === 'ready';
     stateTitle.textContent = title;
     stateText.textContent = text;
     stateRetry.hidden = !retry;
+    if (changed) onState(kind);
   }
   function setBanner(text, action = null, handler = null) {
     banner.hidden = !text;
@@ -931,6 +934,9 @@ function createFlowTimeline({root, onSelect, onFollow, onPartial, describeReques
     },
     clear() { selected = null; paintSelection(); },
     selection: () => describe(selected),
+    /** Whether there is anything to draw yet: no session, a first read or a
+     * read with no call or sample. A failed read is something to show. */
+    empty: () => status === 'idle' || status === 'empty' || (status === 'loading' && !model),
     /** Steps the selected sample (direction 1 or -1) within its site. */
     stepSample(direction) {
       const info = describe(selected);

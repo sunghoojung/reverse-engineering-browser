@@ -727,16 +727,17 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 71, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 72, "Review route coverage when the API changes");
     assert!(ids.contains("get_wasm_run_memory"));
     assert!(ids.contains("export_requests_har"));
     assert!(ids.contains("get_wasm_pseudocode"));
     assert!(ids.contains("search_wasm_inspection"));
+    assert!(ids.contains("get_wasm_pseudocode"));
     assert!(ids.contains("get_request_headers"));
     assert!(ids.contains("get_request_cookies") && ids.contains("get_cookie_provenance"));
     assert!(ids.contains("get_xrefs"));
     assert!(ids.contains("get_wasm_value_flow"));
-    assert!(ids.contains("get_flow_graph"));
+    assert!(ids.contains("get_flow_graph") && ids.contains("get_flow_graph_paths"));
     assert!(ids.contains("post_graph_layout"));
     assert!(
         ids.contains("get_js_invocation_sites")
@@ -821,7 +822,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 71);
+    assert_eq!(operation_count, 72);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -954,7 +955,8 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
         (
             "NativeConsoleAction",
             include_str!("../src/native_console.rs"),
-            r#"action\s*(?:==|!=)\s*"([a-z_]+)""#,
+            // interrupt is answered before the action lock, from the request.
+            r#"(?:action|request\["action"\])\s*(?:==|!=)\s*"([a-z_]+)""#,
         ),
         (
             "CaptureAction",
@@ -1259,11 +1261,71 @@ async fn openapi_responses_match_live_local_http_and_conditional_reads() {
         ("/api/flow-graph", "/api/flow-graph", 400),
         ("/api/flow-graph?session_id=0", "/api/flow-graph", 400),
         (
-            "/api/flow-graph?session_id=1&limit=2",
+            "/api/flow-graph?session_id=1&request_id=2",
+            "/api/flow-graph",
+            400,
+        ),
+        (
+            "/api/flow-graph?session_id=1&limit=many",
+            "/api/flow-graph",
+            400,
+        ),
+        (
+            "/api/flow-graph?session_id=1&cursor=1",
             "/api/flow-graph",
             400,
         ),
         ("/api/flow-graph?session_id=1", "/api/flow-graph", 200),
+        (
+            "/api/flow-graph?session_id=1&cursor=0&limit=2",
+            "/api/flow-graph",
+            200,
+        ),
+        (
+            "/api/flow-graph?session_id=1&generation=gone",
+            "/api/flow-graph",
+            409,
+        ),
+        (
+            "/api/flow-graph/paths?session_id=1",
+            "/api/flow-graph/paths",
+            400,
+        ),
+        (
+            "/api/flow-graph/paths?session_id=1&node=0&digest=00",
+            "/api/flow-graph/paths",
+            400,
+        ),
+        (
+            "/api/flow-graph/paths?session_id=1&request_id=2",
+            "/api/flow-graph/paths",
+            400,
+        ),
+        (
+            "/api/flow-graph/paths?session_id=1&digest=AB",
+            "/api/flow-graph/paths",
+            400,
+        ),
+        (
+            "/api/flow-graph/paths?session_id=1&node=0",
+            "/api/flow-graph/paths",
+            400,
+        ),
+        (
+            "/api/flow-graph/paths?session_id=1&process_id=4&request_id=2",
+            "/api/flow-graph/paths",
+            200,
+        ),
+        (
+            "/api/flow-graph/paths?session_id=1&digest=0000000000000000000000000000000000000000000000000000000000000000&limit=1",
+            "/api/flow-graph/paths",
+            200,
+        ),
+        (
+            "/api/flow-graph/paths?session_id=1&generation=gone&process_id=4&request_id=2",
+            "/api/flow-graph/paths",
+            409,
+        ),
         ("/api/request-stack?request_id=3", "/api/request-stack", 400),
         (
             "/api/request-stack?process_id=0&request_id=3",

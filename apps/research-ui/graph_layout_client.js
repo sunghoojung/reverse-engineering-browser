@@ -156,5 +156,5 @@ const graphLayoutClient = (() => {
     return {outcomes, revision: fresh ?? revision, failure: null};
   }
 
-  return {AUTOMATIC, layOut, routePoints};
+  return {AUTOMATIC, ACCEPT, layOut, routePoints};
 })();

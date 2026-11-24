@@ -2026,7 +2026,11 @@ mod tests {
         assert_eq!(refused.len(), 1);
         assert_eq!(refused[0]["reason"], "js-dispatch-site-limit");
         let file = arming["file"].as_str().unwrap();
-        assert!((64 * 1024..128 * 1024).contains(&file.len()), "{}", file.len());
+        assert!(
+            (64 * 1024..128 * 1024).contains(&file.len()),
+            "{}",
+            file.len()
+        );
     }
 
     #[test]

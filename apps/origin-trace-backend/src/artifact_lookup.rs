@@ -13,6 +13,7 @@ use crate::{
     evidence,
     index_db::{self, Indexed, Position, SqlResult},
 };
+use hex::FromHex;
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 use std::{
@@ -28,8 +29,8 @@ pub const SUFFIX: &str = ".lookup-v1";
 /// The second layout adds the summary's counts and manifest order, the
 /// third JavaScript artifacts by digest and URL, the fourth Wasm modules.
 /// The fifth folds records of any URL length, which the fourth recorded as
-/// damage past 8 KiB.
-const FORMAT: &str = "reb-artifact-lookup-v1/5";
+/// damage past 8 KiB, and the sixth adds the flow graph's content by SHA-256.
+const FORMAT: &str = "reb-artifact-lookup-v1/6";
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS artifacts(id INTEGER PRIMARY KEY, start INTEGER NOT NULL, end INTEGER NOT NULL, parent INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS artifacts_parent ON artifacts(parent) WHERE parent != 0;
@@ -39,7 +40,12 @@ const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS scripts(id INTEGER PRIMARY KEY, sha256 TEXT NOT NULL, url TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS scripts_sha256 ON scripts(sha256);
     CREATE INDEX IF NOT EXISTS scripts_url ON scripts(url);
-    CREATE TABLE IF NOT EXISTS wasm(id INTEGER PRIMARY KEY);";
+    CREATE TABLE IF NOT EXISTS wasm(id INTEGER PRIMARY KEY);
+    -- The newest record of each SHA-256 per session and content (1 stack
+    -- artifacts, 2 scripts and modules), as the flow graph reads them.
+    CREATE TABLE IF NOT EXISTS digests(session INTEGER NOT NULL, content INTEGER NOT NULL,
+        sha256 BLOB NOT NULL, start INTEGER NOT NULL, end INTEGER NOT NULL,
+        PRIMARY KEY(session, content, sha256)) WITHOUT ROWID;";
 /// A manifest line, its newline included, as the receiver writes it: one
 /// with a URL as long as Chromium carries, 2 MiB, fits.
 pub const RECORD_BYTES: usize = crate::artifact_query::MANIFEST_RECORD_BYTES;
@@ -187,6 +193,7 @@ impl ArtifactIndex {
                 if inserted == 0 {
                     return damage(tx, "The artifact manifest contains a duplicate artifact ID");
                 }
+                digest(tx, &value, start, end)?;
                 count(tx, &value)
             })?;
             if position.indexed_to == before || Instant::now() >= deadline {
@@ -371,6 +378,122 @@ struct Ready {
 /// A validated record's canonical decimal artifact ID.
 fn artifact_key(value: &Value) -> u64 {
     value["artifact_id"].as_str().unwrap().parse().unwrap()
+}
+
+/// What a flow graph reads by SHA-256: a stack artifact, or the retained
+/// source of a script or module.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Content {
+    Stack = 1,
+    Source = 2,
+}
+
+/// Keeps a stack, script or module record as the newest of its SHA-256 in
+/// its session; later manifest records are newer and win.
+fn digest(
+    transaction: &rusqlite::Transaction<'_>,
+    value: &Value,
+    start: u64,
+    end: u64,
+) -> Result<()> {
+    let content = match value["kind"].as_str() {
+        Some("stack") => Content::Stack,
+        Some("javascript" | "wasm") => Content::Source,
+        _ => return Ok(()),
+    };
+    // A validated record has a canonical session and a lowercase hex digest.
+    let session: u64 = value["session_id"].as_str().unwrap().parse().unwrap();
+    let sha256 = <[u8; 32]>::from_hex(value["sha256"].as_str().unwrap()).unwrap();
+    transaction
+        .prepare_cached(
+            "INSERT INTO digests(session, content, sha256, start, end) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(session, content, sha256) DO UPDATE SET start = excluded.start, end = excluded.end",
+        )
+        .sql()?
+        .execute(params![
+            index_db::key(session),
+            content as i64,
+            &sha256[..],
+            start as i64,
+            end as i64
+        ])
+        .sql()?;
+    Ok(())
+}
+
+/// Manifest records found by SHA-256, and how far the index had reached.
+pub struct Digests {
+    /// Changes whenever the index is rebuilt from byte 0.
+    pub epoch: String,
+    /// The manifest bytes the index covers; a digest not found can appear
+    /// only once this grows.
+    pub indexed_to: u64,
+    /// Every complete manifest record was indexed.
+    pub caught_up: bool,
+    /// The validated newest record of each digest found, in the order asked.
+    pub found: Vec<([u8; 32], Value)>,
+}
+
+/// The newest validated record of each digest of `session` and `content`,
+/// from the index brought up to the manifest until `deadline`. A bad row
+/// anywhere in the manifest fails the lookup, as it fails every lookup.
+pub fn by_digest(
+    root: &Path,
+    session: u64,
+    content: Content,
+    digests: &[[u8; 32]],
+    deadline: Instant,
+) -> Result<Digests> {
+    let index = index(root);
+    let mut index = lock(&index);
+    let Some((mut file, position)) = index.open()? else {
+        return Ok(Digests {
+            epoch: String::new(),
+            indexed_to: 0,
+            caught_up: true,
+            found: Vec::new(),
+        });
+    };
+    let position = index.fold(&mut file, position, deadline)?;
+    let connection = index.index.sidecar().connection();
+    if let Some(message) = connection
+        .query_row("SELECT message FROM damage WHERE id = 0", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()
+        .sql()?
+    {
+        return Err(Error::new(500, message));
+    }
+    let mut statement = connection
+        .prepare_cached(
+            "SELECT start, end FROM digests WHERE session = ?1 AND content = ?2 AND sha256 = ?3",
+        )
+        .sql()?;
+    let mut found = Vec::new();
+    for sha256 in digests {
+        let range: Option<(i64, i64)> = statement
+            .query_row(
+                params![index_db::key(session), content as i64, &sha256[..]],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .sql()?;
+        if let Some((start, end)) = range {
+            let value = parse(&index_db::record(&mut file, start, end)?)?;
+            // The anchors cover only the prefix ends; the row itself must still say so.
+            if value["sha256"].as_str() != Some(hex::encode(sha256).as_str()) {
+                return Err(Error::new(500, "Artifact manifest changed during lookup"));
+            }
+            found.push((*sha256, value));
+        }
+    }
+    Ok(Digests {
+        epoch: position.epoch.clone(),
+        indexed_to: position.indexed_to,
+        caught_up: position.caught_up(RECORD_BYTES as u64),
+        found,
+    })
 }
 
 /// Counts one indexed record for the summary, keeps a script by its digest

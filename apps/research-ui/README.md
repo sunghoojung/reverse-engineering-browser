@@ -887,6 +887,16 @@ The native app keeps what the page must not hold:
 A workspace without a loopback API (the bundled offline workspace) says the
 agent is unavailable.
 
+Native reaches the page only by answering it. The page keeps one request for
+events waiting, and native answers it with every event it has made since,
+in order with its replies to the page's other requests
+([`NativePageOutbox.swift`](macos/NativePageOutbox.swift)). The live session
+panel gets its states the same way. Native never runs a script in the page to
+deliver one: WebKit runs such a script as a user gesture and consumes the
+page's transient activation when that gesture ends. A streamed event that
+ended between a press and its click took the click's activation, and WebKit
+refused the clipboard write the click made.
+
 ### What leaves the machine
 
 As the disclosure says: the question, excerpts the researcher pins, and every
@@ -950,15 +960,18 @@ accepts only a loopback stand-in, for tests; it never redirects a real key.
   and covers renewal, refusal, a forged issuer and sign out. Its waits count
   only time the Mac is awake, so a sleep during a run (a closed lid, or a dark
   wake that load ends) does not fail it.
-- `node tools/check-agent-panel.mjs` (`make native-only-check`) checks the dock's
-  states, safe rendering, citations and budgets in a DOM model, collapsed tool
-  results, the menu, Info and picker, a new conversation, the subscription
-  states, the CLI rows and decisions, and that the CLIs get the graph's system
-  prompt.
+- `node tools/check-agent-panel.mjs` (`make native-only-check`) checks the
+  dock's states, events through its waiting request, safe rendering, citations
+  and budgets in a DOM model, collapsed tool results, the menu, Info and picker,
+  a new conversation, the subscription states, the CLI rows and decisions, and
+  that the CLIs get the graph's system prompt.
 - `test0AgentPanel` drives the packaged app at both window sizes and in the
   light theme: no clipped or overlapping control in the dock, tool results
   opened and closed with Space and Return, the model picker with Return, Down
   and Escape, and the approval taking focus.
+- `test0bCopyWhileAgentStreams` copies a Traffic request as cURL five times
+  while the stand-in provider streams an answer a word every 20 ms, each with a
+  150 ms press, and reads every copy back from the pasteboard.
 
 ## Native console
 
@@ -1908,7 +1921,12 @@ The timing strip above the table counts request starts in 120 buckets. Drag
 across it to filter to that time range; with it focused, Right or Left Arrow
 selects or moves a bucket, Shift+Arrow grows or shrinks the range, and Escape
 or **Clear range** removes it. The footer reads `N / M requests · X transferred
-· Y resources` for the matching requests of the whole session.
+· Y resources` for the matching requests of the whole session. Where the
+counts cannot share a row with the footer's buttons they take a row of their
+own, each count stays on one line, and an item that does not fit on the
+current line starts the next. Beside a short stacked inspector, where the list
+has no line to spare, they flow as text beside the buttons instead. A count's
+number always stays on the line of the word it counts.
 
 A content session keeps every body whole. When the artifact receiver refuses a
 body to keep its free-disk reserve, the browser still lists it and names it as
@@ -2989,14 +3007,19 @@ request renamed is not a pick. In focus mode a tab bar names what each pane
 holds, and the **Related** rail lists what links to the selection: its
 lineage links, its samples, the function's sampled sites and the graph card
 with its row, callers, callees and request where the graph reports them.
-Every entry jumps. The rail is rebuilt only when what it lists changes, so an
-evidence poll leaves keyboard focus where it is.
+Every entry is listed and jumps; a long section scrolls in place. While it
+relates nothing, the rail folds away and the focused pane takes its width.
+The rail is rebuilt only when what it lists changes, so an evidence poll
+leaves keyboard focus where it is.
 
 ### Layout
 
 Container queries on the Flow screen decide the layout from the screen's own
 width, so a docked Console or agent narrows it as a smaller window would.
-- 1240 px and wider: every pane, with the timeline docked under them.
+- 1240 px and wider: every pane, with the timeline docked under them. While
+  the timeline has nothing to draw (no session, its first read, or no tracked
+  call), the dock is its head row, with **Open**; it opens by itself once it
+  has calls.
 - 900 to 1240 px: CFG is a tab beside Lineage and Details, and the timeline is
   a strip that opens with **Open**, 4, or a jump to a sample.
 - Narrower, down to the 760 by 560 window minimum: one pane at a time behind
@@ -3082,9 +3105,9 @@ drives the panel through its `select`, `setMark`, `resize` and
 opens its CFG; a sample marks its function's card; Back and Forward reselect
 the card a trail entry named. The graph's setters never report back as a
 pick, so nothing loops. A pick made through the workspace uses the setter's
-answer: a lineage request step lights that request's stack and the card the
-graph selects for it becomes the selection, in the same trail entry as the
-step, and a card, caller or callee in the Related rail is selected in the
+answer: a lineage request step lights that request's stack and, once the
+graph has read it, the card it selects for it becomes the selection, in the
+same trail entry as the step, and a card, caller or callee in the Related rail is selected in the
 graph and followed like a click on it, with its CFG and a trail entry. What
 the graph selects for the host, reported with cause `host` or `replay` (a
 queued `select` landing, the stack of the request the app shows, a trail
@@ -3100,9 +3123,12 @@ own pick or while restoring a trail entry, is not an app pick.
 ## Flow graph
 
 The Flow workspace's **Graph** pane draws every recorded stack of the session
-as one graph ([flow graph v1](../../protocol/flow-graph-v1.md)): request, navigation,
+as one graph ([flow graph v2](../../protocol/flow-graph-v2.md)): request, navigation,
 async scheduling and walked cookie-write stacks, folded so that each distinct
-stack and each retained source is read once. It is observed evidence only; a
+stack and each retained source is read once. It reads the graph page by page
+and draws all of it, with no card, edge or stack budget; while the backend
+has not folded every record, the status bar says how far it got and the pane
+asks again. It is observed evidence only; a
 call that never reached a recorded request, navigation, task or cookie write is
 not drawn, and the status bar says so. The same view is the Graph pane of the
 Flow workspace, through the API under [Workspace API](#workspace-api).
@@ -3122,7 +3148,10 @@ tall column.
   frame its stacks were recorded in and the process. The label takes the
   corner no edge crosses, the right one when both are clear, so it never sits
   on the spine. It stays pinned under the heading while its band is in view,
-  and stops short of the minimap.
+  at the same size at every zoom, and stops short of the minimap and of a
+  Details drawer over the canvas. A pinned label is left out while a card is
+  under it, so it never hides a card's name; the band's tint still marks the
+  realm.
 - **Rows of the graph:** inside a band they are call depth, callers above
   callees. A band entered from another starts at its own top row.
 - **Card header:** each card is one function. The header is tinted by the
@@ -3142,8 +3171,9 @@ tall column.
   - how many records walked it.
 - **Requests:** a request, navigation or cookie write is a row of each function
   that made it, not a card of its own, unless nothing recorded calls it.
-- **Row limit:** a card shows seven rows and counts the rest; Details lists
-  them all.
+- **Row pages:** a card shows eight rows at a time. A card with more ends in a
+  pager row whose halves page back and on; J and K page with the selected
+  row, and Details lists every row.
 - **Unresolved and cut frames:** an unresolved frame keeps its script ID and
   reason on a dashed card. A card whose earlier async callers were not recorded
   has a dashed stub above it.
@@ -3178,7 +3208,7 @@ theme, Dawn and the light app palette in the light one.
   the card, on its tinted header, on its pill and on a selected or marked row
   in both themes. A hue that would not, such as Moon's pine or Dawn's gold,
   never sets text.
-- **Line style:** every v1 edge is observed, so it is solid; only an omitted
+- **Line style:** every edge is observed, so it is solid; only an omitted
   run of frames is dotted. Colour is never the only carrier: a crossing, a task
   kind and a request are written on their rows too.
 - **Lit stack:** when a request or a card is selected, the stacks it lights
@@ -3235,6 +3265,19 @@ took.
   the counts of distinct stacks and cards.
 - **Request stack** lights the chosen request again after another selection.
 
+A card's and a request's stacks are read when they are selected
+(`GET /api/flow-graph/paths`), and the last 256 answers of the graph's
+generation are kept, so going back to a card reads nothing.
+
+**Lineage** (V, the toolbar's **Lineage** or **Draw its lineage** in the
+menu) draws only the cards the lit stacks walk, left to right, causes left of
+what they led to. Each realm is a column as tall as its own cards. The whole
+lineage is shown when it fits at a legible zoom; a wider one is shown at
+reading size around the selected card, slid to the lineage's start so no side
+of the view is empty. Selecting a card inside it keeps it; choosing a request
+draws that request's lineage; selecting a card outside it, Escape or
+**Lineage** again returns to the session with the selection in view.
+
 **Hover and menu:**
 - Hovering a card, a row or an edge shows its facts beside the card: kind,
   location, realm, call sites, distinct stacks, records, and what it crosses.
@@ -3251,6 +3294,10 @@ took.
 - every caller and callee, with the boundary and the call sites;
 - the requests the function made.
 
+Every list is whole. A list longer than twelve rows scrolls in place and
+builds only the rows in view, one line each with its whole text in its
+tooltip.
+
 With nothing selected it lists the realms (each jumps to its band), the
 crossings, what was not decoded, and what stacks cannot contain.
 
@@ -3258,8 +3305,11 @@ crossings, what was not decoded, and what stacks cannot contain.
 steps with Enter, Shift+Enter or its arrows, and never dims a match.
 
 **Status bar and feedback:**
+- The heading names the distinct stacks; its tooltip and the Key give the
+  functions, sinks, realms and folded chains.
 - The status bar names the selection and the evidence: records, the crossings
-  by kind, the layout engine, and any budget or deadline that cut the graph.
+  by kind, the layout engine and how far the fold got. The selection's name
+  and location give way before its stack count.
 - Copy feedback is a toast, so a refresh-failure warning stays until Retry.
 - A refresh keeps the selection, the expanded chains, the mark and the view
   wherever the same functions are still in the graph.
@@ -3287,7 +3337,8 @@ steps with Enter, Shift+Enter or its arrows, and never dims a match.
 - F centers the selection.
 - I toggles Details.
 - C and L copy the name and location.
-- M hides the minimap.
+- V draws the lit stacks' lineage alone, or returns to the session.
+- M shows or hides the minimap.
 - Letters do the same with Shift. Keys with Command, Control or Option are the
   app's, except Option+Left.
 - A key the host claims through `hostKeys` is left to it. The Flow workspace
@@ -3299,28 +3350,37 @@ The canvas announces this list through `aria-describedby`.
 **Zoom:**
 - The first view fits the whole graph when its rows stay legible. A taller or
   wider graph opens at reading size at the top of its first band, with the
-  whole width in view when it fits, else centred on the busiest entry of that
-  band. It never opens as an unreadable overview; the minimap is the overview.
-- The view keeps to the graph as the block graph's does. A drag, a scroll,
-  Shift+arrows, a minimap press, a zoom or a resized canvas stops where half
-  the canvas on each axis still shows the graph, or all of a graph smaller
-  than that. So any edge pans as far as the middle, and the graph is never
-  lost off the canvas with only Fit to bring it back. Both views take the rule
-  from `graphBoundView` in `block_graph.js`.
-  `tools/check-block-graph-ui.mjs` checks each of those in a DOM model.
+  whole width in view when it fits, else at the left edge of its first card.
+  It never opens as an unreadable overview.
+- The view stays on the graph. Every change of view, a drag, a scroll,
+  Shift+arrows, a minimap press, a zoom or a resized canvas, keeps to the
+  block graph's rule, `graphBoundView` in `block_graph.js`: half the canvas on
+  each axis still shows the graph, or all of a graph smaller than that. Fit
+  (0) shows all of it at any size. `tools/check-block-graph-ui.mjs` checks the
+  rule in a DOM model.
 - Rows show from 85% zoom.
 - Below that, cards sketch their rows in their rows' colours and paint their
   names at screen size, and band names sit on plates.
 - Below 20% they are boxes filled with their kind's colour, and plain calls
   become hairlines.
+- Below 4.5% each realm is one block with its name and its card and request
+  counts, and the calls between realms are bundled per pair of realms, wider
+  for more calls. A bundle to the next realm in its column runs straight down
+  between the two; any other follows its heaviest call's route, which keeps
+  off every card and on a line of its own. A name sits inside a block wide
+  enough for it, else beside the columns. Clicking a block shows its realm.
 - The minimap takes the graph's shape: a tall graph gets a tall column (up to
   440 px, or 55% of the canvas) with bands, cards in their kinds' colours,
   edges in theirs and the view box; a wide one a short strip. Its width
   follows the canvas, from 72 to 170 px. It hides while the whole graph is in
-  view, in a short canvas and below 380 px, so a workspace pane keeps it.
+  view, in a short canvas, and in a canvas narrower than 820 px unless M shows
+  it.
 - Centring a card keeps it clear of the minimap and of a Details sheet.
-- In a canvas narrower than 860 px the tools drop under the heading. In a
-  narrow window Details is a sheet over the bottom 40% of the canvas.
+- The tools drop under the heading when the heading's whole text and the
+  tools do not fit side by side. In a pane narrower than 760 px Details is a
+  drawer over the right of the canvas, at most 300 px wide, and the heading
+  and tools keep left of it, the tools wrapping there rather than running
+  under it. Counts carry the locale's digit grouping.
 
 ### Workspace API
 
@@ -3364,7 +3424,7 @@ calls with the session, the selected request and the stack count.
 | `function_index` | the Wasm function index, or `null` |
 | `row` | the chosen row as `{index, site, op, target}`, or `null`; `site` is the text the row shows, such as `8:3` or `+0x2f` |
 | `request` | the lit request as `{process, request}` while its stack is the highlight, else `null` |
-| `callers` | up to eight cards on drawn edges into this one, most stacks first, each `{key, name, kind, note, count}` with `note` the edge kind |
+| `callers` | every card on a drawn edge into this one, most stacks first, each `{key, name, kind, note, count}` with `note` the edge kind |
 | `callees` | the same for drawn edges out of this card |
 
 `show({session, request, stacks})` shows the view for a session and the
@@ -3387,8 +3447,9 @@ wins, in that order.
   the graph.
 - `highlightRequest(request, {reveal = true, silent = true} = {})` lights the
   stack of the renderer request `{process, request}` and selects the row that
-  made it. It returns that card's `info`, or `null` when the request has no
-  stack here, which clears the selection.
+  made it. The stack is read on demand, so it returns a promise of that card's
+  `info`, or of `null` when the request has no stack here, which clears the
+  selection.
 - `selection()` returns the current `info`, or `null`.
 - `resize()` re-measures the stage after the host changed its size, such as
   when a pane opens, closes or is dragged.
@@ -3403,9 +3464,14 @@ wins, in that order.
 
 ### Layout
 
-Layout runs in `flow_graph_layout.js` as a Web Worker, through the block
-graph's runner, or on the main thread when a shell cannot start one, with the
-same engine report either way, on card sizes measured from their text.
+`flow_graph_worker.js` reads the pages, builds the model
+(`flow_graph_model.js`), folds it, sizes the cards and lays them out
+(`flow_graph_layout.js`) in a Web Worker, and sends each result as typed
+arrays. The page measures its fonts' advances and sends them, so a card is
+sized from the same text it draws, and lands each page and fold in slices
+that leave the page responsive. Where no worker starts, the page runs the
+same pipeline itself. Expanding or folding a chain lays out again only the
+band it is in, and the selected card stays where it was on screen.
 
 **Layered layout:**
 - Bands are ordered callers first over the calls between realms: realms that
@@ -3445,33 +3511,42 @@ same engine report either way, on card sizes measured from their text.
   wide as it is tall (`aspect`), each band centred in its column at its own
   width.
 
-**Triskel:** when the backend serves `POST /api/graph-layout`, each realm of 2
-to 2,000 cards and up to 8,000 calls is then sent to
-[Triskel](https://github.com/triskellib/triskel) in one request, in band
-order, with no deadline. While it runs over no drawing, the view counts its
-seconds and offers **Use the layered layout**; over a drawing, the status bar
-counts them beside **Cancel**. A larger realm keeps the layered layout, and the
-status bar offers **Lay out with Triskel**, which sends every realm whatever
-its size until the session changes or a run is stopped. The layout worker keeps Triskel's last 64
-answers by realm, so a new layout of mostly the same realms, such as a chain
-folded or a refresh, sends only the realms that changed. A realm takes Triskel's coordinates and waypoints unless Triskel would
-draw it more than 1.6 times wider than the layered layout and over 1,400 px,
-or more than 1.6 times taller and over 1,600 px taller.
+**Triskel:** the layered layout is drawn first. When the backend serves
+`POST /api/graph-layout`, each realm of 2 to 2,000 cards and up to 8,000
+calls is then sent to [Triskel](https://github.com/triskellib/triskel) in the
+background, smallest first, one realm per request and two at a time, with no
+deadline, and each realm it accepts is swapped in, at most every 400 ms,
+keeping the selected card (or the card in the middle of the view) where it
+was on screen. While it runs, the status bar counts its seconds beside
+**Cancel**, which stops the requests in flight and leaves every realm not yet
+answered layered. A larger realm keeps the layered layout, and the status bar
+offers **Lay out with Triskel**, which sends every realm whatever its size,
+and a stopped one again, until the session changes or a run is stopped. No
+realm is refused before Triskel answers: Triskel ranks each SESE region of a
+realm on its own, so no measure of the realm alone bounds how narrow it draws
+it. A refold that keeps a realm waits for the request already in flight for
+it, and one that changes it stops that request. The client keeps Triskel's
+last 64 answers by realm, so a new layout of mostly the same realms, such as
+a chain folded or a refresh, sends only the realms that changed. A realm
+takes Triskel's coordinates and waypoints unless Triskel would draw it more
+than 1.6 times wider than the layered layout and over 1,400 px, or more than
+1.6 times taller and over 1,600 px taller.
 Triskel does not stack a wide fan of calls, and a call tree's breadth would
 otherwise run off to the side. The layered layout also stays when Triskel's
 answer is missing, failed or the wrong shape. Either way the bands keep the
-layered order and are packed into columns and routed between the same way. The
-status bar says `Triskel layout`, or how many realms it took, and hovering it
-gives each other realm's reason.
+layered order and are packed into columns and routed between the same way.
+The status bar says `Triskel layout`, or how many realms it took, and hovering
+it counts the realms still waiting and gives each other realm's reason.
 
 Ten thousand cards lay out in under half a second in Node, fifty thousand in
-under three. The canvas is one bounded
-backing store, released with the minimap while the view is hidden, and only
-visible bands, cards and edges are drawn. Card text is cut to its card once
-per layout, not per frame, and a selection reads per-model path indexes and
-per-display edge lists rather than walking every path; cards drop
-their lift shadow when more than 160 are in view, and the lit stack drops its
-glow past 600 edges. A refresh failure keeps the last graph under a banner.
+under three. The canvas is one bounded backing store, released with the
+minimap while the view is hidden, and only visible bands, cards and edges are
+drawn, with no allocation per frame. A card is built and its text cut the
+first time it is drawn, one row at a time. The minimap redraws its picture
+only when the layout or its size changes; the lit stacks and matches are an
+overlay, and the view box is drawn each frame. Cards drop their lift shadow
+when more than 160 are in view, and the lit stack drops its glow past 600
+edges. A refresh failure keeps the last graph under a banner.
 The `reb://` stored-evidence window has no flow graph route and says so.
 
 ## Pane sizes

@@ -94,7 +94,7 @@ every valid observation record of the store, newest first. Each frame's
 `records` counts its records and `kinds` counts them per record type (a type
 the frame never recorded is absent), so a reader can name each kind's count
 without reading the records. The event index (`events.jsonl.events-v1`,
-layout 5) keeps them as it folds the store, beside `threads.workers` (every
+layout 7) keeps them as it folds the store, beside `threads.workers` (every
 worker that started a request) and `observation_budget_gaps` (every
 `debugger_observation_budget` gap, above, which only earlier builds write), so
 a frame observed early in a long session is still listed. `threads.coverage`

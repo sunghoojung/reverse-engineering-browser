@@ -33,7 +33,22 @@ const posted = [];
 // checked in their own section below.
 const startOptions = [];
 let answer = message => ({ok: true});
+// Native's outbox (NativePageOutbox): the page's one waiting request for
+// states, answered with every state posted for it.
+const outbox = {queued: [], waiting: null, requests: 0, pages: new Set()};
+const flushOutbox = () => {
+  if (!outbox.waiting || !outbox.queued.length) return;
+  const {resolve} = outbox.waiting;
+  outbox.waiting = null;
+  resolve({events: outbox.queued.splice(0)});
+};
+const publish = async (...states) => { outbox.queued.push(...states); flushOutbox(); await settle(); };
 context.webkit = {messageHandlers: {rebSession: {postMessage: async message => {
+  if (message.op === 'events') {
+    outbox.requests += 1;
+    outbox.pages.add(message.page);
+    return new Promise((resolve, reject) => { outbox.waiting = {resolve, reject}; flushOutbox(); });
+  }
   const copy = JSON.parse(JSON.stringify(message));
   if (copy.op === 'start') { startOptions.push(copy.options); delete copy.options; }
   posted.push(copy);
@@ -324,6 +339,28 @@ push({panel: 'failed', mode: 'content', modes, options: options(), failure: {tit
   message: 'The live capture coordinator stopped unexpectedly.', afterStartup: true, reviewable: false, endedNormally: false}});
 assert.deepEqual([...panel.querySelectorAll('footer button')].map(button => button.textContent), ['Continue Offline', 'Retry']);
 
+// Native's states come as the answers to one request the page keeps waiting,
+// started by its first request to native; states posted together arrive in order.
+assert(outbox.waiting, 'the page keeps a request for states waiting');
+await publish(choose(saved(4, [])), {panel: 'failed', mode: 'content', modes, options: options(),
+  failure: {title: 'Live session unavailable', message: 'Brave did not start.', afterStartup: false, reviewable: false, endedNormally: false}});
+assert.equal(panel.dataset.state, 'failed', 'the states native posted are drawn in order');
+assert.equal(panel.querySelector('#session-panel-failure').textContent, 'Brave did not start.');
+assert(outbox.waiting, 'the page asks again once it has the answer');
+assert.equal(outbox.pages.size, 1, 'the page names itself the same in every request');
+// A refusal, as native gives a document it saw leave, ends the wait; the next
+// request to native starts it again.
+const waits = outbox.requests;
+outbox.waiting.reject(new Error('This document is no longer the application’s.'));
+outbox.waiting = null;
+await settle();
+assert.equal(outbox.requests, waits, 'a refused wait is not asked again by itself');
+buttonNamed('Retry').click();
+await settle();
+assert.deepEqual(posted.at(-1), {op: 'retry'});
+assert.equal(outbox.requests, waits + 1, 'a request to native starts the wait again');
+assert(outbox.waiting);
+
 push({panel: 'hidden'});
 assert.equal(panel.hidden, true);
 assert.equal(panel.children.length, 0);
@@ -333,6 +370,9 @@ release();
 
 // Native owns the decision: every choice the page can send is checked there.
 const native = readFileSync(new URL('../apps/research-ui/macos/SessionPanel.swift', import.meta.url), 'utf8');
+// A script native ran in the page would take the activation of a click it
+// landed in; states go only as answers to the page's request (NativePageOutbox).
+assert.doesNotMatch(native, /callAsyncJavaScript|evaluateJavaScript/, 'native runs no script in the page');
 for (const op of ['state', 'start', 'retry', 'review', 'offline', 'removeSite', 'clearSites']) {
   assert(native.includes(`case "${op}"`) || native.includes(`"${op}"`), `native handles ${op}`);
 }
@@ -352,7 +392,7 @@ const launcher = readFileSync(new URL('../scripts/run-live-session.sh', import.m
 for (const [name, source] of [['the app', coordinator + native], ['the launcher', launcher]]) {
   assert.doesNotMatch(source, /BUDGET_MIB|budget_mib|CAPTURE_RESPONSE_MEDIA|response_media|ContentLimits/, `${name} names no content limit`);
 }
-console.log('PASS session panel: start choices with the alert’s wording, no Keychain option, saved sites as text, Remove and Clear All by generation, '
+console.log('PASS session panel: states from native as the answers to the page’s one waiting request, start choices with the alert’s wording, no Keychain option, saved sites as text, Remove and Clear All by generation, '
   + 'Start with the page selection, a refused choice kept on screen, starting, unavailable and ended states with Retry and Continue Offline, '
   + 'Content naming the disk reserve and no size or media choice, a start that names only its mode, and no content limit left in the app or launcher '
   + '(offline DOM model; rendered layout, focus and the real bridge are in the rendered harness)');

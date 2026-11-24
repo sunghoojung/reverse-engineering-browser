@@ -238,7 +238,7 @@ impl Segment {
         self.digest.iter().any(|b| *b != 0)
     }
     /// No script was running, or the message's origin was rejected: the chain ends here.
-    fn ends_chain(&self) -> bool {
+    pub(crate) fn ends_chain(&self) -> bool {
         matches!(self.state, 7 | 8)
     }
 }
@@ -884,7 +884,7 @@ pub(crate) fn task_kind(kind: u8) -> &'static str {
     }
 }
 
-fn segment_state(state: u8) -> &'static str {
+pub(crate) fn segment_state(state: u8) -> &'static str {
     match state {
         1 => "captured",
         4 => "not_retained_artifact_unavailable",

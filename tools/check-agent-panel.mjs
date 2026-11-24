@@ -89,7 +89,22 @@ export async function checkAgentPanel() {
         ...(subscriptions ? {supportsKey: true, subscriptionModel: 'gpt-6-astra', subscription: {kind: 'oauth', available: true, signedIn: chatgptSignedIn}} : {})},
       ...(subscriptions ? [{id: 'grok', label: 'Grok', vendor: 'xAI', defaultModel: 'default', subscriptionModel: 'default', supportsKey: false,
         hasKey: false, subscription: {kind: 'cli', available: true, cli: 'grok'}}] : [])], engine, preferences: copy(saved)});
+  // Native's outbox (NativePageOutbox): the page's one waiting request for
+  // events, answered with every event posted for it.
+  const outbox = {queued: [], waiting: null, requests: 0, delivered: 0, pages: new Set()};
+  const flushOutbox = () => {
+    if (!outbox.waiting || !outbox.queued.length) return;
+    const resolve = outbox.waiting;
+    outbox.waiting = null;
+    outbox.delivered += outbox.queued.length;
+    resolve({events: outbox.queued.splice(0)});
+  };
   context.__agentPost = message => {
+    if (message.op === 'events') {
+      outbox.requests += 1;
+      outbox.pages.add(message.page);
+      return new Promise(resolve => { outbox.waiting = resolve; flushOutbox(); });
+    }
     posted.push(message);
     if (message.op === 'enable') {
       const cli = message.auth === 'subscription' && message.provider !== 'chatgpt';
@@ -168,6 +183,7 @@ export async function checkAgentPanel() {
   };
   assert.equal(byId('agent-dock').hidden, true, 'the dock is closed by default');
   assert.equal(posted.length, 0, 'nothing is asked of native while closed');
+  assert.equal(outbox.requests, 0, 'and no request for events waits');
 
   byId('agent-toggle').click();
   await settle();
@@ -341,6 +357,21 @@ export async function checkAgentPanel() {
   assert.ok(['keyword', 'string', 'comment'].every(kind => fencedBody.querySelector(`.syntax-${kind}`)), 'fenced code is colored by the shared lexer');
   assert.ok([...fencedBody.querySelectorAll('*')].every(node => node.tagName === 'SPAN'), 'colored code holds only text spans');
   assert.equal(logNode.querySelector('b'), null, 'markup in fenced code is never instantiated');
+  // Copy says what the clipboard did: a refused write is not reported as copied.
+  const codeCopy = logNode.querySelector('.agent-code-copy');
+  const written = [];
+  window.navigator.clipboard.writeText = async text => { written.push(text); };
+  codeCopy.click();
+  await settle();
+  assert.deepEqual(written, [fencedSource]);
+  assert.equal(codeCopy.textContent, 'Copied');
+  assert.ok(codeCopy.classList.contains('copied') && !codeCopy.classList.contains('failed'));
+  window.navigator.clipboard.writeText = async () => { throw new window.DOMException('Not allowed', 'NotAllowedError'); };
+  codeCopy.click();
+  await settle();
+  assert.equal(codeCopy.textContent, 'Copy failed', 'a refused write says so');
+  assert.ok(codeCopy.classList.contains('failed') && !codeCopy.classList.contains('copied'));
+  window.navigator.clipboard.writeText = async () => {};
   // A streamed reply keeps the blocks it drew; in pieces it must draw what the whole reply does.
   const reply = 'Intro <b>x</b>\nmore\n\n# Head\n- one\n- two\n\n```json\n{"a": [1, "<i>"]}\n```\n1. after\n\n```js\nlet open = 1;';
   for (let at = 0; at < reply.length; at += 7) {
@@ -615,7 +646,10 @@ export async function checkAgentPanel() {
   await press(input, 'Enter');
   const sent = posted.findLast(message => message.op === 'cliSend');
   assert.equal(sent?.text, 'What did the CLI see?', 'Return sends the question to the native CLI driver');
-  const cli = event => runInContext(`__rebAgentEvent(${JSON.stringify({...event, cli: true})})`, context);
+  // Native's CLI events, as the answers to the request for events the dock's
+  // first request to native started.
+  assert(outbox.waiting, 'the page keeps a request for events waiting');
+  const cli = event => { outbox.queued.push({...event, cli: true}); flushOutbox(); };
   cli({type: 'text', rowId: 'g1', turnId: sent.turnId, delta: 'From Grok <b>bold</b>'});
   cli({type: 'tool', id: 'tool-g', turnId: sent.turnId, name: 'get_session_summary', arguments: '{}', state: 'running', readOnly: true});
   cli({type: 'tool', id: 'tool-g', turnId: sent.turnId, name: 'get_session_summary', arguments: '{}', state: 'done', result: '{"events":3}', resultBytes: 12, isError: false});
@@ -624,6 +658,9 @@ export async function checkAgentPanel() {
   assert.match(logNode.textContent, /From Grok <b>bold<\/b>/);
   assert.equal(logNode.querySelector('b'), null, 'CLI text stays inert');
   assert.equal(logNode.querySelector('[data-row-id="tool-g"] .agent-tool-summary').getAttribute('aria-expanded'), 'false');
+  assert.equal(outbox.delivered, 4, 'the four events came through the waiting request');
+  assert.equal(logNode.querySelector('[data-row-id="tool-g"] .agent-tool-state-done') !== null, true, 'in the order native made them');
+  assert(outbox.waiting, 'and the page asked again');
   logNode.querySelector('[data-approve="gc1"]').click();
   await settle();
   assert.deepEqual(copy(posted.findLast(message => message.op === 'cliDecide')), {op: 'cliDecide', callId: 'gc1', allow: true}, 'Allow once reaches the driver');
@@ -687,9 +724,14 @@ export async function checkAgentPanel() {
   assert.equal(dockState(), 'off');
   byId('agent-toggle').click();
   await settle();
+  assert.equal(outbox.pages.size, 1, 'the page names itself the same in every request for events');
+  // A script native ran in the page would take the activation of a click it
+  // landed in; events go only as answers to the page's request (NativePageOutbox).
+  assert.doesNotMatch(readFileSync(new URL('../apps/research-ui/macos/AgentBridge.swift', import.meta.url), 'utf8'),
+    /callAsyncJavaScript|evaluateJavaScript/, 'native runs no script in the page');
   assert.deepEqual(asyncErrors, [], 'no asynchronous errors');
   release();
-  console.log('PASS agent panel: safe markdown, verified citations, byte budget, consent as the only confirmation for the four permission levels (warning, named button, badge, dock button, lowering and raising, and the level saved for the next app run), collapsed tool results, approvals, menus and picker, new conversation, closed-panel behavior, and subscription states with the CLI and ChatGPT paths (not rendered QA)');
+  console.log('PASS agent panel: events from native as the answers to the page\'s one waiting request, safe markdown, verified citations, byte budget, consent as the only confirmation for the four permission levels (warning, named button, badge, dock button, lowering and raising, and the level saved for the next app run), collapsed tool results, approvals, menus and picker, new conversation, closed-panel behavior, and subscription states with the CLI and ChatGPT paths (not rendered QA)');
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) await checkAgentPanel();

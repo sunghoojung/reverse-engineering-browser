@@ -3117,7 +3117,9 @@
           // A full list: 256 sites, or 8 from a producer before 2.18.0.
           (row.reason !== 'js-dispatch-site-limit' || [8, 256].includes(arming.sites.length)))) return false;
         if (arming.sites.length === 0) return arming.file === null;
-        return typeof arming.file === 'string' && arming.file.length <= 4096 &&
+        // The file is the canonical rendering of its sites, so its size follows
+        // from their count: 256 sites stay inside the 128 KiB a site file holds.
+        return typeof arming.file === 'string' &&
           arming.file === vmCanonicalJson({sites: arming.sites, version: 1});
       }
       function isNativeGuestSample(row, workspace) {

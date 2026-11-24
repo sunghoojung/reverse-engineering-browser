@@ -122,6 +122,8 @@
   .flow-body[data-mode="split"][data-timeline-open="false"] [data-pane="timeline"] .flow-divider { display: none; }
   .flow-body[data-mode="focus"] { grid-template-columns: minmax(0, 1fr) minmax(260px, 300px); grid-template-rows: minmax(0, 1fr); grid-template-areas: "main related"; }
   .flow-body[data-mode="focus"] > .flow-related:not([hidden]) { grid-area: related; display: flex; }
+  .flow-body[data-mode="focus"][data-related-empty] { grid-template-columns: minmax(0, 1fr); grid-template-areas: "main"; }
+  .flow-body[data-mode="focus"][data-related-empty] > .flow-related { display: none; }
 }
 /* Wide: every pane at once, the timeline as a dock under them. */
 @container flow-screen (min-width: 1240px) {
@@ -132,6 +134,7 @@
   .flow-body[data-mode="split"] > [data-pane="lineage"] { grid-row: 1; grid-column: 3; }
   .flow-body[data-mode="split"] > [data-pane="timeline"] { grid-row: 2; grid-column: 1 / -1; }
   .flow-body[data-mode="focus"] { grid-template-columns: minmax(0, 1fr) 320px; }
+  .flow-body[data-mode="focus"][data-related-empty] { grid-template-columns: minmax(0, 1fr); }
 }
 /* Narrow: Evidence and View traffic stay in the sidebar and Back. */
 @container flow-screen (max-width: 899px) {
@@ -156,16 +159,17 @@
 .flow-empty { margin: auto; max-width: 380px; padding: 24px; text-align: center; }
 .flow-empty h3 { margin: 0 0 8px; color: var(--text); font: 600 13px var(--sans); }
 .flow-empty p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
-.flow-cfg-samples { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px; padding: 6px 8px 6px 12px; border: 1px solid color-mix(in srgb, var(--fw-iris) 45%, var(--line)); border-radius: 8px; background: var(--panel-2); color: var(--muted); font: 11.5px var(--mono); }
+/* Every sampled site is a chip; many of them scroll in place under the CFG. */
+.flow-cfg-samples { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; max-height: 96px; overflow-y: auto; overscroll-behavior: contain; margin: 8px; padding: 6px 8px 6px 12px; border: 1px solid color-mix(in srgb, var(--fw-iris) 45%, var(--line)); border-radius: 8px; background: var(--panel-2); color: var(--muted); font: 11.5px var(--mono); }
 .flow-cfg-sample-text { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; gap: 4px 10px; }
 .flow-cfg-sample-text b { color: var(--text); font-weight: 500; }
 .flow-keys { display: inline-flex; align-items: center; gap: 4px; font-family: var(--sans); }
 .flow-chip { height: 24px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--fw-iris-text); font: 11.5px var(--mono); }
 .flow-chip:hover { border-color: var(--fw-iris); }
-.flow-more { color: var(--faint); font-size: 11px; }
 #flow-pane-cfg { container: flow-cfg / inline-size; }
 @container flow-cfg (max-width: 520px) {
-  .flow-cfg-samples { flex-wrap: nowrap; gap: 6px; }
+  .flow-cfg-samples { flex-wrap: nowrap; gap: 6px; overflow-x: auto; overflow-y: hidden; }
+  .flow-cfg-samples > .flow-chip { flex: none; }
   .flow-cfg-sample-text { flex-wrap: nowrap; overflow: hidden; white-space: nowrap; }
   .flow-cfg-sample-text > span { overflow: hidden; text-overflow: ellipsis; }
   .flow-cfg-samples .flow-keys { display: none; }
@@ -209,8 +213,9 @@
 .flow-lineage-selected h3 { margin: 0 0 4px; color: var(--muted); font: 600 11px var(--sans); letter-spacing: .04em; text-transform: uppercase; }
 .flow-lineage-selected-site { color: var(--fw-iris-text); font-family: var(--mono); letter-spacing: 0; text-transform: none; }
 .flow-lineage-selected-line { margin: 0 0 8px; color: var(--text); font: 11.5px var(--mono); }
-.flow-histogram { display: flex; align-items: flex-end; gap: 6px; margin: 0; padding: 0; list-style: none; }
-.flow-histogram li { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 16px; color: var(--muted); font: 10.5px var(--mono); }
+/* Every value has a bar; a wide spread scrolls sideways. */
+.flow-histogram { display: flex; align-items: flex-end; gap: 6px; margin: 0; padding: 0 0 4px; overflow-x: auto; list-style: none; }
+.flow-histogram li { flex: none; display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 16px; color: var(--muted); font: 10.5px var(--mono); }
 .flow-histogram-bar { width: 14px; border-radius: 2px; background: color-mix(in srgb, var(--fw-iris) 45%, transparent); }
 .flow-histogram .flow-histogram-on { color: var(--text); }
 .flow-histogram .flow-histogram-on .flow-histogram-bar { background: var(--fw-iris); }
@@ -273,6 +278,8 @@
 .flow-related-title { margin: 10px 0 2px; color: var(--text); font: 600 12px var(--sans); }
 .flow-related-title b { color: var(--fw-iris-text); font: 600 12px var(--mono); }
 .flow-related-section { display: flex; flex-direction: column; gap: 6px; padding: 12px 0; border-bottom: 1px solid var(--line-soft); }
+/* Every entry is listed; a long section scrolls in place so the next one stays in reach. */
+.flow-related-list { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow-y: auto; overscroll-behavior: contain; }
 .flow-related-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .flow-related-head h3 { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--muted); font: 600 10.5px var(--sans); letter-spacing: .07em; text-transform: uppercase; }
 .flow-related-open { height: 24px; display: inline-flex; align-items: center; gap: 6px; padding: 0 8px; border: 1px solid color-mix(in srgb, var(--pane) 45%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--pane) 10%, transparent); color: var(--text); font: 500 11.5px var(--sans); }
@@ -283,7 +290,6 @@
 .flow-related-strip { display: flex; flex-wrap: wrap; gap: 4px; }
 .flow-related-sample { min-width: 22px; height: 24px; padding: 0 4px; border: 1px solid transparent; border-radius: 4px; background: color-mix(in srgb, var(--fw-iris) 16%, transparent); color: var(--fw-iris-text); font: 11px var(--mono); }
 .flow-related-sample[aria-pressed="true"] { border-color: var(--text); background: color-mix(in srgb, var(--fw-iris) 35%, transparent); color: var(--text); }
-.flow-related-empty { margin: 12px 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
 
 /* Feedback for a key that had nothing to act on; it clears itself. */
 .flow-status { position: absolute; z-index: 8; left: 50%; bottom: 16px; transform: translateX(-50%); max-width: min(560px, calc(100% - 32px)); padding: 7px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-3); color: var(--text); font-size: 12px; box-shadow: 0 8px 24px var(--shadow); pointer-events: none; }

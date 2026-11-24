@@ -129,7 +129,7 @@ class ReleasePair(unittest.TestCase):
         self.provenance = self.provenance.with_name(f"{name}.provenance.json")
         self.write_provenance({**self.browser, "release": TAG, "artifact": f"{name}.zip"})
         self.write_pin(brave_name=name)
-        accepted = self.helper.PENDING_LIVE[:2]
+        accepted = self.helper.ACCEPTED_LIVE[:2]
         with patch.object(self.helper, "PENDING_LIVE", ()), patch.object(
                 self.helper, "ACCEPTED_LIVE", accepted):
             self.run_helper()
@@ -139,7 +139,7 @@ class ReleasePair(unittest.TestCase):
         self.assertIn("## Checked live on this build", notes)
         for claim in accepted:
             self.assertIn(f"- {claim}\n", notes)
-        self.assertNotIn(self.helper.PENDING_LIVE[2], notes)
+        self.assertNotIn(self.helper.ACCEPTED_LIVE[2], notes)
         self.assertNotIn("byte for byte", notes)
         self.assertNotIn("\u2014", notes)
         self.assertTrue((self.output / f"{name}.zip").exists())
@@ -151,8 +151,8 @@ class ReleasePair(unittest.TestCase):
         self.provenance = self.provenance.with_name(f"{name}.provenance.json")
         self.write_provenance({**self.browser, "release": TAG, "artifact": f"{name}.zip"})
         self.write_pin(brave_name=name)
-        self.assertTrue(self.helper.PENDING_LIVE)
-        with self.assertRaisesRegex(ValueError, "pending live acceptance"):
+        with patch.object(self.helper, "PENDING_LIVE", ("A claim not yet run live.",)), \
+                self.assertRaisesRegex(ValueError, "pending live acceptance"):
             self.run_helper()
         self.assertFalse((self.output / f"{name}.zip").exists())
         self.assertFalse((self.output / "release-notes.md").exists())

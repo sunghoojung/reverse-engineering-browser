@@ -28,10 +28,10 @@ readonly check_pin_only
 # every PLACEHOLDER before release. tools/write-release-pair.py reads this block
 # too.
 readonly brave_name=Brave-Browser-Development-v0.6.0-macos-arm64
-readonly source_url=PLACEHOLDER
-readonly brave_sha256=PLACEHOLDER
-readonly provenance_sha256=PLACEHOLDER
-readonly build_source=PLACEHOLDER
+readonly source_url=https://github.com/sunghoojung/reverse-engineering-browser/releases/download/brave-0.6.0-5d0a797
+readonly brave_sha256=cd3414cb3c79399496589c8ecd10fdb46034bd8f214822330a4a746768254c39
+readonly provenance_sha256=7e4560638a7552df058a1c47896aa0bb7e1ff71933ff43e01c62fc35fb62e66f
+readonly build_source=5d0a79720d4ed034d8a0948762f376ab3f556033
 # END reviewed paired browser pin
 
 readonly plist=apps/research-ui/macos/Info.plist

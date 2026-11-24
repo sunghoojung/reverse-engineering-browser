@@ -22,6 +22,7 @@
 #include <type_traits>
 
 #include "../browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_js_dispatch.h"
+#include "reb/broker_refusal.hpp"
 #include "reb/event.hpp"
 #include "reb/js_dispatch.hpp"
 
@@ -168,8 +169,9 @@ int main(int argc, char** argv) {
   } else if (mode == "wide-identities") {
     native.header.session_id = native.header.sequence_number = native.header.monotonic_time_ns =
         native.header.frame_id = std::numeric_limits<std::uint64_t>::max();
-    native.header.process_id = native.header.thread_id = native.header.tab_id =
-        std::numeric_limits<std::uint32_t>::max();
+    // The widest producer process ID; the next is the broker's own.
+    native.header.process_id = reb::kBrokerProcessId - 1;
+    native.header.thread_id = native.header.tab_id = std::numeric_limits<std::uint32_t>::max();
   } else {
     valid = false;
     if (mode == "reserved")

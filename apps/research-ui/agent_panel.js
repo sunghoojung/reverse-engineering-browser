@@ -1438,10 +1438,12 @@
     const wrap = element('div', 'agent-code');
     const header = element('div', 'agent-code-head');
     header.append(element('span', 'agent-code-lang', block.lang || 'text'));
+    // A refused write says so: WebKit refuses one outside the click's activation.
     const copy = button('agent-code-copy', 'Copy', async () => {
-      await navigator.clipboard.writeText(block.text).catch(() => {});
-      copy.textContent = 'Copied';
-      copy.classList.add('copied');
+      const copied = await navigator.clipboard.writeText(block.text).then(() => true, () => false);
+      copy.textContent = copied ? 'Copied' : 'Copy failed';
+      copy.classList.toggle('copied', copied);
+      copy.classList.toggle('failed', !copied);
     }, 'Copy code');
     header.append(copy);
     const pre = codeText('agent-code-body', block.text, fenceSyntax(block.lang));

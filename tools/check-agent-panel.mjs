@@ -357,6 +357,21 @@ export async function checkAgentPanel() {
   assert.ok(['keyword', 'string', 'comment'].every(kind => fencedBody.querySelector(`.syntax-${kind}`)), 'fenced code is colored by the shared lexer');
   assert.ok([...fencedBody.querySelectorAll('*')].every(node => node.tagName === 'SPAN'), 'colored code holds only text spans');
   assert.equal(logNode.querySelector('b'), null, 'markup in fenced code is never instantiated');
+  // Copy says what the clipboard did: a refused write is not reported as copied.
+  const codeCopy = logNode.querySelector('.agent-code-copy');
+  const written = [];
+  window.navigator.clipboard.writeText = async text => { written.push(text); };
+  codeCopy.click();
+  await settle();
+  assert.deepEqual(written, [fencedSource]);
+  assert.equal(codeCopy.textContent, 'Copied');
+  assert.ok(codeCopy.classList.contains('copied') && !codeCopy.classList.contains('failed'));
+  window.navigator.clipboard.writeText = async () => { throw new window.DOMException('Not allowed', 'NotAllowedError'); };
+  codeCopy.click();
+  await settle();
+  assert.equal(codeCopy.textContent, 'Copy failed', 'a refused write says so');
+  assert.ok(codeCopy.classList.contains('failed') && !codeCopy.classList.contains('copied'));
+  window.navigator.clipboard.writeText = async () => {};
   // A streamed reply keeps the blocks it drew; in pieces it must draw what the whole reply does.
   const reply = 'Intro <b>x</b>\nmore\n\n# Head\n- one\n- two\n\n```json\n{"a": [1, "<i>"]}\n```\n1. after\n\n```js\nlet open = 1;';
   for (let at = 0; at < reply.length; at += 7) {

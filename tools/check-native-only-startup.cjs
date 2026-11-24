@@ -16,7 +16,13 @@ const ui = path.join(root, 'apps/research-ui');
 // Shared with check-native-only-ui.mjs: one offline loader for every shipped
 // script, so both checks exercise the same production controllers.
 function loadShippedUi() {
-  const {window} = parseHTML(fs.readFileSync(path.join(ui, 'index.html'), 'utf8'));
+  const {window: linked} = parseHTML(fs.readFileSync(path.join(ui, 'index.html'), 'utf8'));
+  // LinkeDOM's window answers every read of navigator with a new object, so a
+  // clipboard set on one was lost. The page's window keeps one navigator.
+  const navigator = {userAgent: linked.navigator.userAgent, clipboard: {writeText: async () => {}}};
+  const window = new Proxy(linked, {
+    get: (target, name) => name === 'navigator' ? navigator : name === 'window' ? window : Reflect.get(target, name)
+  });
   const storage = new Map(), forbidden = [], asyncErrors = [];
   const onRejection = error => asyncErrors.push(error);
   process.on('unhandledRejection', onRejection);
@@ -49,7 +55,6 @@ function loadShippedUi() {
     },
     CSS: {escape: text => text}, devicePixelRatio: 1, innerWidth: 1440, innerHeight: 900
   });
-  window.navigator.clipboard = {writeText: async () => {}};
   window.HTMLElement.prototype.getBoundingClientRect = function () {
     return {x: 0, y: 0, width: 100, height: 30, top: 0, left: 0, right: 100, bottom: 30};
   };

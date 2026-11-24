@@ -12,7 +12,7 @@ use crate::{
     error::Result,
     event_index::Indexes,
     event_query::{self, Cursor, EventFilter},
-    index_db::SqlResult,
+    index_db::{self, SqlResult},
     request_stack::{self, u16_at, u32_at},
 };
 
@@ -257,12 +257,16 @@ const THREADS_FOLD: Duration = Duration::from_millis(100);
 /// the native frame of every valid observation record (the identity a thread
 /// scope filters by), every worker that started a request (`request_initiated`
 /// loader kinds 17 to 19, protocol/native-network-v3.md), every observation
-/// budget gap, and what the index covered.
+/// budget gap, and what the index covered. Each observed frame counts its
+/// records per kind, and `time_origins` holds the first record time of each
+/// observed frame's session, so a reader can show times from its start: one
+/// store can hold sessions from different boots, whose clocks never compare.
 pub struct Threads {
     pub observed: Vec<Value>,
     pub workers: Vec<Value>,
     pub budget_gaps: Vec<Value>,
     pub coverage: Value,
+    pub time_origins: Vec<Value>,
 }
 
 pub fn threads(indexes: &Mutex<Indexes>) -> Result<Threads> {
@@ -273,6 +277,7 @@ pub fn threads(indexes: &Mutex<Indexes>) -> Result<Threads> {
             workers: Vec::new(),
             budget_gaps: Vec::new(),
             coverage: event_query::Coverage::located(0, 0, true, 0).to_json(),
+            time_origins: Vec::new(),
         });
     };
     let text = |key: i64| (key as u64).to_string();
@@ -286,15 +291,43 @@ pub fn threads(indexes: &Mutex<Indexes>) -> Result<Threads> {
             .collect::<rusqlite::Result<Vec<_>>>()
             .sql()
     };
+    // One row per frame and kind it recorded, so at most six per frame.
+    let mut kinds =
+        std::collections::HashMap::<(i64, i64, i64), serde_json::Map<String, Value>>::new();
+    for found in rows(
+        "SELECT session, process, frame, kind, records FROM observed_kinds",
+        &|row| {
+            Ok(json!([
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?
+            ]))
+        },
+    )? {
+        let [session, process, frame, kind, records] =
+            [0, 1, 2, 3, 4].map(|at| found[at].as_i64().unwrap_or(0));
+        if let Some(name) = usize::try_from(kind).ok().and_then(|kind| TYPES.get(kind)) {
+            kinds
+                .entry((session, process, frame))
+                .or_default()
+                .insert((*name).to_owned(), json!(records));
+        }
+    }
     let observed = rows(
         "SELECT session, process, frame, last_sequence, records FROM observed_frames
          ORDER BY last_start DESC",
         &|row| {
-            Ok(
-                json!({"session_id": text(row.get(0)?), "process_id": row.get::<_, i64>(1)?,
-                "frame_id": text(row.get(2)?), "last_sequence": text(row.get(3)?),
-                "records": row.get::<_, i64>(4)?}),
-            )
+            let key = (
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            );
+            Ok(json!({"session_id": text(key.0), "process_id": key.1,
+                "frame_id": text(key.2), "last_sequence": text(row.get(3)?),
+                "records": row.get::<_, i64>(4)?,
+                "kinds": kinds.get(&key).cloned().unwrap_or_default()}))
         },
     )?;
     let workers = rows(
@@ -331,11 +364,31 @@ pub fn threads(indexes: &Mutex<Indexes>) -> Result<Threads> {
         caught_up,
         0,
     );
+    // Every record lands in a summary frame of its session, so the smallest
+    // first time among them is the session's first record.
+    let sessions = observed
+        .iter()
+        .filter_map(|frame| frame["session_id"].as_str()?.parse::<u64>().ok())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut time_origins = Vec::with_capacity(sessions.len());
+    for session in sessions {
+        let first = index
+            .connection
+            .prepare_cached("SELECT min(first_ns) FROM summary_frames WHERE session = ?1")
+            .sql()?
+            .query_row([index_db::key(session)], |row| row.get::<_, Option<i64>>(0))
+            .sql()?;
+        if let Some(first) = first {
+            time_origins.push(json!({"session_id": session.to_string(),
+                "monotonic_time_ns": (first as u64).to_string()}));
+        }
+    }
     Ok(Threads {
         observed,
         workers,
         budget_gaps,
         coverage: coverage.to_json(),
+        time_origins,
     })
 }
 

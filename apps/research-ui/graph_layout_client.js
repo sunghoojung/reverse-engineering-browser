@@ -11,7 +11,7 @@
  *   cancelled       the caller's signal stopped the request
  *   wider, taller   Triskel's drawing is `ratio` times the caller's
  *   mismatch        the answer does not fit what was sent
- *   failed          Triskel's `status` (failed or timeout) and `detail`
+ *   failed          Triskel's `status` (failed) and `detail`
  *   status          the route answered HTTP `status`
  *   route_failed    the request failed; `detail` says how
  * Callers add their own codes: one_card or one_block (nothing to lay out)
@@ -148,7 +148,7 @@ const graphLayoutClient = (() => {
       return everySent({code: 'mismatch'}, 'The layout route returned an unexpected answer.');
     const fresh = answer.engine?.revision ?? null;
     planned.forEach(entry => {
-      // Only a layout is the same next time; a timeout or a failure may not be.
+      // Only a layout is the same next time; a failure may not be.
       const result = entry.position === undefined ? null : answer.graphs[entry.position];
       if (result?.status === 'laid_out') remember(entry.key, {result, revision: fresh});
     });

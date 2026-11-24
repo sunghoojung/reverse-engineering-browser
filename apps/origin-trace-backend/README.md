@@ -49,9 +49,9 @@ current Apple Clang; CI sets `CXX_x86_64_unknown_linux_gnu=g++-14` on Ubuntu
 and `CXX_aarch64_apple_darwin=clang++` on macOS, which also keeps the cc crate
 off CI's sccache compiler shim.
 Only the hidden `--graph-layout-worker` mode of this binary calls Triskel, in a
-contained process per request with a budget per graph and a memory limit; the
-server never does. A request has no size limit or deadline, and a client that
-goes away stops its worker. The budget, measured costs and failure statuses are in
+contained process per request with a memory limit; the server never does. A
+request has no size limit or deadline and a graph no time budget, and a client
+that goes away stops its worker. Measured costs and failure statuses are in
 [`protocol/http-api.md`](../../protocol/http-api.md#graph-layout). The packaged
 app ships the MPL-2.0 and MIT texts, with where Triskel's source is, as
 `Contents/Resources/GraphLayoutLicenses.txt`.

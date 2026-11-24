@@ -247,7 +247,7 @@ final class Harness {
   // Opens another loopback UI in this window, such as the large Flow
   // fixture's own backend, and waits for its document.
   func load(_ url: URL) async throws {
-    _ = try await webView.callAsyncJavaScript("window.__rebOutgoingDocument = true; return true;", contentWorld: .page)
+    _ = try await script("window.__rebOutgoingDocument = true; return true;")
     webView.load(URLRequest(url: url))
     try await waitUntil(
       "window.__rebOutgoingDocument === undefined && document.readyState === 'complete' && typeof state === 'object'",

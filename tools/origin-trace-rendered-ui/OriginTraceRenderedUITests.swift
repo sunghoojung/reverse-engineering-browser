@@ -2146,9 +2146,13 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertEqual(menu["expanded"] as? String, "true")
       try await assertLayout(ui, ".traffic-row-menu", "\(size.name) copy menu")
       try await ui.screenshot("traffic-copy-menu-\(size.name)")
+      try await traceCopies(ui)
       pasteboard.clearContents()
+      let curlCleared = pasteboard.changeCount, curlClearedAt = Self.copyClock()
       try await ui.click(".traffic-row-menu [role=menuitem]", containing: "Copy as cURL")
+      let curlAfterClick = pasteboard.changeCount, curlAfterClickAt = Self.copyClock()
       try await ui.waitUntil("document.querySelector('#request-copy-url').textContent !== 'Copy'", "Copy as cURL did not finish")
+      print("RENDERED_UI_COPY_TRACE \(size.name) cURL \(try await ui.value("document.querySelector('#request-copy-url').textContent") ?? ""), pasteboard \(curlCleared)@\(curlClearedAt) \(curlAfterClick)@\(curlAfterClickAt) \(pasteboard.changeCount)@\(Self.copyClock()), page \(try await copyTrace(ui))")
       let copied = try await ui.json("({label: document.querySelector('#request-copy-url').textContent, notice: document.querySelector('#investigation-notice')?.textContent ?? ''})")
       XCTAssertEqual(copied["label"] as? String, "Copied", "\(size.name): \(copied)")
       let curl = pasteboard.string(forType: .string) ?? ""
@@ -2204,36 +2208,18 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertLayout(ui, "#captured-export-dialog", "\(size.name) Traffic export")
       try await ui.screenshot("traffic-har-export-\(size.name)")
       _ = try await ui.value("(() => { const field = document.querySelector('[data-export-destination]'); field.value = 'copy'; field.dispatchEvent(new Event('change')); return true; })()")
-      // Test-only trace of the copy as WebKit runs it: the click and the
-      // user activation at it and at the clipboard write, the HAR read, and
-      // how the write ended, in ms of the page's clock.
-      _ = try await ui.value("""
-        (() => { const trace = window.__rebCopyTrace = [], at = () => Math.round(performance.now());
-          const active = () => navigator.userActivation?.isActive ?? null;
-          document.querySelector('[data-export-submit]').addEventListener('click', event =>
-            trace.push(['click', at(), {late: Math.round(performance.now() - event.timeStamp), trusted: event.isTrusted, active: active()}]), {capture: true, once: true});
-          const write = navigator.clipboard.write.bind(navigator.clipboard);
-          navigator.clipboard.write = items => { trace.push(['write', at(), {active: active()}]);
-            return write(items).then(value => { trace.push(['written', at()]); return value; },
-              error => { trace.push(['refused', at(), String(error?.name)]); throw error; }); };
-          const read = window.fetch;
-          window.fetch = (input, init) => { if (!String(input).includes('/api/requests/har')) return read(input, init);
-            trace.push(['har', at()]);
-            return read(input, init).then(response => { trace.push(['answered', at(), response.status]); return response; },
-              error => { trace.push(['har failed', at(), String(error)]); throw error; }); };
-          return true; })()
-        """)
+      try await traceCopies(ui)
       pasteboard.clearContents()
-      let cleared = pasteboard.changeCount
+      let cleared = pasteboard.changeCount, clearedAt = Self.copyClock()
       try await ui.click("[data-export-submit]")
+      let afterClick = pasteboard.changeCount, afterClickAt = Self.copyClock()
       do {
         try await ui.waitUntil("document.querySelector('[data-export-status]').textContent.includes('Copied locally')", "the HAR was not copied")
-        print("RENDERED_UI_COPY_TRACE \(size.name) copied \((try? await ui.value("JSON.stringify(window.__rebCopyTrace)")) ?? "unavailable")")
+        print("RENDERED_UI_COPY_TRACE \(size.name) HAR copied, pasteboard \(cleared)@\(clearedAt) \(afterClick)@\(afterClickAt) \(pasteboard.changeCount)@\(Self.copyClock()), page \(try await copyTrace(ui))")
       } catch {
         // WebKit refuses a write when the pasteboard changes while its text
         // is read, and says only NotAllowedError; this says whether it did.
-        let trace = (try? await ui.value("JSON.stringify(window.__rebCopyTrace)")) ?? "unavailable"
-        throw HarnessError("\(error) [pasteboard changes since it was cleared: \(pasteboard.changeCount - cleared), types: \(pasteboard.types?.map(\.rawValue) ?? []), copy trace: \(trace)]")
+        throw HarnessError("\(error) [pasteboard changes since it was cleared: \(pasteboard.changeCount - cleared), types: \(pasteboard.types?.map(\.rawValue) ?? []), pasteboard \(cleared)@\(clearedAt) \(afterClick)@\(afterClickAt) \(pasteboard.changeCount)@\(Self.copyClock()), page \(try await copyTrace(ui))]")
       }
       let har = try JSONSerialization.jsonObject(with: Data((pasteboard.string(forType: .string) ?? "").utf8)) as? [String: Any]
       let log = har?["log"] as? [String: Any]
@@ -2244,6 +2230,40 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.key(53, "\u{1B}")
       try await ui.waitUntil("!document.querySelector('#captured-export-dialog').open", "Escape did not close export")
     }
+  }
+
+  // Test-only trace of each copy as WebKit runs it, in ms of the wall clock
+  // modulo 10^6 so it lines up with the native pasteboard reads: the click
+  // and the user activation at it and at the clipboard write, the HAR read,
+  // when the item's text settled, and how the write ended.
+  static func copyClock() -> Int { Int((Date().timeIntervalSince1970 * 1000).rounded()) % 1_000_000 }
+
+  @MainActor
+  private func traceCopies(_ ui: Harness) async throws {
+    _ = try await ui.value("""
+      (() => { if (window.__rebCopyTrace) { window.__rebCopyTrace.length = 0; return true; }
+        const trace = window.__rebCopyTrace = [], at = () => Math.round(performance.timeOrigin + performance.now()) % 1e6;
+        const page = () => ({active: navigator.userActivation?.isActive ?? null, focused: document.hasFocus(), visible: document.visibilityState});
+        document.addEventListener('click', event => trace.push(['click', at(), {target: String(event.target?.textContent ?? '').slice(0, 16),
+          late: Math.round(performance.now() - event.timeStamp), trusted: event.isTrusted, ...page()}]), true);
+        const write = navigator.clipboard.write.bind(navigator.clipboard);
+        navigator.clipboard.write = items => { trace.push(['write', at(), page()]);
+          const written = write(items).then(value => { trace.push(['written', at()]); return value; },
+            error => { trace.push(['refused', at(), String(error?.name), page()]); throw error; });
+          items[0]?.getType('text/plain').then(blob => trace.push(['text', at(), blob.size]), error => trace.push(['text failed', at(), String(error?.name)]));
+          return written; };
+        const read = window.fetch;
+        window.fetch = (input, init) => { if (!String(input).includes('/api/requests/har')) return read(input, init);
+          trace.push(['har', at()]);
+          return read(input, init).then(response => { trace.push(['answered', at(), response.status]); return response; },
+            error => { trace.push(['har failed', at(), String(error)]); throw error; }); };
+        return true; })()
+      """)
+  }
+
+  @MainActor
+  private func copyTrace(_ ui: Harness) async throws -> String {
+    (try? await ui.value("JSON.stringify(window.__rebCopyTrace ?? null)") as? String) ?? "unavailable"
   }
 
   @MainActor

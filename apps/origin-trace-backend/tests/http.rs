@@ -877,8 +877,9 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
     // LiveWasmAction variants are read_memory, write_memory, call_export,
     // and call_function. set_wasm_function_name is the narrow AnalystAction
     // write of one researcher Wasm name. interrupt is the NativeConsoleAction
-    // that stops a running command.
-    assert_eq!(action_count, 42);
+    // that stops a running command, and add_document_start and
+    // remove_document_start change an armed set without replacing it.
+    assert_eq!(action_count, 44);
     // Source checks intentionally follow the dispatch syntax. If it changes,
     // audit the new handler before updating this narrow test helper.
     fn arms<'a>(source: &'a str, start: &str, end: &str, indent: usize) -> BTreeSet<&'a str> {

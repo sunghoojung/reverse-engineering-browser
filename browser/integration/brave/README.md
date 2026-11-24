@@ -107,14 +107,16 @@ before adding a native network hook; ordinary groups do not isolate traffic.
 
 The disabled-by-default native console is a separate mutation path. Patch 0011
 wires the browser session and per-frame renderer agent; the overlay owns their
-Mojo contract and bounded local transport. It evaluates explicit commands in a
+Mojo contract and local transport, which carries every record whole. It evaluates explicit commands in a
 selected main-world context. A disposable profile is the default. An explicit
 live-capture binding evaluates in a document the capture browser is already
 showing, keeps remote debugging, and does not exit that browser when the
 channel drops. It still cannot set breakpoints, step, or inspect paused frames.
 It creates no CDP endpoint and makes no undetectability guarantee. See
-[Native Console v2](../../../protocol/native-console-v2.md) for ownership,
-wire layouts, limits, and real-browser checks after rebuilding.
+[Native Console v2](../../../protocol/native-console-v2.md) for ownership and
+real-browser checks after rebuilding, and
+[v4](../../../protocol/native-console-v4.md) for wire layouts and the bounds
+that remain.
 Eligible HTTP and HTTPS documents must belong to a profile directory immediately
 inside the owned user-data root, including the fresh browser's `Default` profile.
 The user-data root itself is not a BrowserContext profile path.
@@ -129,15 +131,16 @@ Patch 0016 adds the separately armed document-start script experiment. It needs
 browser never advertises support, the registry refuses to bind a renderer, and
 arming fails closed. The switch alone arms nothing.
 
-The browser process owns the armed set and its byte-bounded output. It pushes
+The browser process owns the armed set and its output, retained up to 64 MiB
+with a visible drop count. It pushes
 the set over a process-wide Mojo interface bound in
 `BindHostReceiverForRenderer`, as one read-only shared memory region every
 renderer maps, so a renderer created after arming holds the set before its
 first document commits without a per-process copy. It only counts a renderer as
 ready once that renderer acknowledges the exact generation it can run, and it
-binds every live renderer. A snippet runs until it returns; Clear, a new arm or
-the end of the session sends Stop for the old generation over each renderer's
-IO-thread control pipe.
+binds every live renderer. A snippet runs until it returns; Remove, Clear, a
+new arm or the end of the session sends Stop for the scripts it ends over each
+renderer's IO-thread control pipe.
 
 The renderer injects at main-world script-context creation, which Blink performs
 before any script can run in that context. A same-origin commit from an initial

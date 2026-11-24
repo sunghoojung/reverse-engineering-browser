@@ -29,15 +29,19 @@ namespace reb {
 namespace {
 
 constexpr std::uint32_t kCounterLimit = 2147483647;
-// What State spends on everything but scripts and records, and the most one
-// listed script or one record can take as JSON beyond its strings. Strings are
-// counted at their worst-case escaping, so a page never outgrows the reply.
-constexpr std::size_t kEnvelopeBytes = 64 * 1024;
-constexpr std::size_t kListedScriptBytes = 256;
+// What one output record takes as JSON beyond its text, for paging.
 constexpr std::size_t kRecordBytes = 320;
 
 void Saturate(std::uint32_t& counter, std::uint32_t amount = 1) noexcept {
   counter += amount > kCounterLimit - counter ? kCounterLimit - counter : amount;
+}
+
+// A JSON number for a size that may pass 2^31: base::Value integers are 32
+// bits, and a double holds every size a set can have exactly.
+base::Value Count(std::uint64_t value) {
+  if (value <= static_cast<std::uint64_t>(kCounterLimit))
+    return base::Value(static_cast<int>(value));
+  return base::Value(static_cast<double>(value));
 }
 
 std::string Hex(std::uint64_t value) {
@@ -85,10 +89,10 @@ class NativeConsoleDocumentStartHost final : public mojom::NativeConsoleScriptHo
   }
 
   // Heard on the renderer's IO thread, so it reaches an injection that holds
-  // the main thread. It names only `generation`'s injections.
-  void Stop(std::uint64_t generation) {
+  // the main thread. It names one script's injections, or every script's.
+  void Stop(std::uint64_t stop_id) {
     if (control_.is_bound())
-      control_->Stop(kNativeConsoleDocumentStartStopBit | generation);
+      control_->Stop(stop_id);
   }
 
  private:
@@ -102,15 +106,13 @@ class NativeConsoleDocumentStartHost final : public mojom::NativeConsoleScriptHo
     NativeConsoleDocumentStartRegistry::Get().BindHostReady(this);
   }
 
-  void Observed(std::uint64_t generation,
-                std::uint64_t script_id,
+  void Observed(std::uint64_t script_id,
                 std::uint64_t frame_id,
                 const base::UnguessableToken& document,
                 std::uint32_t record,
-                bool truncated,
                 const std::string& text) override {
-    NativeConsoleDocumentStartRegistry::Get().Observe(Resolve(document), generation, script_id,
-                                                      frame_id, record, truncated, text);
+    NativeConsoleDocumentStartRegistry::Get().Observe(Resolve(document), script_id, frame_id,
+                                                      record, text);
   }
 
   // The renderer names a document it hosts. Resolve it only among this
@@ -204,11 +206,11 @@ void NativeConsoleDocumentStartRegistry::RemoveHost(NativeConsoleDocumentStartHo
   std::erase_if(hosts_, [host](const auto& owned) { return owned.get() == host; });
 }
 
-void NativeConsoleDocumentStartRegistry::StopRunning() {
+void NativeConsoleDocumentStartRegistry::StopRunning(std::uint64_t stop_id) {
   if (scripts_.empty())
     return;
   for (const auto& host : hosts_)
-    host->Stop(generation_);
+    host->Stop(stop_id);
 }
 
 void NativeConsoleDocumentStartRegistry::Push() {
@@ -216,8 +218,18 @@ void NativeConsoleDocumentStartRegistry::Push() {
     host->Arm(generation_, set_, scripts_.size());
 }
 
-bool NativeConsoleDocumentStartRegistry::Arm(const base::ListValue& scripts, std::string& error) {
-  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+void NativeConsoleDocumentStartRegistry::ClearOutput() {
+  output_.clear();
+  retained_bytes_ = 0;
+  dropped_ = 0;
+  unattributed_ = 0;
+  stale_ = 0;
+}
+
+bool NativeConsoleDocumentStartRegistry::Parse(const base::ListValue& scripts,
+                                               std::vector<Armed>& armed,
+                                               std::vector<NativeConsoleDocumentStartScript>& views,
+                                               std::string& error) const {
   if (!IsPermitted()) {
     error =
         "Document-start scripts are not permitted in this browser session. Rebuild the pinned "
@@ -225,17 +237,11 @@ bool NativeConsoleDocumentStartRegistry::Arm(const base::ListValue& scripts, std
     return false;
   }
   if (scripts.empty()) {
-    error = "Arm at least one document-start script";
+    error = "Name at least one document-start script";
     return false;
   }
-  // Build the whole set before replacing anything: a refusal must leave the
-  // previous set and its output exactly as they were. The views point into
-  // `scripts`, which outlives the encoding below.
-  std::vector<Armed> next;
-  std::vector<NativeConsoleDocumentStartScript> views;
-  next.reserve(scripts.size());
-  views.reserve(scripts.size());
-  std::size_t listing = 0;
+  armed.reserve(armed.size() + scripts.size());
+  views.reserve(views.size() + scripts.size());
   auto script_id = next_script_id_;
   for (const auto& entry : scripts) {
     const auto* record = entry.GetIfDict();
@@ -266,51 +272,146 @@ bool NativeConsoleDocumentStartRegistry::Arm(const base::ListValue& scripts, std
     view.source = *source;
     if (!IsValidNativeConsoleDocumentStartScript(view)) {
       error =
-          "A document-start rule needs one exact http or https origin of at most 256 bytes, frame "
-          "\"top\" or \"child\", an optional literal path prefix of at most 256 bytes, and a "
-          "nonempty valid UTF-8 snippet";
+          "A document-start rule needs one exact http or https origin, frame \"top\" or "
+          "\"child\", an optional literal path prefix, and a nonempty valid UTF-8 snippet";
       return false;
     }
-    // Origins and prefixes are printable ASCII, so JSON at most doubles them.
-    listing += kListedScriptBytes + 2 * (view.rule.origin.size() + view.rule.path.size());
-    if (listing > kNativeConsoleDocumentStartListingLimit) {
-      error = "The armed set could not be listed in one " +
-              base::NumberToString(kNativeConsoleDocumentStartReplyLimit / (1024 * 1024)) +
-              " MiB reply; arm fewer scripts";
-      return false;
-    }
-    Armed armed;
-    armed.script_id = script_id++;
-    armed.frame_flags = view.rule.frame_flags;
-    armed.origin = std::string(view.rule.origin);
-    armed.path = std::string(view.rule.path);
-    armed.source_bytes = view.source.size();
-    armed.digest = NativeConsoleDocumentStartDigest(view.source);
-    next.push_back(std::move(armed));
+    Armed next;
+    next.script_id = script_id++;
+    next.frame_flags = view.rule.frame_flags;
+    next.origin = std::string(view.rule.origin);
+    next.path = std::string(view.rule.path);
+    next.source_bytes = view.source.size();
+    next.digest = NativeConsoleDocumentStartDigest(view.source);
+    armed.push_back(std::move(next));
     views.push_back(view);
   }
-  const auto bytes = NativeConsoleDocumentStartEncodedBytes(views);
-  auto mapped =
-      bytes ? base::ReadOnlySharedMemoryRegion::Create(bytes) : base::MappedReadOnlyRegion();
-  if (!mapped.IsValid() || !EncodeNativeConsoleDocumentStartScripts(
-                               views, mapped.mapping.GetMemoryAsSpan<std::uint8_t>())) {
-    error = "The document-start set could not be placed in shared memory for the renderers";
+  return true;
+}
+
+bool NativeConsoleDocumentStartRegistry::Current(
+    base::ReadOnlySharedMemoryMapping& mapping,
+    std::vector<NativeConsoleDocumentStartScript>& views) const {
+  views.clear();
+  if (!set_.IsValid())
+    return scripts_.empty();
+  mapping = set_.Map();
+  return mapping.IsValid() &&
+         DecodeNativeConsoleDocumentStartScripts(mapping.GetMemoryAsSpan<std::uint8_t>(), views) &&
+         views.size() == scripts_.size();
+}
+
+bool NativeConsoleDocumentStartRegistry::Install(
+    std::vector<Armed> scripts,
+    std::span<const NativeConsoleDocumentStartScript> views,
+    std::string& error) {
+  base::MappedReadOnlyRegion mapped;
+  if (!views.empty()) {
+    const auto bytes = NativeConsoleDocumentStartEncodedBytes(views);
+    mapped = bytes ? base::ReadOnlySharedMemoryRegion::Create(bytes) : base::MappedReadOnlyRegion();
+    if (!mapped.IsValid() || !EncodeNativeConsoleDocumentStartScripts(
+                                 views, mapped.mapping.GetMemoryAsSpan<std::uint8_t>())) {
+      error = "The document-start set could not be placed in shared memory for the renderers";
+      return false;
+    }
+  }
+  if (!scripts.empty())
+    next_script_id_ = std::max(next_script_id_, scripts.back().script_id + 1);
+  scripts_ = std::move(scripts);
+  set_ = std::move(mapped.region);
+  ++generation_;
+  Push();
+  return true;
+}
+
+bool NativeConsoleDocumentStartRegistry::Arm(const base::ListValue& scripts, std::string& error) {
+  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+  // Build the whole set before replacing anything: a refusal must leave the
+  // previous set and its output exactly as they were. The views point into
+  // `scripts`, which outlives the encoding below.
+  std::vector<Armed> next;
+  std::vector<NativeConsoleDocumentStartScript> views;
+  if (!Parse(scripts, next, views, error))
+    return false;
+  // Every previous script's id is below the first new one, so this ends the
+  // previous set's injections and none of the new set's.
+  const auto previous = kNativeConsoleDocumentStartStopBit |
+                        kNativeConsoleDocumentStartStopBelowBit | next_script_id_;
+  const bool armed = !scripts_.empty();
+  if (!Install(std::move(next), views, error))
+    return false;
+  if (armed)
+    StopRunning(previous);
+  // Replacing the set invalidates the previous set's output: a record from a
+  // script that is no longer armed must not look current.
+  ClearOutput();
+  return true;
+}
+
+bool NativeConsoleDocumentStartRegistry::Add(const base::ListValue& scripts, std::string& error) {
+  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+  // The armed scripts' sources live only in the set every renderer maps, so
+  // the next set is built from that mapping and the new declarations.
+  base::ReadOnlySharedMemoryMapping mapping;
+  std::vector<NativeConsoleDocumentStartScript> views;
+  if (!Current(mapping, views)) {
+    error = "The armed document-start set could not be read back to add to it";
     return false;
   }
-  StopRunning();
-  next_script_id_ = script_id;
-  scripts_ = std::move(next);
-  set_ = std::move(mapped.region);
-  listing_bytes_ = listing;
-  ++generation_;
-  // Replacing the set invalidates the previous generation's output: a record
-  // from a script that is no longer armed must not look current.
-  output_.clear();
-  retained_bytes_ = 0;
-  dropped_ = 0;
-  unattributed_ = 0;
-  stale_ = 0;
-  Push();
+  auto next = scripts_;
+  if (!Parse(scripts, next, views, error))
+    return false;
+  return Install(std::move(next), views, error);
+}
+
+bool NativeConsoleDocumentStartRegistry::Remove(const base::ListValue& script_ids,
+                                                std::string& error) {
+  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+  if (!IsPermitted()) {
+    error = "Document-start scripts are not permitted in this browser session";
+    return false;
+  }
+  if (script_ids.empty()) {
+    error = "Name at least one armed script id to remove";
+    return false;
+  }
+  std::vector<std::uint64_t> removed;
+  removed.reserve(script_ids.size());
+  for (const auto& entry : script_ids) {
+    std::uint64_t id = 0;
+    if (!entry.is_string() || !base::StringToUint64(entry.GetString(), &id) || !id ||
+        base::NumberToString(id) != entry.GetString()) {
+      error = "Script ids are decimal strings from the armed listing";
+      return false;
+    }
+    const auto found = std::lower_bound(
+        scripts_.begin(), scripts_.end(), id,
+        [](const Armed& script, std::uint64_t value) { return script.script_id < value; });
+    if (found == scripts_.end() || found->script_id != id) {
+      error = "Script " + entry.GetString() + " is not armed";
+      return false;
+    }
+    removed.push_back(id);
+  }
+  base::ReadOnlySharedMemoryMapping mapping;
+  std::vector<NativeConsoleDocumentStartScript> views;
+  if (!Current(mapping, views)) {
+    error = "The armed document-start set could not be read back to remove from it";
+    return false;
+  }
+  std::vector<Armed> kept;
+  std::vector<NativeConsoleDocumentStartScript> kept_views;
+  for (std::size_t index = 0; index < scripts_.size(); ++index) {
+    if (std::find(removed.begin(), removed.end(), scripts_[index].script_id) != removed.end())
+      continue;
+    kept.push_back(scripts_[index]);
+    kept_views.push_back(views[index]);
+  }
+  if (!Install(std::move(kept), kept_views, error))
+    return false;
+  for (const auto id : removed)
+    for (const auto& host : hosts_)
+      host->Stop(kNativeConsoleDocumentStartStopBit | id);
   return true;
 }
 
@@ -318,34 +419,29 @@ void NativeConsoleDocumentStartRegistry::Clear() {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
   if (scripts_.empty() && output_.empty() && !generation_)
     return;
-  StopRunning();
+  StopRunning(kNativeConsoleDocumentStartStopBit | kNativeConsoleDocumentStartStopBelowBit |
+              next_script_id_);
   scripts_.clear();
   set_ = base::ReadOnlySharedMemoryRegion();
-  listing_bytes_ = 0;
-  output_.clear();
-  retained_bytes_ = 0;
-  dropped_ = 0;
-  unattributed_ = 0;
-  stale_ = 0;
+  ClearOutput();
   ++generation_;
   Push();
 }
 
 void NativeConsoleDocumentStartRegistry::Observe(content::RenderFrameHost* owner,
-                                                 std::uint64_t generation,
                                                  std::uint64_t script_id,
                                                  std::uint64_t frame_id,
                                                  std::uint32_t record,
-                                                 bool truncated,
                                                  const std::string& text) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
   if (!IsPermitted() || scripts_.empty())
     return;
-  if (generation != generation_ || !IsNativeConsoleDocumentStartRecord(record)) {
+  if (!IsNativeConsoleDocumentStartRecord(record)) {
     Saturate(stale_);
     return;
   }
-  // Identities are assigned in increasing order, so the armed set is sorted.
+  // Identities are assigned in increasing order and never reused, so the
+  // armed set is sorted and a late record from a removed script finds nothing.
   auto armed =
       std::lower_bound(scripts_.begin(), scripts_.end(), script_id,
                        [](const Armed& entry, std::uint64_t id) { return entry.script_id < id; });
@@ -357,7 +453,7 @@ void NativeConsoleDocumentStartRegistry::Observe(content::RenderFrameHost* owner
     Saturate(unattributed_);
     return;
   }
-  if (!base::IsStringUTF8(text) || text.size() > kNativeConsoleDocumentStartReportLimit) {
+  if (!base::IsStringUTF8(text)) {
     Saturate(stale_);
     return;
   }
@@ -367,7 +463,8 @@ void NativeConsoleDocumentStartRegistry::Observe(content::RenderFrameHost* owner
   if (record == static_cast<std::uint32_t>(NativeConsoleDocumentStartRecord::kRefused))
     Saturate(armed->refused);
   // Retention is bounded by bytes, not by a record count, so many small
-  // reports are all kept. Past the bound the oldest go, and are counted.
+  // reports are all kept, and one record of any size is kept whole. Past the
+  // bound the oldest go, and are counted.
   const auto bytes = sizeof(Output) + text.size();
   while (!output_.empty() && retained_bytes_ + bytes > kNativeConsoleDocumentStartRetainedBytes) {
     retained_bytes_ -= sizeof(Output) + output_.front().text.size();
@@ -382,7 +479,6 @@ void NativeConsoleDocumentStartRegistry::Observe(content::RenderFrameHost* owner
                      .time = base::Time::Now().InMillisecondsFSinceUnixEpoch(),
                      .record = record,
                      .top_frame = owner->GetParentOrOuterDocument() == nullptr,
-                     .truncated = truncated,
                      .text = text});
 }
 
@@ -397,25 +493,24 @@ base::DictValue NativeConsoleDocumentStartRegistry::State(std::uint64_t after) c
     armed.Append(base::DictValue()
                      .Set("script_id", base::NumberToString(entry.script_id))
                      .Set("rule", std::move(rule))
-                     .Set("source_bytes", static_cast<int>(entry.source_bytes))
+                     .Set("source_bytes", Count(entry.source_bytes))
                      .Set("digest", Hex(entry.digest))
                      .Set("records", static_cast<int>(entry.records))
                      .Set("injected_documents", static_cast<int>(entry.injected_documents))
                      .Set("refused", static_cast<int>(entry.refused)));
   }
-  // Every retained record after the cursor that fits beside the listing.
-  // Records are in sequence order, so the first one after `after` is found by
-  // search rather than by scanning everything a reader has already seen.
+  // The retained records after the cursor, a page at a time: the first one
+  // whole however large, then whole records while the page has room. Records
+  // are in sequence order, so the first one after `after` is found by search
+  // rather than by scanning everything a reader has already seen.
   base::ListValue page;
-  const auto budget = kNativeConsoleDocumentStartReplyLimit - kEnvelopeBytes - listing_bytes_;
   std::size_t used = 0;
-  for (auto entry = std::upper_bound(
-           output_.begin(), output_.end(), after,
-           [](std::uint64_t cursor, const Output& output) { return cursor < output.sequence; });
-       entry != output_.end(); ++entry) {
-    // A control character escapes to six bytes, the most any byte becomes.
-    const auto cost = kRecordBytes + 6 * entry->text.size();
-    if (used + cost > budget)
+  auto entry = std::upper_bound(
+      output_.begin(), output_.end(), after,
+      [](std::uint64_t cursor, const Output& output) { return cursor < output.sequence; });
+  for (; entry != output_.end(); ++entry) {
+    const auto cost = kRecordBytes + entry->text.size();
+    if (!page.empty() && used + cost > kNativeConsolePageBytes)
       break;
     used += cost;
     page.Append(base::DictValue()
@@ -427,9 +522,9 @@ base::DictValue NativeConsoleDocumentStartRegistry::State(std::uint64_t after) c
                     .Set("frame_id", base::NumberToString(entry->frame_id))
                     .Set("top_frame", entry->top_frame)
                     .Set("time", entry->time)
-                    .Set("truncated", entry->truncated)
                     .Set("text", entry->text));
   }
+  const bool more = entry != output_.end();
   std::size_t pending = 0;
   for (const auto& host : hosts_) {
     if (!host->delivered(generation_))
@@ -437,7 +532,8 @@ base::DictValue NativeConsoleDocumentStartRegistry::State(std::uint64_t after) c
   }
   return base::DictValue()
       .Set("status", "ok")
-      .Set("contract_version", 3)
+      // 4 added add, remove and paged output, and reports every text whole.
+      .Set("contract_version", 4)
       .Set("permitted", IsPermitted())
       .Set("generation", base::NumberToString(generation_))
       .Set("scripts", std::move(armed))
@@ -448,11 +544,12 @@ base::DictValue NativeConsoleDocumentStartRegistry::State(std::uint64_t after) c
       .Set("pending_renderer_processes", static_cast<int>(pending))
       .Set("output", base::DictValue()
                          .Set("records", std::move(page))
+                         .Set("more", more)
                          .Set("next_sequence", base::NumberToString(next_sequence_))
                          .Set("oldest_sequence",
                               base::NumberToString(output_.empty() ? 0 : output_.front().sequence))
                          .Set("retained", static_cast<int>(output_.size()))
-                         .Set("retained_bytes", static_cast<int>(retained_bytes_))
+                         .Set("retained_bytes", Count(retained_bytes_))
                          .Set("dropped", static_cast<int>(dropped_))
                          .Set("unattributed", static_cast<int>(unattributed_))
                          .Set("stale", static_cast<int>(stale_)));

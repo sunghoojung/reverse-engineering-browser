@@ -12,7 +12,7 @@ const {parseHTML} = createRequire(new URL('ui-startup-deps/', import.meta.url))(
 // The layout worker loads the Triskel client with importScripts; here it is a global first.
 runInThisContext(await readFile(new URL('../apps/research-ui/graph_layout_client.js', import.meta.url), 'utf8'));
 const layoutModule = require('../apps/research-ui/block_graph_layout.js');
-const {BLOCK_GRAPH_KIND: KIND, blockGraphFailure, blockGraphClipSegment, blockGraphRowInView, blockGraphBoundView} = require('../apps/research-ui/block_graph.js');
+const {BLOCK_GRAPH_KIND: KIND, blockGraphFailure, blockGraphClipSegment, blockGraphRowInView, graphBoundView} = require('../apps/research-ui/block_graph.js');
 const vmStatic = require('../apps/research-ui/vm_static.js');
 const {vmStaticOwnedExample} = require('../apps/research-ui/vm_static_view.js');
 const semantics = require('../apps/research-ui/vm_semantics.js');
@@ -251,9 +251,9 @@ assert.throws(() => layoutModule.wasmGraph({schema: 'other'}), /invalid document
 {
   // A view stays on its drawing: half the stage of a large one on each axis,
   // all of a small one, and a view already on it does not move.
-  assert.deepEqual(blockGraphBoundView({x: 5000, y: -5000, z: 1}, 2000, 3000, 1000, 600), {x: 1500, y: -300, z: 1}, 'a large drawing keeps half the stage');
-  assert.deepEqual(blockGraphBoundView({x: 400, y: -900, z: 0.5}, 300, 200, 1000, 600), {x: 0, y: -900, z: 0.5}, 'a small one stays whole, anywhere on the stage');
-  assert.deepEqual(blockGraphBoundView({x: 100, y: 200, z: 2}, 2000, 3000, 1000, 600), {x: 100, y: 200, z: 2}, 'a view on the drawing is kept');
+  assert.deepEqual(graphBoundView({x: 5000, y: -5000, z: 1}, 2000, 3000, 1000, 600), {x: 1500, y: -300, z: 1}, 'a large drawing keeps half the stage');
+  assert.deepEqual(graphBoundView({x: 400, y: -900, z: 0.5}, 300, 200, 1000, 600), {x: 0, y: -900, z: 0.5}, 'a small one stays whole, anywhere on the stage');
+  assert.deepEqual(graphBoundView({x: 100, y: 200, z: 2}, 2000, 3000, 1000, 600), {x: 100, y: 200, z: 2}, 'a view on the drawing is kept');
 }
 {
   // Failures say why, and offer Retry only where trying again can help.
@@ -779,5 +779,94 @@ globalThis.create = createFlowGraphPanel;`, context);
   for (let i = 0; i < 200 && !/^Triskel/.test($('.flow-graph-engine').textContent); i++) await settle();
   assert.equal($('.flow-graph-engine').textContent, 'Triskel layout', 'the answer replaces the layered layout');
   assert(triskel.hidden && $('.flow-graph-engine-run').hidden);
+}
+{
+  // The flow graph's view keeps to its drawing as the block graph's does:
+  // however far Shift+Arrow, a drag or a scroll pushes it, it stops where
+  // half the stage on each axis still shows the drawing, or all of a drawing
+  // smaller than that, and so do a zoom and a resized stage. Each frame's
+  // view is read back from the transform the cards are drawn at.
+  const {document, window, Event} = parseHTML('<!doctype html><html><body><div id="flow"></div></body></html>');
+  window.HTMLElement.prototype.scrollIntoView ??= function scrollIntoView() {};
+  const transforms = [];
+  const recording = new Proxy({}, {get: (_, key) => key === 'measureText' ? text => ({width: 6.6 * String(text).length}) : key === 'setTransform' ? (...a) => transforms.push(a) : () => {}, set: () => true});
+  const quiet = new Proxy({}, {get: (_, key) => key === 'measureText' ? () => ({width: 6.6}) : () => {}, set: () => true});
+  window.HTMLCanvasElement.prototype.getContext = function getContext() { return this.classList.contains('flow-graph-canvas') ? recording : quiet; };
+  // A call tree of 63 Wasm functions in one realm, which nothing folds, far
+  // wider than the stage. Triskel is refused, so the layered layout stays.
+  const count = 63, SHA = 'b'.repeat(64);
+  const nodes = Array.from({length: count}, (_, id) => ({id, kind: 'wasm', context: 0, status: 'resolved', function_index: id, sha256: SHA, artifact_id: '9', url: 'https://wasm.test/m.wasm', script_id: 3, hits: 1, entries: id ? 0 : 1, leaves: 2 * id + 1 < count ? 0 : 1}));
+  const edges = Array.from({length: count - 1}, (_, index) => ({from: index >> 1, to: index + 1, kind: 'call', count: 1, crosses: []}));
+  const doc = {schema: 'flow-graph-v1', session_id: '1', evidence: 'observed', complete: true, coverage: {stopped: 'end'},
+    stacks: {records: {request_initiator_stack: 1}, not_walked: {}, distinct: 1, occurrences: 1}, truncated: {}, limits: {}, not_shown: {},
+    contexts: [{id: 0, process_id: 1, execution_context_id: '7', origin: 'https://wasm.test', origins: [], frame_ids: [], tab_ids: [], counts: {}}], nodes, edges, paths: []};
+  const fetch = async url => (String(url).startsWith('/api/flow-graph') ? {ok: true, status: 200, json: async () => doc} : {ok: false, status: 503, json: async () => ({})});
+  const context = {document, window, Event, location: {protocol: 'http:'}, addEventListener: () => {}, fetch, performance, console,
+    requestAnimationFrame: fn => setTimeout(() => fn(performance.now()), 0), cancelAnimationFrame: clearTimeout, setTimeout, clearTimeout, queueMicrotask,
+    getComputedStyle: () => ({getPropertyValue: () => ''}), innerHeight: 800, innerWidth: 1180, devicePixelRatio: 1, dispatchEvent: () => true,
+    URLSearchParams, AbortController, AbortSignal, DOMException};
+  const scripts = ['graph_layout_client.js', 'block_graph.js', 'request_stack.js', 'flow_graph_layout.js', 'flow_graph.js'];
+  // The layouts the panel is given, for the drawing's size.
+  runInNewContext(`${(await Promise.all(scripts.map(name => readFile(new URL(`../apps/research-ui/${name}`, import.meta.url), 'utf8')))).join('\n')}
+globalThis.laidOut = [];
+const runAsync = flowGraphLayout.runAsync;
+flowGraphLayout.runAsync = async (...args) => { const layout = await runAsync(...args); laidOut.push(layout); return layout; };
+globalThis.create = createFlowGraphPanel;`, context);
+  const settle = () => new Promise(resolve => setTimeout(resolve, 0));
+  const host = document.querySelector('#flow');
+  const flow = context.create({host, open: () => {}, available: () => true});
+  let rect = {left: 0, top: 0, width: 1000, height: 700, right: 1000, bottom: 700};
+  for (const selector of ['.flow-graph-stage', '.flow-graph-canvas']) host.querySelector(selector).getBoundingClientRect = () => rect;
+  const canvas = host.querySelector('.flow-graph-canvas');
+  canvas.focus = () => {};
+  flow.show({session: '1'});
+  for (let i = 0; i < 200 && !/layout/i.test(host.querySelector('.flow-graph-engine')?.textContent ?? ''); i++) await settle();
+  assert.match(host.querySelector('.flow-graph-engine').textContent, /^Layered layout/, 'the tree is drawn with the layered layout');
+  const {width: W, height: H} = context.laidOut.at(-1);
+  // draw() clears at the identity, sets the view's transform, then returns to
+  // the identity for screen text.
+  const drawn = async () => { for (let i = 0; i < 4; i++) await settle(); const [z, , , , e, f] = transforms.at(-2); return {x: -e / z, y: -f / z, z}; };
+  const near = (got, want, what) => assert(Math.abs(got - want) < 1e-6 * Math.max(1, Math.abs(want)), `${what}: ${got}, wanted ${want}`);
+  // On each axis: the share of the drawing a view keeps on the stage.
+  const keep = (z, size, screen) => Math.min(size, screen / z / 2);
+  const opened = await drawn();
+  assert(W > 2 * rect.width / opened.z, `the tree is wider than twice the stage at ${opened.z}: ${W}x${H}`);
+  const press = async (key, times) => { for (let i = 0; i < times; i++) canvas.dispatchEvent(Object.assign(new Event('keydown', {bubbles: true, cancelable: true}), {key, shiftKey: true, altKey: false, ctrlKey: false, metaKey: false})); return drawn(); };
+  let at = await press('ArrowRight', 400);
+  near(at.x, W - keep(at.z, W, rect.width), 'Shift+Right stops with the right edge mid-stage');
+  at = await press('ArrowDown', 400);
+  near(at.y, H - keep(at.z, H, rect.height), 'Shift+Down stops with the bottom on half the stage, or all of a drawing shorter than that');
+  canvas.dispatchEvent(Object.assign(new Event('pointerdown'), {clientX: 500, clientY: 350, pointerId: 1}));
+  canvas.dispatchEvent(Object.assign(new Event('pointermove'), {clientX: 1e6, clientY: 1e6, pointerId: 1}));
+  canvas.dispatchEvent(Object.assign(new Event('pointerup'), {clientX: 1e6, clientY: 1e6, pointerId: 1}));
+  at = await drawn();
+  near(at.x, keep(at.z, W, rect.width) - rect.width / at.z, 'a drag past the top left stops with the left edge mid-stage');
+  near(at.y, keep(at.z, H, rect.height) - rect.height / at.z, 'and the top kept the same way');
+  canvas.dispatchEvent(Object.assign(new Event('wheel', {cancelable: true}), {deltaX: 1e7, deltaY: 1e7, ctrlKey: false, metaKey: false}));
+  at = await drawn();
+  near(at.x, W - keep(at.z, W, rect.width), 'a scroll past the bottom right stops on the drawing');
+  near(at.y, H - keep(at.z, H, rect.height), 'on both axes');
+  // A wider stage keeps more of the drawing in view, so the view moves back.
+  rect = {left: 0, top: 0, width: 2000, height: 1400, right: 2000, bottom: 1400};
+  window.dispatchEvent(new Event('resize'));
+  at = await drawn();
+  near(at.x, W - keep(at.z, W, rect.width), 'a resized stage moves the view back onto the drawing');
+  const minimap = host.querySelector('.flow-graph-minimap');
+  minimap.dispatchEvent(Object.assign(new Event('pointerdown', {cancelable: true}), {clientX: -1e6, clientY: -1e6, pointerId: 2}));
+  minimap.dispatchEvent(Object.assign(new Event('pointerup'), {pointerId: 2}));
+  at = await drawn();
+  near(at.x, keep(at.z, W, rect.width) - rect.width / at.z, 'a minimap press far past its top left stops with the left edge mid-stage');
+  near(at.y, keep(at.z, H, rect.height) - rect.height / at.z, 'and the top kept the same way');
+  // Zoomed out until the tree is smaller than half the stage, it stays whole
+  // at the edge it is pushed toward.
+  const zoomOut = host.querySelector('button[aria-label="Zoom out"]');
+  for (let i = 0; i < 30; i++) zoomOut.click();
+  at = await drawn();
+  assert(W * at.z < rect.width / 2 && H * at.z < rect.height / 2, `zoomed out, the tree is smaller than half the stage: ${W * at.z}x${H * at.z}`);
+  canvas.dispatchEvent(Object.assign(new Event('wheel', {cancelable: true}), {deltaX: -1e7, deltaY: -1e7, ctrlKey: false, metaKey: false}));
+  at = await drawn();
+  near(at.x, W - rect.width / at.z, 'a small drawing pushed left stays whole at the right edge');
+  near(at.y, H - rect.height / at.z, 'and pushed up, whole at the bottom');
+  flow.hide();
 }
 console.log('PASS block graph model and layout (offline; rendered acceptance is the packaged-app gate)');

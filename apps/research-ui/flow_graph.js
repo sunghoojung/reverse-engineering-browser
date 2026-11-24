@@ -610,7 +610,12 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   let view = {x: 0, y: 0, z: 1}, cssW = 0, cssH = 0, dpr = 1, frame = 0, needsStart = false, miniKey = '', miniBase = null, miniFit = null;
   const metrics = flowGraphLayout.METRICS, ROUTE = flowGraphLayout.ROUTE;
 
-  const requestDraw = () => { if (visible && !frame) frame = requestAnimationFrame(() => { frame = 0; draw(); }); };
+  // Every change of view asks for a draw, so the view is kept on the drawing
+  // here, as in the block graph.
+  const requestDraw = () => {
+    if (layout && cssW) view = graphBoundView(view, layout.width, layout.height, cssW, cssH);
+    if (visible && !frame) frame = requestAnimationFrame(() => { frame = 0; draw(); });
+  };
   /** The heading gives way to the tools by their measured width. */
   const syncToolsWidth = () => host.style.setProperty('--flow-tools-w', `${Math.ceil(tools.offsetWidth || 0)}px`);
   function resize() {

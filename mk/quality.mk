@@ -388,6 +388,7 @@ javascript-check: capture-completeness-check $(UI_STARTUP_DEPS)
 	node tools/check-vm-static.mjs
 	node tools/check-vm-static-ui.mjs
 	node tools/check-block-graph-ui.mjs
+	node tools/check-flow-graph-layout.mjs
 	node tools/check-vm-contextual.mjs
 	node tools/check-vm-contextual-evidence.mjs
 	node tools/check-vm-contextual-ui.mjs

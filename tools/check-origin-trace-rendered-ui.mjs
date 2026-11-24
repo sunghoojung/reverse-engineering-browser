@@ -43,6 +43,13 @@ for (let index = 0; index < argv.length; index += 1) {
   else throw new Error(`Unknown argument ${argv[index]}\n${usage}`);
 }
 
+// WebKit's public script calls run a harness script as a user gesture and
+// consume the page's activation when it ends, which can take a later click's.
+// Harness.script and Harness.evaluate run scripts without one.
+const gestureScripts = (await readFile(join(harness, 'OriginTraceRenderedUITests.swift'), 'utf8')).split('\n')
+  .flatMap((line, index) => /\.(callAsyncJavaScript|evaluateJavaScript)\(/.test(line) ? [`line ${index + 1}: ${line.trim()}`] : []);
+assert.deepEqual(gestureScripts, [], 'Run harness JavaScript through Harness.script or Harness.evaluate, without a user gesture');
+
 assert.equal(process.platform, 'darwin', 'Rendered UI acceptance runs in the packaged macOS app');
 const app = join(root, 'build/Origin Trace.app');
 const goldenStores = {guestStore: join(root, 'build/native-golden/guest-evidence'), dispatchStore: join(root, 'build/native-golden/wasm-evidence'),

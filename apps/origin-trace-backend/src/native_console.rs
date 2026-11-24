@@ -2557,12 +2557,15 @@ mod tests {
     #[tokio::test]
     async fn connect_live_does_not_launch_a_browser_when_the_capture_has_no_binding() {
         let directory = tempfile::tempdir().unwrap();
-        let options = Options::try_parse_from([
+        let mut options = Options::try_parse_from([
             "origin-trace-backend",
             "--native-console-live-directory",
             directory.path().to_str().unwrap(),
         ])
         .unwrap();
+        // --brave-binary also reads REB_BRAVE_BINARY, which a developer who runs
+        // live checks has set; this case is a backend with no browser.
+        options.brave_binary = None;
         let console = NativeConsole::new(&options);
         let state = console.state().await;
         assert_eq!(state["state"], "idle");

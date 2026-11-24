@@ -24,6 +24,8 @@ function loadShippedUi() {
     location: {protocol: 'file:', href: 'file:///index.html', search: '', hash: '', origin: 'null'},
     URL, URLSearchParams, TextEncoder, TextDecoder, AbortController, Blob, Headers, Request, Response,
     atob, btoa, performance, console,
+    // An exception the page reports and carries on from, as WebKit's reportError does.
+    reportError: error => asyncErrors.push(error),
     localStorage: {
       getItem: key => storage.get(key) ?? null,
       setItem: (key, value) => storage.set(key, String(value)),

@@ -67,6 +67,7 @@
   async function ask(op, body = {}) {
     const handler = bridge();
     if (!handler) throw new Error('The native app is not connected.');
+    if (!listening) listen();
     return handler.postMessage({op, ...body});
   }
 
@@ -450,7 +451,34 @@
 
   root.tabIndex = -1;
   globalThis.__rebSessionPanel = state => receive(state);
-  // Native also publishes once the document finishes loading; this covers a
-  // reload the page itself started.
-  if (bridge()) window.addEventListener('load', () => { ask('state').then(receive, () => {}); });
+  // Native's states come only as the answers to one request the page keeps
+  // waiting (macos/NativePageOutbox.swift), in order with the replies: a
+  // script native ran in the page would take the activation of a click it
+  // landed in. The wait starts with the document, and again with a request
+  // after a refusal ended it.
+  // Names this document to native, which refuses a request from one it saw leave.
+  const page = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  let listening = false;
+  async function listen() {
+    listening = true;
+    try {
+      for (;;) {
+        const answer = await bridge().postMessage({op: 'events', page});
+        if (!Array.isArray(answer?.events)) return;
+        for (const state of answer.events) {
+          try { globalThis.__rebSessionPanel(state); } catch (error) { reportError(error); }
+        }
+      }
+    } catch {
+      // Refused: the document is leaving or is not the application's.
+    } finally {
+      listening = false;
+    }
+  }
+  if (bridge()) {
+    listen();
+    // Native also publishes once the document finishes loading; this covers a
+    // reload the page itself started.
+    window.addEventListener('load', () => { ask('state').then(receive, () => {}); });
+  }
 })();

@@ -78,6 +78,7 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
   private let siteStoreURL: URL
   private var trustedURL: URL?
   private var documentReady = false
+  private let outbox = NativePageOutbox()
   private var sites = InvocationSiteSet.State.empty
   // Counts reads of the site file, so a Remove names the list the page saw.
   private var siteGeneration = 0
@@ -99,6 +100,7 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
 
   func navigationWillStart() {
     documentReady = false
+    outbox.reset()
   }
 
   func navigationDidFinish(_ view: WKWebView) {
@@ -112,22 +114,33 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
   ) {
     guard message.name == Self.handlerName,
       message.webView === webView, message.frameInfo.isMainFrame,
-      documentReady, let trustedURL, webView?.url == trustedURL,
+      let trustedURL, webView?.url == trustedURL,
       message.frameInfo.request.url == trustedURL, originMatches(message, trustedURL),
-      let body = message.body as? [String: Any], let op = body["op"] as? String
+      let body = message.body as? [String: Any], let op = body["op"] as? String,
+      // The page asks for states as it loads; the first is posted once the
+      // load finishes.
+      documentReady || op == "events"
     else {
       replyHandler(nil, "The live session panel is unavailable outside the application document.")
       return
     }
+    if op == "events" {
+      guard let page = body["page"] as? String, (1...64).contains(page.count) else {
+        replyHandler(nil, "Malformed request for states.")
+        return
+      }
+      outbox.wait(page: page, replyHandler)
+      return
+    }
     do {
       let (reply, choice) = try handle(op, body)
-      replyHandler(reply, nil)
+      outbox.answer(replyHandler, reply, nil)
       if let choice { Task { @MainActor [weak self] in self?.decide?(choice) } }
     } catch let failure as SessionPanelRefusal {
-      replyHandler(nil, failure.message)
+      outbox.answer(replyHandler, nil, failure.message)
       publish()
     } catch {
-      replyHandler(nil, error.localizedDescription)
+      outbox.answer(replyHandler, nil, error.localizedDescription)
     }
   }
 
@@ -281,16 +294,12 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
     return result
   }
 
-  // State moves as a JSON argument, never as script text.
+  // State reaches the page as data in the answer to its request for states
+  // (NativePageOutbox), never as script.
   private func publish() {
     let value = state()
-    guard documentReady, let webView, JSONSerialization.isValidJSONObject(value),
-      let data = try? JSONSerialization.data(withJSONObject: value)
-    else { return }
-    let payload = String(decoding: data, as: UTF8.self)
-    webView.callAsyncJavaScript(
-      "window.__rebSessionPanel && window.__rebSessionPanel(JSON.parse(payload));",
-      arguments: ["payload": payload], in: nil, in: .page, completionHandler: nil)
+    guard documentReady, JSONSerialization.isValidJSONObject(value) else { return }
+    outbox.post(value)
   }
 }
 

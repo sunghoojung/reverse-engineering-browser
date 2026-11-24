@@ -2130,7 +2130,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
     let pasteboard = NSPasteboard.general
     let saved = pasteboard.string(forType: .string)
     defer { pasteboard.clearContents(); if let saved { pasteboard.setString(saved, forType: .string) } }
-    for size in windowSizes {
+    // Diagnosis only: four rounds per size, so one run has more copies.
+    for size in windowSizes + windowSizes + windowSizes + windowSizes {
       let ui = try await prepare(size)
       try await show(ui, "traffic")
       try await ui.click("#screen-traffic .request-row", containing: expected.requestBodyHost)
@@ -2219,7 +2220,13 @@ final class OriginTraceRenderedUITests: XCTestCase {
       } catch {
         // WebKit refuses a write when the pasteboard changes while its text
         // is read, and says only NotAllowedError; this says whether it did.
-        throw HarnessError("\(error) [pasteboard changes since it was cleared: \(pasteboard.changeCount - cleared), types: \(pasteboard.types?.map(\.rawValue) ?? []), pasteboard \(cleared)@\(clearedAt) \(afterClick)@\(afterClickAt) \(pasteboard.changeCount)@\(Self.copyClock()), page \(try await copyTrace(ui))]")
+        // Diagnosis only: report it and go on to the next round.
+        let status = (try? await ui.value("document.querySelector('[data-export-status]').textContent")) ?? ""
+        print("RENDERED_UI_COPY_TRACE \(size.name) HAR refused (\(status)), pasteboard \(cleared)@\(clearedAt) \(afterClick)@\(afterClickAt) \(pasteboard.changeCount)@\(Self.copyClock()), page \(try await copyTrace(ui))")
+        XCTFail("\(size.name): \(error) [pasteboard changes since it was cleared: \(pasteboard.changeCount - cleared), types: \(pasteboard.types?.map(\.rawValue) ?? [])]")
+        try await ui.key(53, "\u{1B}")
+        try await ui.waitUntil("!document.querySelector('#captured-export-dialog').open", "Escape did not close export")
+        continue
       }
       let har = try JSONSerialization.jsonObject(with: Data((pasteboard.string(forType: .string) ?? "").utf8)) as? [String: Any]
       let log = har?["log"] as? [String: Any]

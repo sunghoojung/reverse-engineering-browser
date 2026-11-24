@@ -60,6 +60,7 @@ decoder_binary="${repo_root}/build/reb-decoder"
 agent_core_source="${repo_root}/apps/research-ui/macos/AgentCore.swift"
 agent_bridge_source="${repo_root}/apps/research-ui/macos/AgentBridge.swift"
 session_panel_source="${repo_root}/apps/research-ui/macos/SessionPanel.swift"
+page_outbox_source="${repo_root}/apps/research-ui/macos/NativePageOutbox.swift"
 agent_cli_source="${repo_root}/apps/research-ui/macos/AgentCLI.swift"
 agent_chatgpt_source="${repo_root}/apps/research-ui/macos/AgentChatGPTAuth.swift"
 cargo build --locked --release --manifest-path "${repo_root}/apps/deobfuscator-worker/Cargo.toml"
@@ -223,7 +224,7 @@ smoke "${repo_root}/build/check-stored-evidence-backend" "${macos_path}/OriginTr
   -framework Cocoa \
   -framework WebKit \
   -framework Security \
-  "${swift_source}" "${stored_evidence_backend_source}" "${workspace_lease_source}" "${decoder_service_source}" "${agent_core_source}" "${agent_cli_source}" "${agent_chatgpt_source}" "${agent_bridge_source}" "${session_panel_source}" "${live_session_source}" "${live_session_options_source}" "${recorded_session_source}" "${close_guard_source}" "${close_smoke_source}" "${client_project_export_source}" "${client_project_smoke_source}" \
+  "${swift_source}" "${stored_evidence_backend_source}" "${workspace_lease_source}" "${decoder_service_source}" "${agent_core_source}" "${agent_cli_source}" "${agent_chatgpt_source}" "${agent_bridge_source}" "${session_panel_source}" "${page_outbox_source}" "${live_session_source}" "${live_session_options_source}" "${recorded_session_source}" "${close_guard_source}" "${close_smoke_source}" "${client_project_export_source}" "${client_project_smoke_source}" \
   -o "${macos_path}/OriginTrace"
 
 "${macos_path}/OriginTrace" --check-native-ui-url

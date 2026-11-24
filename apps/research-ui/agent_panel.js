@@ -238,7 +238,34 @@
   // randomUUID needs a secure context; the offline reb:// page is not one.
   const rowId = prefix => `${prefix}-${crypto.randomUUID?.() ?? Math.random().toString(36).slice(2)}`;
   const nativeBridge = () => globalThis.webkit?.messageHandlers?.rebAgent ?? null;
-  const call = (op, fields = {}) => nativeBridge().postMessage({op, ...fields});
+  const call = (op, fields = {}) => {
+    if (!listening) listen();
+    return nativeBridge().postMessage({op, ...fields});
+  };
+  // Native's events come only as the answers to one request the page keeps
+  // waiting (macos/NativePageOutbox.swift), in order with the replies: a
+  // script native ran in the page would take the activation of a click it
+  // landed in. The wait starts with the first request, as the events follow
+  // the page's requests, and ends with the document or a refusal.
+  // Names this document to native, which refuses a request from one it saw leave.
+  const page = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  let listening = false;
+  async function listen() {
+    listening = true;
+    try {
+      for (;;) {
+        const answer = await nativeBridge().postMessage({op: 'events', page});
+        if (!Array.isArray(answer?.events)) return;
+        for (const event of answer.events) {
+          try { globalThis.__rebAgentEvent(event); } catch (error) { reportError(error); }
+        }
+      }
+    } catch {
+      // Refused: the document is leaving or is not the application's.
+    } finally {
+      listening = false;
+    }
+  }
   const element = (tag, className, text) => {
     const node = document.createElement(tag);
     if (className) node.className = className;
@@ -1411,10 +1438,12 @@
     const wrap = element('div', 'agent-code');
     const header = element('div', 'agent-code-head');
     header.append(element('span', 'agent-code-lang', block.lang || 'text'));
+    // A refused write says so: WebKit refuses one outside the click's activation.
     const copy = button('agent-code-copy', 'Copy', async () => {
-      await navigator.clipboard.writeText(block.text).catch(() => {});
-      copy.textContent = 'Copied';
-      copy.classList.add('copied');
+      const copied = await navigator.clipboard.writeText(block.text).then(() => true, () => false);
+      copy.textContent = copied ? 'Copied' : 'Copy failed';
+      copy.classList.toggle('copied', copied);
+      copy.classList.toggle('failed', !copied);
     }, 'Copy code');
     header.append(copy);
     const pre = codeText('agent-code-body', block.text, fenceSyntax(block.lang));

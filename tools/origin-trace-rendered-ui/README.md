@@ -448,6 +448,12 @@ conversation mounts only nearby rows, the switch stops the tool server, and
 asserts the provider received no key and no captured source, and that the
 transcript is user-only.
 
+`test0bCopyWhileAgentStreams` turns the agent on and asks the stand-in
+provider for an answer it streams a word every 20 ms until the app hangs up.
+While it streams, it copies a Traffic row as cURL five times, each with a
+150 ms press as a person clicks, so native events reach the page between the
+press and the click. Every copy must say Copied and be on the pasteboard.
+
 `test23WorkspaceReloadsAfterContentProcessStops` ends the web content process
 with SIGKILL, as a crash would; WebKit's testing selector names its process ID.
 The workspace must reload once by itself; a second stop within 30 seconds must

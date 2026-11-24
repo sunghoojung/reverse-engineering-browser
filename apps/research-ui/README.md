@@ -887,6 +887,16 @@ The native app keeps what the page must not hold:
 A workspace without a loopback API (the bundled offline workspace) says the
 agent is unavailable.
 
+Native reaches the page only by answering it. The page keeps one request for
+events waiting, and native answers it with every event it has made since,
+in order with its replies to the page's other requests
+([`NativePageOutbox.swift`](macos/NativePageOutbox.swift)). The live session
+panel gets its states the same way. Native never runs a script in the page to
+deliver one: WebKit runs such a script as a user gesture and consumes the
+page's transient activation when that gesture ends. A streamed event that
+ended between a press and its click took the click's activation, and WebKit
+refused the clipboard write the click made.
+
 ### What leaves the machine
 
 As the disclosure says: the question, excerpts the researcher pins, and every
@@ -950,15 +960,18 @@ accepts only a loopback stand-in, for tests; it never redirects a real key.
   and covers renewal, refusal, a forged issuer and sign out. Its waits count
   only time the Mac is awake, so a sleep during a run (a closed lid, or a dark
   wake that load ends) does not fail it.
-- `node tools/check-agent-panel.mjs` (`make native-only-check`) checks the dock's
-  states, safe rendering, citations and budgets in a DOM model, collapsed tool
-  results, the menu, Info and picker, a new conversation, the subscription
-  states, the CLI rows and decisions, and that the CLIs get the graph's system
-  prompt.
+- `node tools/check-agent-panel.mjs` (`make native-only-check`) checks the
+  dock's states, events through its waiting request, safe rendering, citations
+  and budgets in a DOM model, collapsed tool results, the menu, Info and picker,
+  a new conversation, the subscription states, the CLI rows and decisions, and
+  that the CLIs get the graph's system prompt.
 - `test0AgentPanel` drives the packaged app at both window sizes and in the
   light theme: no clipped or overlapping control in the dock, tool results
   opened and closed with Space and Return, the model picker with Return, Down
   and Escape, and the approval taking focus.
+- `test0bCopyWhileAgentStreams` copies a Traffic request as cURL five times
+  while the stand-in provider streams an answer a word every 20 ms, each with a
+  150 ms press, and reads every copy back from the pasteboard.
 
 ## Native console
 

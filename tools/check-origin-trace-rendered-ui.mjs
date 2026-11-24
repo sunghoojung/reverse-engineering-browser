@@ -175,6 +175,22 @@ fetch("/getcaptcha");
     {type: 'content_block_start', index: 0, content_block: {type: 'text', text: ''}},
     {type: 'content_block_delta', index: 0, delta: {type: 'text_delta', text: answer}},
     {type: 'content_block_stop', index: 0}, {type: 'message_delta', delta: {stop_reason: 'end_turn'}, usage: {output_tokens: 32}}, {type: 'message_stop'}]);
+  // An answer streamed a word every 20 ms until the app hangs up, or for a
+  // minute, so test0bCopyWhileAgentStreams acts while the agent's events arrive.
+  const slowTurn = response => {
+    response.write(sse([{type: 'message_start', message: {id: `msg_${Math.random().toString(36).slice(2)}`, type: 'message', role: 'assistant', model: 'claude-opus-5-5', content: [], stop_reason: null, usage: {input_tokens: 16, output_tokens: 0}}},
+      {type: 'content_block_start', index: 0, content_block: {type: 'text', text: ''}}]));
+    let word = 0;
+    const timer = setInterval(() => {
+      if (word < 3000) {
+        response.write(sse([{type: 'content_block_delta', index: 0, delta: {type: 'text_delta', text: `streamed-word-${word++} `}}]));
+        return;
+      }
+      clearInterval(timer);
+      response.end(sse([{type: 'content_block_stop', index: 0}, {type: 'message_delta', delta: {stop_reason: 'end_turn'}, usage: {output_tokens: word}}, {type: 'message_stop'}]));
+    }, 20);
+    response.on('close', () => clearInterval(timer));
+  };
   agentStandIn = createServer((request, response) => {
     let body = '';
     request.setEncoding('utf8');
@@ -190,7 +206,8 @@ fetch("/getcaptcha");
       // A turn's first request asks for a tool; the request carrying its result
       // gets the answer. Earlier turns' results are history, not this signal.
       const last = JSON.stringify(JSON.parse(body || '{}').messages?.at(-1) ?? '');
-      response.end(last.includes('tool_result') ? textTurn() : toolTurn());
+      if (last.includes('Stream slowly')) slowTurn(response);
+      else response.end(last.includes('tool_result') ? textTurn() : toolTurn());
     });
   });
   await new Promise(done => agentStandIn.listen(0, '127.0.0.1', done));

@@ -236,6 +236,7 @@
 .agent-code-copy { height: 22px; padding: 0 7px; border: 0; border-radius: 5px; background: transparent; color: var(--faint); font: 11.5px var(--sans); }
 .agent-code-copy:hover { color: var(--text); background: var(--agent-hover); }
 .agent-code-copy.copied { color: var(--agent-ok); }
+.agent-code-copy.failed { color: var(--red); }
 /* Fenced code and tool JSON read like every other code view: the shared
  * lexer's token colors (code_view.js), Menlo 12/18 px and the editor colors. */
 .agent-code-body { margin: 0; padding: 9px 11px; overflow-x: auto; font: 12px/18px var(--code-font); tab-size: 2; white-space: pre; color: var(--code-text); background: var(--code-bg); }

@@ -2371,7 +2371,10 @@ var(--panel);
       .request-row.is-new { animation: request-arrival 480ms ease-out; }
       @keyframes request-arrival { from { box-shadow: inset 3px 0 var(--cyan); } }
       .request-window { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; padding: 4px 8px; min-height: 28px; border-top: 1px solid var(--line); background: var(--bg); color: var(--muted); font: 10px var(--sans); }
-      .request-window > span { flex: 1 1 150px; }
+      /* The counts share a row with the buttons only when they fit on it whole;
+         otherwise they take a row of their own and the buttons the next, as a
+         count squeezed beside buttons wraps into more lines than it saves. */
+      .request-window > span { flex: 1 1 auto; }
       .request-window button { padding: 3px 4px; color: var(--muted); background: transparent; border: 0; border-radius: 4px; font: 10px var(--sans); }
       .request-window button:hover { color: var(--text); background: var(--panel-3); }
       .request-window button:disabled { opacity: .45; cursor: default; }

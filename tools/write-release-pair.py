@@ -32,35 +32,52 @@ PREVIOUS_BROWSER = "Brave v1.95.52 on Chromium 151.0.7922.108"
 # docs/development/paired-release.md runs each one; move a claim to
 # ACCEPTED_LIVE only with that evidence, and delete one that did not hold.
 # A pair is not recorded while any claim is still pending.
-PENDING_LIVE = (
+PENDING_LIVE = ()
+ACCEPTED_LIVE = (
     "A fresh live session with this build on an owned local fixture recorded Wasm "
     "`br_table` and `call_indirect` observations, the Canvas readback image, network "
     "and fingerprint surfaces, and the native Console runtime check passed on the "
     "extracted ZIP.",
-    "Every script V8 compiles is captured, so `eval` and `new Function` on a page "
-    "with no CSP, and worker scripts, are recorded with their source.",
-    "Request and response headers and each request's cookies are recorded natively, "
-    "`document.cookie` reads are named per cookie, and every header block or cookie "
-    "list that was not kept is counted by reason.",
-    "Response bodies are kept with exact bytes or a stated reason, a memory-cache "
-    "reuse links to the bytes that first loaded it, and streamed bodies are kept as "
-    "they arrive.",
-    "Full URLs and request bodies up to 16 MiB, including file, blob and stream "
-    "bodies, are kept within the byte budget the start panel sets.",
-    "Every Traffic request links to its browser tab, including worker, service "
-    "worker, worklet, early-hints and prefetch requests; a request with no tab is "
-    "counted with a reason.",
-    "With request stacks on, a renderer request carries the JavaScript and Wasm "
-    "stack that started it, in workers too, linked across message posts.",
-    "Synchronous XHR, service-worker failures and memory-cache reuse finish their "
-    "requests in the renderer.",
-    "Debugger observations (watched requests, uncaught exceptions and rejections, "
-    "listener dispatches, timers, CSP violations and DOM mutations) arrive from the "
-    "page for an agent to wait on.",
-    "Each Wasm `br_table` sample names its direct caller, and Wasm traps, calls still "
-    "executing and dispatch scope gaps are recorded.",
+    "Every script V8 compiles is captured with its source, including `eval`, "
+    "`new Function`, worker and service worker imports, 40 scripts loaded at once "
+    "and a 24 MiB script.",
+    "Request and response headers are recorded natively and whole, credential values "
+    "included, across redirect hops and for a 200 KiB response head. Each request's "
+    "sent, received and blocked cookies match the server, and a `document.cookie` "
+    "write links to its script position.",
+    "Response bodies of any size are kept with the server's exact bytes and digest, "
+    "decoded from gzip and brotli: JSON, HTML, images, fonts, media, chunked and "
+    "streamed bodies, service worker and navigation preload answers, 50 at once, and "
+    "six 96 MiB bodies in one session. A 304, an aborted download and a service worker "
+    "answer each carry that state.",
+    "Full URLs and request bodies are kept whole with no content budget: an 8 KB "
+    "GraphQL GET URL, 5 MiB JSON, multipart and Blob bodies, four 72 MiB bodies, a "
+    "re-sent 307 POST body and 5,000 small POSTs. While 576 MiB of responses passed, "
+    "capture added 32 MiB to the browser's memory.",
+    "Every Traffic request of the content session linked to its browser tab, none "
+    "unresolved of 518: removed iframes, dedicated, nested and shared workers, "
+    "`sendBeacon` and keepalive at unload, service worker installs, caches and "
+    "fetches after their last tab, a service worker with 30 client tabs, redirect "
+    "chains and downloads.",
+    "With request stacks on, a renderer request carries the JavaScript stack that "
+    "started it: all 150 frames through wrappers, the innermost and outermost 512 "
+    "frames of a 5,000-deep recursion with the rest counted, inline, `eval` and "
+    "network script frames at their lines, a fetch from a Wasm import, and the async "
+    "frames of an `await` chain. With stacks off, no stack is walked.",
+    "An agent can wait for the next fetch to a URL and read its stack, the next click "
+    "handler and its position, and the next CSP violation, and can keep those rules "
+    "so a new tab's document is watched before its own scripts run.",
+    "Wasm `br_table` and `call_indirect` are sampled per window by default, with the "
+    "paced remainder named, or kept as every record on request: 760,000 of each for "
+    "760,000 calls, with no gap.",
+    "Tracked JavaScript functions arm past 256 sites: 300 sites and all 900 of their "
+    "calls were recorded with no invocation gap. The native Console kept all 601 "
+    "activity records and 300 child document IDs, and a QuickJS guest under the "
+    "fixture adapter kept every dispatch sample and host parent.",
+    "A Metadata session records no header, cookie or body value. Bodies that the "
+    "receiver's disk reserve refuses are recorded as not captured for that reason "
+    "and counted apart.",
 )
-ACCEPTED_LIVE = ()
 
 
 def digest(path):
@@ -162,9 +179,8 @@ def notes_text(tag, brave_tag, source_sha, run_url, assets, browser):
             "carried onto it.\n"
         )
         validation = (
-            "- Guest-state adapters, JavaScript dispatch sites and Finder automatic "
-            "launch were not exercised live. The pausing debugger is built in but off: "
-            "nothing in Origin Trace turns it on.\n"
+            "- Finder automatic launch was not exercised live. The pausing debugger is "
+            "built in but off: nothing in Origin Trace turns it on.\n"
         )
         accepted = "## Checked live on this build\n\n" + (
             "".join(f"- {claim}\n" for claim in ACCEPTED_LIVE) if ACCEPTED_LIVE
@@ -192,8 +208,11 @@ def notes_text(tag, brave_tag, source_sha, run_url, assets, browser):
         "- **In-app agent:** a chat dock that works over the `reb-api` MCP with a Claude or "
         "ChatGPT API key, or a Claude, ChatGPT or Grok subscription, at one of four "
         "permission levels.\n"
-        "- **Starting a session:** an in-window start panel replaces the startup alerts, "
-        "with Content limits for the request and response budgets and media capture.\n"
+        "- **Starting a session:** an in-window start panel replaces the startup alerts "
+        "and picks Content or Metadata capture.\n"
+        "- **No content budgets:** request and response bodies, URLs, scripts and "
+        "headers of any size are kept whole, and Console, analysis and evidence reads "
+        "no longer stop at fixed sizes or counts.\n"
         "- **Look:** one color system and a Rosé Pine Dawn light theme.\n\n"
         f"{accepted}"
         "## Live sessions\n\n"

@@ -60,3 +60,10 @@ wat = "=1.240.0"
 # backend and its tests keep it optimized.
 [profile.dev.package.wasmi]
 opt-level = 3
+
+# A WASM comparison digests each function body whole before its first
+# cancellation check. Unoptimized, a 7.6 MB body takes about 300 ms of CPU
+# against 20 ms optimized, so the debug backend and its tests keep the digest
+# optimized and stop about as promptly after a cancel as a release does.
+[profile.dev.package.sha2]
+opt-level = 3

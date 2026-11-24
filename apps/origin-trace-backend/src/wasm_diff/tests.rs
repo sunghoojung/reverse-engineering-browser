@@ -673,11 +673,76 @@ fn every_step_the_budget_stops_leaves_honest_unclassified_rows() {
     );
 }
 
+/// The CPU clock of the thread that reads it first, readable from any thread.
+/// CPU time does not grow while a thread waits for a core, so a loaded
+/// machine cannot stretch it as it stretches wall time.
+#[derive(Clone, Copy)]
+struct ThreadCpu(CpuClock);
+#[cfg(target_os = "linux")]
+type CpuClock = libc::clockid_t;
+#[cfg(target_os = "macos")]
+type CpuClock = libc::mach_port_t;
+
+impl ThreadCpu {
+    #[cfg(target_os = "linux")]
+    fn current() -> Self {
+        let mut clock = 0;
+        // SAFETY: pthread_self names the calling thread, and the call writes
+        // only `clock`.
+        let status = unsafe { libc::pthread_getcpuclockid(libc::pthread_self(), &mut clock) };
+        assert_eq!(status, 0);
+        Self(clock)
+    }
+    #[cfg(target_os = "linux")]
+    fn time(self) -> Duration {
+        let mut now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: the call writes only `now`.
+        assert_eq!(unsafe { libc::clock_gettime(self.0, &mut now) }, 0);
+        Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
+    }
+    #[cfg(target_os = "macos")]
+    fn current() -> Self {
+        // SAFETY: pthread_self names the calling thread; its port lives as
+        // long as the thread does.
+        Self(unsafe { libc::pthread_mach_thread_np(libc::pthread_self()) })
+    }
+    #[cfg(target_os = "macos")]
+    fn time(self) -> Duration {
+        let mut info = std::mem::MaybeUninit::<libc::thread_basic_info>::zeroed();
+        let mut count = libc::THREAD_BASIC_INFO_COUNT;
+        // SAFETY: the call writes at most `count` words, the size of `info`.
+        let status = unsafe {
+            libc::thread_info(
+                self.0,
+                libc::THREAD_BASIC_INFO as libc::thread_flavor_t,
+                info.as_mut_ptr().cast(),
+                &mut count,
+            )
+        };
+        assert_eq!(status, libc::KERN_SUCCESS);
+        // SAFETY: thread_info filled it, and zeroed is valid for it anyway.
+        let info = unsafe { info.assume_init() };
+        let time = |t: libc::time_value_t| {
+            Duration::from_secs(t.seconds as u64) + Duration::from_micros(t.microseconds as u64)
+        };
+        time(info.user_time) + time(info.system_time)
+    }
+}
+
 #[test]
 fn cancellation_stops_adversarial_inputs_promptly() {
-    // Each of these once ran for many seconds before cancellation was
-    // checked inside bodies and global numbering was made linear.
+    // Each of these once ran for many seconds after it was cancelled, before
+    // cancellation was checked inside bodies and global numbering was made
+    // linear. What is bounded is the comparing thread's CPU time from the
+    // moment the flag is set to the comparison's return: it does not grow
+    // while the thread waits for a core, so a loaded machine cannot fail it.
+    // Each stops within milliseconds; with the flag ignored, the bodies and
+    // similar inputs run on for seconds.
     let after = Duration::from_millis(250);
+    let grace = Duration::from_millis(500);
     for (label, a, b) in [
         (
             "globals",
@@ -689,24 +754,27 @@ fn cancellation_stops_adversarial_inputs_promptly() {
     ] {
         let cancelled = Arc::new(AtomicBool::new(false));
         let flag = cancelled.clone();
+        let comparing = ThreadCpu::current();
+        // Returns the comparing thread's CPU time when it set the flag.
         let cancel = std::thread::spawn(move || {
             std::thread::sleep(after);
+            let at = comparing.time();
             flag.store(true, Ordering::Relaxed);
+            at
         });
-        let started = Instant::now();
         let result = compare_with(&a, &b, json!({}), json!({}), Limits::DEFAULT, &cancelled);
-        let elapsed = started.elapsed();
-        cancel.join().unwrap();
+        let done = comparing.time();
+        let at = cancel.join().unwrap();
+        // Zero when the comparison returned before the flag was set.
+        let ran = done.saturating_sub(at);
+        assert!(
+            ran < grace,
+            "{label} ran {ran:?} of CPU after it was cancelled"
+        );
         // A fast machine may finish an input; a cancelled one says so.
         match result {
             Ok(report) => assert!(report.complete, "{label}: {:?}", report.omissions),
-            Err(error) => {
-                assert_eq!(error.status, 499, "{label}: {}", error.message);
-                assert!(
-                    elapsed < after + Duration::from_millis(2500),
-                    "{label} took {elapsed:?}"
-                );
-            }
+            Err(error) => assert_eq!(error.status, 499, "{label}: {}", error.message),
         }
     }
 }

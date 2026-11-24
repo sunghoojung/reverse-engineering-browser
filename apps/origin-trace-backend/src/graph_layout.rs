@@ -3,12 +3,13 @@
 //! regions and Sugiyama layering; see `vendor/README.md`).
 //!
 //! Triskel is third-party C++ fed graphs shaped by captured pages, and this
-//! revision can loop forever or crash on some of them, so it never runs in
-//! the server. A request's graphs go to a contained
-//! `--graph-layout-worker` process, at most two run at once, and a graph that
-//! hangs, crashes or exhausts memory costs only itself: a new worker
-//! continues with the graphs after it. A request has no size limit or
-//! deadline; one that goes away drops its future, which kills its worker.
+//! revision can crash on some of them, so it never runs in the server. A
+//! request's graphs go to a contained `--graph-layout-worker` process, at
+//! most two run at once, and a graph that crashes or exhausts memory costs
+//! only itself: a new worker continues with the graphs after it. A graph has
+//! no time budget and a request no size limit or deadline: a request that
+//! goes away, as when the reader stops Triskel, drops its future, which kills
+//! its worker.
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -34,8 +35,6 @@ const MAX_NODE_SIZE: f64 = 100_000.0;
 const MEMORY_LIMIT: u64 = 2 << 30;
 const MEMORY_EXIT: i32 = 75;
 const REPLY: &[u8] = b"REBGL1 ";
-/// The worker's line as it starts a graph, which starts that graph's budget.
-const BEGIN: &[u8] = b"REBGL1-BEGIN\n";
 const INVALID: &str = "The layout worker returned an invalid result";
 const SHAPE: &str = "The graph layout body must be {\"graphs\": [{\"nodes\": [[width, height], ...], \"edges\": [[from, to], ...]}]} with integer node indexes";
 /// Two layouts at once keep a burst of graph views from taking every core; a
@@ -83,8 +82,8 @@ impl Serialize for Coord {
     }
 }
 
-/// One graph's result, in request order. The worker writes `LaidOut` or
-/// `Failed`; the server assigns the others.
+/// One graph's result, in request order. The worker writes it, or the
+/// server does for an empty graph and for one that stopped the worker.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum Outcome {
@@ -96,9 +95,6 @@ enum Outcome {
         elapsed_ms: u64,
     },
     Failed {
-        reason: String,
-    },
-    Timeout {
         reason: String,
     },
 }
@@ -216,21 +212,6 @@ struct Job {
     json: Vec<u8>,
 }
 
-impl Job {
-    /// Measured Triskel time grows with the square of the graph's size (about
-    /// 2 µs times n squared on a loaded machine; tree-like graphs: 1,000
-    /// nodes 0.6 s, 3,000 nodes 6.6 s, 8,000 nodes 85 s), and edges count too
-    /// (2 nodes with 8,001 parallel edges take 1.5 s). Four times that for
-    /// nodes and edges together, and at least 1 s, separates a slow layout
-    /// from one that will never finish (the `init_rank` loop in
-    /// `vendor/README.md`). It grows with the graph, so it limits no size.
-    fn budget(&self) -> Duration {
-        let size = (self.nodes + self.edges) as u64;
-        Duration::from_secs(1)
-            + Duration::from_nanos(8_000u64.saturating_mul(size.saturating_mul(size)))
-    }
-}
-
 /// The pending graphs encoded for the worker, off the async runtime: a request
 /// can hold tens of MiB of numbers.
 async fn encode(graphs: Vec<Graph>, pending: Vec<usize>) -> Option<Vec<Job>> {
@@ -255,18 +236,15 @@ async fn encode(graphs: Vec<Graph>, pending: Vec<usize>) -> Option<Vec<Job>> {
 /// Why one worker stopped before every graph it was given had a result.
 enum Stop {
     Complete,
-    /// The graph in progress overran its own budget.
-    Budget(Duration),
     /// The graph in progress crashed the worker or produced an invalid result.
     Graph(String),
     /// The worker failed before or apart from any one graph.
     Abandon(String),
 }
 
-/// Lays out `jobs` in order, one worker at a time. Triskel can loop forever
-/// or crash on some graphs (see `vendor/README.md`), so each graph has its own
-/// budget: a graph that overruns it, crashes the worker or exhausts its
-/// memory gets `timeout` or `failed`, and a new worker continues with the
+/// Lays out `jobs` in order, one worker at a time. Triskel can crash on some
+/// graphs (see `vendor/README.md`), so a graph that crashes the worker or
+/// exhausts its memory gets `failed`, and a new worker continues with the
 /// graphs after it.
 async fn in_worker(jobs: &[Job]) -> Vec<Outcome> {
     let mut outcomes = Vec::with_capacity(jobs.len());
@@ -275,15 +253,6 @@ async fn in_worker(jobs: &[Job]) -> Vec<Outcome> {
         let rest = &jobs[outcomes.len()..];
         let missing = match exchange(rest, &mut outcomes).await {
             Stop::Complete => continue,
-            Stop::Budget(budget) => {
-                outcomes.push(Outcome::Timeout {
-                    reason: format!(
-                        "The layout did not finish within this graph's {:.1} s budget",
-                        budget.as_secs_f64()
-                    ),
-                });
-                continue;
-            }
             Stop::Graph(reason) => {
                 outcomes.push(Outcome::Failed { reason });
                 continue;
@@ -345,22 +314,10 @@ async fn exchange(jobs: &[Job], outcomes: &mut Vec<Outcome>) -> Stop {
     .await;
     let mut reader = BufReader::new(stdout);
     for job in jobs {
-        // A graph's budget runs from the worker's line that it has begun the
-        // graph, so starting the worker, sending the request and parsing it
-        // count against none, however loaded the machine.
-        match next_line(&mut reader).await {
-            Ok(Some(Line::Begin)) => {}
-            Ok(Some(Line::Reply(_))) | Err(_) => return Stop::Graph(INVALID.to_owned()),
+        let line = match next_reply(&mut reader).await {
+            Ok(Some(line)) => line,
             Ok(None) => return stopped(child.wait().await),
-        }
-        let budget = job.budget();
-        let Ok(line) = tokio::time::timeout(budget, next_line(&mut reader)).await else {
-            return Stop::Budget(budget);
-        };
-        let line = match line {
-            Ok(Some(Line::Reply(line))) => line,
-            Ok(Some(Line::Begin)) | Err(_) => return Stop::Graph(INVALID.to_owned()),
-            Ok(None) => return stopped(child.wait().await),
+            Err(reason) => return Stop::Graph(reason.to_owned()),
         };
         match parse_reply(line, job).await {
             Ok(outcome) => outcomes.push(outcome),
@@ -370,17 +327,11 @@ async fn exchange(jobs: &[Job], outcomes: &mut Vec<Outcome>) -> Stop {
     Stop::Complete
 }
 
-/// One line of the worker's output.
-enum Line {
-    Begin,
-    /// A reply, prefix and newline included.
-    Reply(Vec<u8>),
-}
-
-/// The worker's next line, or `None` at the end of its output.
-async fn next_line(
+/// The next reply line, prefix and newline included, or `None` at the end of
+/// the worker's output.
+async fn next_reply(
     reader: &mut BufReader<ChildStdout>,
-) -> std::result::Result<Option<Line>, &'static str> {
+) -> std::result::Result<Option<Vec<u8>>, &'static str> {
     let mut line = Vec::new();
     loop {
         line.clear();
@@ -392,11 +343,8 @@ async fn next_line(
             // End of output, possibly mid-line: the exit status says why.
             return Ok(None);
         }
-        if line == BEGIN {
-            return Ok(Some(Line::Begin));
-        }
         if line.starts_with(REPLY) {
-            return Ok(Some(Line::Reply(line)));
+            return Ok(Some(line));
         }
         // libtest prints this banner before a re-executed test worker runs.
         let text = &line[..line.len() - 1];
@@ -445,7 +393,6 @@ fn checked(
             if valid { Ok(outcome) } else { Err(INVALID) }
         }
         Outcome::Failed { .. } => Ok(outcome),
-        Outcome::Timeout { .. } => Err(INVALID),
     }
 }
 
@@ -498,8 +445,6 @@ pub(crate) fn worker_main() -> i32 {
     if watch_memory().is_err() {
         return 71;
     }
-    #[cfg(test)]
-    tests::start_fault();
     let mut input = Vec::new();
     if std::io::stdin().lock().read_to_end(&mut input).is_err() {
         return 72;
@@ -509,9 +454,6 @@ pub(crate) fn worker_main() -> i32 {
     };
     drop(input);
     for graph in &graphs {
-        if reply.write_all(BEGIN).and_then(|()| reply.flush()).is_err() {
-            return 74;
-        }
         #[cfg(test)]
         tests::fault();
         let Ok(json) = serde_json::to_vec(&lay_out(graph)) else {
@@ -533,9 +475,9 @@ pub(crate) fn worker_main() -> i32 {
 /// dump would hold an image of the request's graphs. On Linux a piped
 /// `core_pattern` (Apport, systemd-coredump) ignores `RLIMIT_CORE` and keeps
 /// the crashed process, with its reply pipe open, until the helper returns,
-/// which on a loaded machine outlasts a small graph's budget and turns the
-/// crash into a timeout. A process that is not dumpable is never dumped, so
-/// it ends at once and its signal names the crash.
+/// so the crash and the graphs after it would wait on the helper. A process
+/// that is not dumpable is never dumped, so it ends at once and its signal
+/// names the crash.
 fn no_core_dump() -> std::io::Result<()> {
     let none = libc::rlimit {
         rlim_cur: 0,
@@ -1077,14 +1019,6 @@ mod tests {
             const { std::cell::Cell::new(None) };
     }
 
-    /// A test-only fault before the worker reads its request: a worker that
-    /// starts slower than a graph's budget.
-    pub(super) fn start_fault() {
-        if std::env::var(FAULT_VARIABLE).as_deref() == Ok("slow start") {
-            std::thread::sleep(Duration::from_millis(1500));
-        }
-    }
-
     /// Test-only faults in the re-executed worker, after the first graph's
     /// reply so a test sees both a kept result and the missing ones.
     pub(super) fn fault() {
@@ -1352,16 +1286,14 @@ mod tests {
     async fn a_stopped_graph_costs_only_itself() {
         let small = || graph(&sized(3), &[[0, 1], [1, 2]]);
         for (fault, words) in [
-            ("hang", "this graph's 1.0 s budget"),
             ("crash", "signal 6 while laying out this graph"),
             ("memory", "2 GiB memory limit on this graph"),
         ] {
             FAULT.set(Some(fault));
             let outcomes = lay_out_all(vec![small(), small(), small()]).await;
             assert_sound(&small(), &outcomes[0], fault);
-            let reason = match (&outcomes[1], fault) {
-                (Outcome::Timeout { reason }, "hang") | (Outcome::Failed { reason }, _) => reason,
-                (outcome, _) => panic!("{fault}: {outcome:?}"),
+            let Outcome::Failed { reason } = &outcomes[1] else {
+                panic!("{fault}: {:?}", outcomes[1]);
             };
             assert!(reason.contains(words), "{fault}: {reason}");
             // A new worker lays out the graphs after the stopped one.
@@ -1369,25 +1301,13 @@ mod tests {
         }
     }
 
-    /// A graph's budget starts when the worker begins it, so a worker that is
-    /// slow to start, as on a loaded machine, costs no graph its layout.
+    /// A small connected graph on which upstream Triskel never returns: two
+    /// entries meet at 3, and the SESE pass roots the region {0, 4, 5, 6} at
+    /// its exit node 0, so cycle removal misses the loop 6 -> 4 -> 5 -> 6 and
+    /// layer assignment spins. `build.rs` makes that pass fail (see
+    /// vendor/README.md), and the graph after it is laid out.
     #[tokio::test]
-    async fn starting_a_worker_counts_against_no_graph() {
-        let small = || graph(&sized(3), &[[0, 1], [1, 2]]);
-        FAULT.set(Some("slow start"));
-        let outcomes = lay_out_all(vec![small(), small()]).await;
-        FAULT.set(None);
-        for (index, outcome) in outcomes.iter().enumerate() {
-            assert_sound(&small(), outcome, &format!("slow start, graph {index}"));
-        }
-    }
-
-    /// A small connected graph on which this Triskel revision never returns:
-    /// two entries meet at 3, and the SESE pass roots the region {0, 4, 5, 6}
-    /// at its exit node 0, so cycle removal misses the loop 6 -> 4 -> 5 -> 6
-    /// and layer assignment spins (see vendor/README.md).
-    #[tokio::test]
-    async fn a_graph_triskel_never_finishes_times_out_alone() {
+    async fn a_graph_triskel_would_never_finish_fails_alone() {
         let looping = graph(
             &sized(7),
             &[[0, 3], [6, 0], [4, 5], [2, 6], [6, 4], [5, 6], [1, 3]],
@@ -1400,10 +1320,10 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
-        let Outcome::Timeout { reason } = &outcomes[0] else {
+        let Outcome::Failed { reason } = &outcomes[0] else {
             panic!("{:?}", outcomes[0]);
         };
-        assert!(reason.contains("budget"), "{reason}");
+        assert!(reason.contains("met a loop"), "{reason}");
         assert_sound(&diamond, &outcomes[1], "after a looping graph");
     }
 
@@ -1434,8 +1354,8 @@ mod tests {
         WORKER.set(None);
         let small = || graph(&sized(3), &[[0, 1], [1, 2]]);
         // The worker hangs after the first reply. Another test may hold both
-        // worker slots for a while, so wait for this request's worker, then
-        // drop the request well inside the second graph's 1 s budget.
+        // worker slots for a while, so wait for this request's worker, see
+        // that the request is still waiting, then drop it.
         let mut layout = Box::pin(lay_out_all(vec![small(), small()]));
         let waited = Instant::now();
         let pid = loop {
@@ -1513,11 +1433,8 @@ mod tests {
                     assert_sound(graph, outcome, &format!("random graph {index}"));
                     laid_out += 1;
                 }
-                Outcome::Failed { reason } | Outcome::Timeout { reason } => {
-                    assert!(
-                        reason.contains("Triskel") || reason.contains("budget"),
-                        "{reason}"
-                    );
+                Outcome::Failed { reason } => {
+                    assert!(reason.contains("Triskel"), "{reason}");
                 }
             }
         }

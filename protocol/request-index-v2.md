@@ -155,7 +155,9 @@ rebuilt. A version 1 `<store>.requests-v1` file is removed.
 
 On every call the backend checks that identity and both digests against the
 store. A truncated, rewritten or replaced store discards the index, rebuilds it
-from byte 0 and changes `index.epoch`. A matching index is reopened after a
+from byte 0 and changes `index.epoch`, also when the change lands while the
+index is reading the store: the digests it records are those of the bytes it
+indexed, never a later read of the file. A matching index is reopened after a
 restart (`index.reopened`), so reopening a session reads only records appended
 since. When the store's directory cannot hold the database, such as read-only
 evidence, the index lives in a private temporary directory for as long as the

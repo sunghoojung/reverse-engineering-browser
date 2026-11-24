@@ -70,7 +70,10 @@ jobs:
     needs: route
     if: needs.route.outputs.release_type == 'paired'
     runs-on: macos-latest
-    timeout-minutes: 45
+    # Only a hang guard. A release dispatch runs the release checks (26 min)
+    # before the packaged pair, lifecycle, startup and rendered UI runs, about
+    # 62 min in all; v0.6.0's first dispatch ran out at 45.
+    timeout-minutes: 120
     outputs:
       release_tag: ${{ steps.source.outputs.release_tag }}
       source_sha: ${{ steps.source.outputs.source_sha }}

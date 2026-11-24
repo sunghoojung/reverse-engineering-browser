@@ -23,6 +23,8 @@ import threading
 import time
 import urllib.request
 
+from live_acceptance.evidence import Api, Session
+
 KIND_SCRIPT, KIND_FUNCTION_CONSTRUCTOR, KIND_EVAL = 1, 5, 4
 QUEUED, DUPLICATE, NETWORK_FETCHED = 1, 2, 3
 PAYLOAD_VERSION = 2
@@ -292,6 +294,9 @@ def main() -> int:
             artifacts = api(endpoint, instance, "/api/artifacts?kind=javascript&limit=5000")["artifacts"]
         finally:
             api(endpoint, instance, "/api/session/actions", {"action": "end", "confirm": True})
+            # The launcher leaves Origin Trace open on this session's store, which is
+            # deleted with the temporary directory below.
+            Session(session, Api(endpoint, instance)).close_app()
             server.shutdown()
 
     failures = [f"page beacon never arrived: {name}" for name in sorted(beacons - seen)]

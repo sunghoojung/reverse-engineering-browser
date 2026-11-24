@@ -8,7 +8,7 @@ import {createServer} from 'node:http';
 import {createRequire} from 'node:module';
 
 const require = createRequire(import.meta.url);
-const {trafficCurl, trafficFetch, trafficCopyGaps, trafficHarEntry} = require('../apps/research-ui/traffic_copy.js');
+const {trafficCurl, trafficFetch, trafficCopyGaps, trafficHarEntry, trafficClipboardWrite} = require('../apps/research-ui/traffic_copy.js');
 
 const received = [];
 const server = createServer((request, response) => {
@@ -102,5 +102,23 @@ await assert.rejects(trafficHarEntry('R9', fetcher), /No request row has ID R9/)
 next = {ok: false, status: 502, json: async () => { throw new SyntaxError('not JSON'); }};
 await assert.rejects(trafficHarEntry('R9', fetcher), /the backend returned 502/);
 
+// The clipboard write starts at once and takes the text when it arrives. Like
+// WebKit, this clipboard rejects a write whose text failed as NotAllowedError;
+// the copy reports the text's own failure, and a refused write as refused.
+const written = [];
+let refuse = false;
+globalThis.ClipboardItem = class { constructor(items) { this.items = items; } };
+Object.defineProperty(globalThis, 'navigator', {configurable: true, value: {clipboard: {write: async ([item]) => {
+  const blob = await item.items['text/plain'].catch(() => null);
+  if (!blob || refuse) throw new DOMException('The request is not allowed by the user agent or the platform in the current context.', 'NotAllowedError');
+  written.push(await blob.text());
+}}}});
+await trafficClipboardWrite(Promise.resolve('curl https://copied.test'));
+assert.deepEqual(written, ['curl https://copied.test']);
+await assert.rejects(trafficClipboardWrite(Promise.reject(new TypeError('the archive is incomplete'))), /the archive is incomplete/);
+refuse = true;
+await assert.rejects(trafficClipboardWrite(Promise.resolve('curl https://refused.test')), {name: 'NotAllowedError'});
+assert.deepEqual(written, ['curl https://copied.test'], 'a failed or refused write puts nothing on the clipboard');
+
 server.close();
-console.log('PASS Copy as cURL and Copy as fetch send the captured method, URL, headers and text or binary body as captured, leave framing to the client, report withheld values, unretained bodies and partial URLs, and read the row\'s first hop');
+console.log('PASS Copy as cURL and Copy as fetch send the captured method, URL, headers and text or binary body as captured, leave framing to the client, report withheld values, unretained bodies and partial URLs, read the row\'s first hop, and report why a clipboard write failed');

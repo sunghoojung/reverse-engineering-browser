@@ -58,11 +58,16 @@ final class CompanionWarningUITests: XCTestCase {
     defer { if app.state != .notRunning { app.terminate() } }
 
     let first = failureDetail(assertStartupFailure(app))
+    // The web panel can expose its title in more than one accessibility
+    // element, so reopen is measured against the failure as first shown.
+    let shownTitles = app.staticTexts.matching(identifier: failureTitle).count
     attachScreenshot(app, name: "modal-reopen-initial-failure")
     let firstPID = try reopenApplication()
     let secondPID = try reopenApplication()
     XCTAssertEqual(firstPID, secondPID, "Reopen must address the existing app instance")
-    XCTAssertEqual(app.staticTexts.matching(identifier: failureTitle).count, 1,
+    XCTAssertEqual(app.staticTexts.matching(identifier: failureTitle).count, shownTitles,
+                   "Reopen must not show a second live-session failure")
+    XCTAssertEqual(app.buttons.matching(identifier: "Retry").count, 1,
                    "Reopen must not show a second live-session failure")
     XCTAssertEqual(failureDetail(app), first, "Reopen must not replace the open failure with another session")
     attachScreenshot(app, name: "modal-reopen-single-failure")
@@ -116,6 +121,9 @@ final class CompanionWarningUITests: XCTestCase {
       "REB_NATIVE_QUIET_MODE": "0",
       "REB_NATIVE_WASM_DISPATCH": "0",
       "REB_NATIVE_WASM_CALL_INDIRECT": "0",
+      // Request stacks are on by default and add --reb-request-stacks, which the
+      // launcher checks in V8 too; this also leaves promise stacks off.
+      "REB_NATIVE_REQUEST_STACKS": "0",
       "REB_LOCALHOST_ONLY": "1",
       "REB_COMPANION_WARNING_RECEIPT": directory.appendingPathComponent("launches.txt").path,
     ]
@@ -163,20 +171,41 @@ final class CompanionWarningUITests: XCTestCase {
   @MainActor
   @discardableResult
   private func assertFreshStartupFailure(_ app: XCUIApplication, after previous: String) -> XCUIElement {
-    let fresh = app.staticTexts.matching(NSPredicate(
-      format: "(label CONTAINS %@ OR value CONTAINS %@) AND NOT (label == %@ OR value == %@)",
-      stoppedBrowser, stoppedBrowser, previous, previous)).firstMatch
-    XCTAssertTrue(fresh.waitForExistence(timeout: 90),
-                  "Retry must relaunch and report a new session failure: " + app.debugDescription)
+    XCTAssertNotNil(waitForStaticText(in: app, containing: stoppedBrowser, excluding: previous, timeout: 90),
+                    "Retry must relaunch and report a new session failure: " + app.debugDescription)
     return assertStartupFailure(app)
   }
 
   @MainActor
   private func failureDetail(_ scope: XCUIElement) -> String {
-    let detail = scope.staticTexts.matching(NSPredicate(
-      format: "label CONTAINS %@ OR value CONTAINS %@", "Session log:", "Session log:")).firstMatch
-    XCTAssertTrue(detail.exists, "The failure must name its session log")
+    guard let detail = staticText(in: scope, containing: "Session log:") else {
+      XCTFail("The failure must name its session log")
+      return ""
+    }
     return (detail.value as? String).flatMap { $0.isEmpty ? nil : $0 } ?? detail.label
+  }
+
+  /// A static text whose label or string value contains `text`. The start panel
+  /// is web content, where a heading reports its level as a number value that a
+  /// `value CONTAINS` predicate throws on, so the match reads each element here.
+  @MainActor
+  private func staticText(in scope: XCUIElement, containing text: String,
+                          excluding previous: String? = nil) -> XCUIElement? {
+    scope.staticTexts.allElementsBoundByIndex.first { element in
+      let shown = [element.label, element.value as? String].compactMap { $0 }
+      return shown.contains { $0.contains(text) } && !shown.contains { $0 == previous }
+    }
+  }
+
+  @MainActor
+  private func waitForStaticText(in scope: XCUIElement, containing text: String,
+                                 excluding previous: String? = nil, timeout: TimeInterval) -> XCUIElement? {
+    let deadline = Date().addingTimeInterval(timeout)
+    repeat {
+      if let found = staticText(in: scope, containing: text, excluding: previous) { return found }
+      RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+    } while Date() < deadline
+    return nil
   }
 
   @MainActor

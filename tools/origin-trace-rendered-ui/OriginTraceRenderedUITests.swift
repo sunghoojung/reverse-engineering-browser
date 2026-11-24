@@ -18,6 +18,10 @@ final class Harness {
     guard let window = NSApp.windows.first(where: { $0.contentView is WKWebView }),
       let webView = window.contentView as? WKWebView
     else { throw HarnessError("The packaged app did not create its WKWebView window") }
+    // Said here, rather than as a wait that times out on every script.
+    guard webView.responds(to: Harness.evaluateWithoutGesture) else {
+      throw HarnessError("This WebKit has no \(NSStringFromSelector(Harness.evaluateWithoutGesture)), so harness scripts would run as user gestures")
+    }
     self.window = window
     self.webView = webView
     output = URL(fileURLWithPath: try Harness.required(environment, "REB_RENDERED_UI_OUTPUT"), isDirectory: true)
@@ -116,27 +120,80 @@ final class Harness {
     }
   }
 
+  // WebKit runs JavaScript an app evaluates as a user gesture and, since
+  // 265168@main, consumes the page's transient activation when that gesture
+  // ends. It ends late when the script leaves a timer or a fetch behind, which
+  // WebKit forwards it to: settle() leaves a 500 ms timer. Ending between a
+  // native press and its click, it takes the click's activation, and WebKit
+  // refuses what the click does, such as a clipboard write. Harness scripts
+  // run without a user gesture instead, so only native input activates the
+  // page, as for a researcher. The WebKit call that can (SPI since macOS 15)
+  // evaluates a classic script. macOS 26 has no such call for an async
+  // function, so script() starts one and reads its result with later
+  // evaluations.
+  private typealias ScriptReply = @convention(block) (AnyObject?, NSError?) -> Void
+  private typealias EvaluateWithoutGesture = @convention(c)
+    (WKWebView, Selector, NSString, NSURL?, WKFrameInfo?, WKContentWorld, Bool, @escaping ScriptReply) -> Void
+  private static let evaluateWithoutGesture =
+    NSSelectorFromString("_evaluateJavaScript:withSourceURL:inFrame:inContentWorld:withUserGesture:completionHandler:")
+
+  // Evaluates `source` as a classic script in the page.
+  func evaluate(_ source: String) async throws -> Any? {
+    let selector = Harness.evaluateWithoutGesture
+    let run = unsafeBitCast(webView.method(for: selector), to: EvaluateWithoutGesture.self)
+    return try await withCheckedThrowingContinuation { continuation in
+      run(webView, selector, source as NSString, nil, nil, .page, false) { value, error in
+        if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: value) }
+      }
+    }
+  }
+
+  // Runs `body` as an async function in the page. Its settled result waits in
+  // a page map for the next read, every 4 ms. A document that replaced the
+  // one it ran in has no entry, which ends the call.
+  func script(_ body: String) async throws -> Any? {
+    let id = UUID().uuidString
+    _ = try await evaluate("""
+      (window.__rebHarnessScripts ??= new Map()).set('\(id)', [0, null]);
+      (async () => {
+      \(body)
+      })().then(value => __rebHarnessScripts.set('\(id)', [1, value === undefined ? null : value]),
+        error => __rebHarnessScripts.set('\(id)', [2, `${error}\\n${error?.stack ?? ''}`]));
+      true
+      """)
+    let read = "(() => { const entry = window.__rebHarnessScripts?.get('\(id)') ?? [3, null]; " +
+      "if (entry[0] !== 0) window.__rebHarnessScripts?.delete('\(id)'); return entry; })()"
+    while true {
+      let entry = try await evaluate(read) as? [Any] ?? []
+      switch entry.first as? Int {
+      case 0: try await Task.sleep(for: .milliseconds(4))
+      case 1: return entry[1] is NSNull ? nil : entry[1]
+      case 2: throw HarnessError("A harness script threw \(entry[1])")
+      default: throw HarnessError("The document changed before a harness script finished")
+      }
+    }
+  }
+
   // Waits for two animation frames so layout and paint reflect the last event.
   func settle() async throws {
-    _ = try await webView.callAsyncJavaScript(
+    _ = try await script(
       """
       await new Promise(done => {
         requestAnimationFrame(() => requestAnimationFrame(done));
         setTimeout(done, 500);
       });
       return true;
-      """,
-      contentWorld: .page)
+      """)
   }
 
   func injectProbes() async throws {
-    _ = try await webView.evaluateJavaScript(probes)
+    _ = try await evaluate(probes)
   }
 
   func json(_ expression: String) async throws -> [String: Any] {
     try await injectProbes()
-    let raw = try await webView.callAsyncJavaScript(
-      "return JSON.stringify(await (async () => (\(expression)))());", contentWorld: .page)
+    let raw = try await script(
+      "return JSON.stringify(await (async () => (\(expression)))());")
     guard let text = raw as? String, let data = text.data(using: .utf8),
       let value = try JSONSerialization.jsonObject(with: data) as? [String: Any]
     else { throw HarnessError("Probe returned no object for \(expression)") }
@@ -145,8 +202,8 @@ final class Harness {
 
   func value(_ expression: String) async throws -> Any? {
     try await injectProbes()
-    let raw = try await webView.callAsyncJavaScript(
-      "return JSON.stringify({value: await (async () => (\(expression)))()});", contentWorld: .page)
+    let raw = try await script(
+      "return JSON.stringify({value: await (async () => (\(expression)))()});")
     guard let text = raw as? String, let data = text.data(using: .utf8),
       let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
     else { throw HarnessError("Probe returned nothing for \(expression)") }
@@ -179,7 +236,7 @@ final class Harness {
   // document without the mark.
   func reload(requireRequests: Bool = true, activating: Bool = true) async throws {
     if activating { try await activate() }
-    _ = try await webView.callAsyncJavaScript("window.__rebOutgoingDocument = true; return true;", contentWorld: .page)
+    _ = try await script("window.__rebOutgoingDocument = true; return true;")
     webView.reload()
     try await waitUntil(
       "window.__rebOutgoingDocument === undefined && document.readyState === 'complete' && typeof state === 'object' && (\(requireRequests ? "state.requests.length > 0" : "true")) && !document.querySelector('#screen-traffic').hidden",
@@ -416,24 +473,22 @@ final class Harness {
     // now get two seconds to finish; infinite ones, such as a spinner, are
     // left running. The wait is polled from here, so a page whose timers stop
     // cannot hold the screenshot.
-    _ = try await webView.callAsyncJavaScript(
+    _ = try await script(
       """
       window.__rebScreenshotAnimations = document.getAnimations().filter(animation => animation.playState === 'running'
         && Number.isFinite(animation.effect?.getComputedTiming().endTime));
       return true;
-      """,
-      contentWorld: .page)
+      """)
     let deadline = Date().addingTimeInterval(2)
     while true {
-      let running = try await webView.callAsyncJavaScript(
+      let running = try await script(
         """
         return window.__rebScreenshotAnimations.filter(animation => animation.playState === 'running').map(animation => {
           const target = animation.effect?.target;
           const node = target ? target.tagName.toLowerCase() + (target.id ? `#${target.id}` : '') + [...target.classList].map(name => `.${name}`).join('') : 'no target';
           return `${animation.animationName ?? animation.transitionProperty ?? 'animation'} on ${node} at ${Math.round(animation.currentTime ?? -1)} of ${Math.round(animation.effect.getComputedTiming().endTime)} ms`;
         });
-        """,
-        contentWorld: .page) as? [String] ?? []
+        """) as? [String] ?? []
       if running.isEmpty { break }
       guard Date() < deadline else {
         print("RENDERED_UI_ANIMATION_RUNNING \(name): \(running.joined(separator: "; "))")
@@ -441,7 +496,7 @@ final class Harness {
       }
       try await Task.sleep(nanoseconds: 50_000_000)
     }
-    _ = try await webView.callAsyncJavaScript("delete window.__rebScreenshotAnimations; return true;", contentWorld: .page)
+    _ = try await script("delete window.__rebScreenshotAnimations; return true;")
     let configuration = WKSnapshotConfiguration()
     configuration.afterScreenUpdates = true
     let image = try await webView.takeSnapshot(configuration: configuration)
@@ -2205,8 +2260,15 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.screenshot("traffic-har-export-\(size.name)")
       _ = try await ui.value("(() => { const field = document.querySelector('[data-export-destination]'); field.value = 'copy'; field.dispatchEvent(new Event('change')); return true; })()")
       pasteboard.clearContents()
+      let cleared = pasteboard.changeCount
       try await ui.click("[data-export-submit]")
-      try await ui.waitUntil("document.querySelector('[data-export-status]').textContent.includes('Copied locally')", "the HAR was not copied")
+      do {
+        try await ui.waitUntil("document.querySelector('[data-export-status]').textContent.includes('Copied locally')", "the HAR was not copied")
+      } catch {
+        // WebKit refuses a write when the pasteboard changes while its text
+        // is read, and says only NotAllowedError; this says whether it did.
+        throw HarnessError("\(error) [pasteboard changes since it was cleared: \(pasteboard.changeCount - cleared), types: \(pasteboard.types?.map(\.rawValue) ?? [])]")
+      }
       let har = try JSONSerialization.jsonObject(with: Data((pasteboard.string(forType: .string) ?? "").utf8)) as? [String: Any]
       let log = har?["log"] as? [String: Any]
       let entries = log?["entries"] as? [[String: Any]] ?? []
@@ -2923,7 +2985,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
   func test17LiveCaptureDefaultsAreLabeled() async throws {
     for size in windowSizes {
       let ui = try await prepare(size)
-      _ = try await ui.webView.callAsyncJavaScript(
+      _ = try await ui.script(
         """
         const original = window.fetch.bind(window);
         const reply = value => new Response(JSON.stringify(value), {status: 200, headers: {'Content-Type': 'application/json'}});
@@ -2944,7 +3006,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
           return original(input, init);
         };
         return true;
-        """, contentWorld: .page)
+        """)
       // Content capture is labeled for the session in the titlebar, beside and
       // never over the session state, and readable at the narrowest window.
       try await ui.waitUntil("state.sessionMode === 'live' && __rebUiProbe.count('#session-content') === 1",
@@ -3126,7 +3188,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
     for size in windowSizes {
       let ui = try await prepare(size)
-      _ = try await ui.webView.callAsyncJavaScript(
+      _ = try await ui.script(
         """
         const original = window.fetch.bind(window);
         const reply = value => new Response(JSON.stringify(value), {status: 200, headers: {'Content-Type': 'application/json'}});
@@ -3157,7 +3219,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
           return reply({...state(), request_id: '1', runtime: {status: 'ok', messages, dropped: 0, more: sent < total || !large}});
         };
         return true;
-        """, contentWorld: .page)
+        """)
       try await ui.click("#native-console-toggle")
       try await ui.waitUntil("!document.querySelector('#native-console-mode').disabled", "\(size.name): the Console did not finish its availability check")
       _ = try await ui.value(
@@ -3359,12 +3421,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#source-more > summary")
       try await ui.click("#source-goto")
       try await ui.waitUntil("document.activeElement?.id === 'source-window-line'", "\(size.name): Go to line did not focus its line field")
-      _ = try await ui.webView.callAsyncJavaScript(
+      _ = try await ui.script(
         """
         const line = document.querySelector('#source-window-line'), column = document.querySelector('#source-window-column');
         line.value = '2'; column.value = String(document.querySelector('.source-line[data-line="2"] .source-text').textContent.indexOf('awb') + 1);
         return true;
-        """, contentWorld: .page)
+        """)
       try await ui.click("#source-window button[type=submit]")
       try await ui.waitUntil("document.querySelector('#source-window').hidden", "\(size.name): Go to line stayed open after Go")
       try await ui.click("#source-more > summary")
@@ -3533,7 +3595,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
   func test20EventPollTimeoutAndCaptureActions() async throws {
     for size in windowSizes {
       let ui = try await prepare(size)
-      _ = try await ui.webView.callAsyncJavaScript(
+      _ = try await ui.script(
         """
         const original = window.fetch.bind(window);
         const reply = value => new Response(JSON.stringify(value), {status: 200, headers: {'Content-Type': 'application/json'}});
@@ -3554,7 +3616,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
           return original(input, init);
         };
         return true;
-        """, contentWorld: .page)
+        """)
       try await show(ui, "signals")
       try await ui.waitUntil("state.connection === 'connected' && !document.querySelector('#signal-stop-capture').disabled",
         "\(size.name): the live capture did not offer Stop")
@@ -3703,7 +3765,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       """)
     let run = try XCTUnwrap(saved["run"] as? String)
     try await ui.waitUntil("\(runner).then(state => state.active_run_id === 1)", timeout: 10, "the analyst runner did not start")
-    _ = try await ui.webView.callAsyncJavaScript("window.__rebOutgoingDocument = true; return true;", contentWorld: .page)
+    _ = try await ui.script("window.__rebOutgoingDocument = true; return true;")
     ui.webView.reload()
     try await ui.waitUntil("window.__rebOutgoingDocument === undefined && document.readyState === 'complete' && typeof state === 'object'",
       timeout: 30, "the bundled workspace did not reload")
@@ -3852,7 +3914,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
   private func openStartPanel(_ ui: Harness) async throws {
     // New Live Session always loads the bundled workspace again, so wait for
     // a document other than this one.
-    _ = try? await ui.webView.callAsyncJavaScript("window.__rebOutgoingDocument = true; return true;", contentWorld: .page)
+    _ = try? await ui.script("window.__rebOutgoingDocument = true; return true;")
     let backstop = try chooseMenuItem("newLiveSession:")
     defer { backstop.invalidate() }
     let ready = "window.__rebOutgoingDocument === undefined && location.protocol === 'reb:' && document.readyState === 'complete' "
@@ -3955,7 +4017,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     guard ui.webView.responds(to: Selector(("_webProcessIdentifier"))),
       let pid = (ui.webView.value(forKey: "_webProcessIdentifier") as? NSNumber)?.int32Value, pid > 0
     else { throw XCTSkip("This WebKit does not name its content process") }
-    _ = try await ui.webView.callAsyncJavaScript("window.__rebOutgoingDocument = true; return true;", contentWorld: .page)
+    _ = try await ui.script("window.__rebOutgoingDocument = true; return true;")
     reloadStarted = false
     let observation = ui.webView.observe(\.isLoading, options: [.new]) { [weak self] view, _ in
       if view.isLoading { self?.reloadStarted = true }
@@ -4930,7 +4992,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       // An action waits on an explicit decision, and the request takes focus
       // when the researcher is in the dock.
       try await ui.click("#agent-input")
-      _ = try await ui.webView.callAsyncJavaScript(#"__rebAgentEvent({type:'approval',turnId:'t',callId:'rendered',name:'capture_action',arguments:'{"action":"pause"}'}); return true;"#, contentWorld: .page)
+      _ = try await ui.script(#"__rebAgentEvent({type:'approval',turnId:'t',callId:'rendered',name:'capture_action',arguments:'{"action":"pause"}'}); return true;"#)
       try await ui.waitUntil("__rebUiProbe.count('[data-approve]') === 1", "the approval row did not show")
       try await ui.waitUntil("document.activeElement?.classList.contains('agent-approval')", "the approval did not take focus")
       let approval = try await ui.value("__rebUiProbe.text('.agent-approval')") as? String ?? ""
@@ -4938,7 +5000,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await agentLayoutIsClean(ui, "approval")
       try await ui.screenshot("agent-approval-\(size.name)")
       // A long conversation keeps only nearby rows mounted.
-      _ = try await ui.webView.callAsyncJavaScript("""
+      _ = try await ui.script("""
         for (let index = 0; index < 400; index += 1) {
           __rebAgentEvent({type: 'tool', id: 'long-' + index, turnId: 't', name: 'get_events', arguments: '{"limit":50}', state: 'done',
             result: JSON.stringify({events: Array.from({length: 80}, (_, row) => ({session_id: '1', process_id: '2', sequence_number: String(row), type: 'request_started'}))}),
@@ -4946,7 +5008,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
           __rebAgentEvent({type: 'text', rowId: 'long-text-' + index, turnId: 't', delta: 'Observation ' + index + ': ' + 'word '.repeat(120)});
         }
         return true;
-        """, contentWorld: .page)
+        """)
       try await ui.settle()
       try await ui.waitUntil("__rebUiProbe.exists('.agent-rows .agent-row') > 0", "the long transcript did not render")
       let mounted = try await ui.value("__rebUiProbe.exists('.agent-rows .agent-row')") as? Int ?? 0
@@ -5089,8 +5151,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
 
   @MainActor
   private func restoreDarkTheme(_ ui: Harness) async throws {
-    _ = try await ui.webView.callAsyncJavaScript(
-      "if (document.documentElement.dataset.theme === 'light') document.querySelector('#theme-toggle').click(); return true;", contentWorld: .page)
+    _ = try await ui.script(
+      "if (document.documentElement.dataset.theme === 'light') document.querySelector('#theme-toggle').click(); return true;")
     try await ui.waitUntil("document.documentElement.dataset.theme === 'dark'", "the dark theme did not come back")
   }
 
@@ -5470,7 +5532,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     do {
       for size in windowSizes {
         try await ui.resize(width: size.width, height: size.height)
-        _ = try? await ui.webView.callAsyncJavaScript("window.__rebOutgoingDocument = true; return true;", contentWorld: .page)
+        _ = try? await ui.script("window.__rebOutgoingDocument = true; return true;")
         let index = recent.index(of: session)
         RunLoop.main.add(Timer(timeInterval: 0, repeats: false) { _ in recent.performActionForItem(at: index) }, forMode: .default)
         let ready = "window.__rebOutgoingDocument === undefined && location.protocol === 'reb:' && document.readyState === 'complete' "

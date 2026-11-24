@@ -251,11 +251,16 @@ One acceptance item needs a profiler rather than a fixture: "the inactive probe
 path costs one atomic load and allocates nothing" (#425, #427, #434, #436).
 Record how it was measured. The volume session measures the browser process's
 physical footprint (`footprint -p`) itself: first through the same page in the
-same Brave without a session, then in the session, and reports each phase's
-growth and capture's share, the difference. Resident size would also count
-pages the allocator freed but had not returned, and Brave without a session
-already keeps hundreds of MiB after the uploads, so neither alone measures
-capture.
+same Brave without a session, started with the launcher's arguments that are
+not capture, then in the session, and reports each phase's growth and
+capture's share, the difference. The page waits before each phase while the
+browser rests, and each phase grows from that rest, so no phase is charged
+with another's samples or with memory an earlier one left allocated. Resident
+size would also count pages the allocator freed but had not returned, and
+Brave without a session already keeps hundreds of MiB after the uploads, so
+neither alone measures capture. The uploads are strings: a typed array the
+page built would also be a VM typed-array snapshot, which the browser holds
+against the renderer's 256 MiB artifact credit rather than the in-flight pool.
 
 The pausing debugger has no launch path: nothing in `run-live-session.sh` or the
 app passes `--reb-native-debugger` to Brave or `--native-debugger-socket` to the

@@ -483,18 +483,74 @@ const found = cpuMs() - started;
 assert.equal(text('.traffic-payload-matches'), '1 of 1');
 assert.equal(text('.traffic-payload-tree .is-current'), 'needle: "deep-match"');
 assert(panel.querySelectorAll('*').length < 2500, `the DOM stays bounded: ${panel.querySelectorAll('*').length} elements`);
+// Open and find use about 1% and 10% of this bound, far more than a loaded host adds.
+for (const [label, elapsed] of [['open', opened], ['find', found]]) {
+  assert(elapsed < 4000, `5 MiB ${label} took ${Math.round(elapsed)} ms of CPU`);
+}
+// Source is held to the work it does, not to its CPU time: with every core
+// busy, the same work took 1.2 to 4.5 s of CPU. Each pass over the text is
+// counted where the shipped code makes it, as are every drawing and element.
+// A loaded host only adds drawings: the count repaints its marks about every
+// 200 ms while it runs, so each drawing is held to what is shown.
+const work = {layouts: 0, bodyUnits: 0, laidUnits: 0, rowUnits: 0, scans: 0, chunkUnits: 0, colorUnits: 0, drawings: 0, elements: 0};
+const shipped = {sourceLayoutTask: context.sourceLayoutTask, codeViewRows: context.codeViewRows, sourceFindSpan: context.sourceFindSpan,
+  createSourceHighlighter: context.createSourceHighlighter, createCodeView: context.createCodeView};
+const createElement = document.createElement;
+Object.assign(context, {
+  sourceLayoutTask(task) {
+    const result = shipped.sourceLayoutTask(task);
+    work.layouts += 1;
+    work.bodyUnits += task.op === 'map' ? task.original.length : task.value.length;
+    work.laidUnits += task.op === 'map' ? task.formatted.length : result.text?.length ?? 0;
+    return result;
+  },
+  codeViewRows(text) {
+    work.rowUnits += text.length;
+    return shipped.codeViewRows(text);
+  },
+  sourceFindSpan(search, ...rest) {
+    work.scans += 1;
+    work.chunkUnits = search.document.chunkUnits;
+    return shipped.sourceFindSpan(search, ...rest);
+  },
+  createSourceHighlighter(...args) {
+    const highlighter = shipped.createSourceHighlighter(...args), advance = highlighter.advance;
+    highlighter.advance = units => {work.colorUnits += units; return advance.call(highlighter, units);};
+    return highlighter;
+  },
+  createCodeView(...args) {
+    const view = shipped.createCodeView(...args), mark = view.mark;
+    work.drawings += 1;
+    view.mark = (...marks) => {work.drawings += 1; return mark.apply(view, marks);};
+    return view;
+  }
+});
+document.createElement = function creating(...args) {work.elements += 1; return createElement.apply(this, args);};
 started = cpuMs();
 click(button('Source'));
 // The source count scans in time slices, and the match is near the end.
-for (let i = 0; i < 400 && all('.traffic-payload-lines mark.is-current').length !== 1; i++) await settle();
+const finished = () => text('.traffic-payload-matches') === '1 of 1' && all('.traffic-payload-lines mark.is-current').length === 1;
+for (let i = 0; i < 400 && !finished(); i++) await settle();
 const source = cpuMs() - started;
+Object.assign(context, shipped);
+document.createElement = createElement;
 assert(all('.traffic-payload-lines .traffic-payload-line').length <= 400, 'source renders its rows in blocks');
 assert(all('.traffic-payload-lines mark.is-current').length === 1, 'the source match is revealed');
-for (const [label, elapsed] of [['open', opened], ['find', found], ['source', source]]) {
-  assert(elapsed < 4000, `5 MiB ${label} took ${Math.round(elapsed)} ms of CPU`);
-}
+assert.equal(text('.traffic-payload-matches'), '1 of 1', 'the source count finishes');
+// One pass each: the layout reads the body, and the rows, the count and the
+// colors read the laid-out text. A drawing rescans only the match's chunk.
+const chunks = Math.ceil(work.laidUnits / work.chunkUnits), shown = panel.querySelectorAll('*').length;
+assert.equal(work.bodyUnits, large.length, `the body is laid out once: ${work.layouts} layouts read ${work.bodyUnits} units of ${large.length}`);
+assert(work.laidUnits > large.length, 'the source is the laid-out body');
+assert(work.rowUnits <= work.laidUnits, `the rows are cut in one pass: ${work.rowUnits} units of ${work.laidUnits}`);
+assert(work.scans <= chunks + 4 * work.drawings, `the count scans each chunk once: ${work.scans} scans of ${chunks} chunks in ${work.drawings} drawings`);
+assert(work.colorUnits <= work.laidUnits, `coloring tokenizes the text at most once: ${work.colorUnits} units of ${work.laidUnits}`);
+assert(work.elements <= 2 * work.drawings * shown, `each drawing creates at most twice what is shown: ${work.elements} elements in ${work.drawings} drawings of ${shown}`);
 click(button('Parsed'));
-console.log(`PASS Payload 5 MiB JSON: CPU for open ${Math.round(opened)} ms, find ${Math.round(found)} ms, source ${Math.round(source)} ms, DOM bounded (DOM model; rendered timing is the packaged-app check)`);
+console.log(`PASS Payload 5 MiB JSON: CPU for open ${Math.round(opened)} ms, find ${Math.round(found)} ms; Source laid the body out once, ` +
+  `then cut rows, counted ${work.scans} chunk scans of ${chunks} and colored ${work.colorUnits.toLocaleString('en-US')} of ` +
+  `${work.laidUnits.toLocaleString('en-US')} units, and created ${work.elements.toLocaleString('en-US')} elements in ${work.drawings} ${work.drawings === 1 ? 'drawing' : 'drawings'} ` +
+  `of ${shown.toLocaleString('en-US')} (${Math.round(source)} ms of CPU, not checked); DOM model, not rendered timing`);
 
 function rangeCount(count) {
   let step = 100;

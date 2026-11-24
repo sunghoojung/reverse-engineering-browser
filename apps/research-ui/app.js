@@ -3640,15 +3640,29 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       // `totals`: the index's matching sizes, hidden browser-internal rows and rows without a tab.
       function renderTrafficWindowStatus(visibleCount, totalCount, outside, note = '', totals = null) {
         const bytes = value => trafficBytesLabel(value).replace(' ', '\u00a0');
-        const sizes = totals?.sizes ? ` · ${bytes(totals.sizes.transferred)} transferred · ${bytes(totals.sizes.resources)} resources` : '';
-        const hidden = totals?.hiddenInternal ? ` · ${totals.hiddenInternal.toLocaleString('en-US')} browser-internal hidden` : '';
-        const excluded = globalThis.RebNetworkScope?.captureExclusionNotice(state.captureExclusions) ?? '';
+        const items = [];
         // A null total is a session nothing has been read from yet: no counts, the note leads.
-        const counts = totalCount === null ? '' : `${visibleCount === null ? '' : `${visibleCount.toLocaleString('en-US')} / `}${totalCount.toLocaleString('en-US')} requests${sizes}${hidden}`;
-        const rest = `${excluded ? ` · ${excluded}` : ''}${outside ? ' · Selection outside filter' : ''}${note ? ` · ${note}` : ''}`;
-        const message = counts ? counts + rest : rest.slice(3).replace(/^./, letter => letter.toUpperCase());
+        if (totalCount !== null) {
+          items.push(`${visibleCount === null ? '' : `${visibleCount.toLocaleString('en-US')} / `}${totalCount.toLocaleString('en-US')} requests`);
+          if (totals?.sizes) items.push(`${bytes(totals.sizes.transferred)} transferred`, `${bytes(totals.sizes.resources)} resources`);
+          if (totals?.hiddenInternal) items.push(`${totals.hiddenInternal.toLocaleString('en-US')} browser-internal hidden`);
+        }
+        items.push(...globalThis.RebNetworkScope?.captureExclusionItems(state.captureExclusions) ?? []);
+        if (outside) items.push('Selection outside filter');
+        if (note) items.push(note);
+        if (totalCount === null && items.length) items[0] = items[0].replace(/^./, letter => letter.toUpperCase());
+        // Each item is its own box, so a narrow footer breaks lines between
+        // items and never inside a short one, such as "98.0 kB transferred".
+        // An item longer than the line wraps by itself. The text is the items
+        // joined by " · ", with each separator ending the item before it.
         const status = document.querySelector('#request-window-status');
-        if (status.textContent !== message) status.textContent = message;
+        if (status.textContent !== items.join(' · ')) {
+          status.replaceChildren(...items.map((item, index) => {
+            const span = document.createElement('span');
+            span.textContent = index < items.length - 1 ? `${item} · ` : item;
+            return span;
+          }));
+        }
         const unresolved = totals?.unresolved ?? state.requests.filter(request => globalThis.RebRequestTabs?.isUnresolved(request)).length;
         const errors = document.querySelector('#request-unresolved');
         errors.hidden = unresolved === 0;

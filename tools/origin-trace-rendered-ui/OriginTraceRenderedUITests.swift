@@ -932,6 +932,24 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
+  // The Traffic footer's counts break between items: an item narrower than the
+  // footer, such as "98.0 kB transferred ·", stays on one line. Only an item
+  // longer than the line wraps, and it then fills the line.
+  @MainActor
+  private func assertFooterItemsWhole(_ ui: Harness, _ context: String) async throws {
+    let footer = try await ui.json("""
+      (() => { const status = document.querySelector('#request-window-status'), width = status.getBoundingClientRect().width;
+        const lines = item => { const range = document.createRange(); range.selectNodeContents(item);
+          return new Set([...range.getClientRects()].filter(rect => rect.width > 0).map(rect => Math.round(rect.top))).size; };
+        const items = [...status.children];
+        return {items: items.length, broken: items.filter(item => lines(item) > 1 && item.getBoundingClientRect().width < width - 1)
+          .map(item => item.textContent), lines: lines(status), text: status.textContent}; })()
+      """)
+    print("RENDERED_UI_TRAFFIC_FOOTER \(context) \(footer)")
+    XCTAssertGreaterThan(footer["items"] as? Int ?? 0, 1, "\(context): the footer counts are separate items: \(footer)")
+    XCTAssertEqual(footer["broken"] as? [String] ?? ["unreadable"], [], "\(context): a short footer item broke across lines: \(footer)")
+  }
+
   // Columns fit the table, every cell with text has a tooltip, and Size, the
   // waterfall and the timing strip follow the fixture's recorded lengths and
   // timestamps. The strip and the column menu work from the keyboard.
@@ -963,6 +981,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     XCTAssertEqual(table["untitled"] as? Int, 0, "\(context): truncated cells have tooltips")
     let footer = table["footer"] as? String ?? ""
     XCTAssertTrue(footer.contains(" transferred · ") && footer.contains(" resources"), "\(context): footer totals: \(footer)")
+    try await assertFooterItemsWhole(ui, context)
     XCTAssertEqual(table["bars"] as? Int, 120, "\(context): the timing strip has one bar per bucket")
     // syntheticTransferSize(3) in evidence-fixture.mjs.
     if visible.contains("size") {
@@ -1045,6 +1064,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertTrue(rowText.contains(expected.hostileUrlMarker), "\(size.name): hostile URL renders as literal text: \(rowText)")
       try await assertInert(ui, "\(size.name) traffic detail")
       try await assertLayout(ui, "#screen-traffic", "\(size.name) traffic detail")
+      try await assertFooterItemsWhole(ui, "\(size.name) traffic detail")
       try await ui.screenshot("traffic-detail-\(size.name)")
 
       // End and Home reach the ends of the whole list through unmounted rows; focus follows the selection.

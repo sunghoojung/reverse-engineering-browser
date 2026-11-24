@@ -4355,7 +4355,8 @@ input[type="file"]:hover::file-selector-button { background: var(--panel-3); }
 #screen-traffic .request-tab-scope span { font-variant-numeric: tabular-nums; }
 #screen-traffic .request-domain-filter { gap: 8px; font-size: 11px; }
 #screen-traffic .request-domain-filter select { height: 24px; }
-#screen-traffic #request-window-status { font: 10px var(--mono); font-variant-numeric: tabular-nums; }
+/* Items wrap whole (renderTrafficWindowStatus); the gap stands for the space a line end drops. */
+#screen-traffic #request-window-status { display: flex; flex-wrap: wrap; column-gap: 1ch; font: 10px var(--mono); font-variant-numeric: tabular-nums; }
 #screen-traffic .request-window button { padding: 2px 4px; }
 
 /* The detail pane's strip, tabs and panels share one 12px inset. */

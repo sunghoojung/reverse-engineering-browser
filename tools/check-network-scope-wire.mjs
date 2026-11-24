@@ -156,12 +156,12 @@ const totals = scope.captureExclusionTotals([exclusion(1, 16, 3, 1), exclusion(1
 assert.equal(totals.requests, 8n);
 assert.equal(totals.renderers, 2n);
 assert.deepEqual([...totals.byScheme], [['chrome', 7n], ['devtools', 1n]]);
-assert.equal(scope.captureExclusionNotice(totals), '8 browser-internal requests not recorded · 2 WebUI renderers not admitted');
-assert.equal(scope.captureExclusionNotice(scope.captureExclusionTotals([])), '');
+assert.equal(scope.captureExclusionItems(totals).join(' · '), '8 browser-internal requests not recorded · 2 WebUI renderers not admitted');
+assert.deepEqual(scope.captureExclusionItems(scope.captureExclusionTotals([])), []);
 // Requests a WebUI renderer sends through the proxy are browser-internal requests too.
 const proxied = scope.captureExclusionTotals([webui, golden('webui requests at the proxy'), golden('webui requests with a producer')]);
 assert.deepEqual([proxied.requests, proxied.renderers, [...proxied.byScheme]], [3n, 2n, [['webui', 3n]]]);
-assert.equal(scope.captureExclusionNotice(proxied), '3 browser-internal requests not recorded · 2 WebUI renderers not admitted');
+assert.equal(scope.captureExclusionItems(proxied).join(' · '), '3 browser-internal requests not recorded · 2 WebUI renderers not admitted');
 // Traffic no tab caused: counted per class, never as browser-internal requests.
 const noTab = scope.captureExclusionTotals([golden('extension worker requests of a renderer'),
   golden('devtools loads'), golden('pageless service worker requests of a renderer'),
@@ -169,14 +169,14 @@ const noTab = scope.captureExclusionTotals([golden('extension worker requests of
   golden('browser prefetches with a producer')]);
 assert.deepEqual([noTab.requests, noTab.extension, noTab.devtools, noTab.serviceWorker, noTab.prefetch],
   [0n, 2n, 4n, 3n, 1n]);
-assert.equal(scope.captureExclusionNotice(noTab), '2 extension worker requests not recorded · 4 DevTools loads not ' +
+assert.equal(scope.captureExclusionItems(noTab).join(' · '), '2 extension worker requests not recorded · 4 DevTools loads not ' +
   'recorded · 3 service worker requests no page caused not recorded · 1 browser prefetch with no page not recorded');
 // Memory-cache reuses past a renderer's budget are their own count, never browser-internal.
 const reuses = scope.captureExclusionTotals([golden('memory-cache reuses of a renderer'),
   golden('memory-cache reuses with no renderer'), golden('non-ordinary-page reuses of a renderer')]);
 // Lost tab rows and reuses no tab owned stay apart.
 assert.deepEqual([reuses.memoryCache, reuses.nonOrdinaryPage, reuses.requests], [4097n, 3n, 0n]);
-assert.equal(scope.captureExclusionNotice(reuses),
+assert.equal(scope.captureExclusionItems(reuses).join(' · '),
   '4097 memory-cache reuses not recorded · 3 memory-cache reuses in SVG images or popups not recorded');
 
 console.log(`PASS network scope wire: ${cases.length} C++ golden records agree with Python and the UI readers; ` +

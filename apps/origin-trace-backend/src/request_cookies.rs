@@ -14,11 +14,12 @@ use sha2::{Digest, Sha256};
 use crate::evidence;
 use crate::request_headers::{
     Credentials, Drops, STATES, child_payload, le, lifecycle_of, provisional_hops, qualified,
-    span_of,
+    span_of, too_long,
 };
 use crate::request_stack;
 
-const LIST_LIMIT: usize = 2 * 1024 * 1024;
+/// Version 1's list limit; version 2 retains a list of any length.
+const LIST_LIMIT_V1: u32 = 2 * 1024 * 1024;
 const NAME_PREFIX: usize = 24;
 const EXCLUSIONS: [&str; 30] = [
     "unknown_error",
@@ -127,7 +128,7 @@ fn decode_list(event: &Value) -> Option<List> {
         && (list.count == 0) == empty
         && (list.length == 0) == empty
         && (empty || u64::from(list.length) >= 16 + 64 * u64::from(list.count))
-        && limited == (list.length as usize > LIST_LIMIT)
+        && limited == too_long(le(&bytes[0..2]), list.length, LIST_LIMIT_V1)
         && zero(&list.digest) == limited
         && (event["artifact_id"] != "0") == matches!(list.state, 1 | 2);
     valid.then_some(list)
@@ -298,7 +299,7 @@ fn read_list(
         (Some(artifact), None) => artifact,
         _ => return Err("missing"),
     };
-    match evidence::content(root, artifact, LIST_LIMIT) {
+    match evidence::content(root, artifact, list.length as usize) {
         Ok(bytes) => verified_list(&bytes, list),
         Err(_) => Err("unreadable"),
     }
@@ -357,7 +358,10 @@ fn read_lists(
                         contents.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
                     {
                         let artifact = jobs[group[0]].1.expect("grouped jobs name an artifact");
-                        let bytes = evidence::content(root, artifact, LIST_LIMIT);
+                        // Each list is read whole, and checked against its own length.
+                        let length = group.iter().map(|&index| jobs[index].0.length);
+                        let length = length.max().unwrap_or(0) as usize;
+                        let bytes = evidence::content(root, artifact, length);
                         for &index in group {
                             let cookies = bytes
                                 .as_ref()

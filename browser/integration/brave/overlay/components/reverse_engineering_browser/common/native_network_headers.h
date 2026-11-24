@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -15,9 +15,13 @@
 namespace reb {
 // Browser-side producer half of protocol/native-network-v3.md. The core mirror
 // in include/reb/network_headers.hpp decodes and validates the same bytes.
-inline constexpr std::uint16_t kNativeHeaderPayloadVersion = 1;
-// Chromium's 256 KiB header bound plus what `: ` normalization can add.
-inline constexpr std::size_t kNativeHeaderBlockLimitBytes = 320U * 1024U;
+// Version 2 retains a block of any length. Version 1 retained one of at most
+// 320 KiB and recorded a longer one as kNotCapturedBlockLimit.
+inline constexpr std::uint16_t kNativeHeaderPayloadVersion = 2;
+// The 32-bit length field's ceiling: a block this long or longer is recorded
+// as kNotCapturedBlockLimit with this length, the only block not retained for
+// its size.
+inline constexpr std::uint64_t kNativeHeaderLengthUnrepresentable = 0xffff'ffffU;
 // Accepted blocks a later identical block can name instead of being sent
 // again. Past it a repeat is sent and stored once more by digest, so the
 // bound costs only dedupe, never a block.
@@ -34,6 +38,8 @@ enum class NativeHeaderState : std::uint8_t {
   kCaptured = 1,
   kCapturedShared = 2,
   kEmpty = 3,
+  // Version 2: longer than the length field holds. Version 1: longer than
+  // its 320 KiB block limit.
   kNotCapturedBlockLimit = 4,
   kNotCapturedArtifactUnavailable = 5,
   kNotCapturedTransferRefused = 6,

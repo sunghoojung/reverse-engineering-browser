@@ -55,7 +55,7 @@ The entire input and artifact are validated before one atomic private (0600 on
 Unix) file is published. A failed write does not authorize retrying elsewhere.
 No HTTP route or MCP tool is added; effects permissions are unchanged.
 
-Input is bounded to 2 MiB and 1–4096 samples. Identity strings must be canonical
+Input is read whole and holds one or more samples. Identity strings must be canonical
 nonzero uint64 decimal values. Sample PC, opcode, handler and sample index must
 be uint32 JSON integers; operand count must be uint8. Sample indices must
 increase strictly, but need not be contiguous. There is no implicit truncation,
@@ -63,9 +63,10 @@ retry, fabricated gap count, or conversion from strings/floats. Unknown fields,
 versions, sources, zero/overflowed identities, duplicate fields and malformed
 samples fail the whole input. The artifact must match the selected ID, full
 SHA-256, session, navigation and frame. Its bytes are verified against the full
-manifest digest and version-1 Wasm header, with a 64 MiB artifact limit. Manifest
-scans are limited to 10000 records, 64 MiB and the existing read deadline.
-Verification binds bytes and scope; it does not authenticate a runtime sample.
+manifest digest and version-1 Wasm header, hashed in blocks so an artifact of
+any size is verified. The whole manifest is scanned. Writers before this
+revision refused inputs over 2 MiB or 4096 samples, artifacts over 64 MiB, and
+manifests over 10000 records or 64 MiB. Verification binds bytes and scope; it does not authenticate a runtime sample.
 
 ## Output and provenance
 

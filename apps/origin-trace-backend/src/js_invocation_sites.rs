@@ -1,7 +1,8 @@
-//! Native JavaScript invocation sites: the site key, the app's saved set, and
-//! resolving a name or a position in a retained artifact to exactly one site.
-//! The wire and file contract is protocol/native-js-invocation-v1.md; why the
-//! app saves sites for its next capture is in docs/product/native-js-invocation-v1.md.
+//! Native JavaScript invocation sites: the site key, the app's saved set, the
+//! slot table a live capture follows, and resolving a name or a position in a
+//! retained artifact to exactly one site. The wire and file contract is
+//! protocol/native-js-invocation-v1.md; why the app saves sites and how a
+//! capture follows them is in docs/product/native-js-invocation-v1.md.
 //!
 //! A site is computed exactly as tools/native-js-invocation-site.py computes
 //! it. Both read tools/fixtures/native-js-invocation/site-cases.json, so the
@@ -10,21 +11,26 @@ use crate::{
     durable,
     error::{Code, Error, Result},
 };
+use reb_js_lexer::invocation_site::{self, Index, Query};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Mutex,
 };
 
-pub const SITE_LIMIT: usize = 8;
-pub const FILE_LIMIT: usize = 4096;
-const LABELS_LIMIT: usize = 128 * 1024;
+/// The browser's `kNativeJsInvocationSiteListLimit`. Records name a site by
+/// a u32 slot, but each renderer receives the whole table in one shared
+/// memory region, which Chromium maps only up to `i32::MAX` bytes of 44-byte
+/// records. It is the only bound on a site set; the files have no size limit.
+pub const SITE_LIMIT: usize = i32::MAX as usize / 44;
 const LABEL_CHARS: usize = 128;
 const URL_BYTES: usize = 8192;
 const CONTEXT_CHARS: usize = 60;
 const CANDIDATE_LIMIT: usize = 32;
 const NEXT_CAPTURE: &str = "Tracking starts with the next capture Origin Trace starts, not the open page: a function compiled before its site is armed cannot gain tracking.";
+const THIS_CAPTURE: &str = "This capture arms a saved function at once and stops tracking a removed one. A page that compiled the function before it was saved records its calls after a reload.";
 
 /// One `native-js-invocation-sites-v1` entry with shape `function-entry`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,12 +57,29 @@ impl Site {
             self.source_sha256
         )
     }
+    /// The version 2 slot entry: `armed` sorts after `anchor_offset`.
+    fn canonical_slot(&self, armed: bool) -> String {
+        let canonical = self.canonical();
+        let anchor = format!(r#"{{"anchor_offset":{},"#, self.anchor_offset);
+        format!(r#"{anchor}"armed":{armed},{}"#, &canonical[anchor.len()..])
+    }
     pub fn value(&self) -> Value {
         serde_json::from_str(&self.canonical()).expect("canonical site JSON")
     }
     fn same_function(&self, other: &Site) -> bool {
-        self.source_sha256 == other.source_sha256 && self.anchor_offset == other.anchor_offset
+        self.key() == other.key()
     }
+    /// What names the function: its source digest and anchor offset.
+    fn key(&self) -> (&str, u32) {
+        (&self.source_sha256, self.anchor_offset)
+    }
+}
+
+/// Whether two sites name the same function; one pass, so a long set costs
+/// no quadratic scan.
+fn repeats<'a>(sites: impl IntoIterator<Item = &'a Site>) -> bool {
+    let mut seen = HashSet::new();
+    sites.into_iter().any(|site| !seen.insert(site.key()))
 }
 
 /// Why a byte offset names no site. `kind` matches the shared case fixture.
@@ -69,7 +92,6 @@ pub enum SiteError {
     NotParen,
     Count,
     Duplicate,
-    FileSize,
 }
 
 impl SiteError {
@@ -83,7 +105,6 @@ impl SiteError {
             Self::NotParen => "not_paren",
             Self::Count => "count",
             Self::Duplicate => "duplicate",
-            Self::FileSize => "file_size",
         }
     }
 }
@@ -160,46 +181,77 @@ pub fn site(
     })
 }
 
-/// The exact `native-js-invocation-sites-v1` file for 1 to 8 distinct sites.
+/// The exact `native-js-invocation-sites-v1` file for 1 to `SITE_LIMIT`
+/// distinct sites.
 pub fn sites_file(sites: &[Site]) -> std::result::Result<String, SiteError> {
     if !(1..=SITE_LIMIT).contains(&sites.len()) {
         return Err(SiteError::Count);
     }
-    for (index, site) in sites.iter().enumerate() {
-        if sites[..index].iter().any(|prior| prior.same_function(site)) {
-            return Err(SiteError::Duplicate);
-        }
+    if repeats(sites) {
+        return Err(SiteError::Duplicate);
     }
     let entries = sites.iter().map(Site::canonical).collect::<Vec<_>>();
-    let text = format!(r#"{{"sites":[{}],"version":1}}"#, entries.join(","));
-    if text.len() > FILE_LIMIT {
-        return Err(SiteError::FileSize);
+    Ok(format!(
+        r#"{{"sites":[{}],"version":1}}"#,
+        entries.join(",")
+    ))
+}
+
+/// The exact version 2 slot table for 0 to `SITE_LIMIT` distinct sites, each
+/// with whether it is armed. A slot keeps its site for the browser's
+/// lifetime, so a revision disarms a removed site instead of renumbering the
+/// others.
+pub fn slot_table_file(slots: &[(Site, bool)]) -> std::result::Result<String, SiteError> {
+    if slots.len() > SITE_LIMIT {
+        return Err(SiteError::Count);
     }
-    Ok(text)
+    if repeats(slots.iter().map(|(site, _)| site)) {
+        return Err(SiteError::Duplicate);
+    }
+    let entries = slots
+        .iter()
+        .map(|(site, armed)| site.canonical_slot(*armed))
+        .collect::<Vec<_>>();
+    Ok(format!(
+        r#"{{"sites":[{}],"version":2}}"#,
+        entries.join(",")
+    ))
 }
 
 fn keys(object: &Map<String, Value>, expected: &[&str]) -> bool {
     object.len() == expected.len() && expected.iter().all(|key| object.contains_key(*key))
 }
 
-/// Accepts exactly what the browser accepts: canonical text, 1 to 8 distinct
-/// valid `function-entry` sites.
+/// Accepts exactly what the browser accepts: canonical text, 1 to
+/// `SITE_LIMIT` distinct valid `function-entry` sites.
 pub fn parse_sites_file(text: &str) -> Option<Vec<Site>> {
-    if text.is_empty() || text.len() > FILE_LIMIT {
+    let (version, slots) = parse_entries(text)?;
+    (version == 1).then(|| slots.into_iter().map(|(site, _)| site).collect())
+}
+
+/// A version 1 file, every site armed, or a version 2 slot table, each in
+/// exactly the canonical form the browser accepts.
+pub fn parse_slot_table(text: &str) -> Option<Vec<(Site, bool)>> {
+    parse_entries(text).map(|(_, slots)| slots)
+}
+
+fn parse_entries(text: &str) -> Option<(u64, Vec<(Site, bool)>)> {
+    if text.is_empty() {
         return None;
     }
     let value: Value = serde_json::from_str(text).ok()?;
     let object = value.as_object()?;
-    if !keys(object, &["sites", "version"]) || object["version"] != 1 {
+    let version = object.get("version").and_then(Value::as_u64)?;
+    if !keys(object, &["sites", "version"]) || !(1..=2).contains(&version) {
         return None;
     }
     let u32_field = |entry: &Map<String, Value>, key: &str| {
         entry[key].as_u64().and_then(|n| u32::try_from(n).ok())
     };
-    let mut sites = Vec::new();
+    let mut slots = Vec::new();
     for entry in object["sites"].as_array()? {
         let entry = entry.as_object()?;
-        let fields = [
+        let mut fields = vec![
             "anchor_offset",
             "artifact_id",
             "artifact_sha256",
@@ -208,9 +260,17 @@ pub fn parse_sites_file(text: &str) -> Option<Vec<Site>> {
             "source_length",
             "source_sha256",
         ];
+        if version == 2 {
+            fields.push("armed");
+        }
         if !keys(entry, &fields) || entry["shape"] != "function-entry" {
             return None;
         }
+        let armed = if version == 2 {
+            entry["armed"].as_bool()?
+        } else {
+            true
+        };
         let site = Site {
             anchor_offset: u32_field(entry, "anchor_offset")?,
             artifact_id: entry["artifact_id"]
@@ -231,9 +291,20 @@ pub fn parse_sites_file(text: &str) -> Option<Vec<Site>> {
         if site.source_length == 0 || site.anchor_offset >= site.source_length {
             return None;
         }
-        sites.push(site);
+        slots.push((site, armed));
     }
-    (sites_file(&sites).ok()? == text).then_some(sites)
+    let canonical = if version == 1 {
+        sites_file(
+            &slots
+                .iter()
+                .map(|(site, _)| site.clone())
+                .collect::<Vec<_>>(),
+        )
+        .ok()?
+    } else {
+        slot_table_file(&slots).ok()?
+    };
+    (canonical == text).then_some((version, slots))
 }
 
 /// A saved site and what the researcher needs to recognize it.
@@ -321,7 +392,8 @@ impl Store {
     }
 
     fn read(&self) -> Result<Vec<Saved>> {
-        let Some(bytes) = durable::read_private(&self.path, FILE_LIMIT)? else {
+        // Neither file has a size limit: the set has none but SITE_LIMIT.
+        let Some(bytes) = durable::read_private(&self.path, usize::MAX)? else {
             return Ok(Vec::new());
         };
         let sites = std::str::from_utf8(&bytes)
@@ -333,20 +405,29 @@ impl Store {
                     "The saved invocation site file is not a valid native-js-invocation-sites-v1 file. Clear the saved sites to start again.",
                 )
             })?;
-        let labels = durable::read_private(&self.labels, LABELS_LIMIT)
+        let labels = durable::read_private(&self.labels, usize::MAX)
             .ok()
             .flatten()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
             .filter(|value| value["version"] == 1)
             .and_then(|value| value["sites"].as_array().cloned())
             .unwrap_or_default();
+        // The first entry of each key, as a scan would find it.
+        let mut by_key = HashMap::new();
+        for entry in &labels {
+            if let (Some(sha), Some(anchor)) = (
+                entry["source_sha256"].as_str(),
+                entry["anchor_offset"]
+                    .as_u64()
+                    .and_then(|n| u32::try_from(n).ok()),
+            ) {
+                by_key.entry((sha, anchor)).or_insert(entry);
+            }
+        }
         Ok(sites
             .into_iter()
             .map(|site| {
-                let entry = labels.iter().find(|entry| {
-                    entry["source_sha256"] == site.source_sha256.as_str()
-                        && entry["anchor_offset"] == site.anchor_offset
-                });
+                let entry = by_key.get(&site.key()).copied();
                 let text = |key: &str, limit: usize| {
                     entry
                         .and_then(|entry| entry[key].as_str())
@@ -367,7 +448,8 @@ impl Store {
 
     /// Labels first, then the site file, each replaced atomically with
     /// user-only permissions, so the site file never names a site whose label
-    /// was lost. An empty set has no site file: the format needs 1 to 8 sites.
+    /// was lost. An empty set has no site file: the format needs at least one
+    /// site.
     fn write(&self, saved: &[Saved]) -> Result<()> {
         if saved.is_empty() {
             for path in [&self.path, &self.labels] {
@@ -416,9 +498,9 @@ impl Store {
             ));
         }
         if current.len() >= SITE_LIMIT {
-            return Err(Error::conflict(
-                "The saved set already tracks 8 functions, the most one capture can arm. Remove one first.",
-            )
+            return Err(Error::conflict(format!(
+                "The saved set already tracks {SITE_LIMIT} functions, the most one browser shared memory region carries to a renderer. Remove one first."
+            ))
             .with_code(Code::ResourceLimit));
         }
         current.push(saved);
@@ -453,71 +535,215 @@ impl Store {
     }
 }
 
-/// What this session's launcher armed, read once when the backend starts.
+/// One slot of the session's table: the site it keeps for the browser's
+/// lifetime, its saved label, and whether it is armed now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Slot {
+    saved: Saved,
+    armed: bool,
+}
+
+/// Where a live session publishes slot tables: the site file Brave was given
+/// and the generation file Brave polls for a newer table.
+struct Live {
+    sites: PathBuf,
+    generation: PathBuf,
+}
+
+#[derive(Default)]
+struct Slots {
+    table: Vec<Slot>,
+    generation: u64,
+    error: Option<String>,
+}
+
+/// What this session's launcher armed. A live session also follows the saved
+/// set: each change it sees rewrites the site file as a slot table and
+/// advances the generation, and Brave applies it to the running capture.
 pub struct Session {
     pub state: &'static str,
-    pub sites: Vec<Saved>,
     pub digests: bool,
+    live: Option<Live>,
+    slots: Mutex<Slots>,
 }
 
 impl Session {
-    pub fn read(path: Option<&Path>, state: Option<&str>, digests: bool, store: &Store) -> Self {
-        let Some(path) = path else {
-            return Self {
-                state: "not_armed",
-                sites: Vec::new(),
-                digests: false,
-            };
+    pub fn read(
+        path: Option<&Path>,
+        state: Option<&str>,
+        digests: bool,
+        generation: Option<&Path>,
+        store: &Store,
+    ) -> Self {
+        let empty = |state| Self {
+            state,
+            digests: false,
+            live: None,
+            slots: Mutex::new(Slots::default()),
         };
-        let sites = durable::read_private(path, FILE_LIMIT)
+        let Some(path) = path else {
+            return empty("not_armed");
+        };
+        let slots = durable::read_private(path, usize::MAX)
             .ok()
             .flatten()
             .and_then(|bytes| String::from_utf8(bytes).ok())
-            .and_then(|text| parse_sites_file(&text));
-        let Some(sites) = sites else {
-            return Self {
-                state: "unreadable",
-                sites: Vec::new(),
-                digests: false,
-            };
+            .and_then(|text| parse_slot_table(&text));
+        let Some(slots) = slots else {
+            return empty("unreadable");
         };
         let saved = store.load().unwrap_or_default();
+        let by_key = saved
+            .iter()
+            .rev()
+            .map(|prior| (prior.site.key(), prior))
+            .collect::<HashMap<_, _>>();
         let browser_unsupported = state == Some("browser_unsupported");
-        Self {
+        let session = Self {
             state: if browser_unsupported {
                 "browser_unsupported"
             } else {
                 "armed"
             },
-            sites: sites
-                .into_iter()
-                .map(|site| {
-                    saved
-                        .iter()
-                        .find(|prior| prior.site.same_function(&site))
-                        .cloned()
-                        .unwrap_or(Saved {
-                            site,
-                            label: "Unlabeled function".into(),
-                            source_url: None,
-                            session_id: None,
-                        })
-                })
-                .collect(),
             digests: digests && !browser_unsupported,
+            live: generation
+                .filter(|_| !browser_unsupported)
+                .map(|generation| Live {
+                    sites: path.to_owned(),
+                    generation: generation.to_owned(),
+                }),
+            slots: Mutex::new(Slots {
+                table: slots
+                    .into_iter()
+                    .map(|(site, armed)| Slot {
+                        saved: by_key
+                            .get(&site.key())
+                            .map(|prior| (*prior).clone())
+                            .unwrap_or(Saved {
+                                site,
+                                label: "Unlabeled function".into(),
+                                source_url: None,
+                                session_id: None,
+                            }),
+                        armed,
+                    })
+                    .collect(),
+                ..Slots::default()
+            }),
+        };
+        session.follow(&saved);
+        session
+    }
+
+    /// Whether a saved change applies to this capture or the next one.
+    pub fn applies(&self) -> &'static str {
+        if self.live.is_some() {
+            THIS_CAPTURE
+        } else {
+            NEXT_CAPTURE
         }
     }
 
+    /// Makes a live session's slot table follow the saved set: a removed site
+    /// disarms its slot, a saved site arms its slot again, and a new one takes
+    /// the next free slot. Once `SITE_LIMIT` slots are used, a new site waits
+    /// for the next capture. The site file is replaced before the generation
+    /// advances, so Brave never applies a generation without its table. A
+    /// failed write keeps the table Brave has and is reported in `value`.
+    pub fn follow(&self, saved: &[Saved]) {
+        let Some(live) = &self.live else {
+            return;
+        };
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        let mut table = slots.table.clone();
+        let by_key = saved
+            .iter()
+            .rev()
+            .map(|prior| (prior.site.key(), prior))
+            .collect::<HashMap<_, _>>();
+        for slot in &mut table {
+            let current = by_key.get(&slot.saved.site.key()).copied();
+            slot.armed = current.is_some();
+            if let Some(current) = current {
+                // The slot keeps the site Brave has; only its labels follow.
+                slot.saved = Saved {
+                    site: slot.saved.site.clone(),
+                    ..current.clone()
+                };
+            }
+        }
+        let mut slotted = table
+            .iter()
+            .map(|slot| slot.saved.site.key())
+            .collect::<HashSet<_>>();
+        let mut appended = Vec::new();
+        for current in saved {
+            if table.len() + appended.len() < SITE_LIMIT && slotted.insert(current.site.key()) {
+                appended.push(Slot {
+                    saved: current.clone(),
+                    armed: true,
+                });
+            }
+        }
+        drop(slotted);
+        table.extend(appended);
+        let browser = |table: &[Slot]| {
+            table
+                .iter()
+                .map(|slot| (slot.saved.site.clone(), slot.armed))
+                .collect::<Vec<_>>()
+        };
+        let revised = browser(&table);
+        if revised == browser(&slots.table) {
+            slots.table = table;
+            return;
+        }
+        let next = slots.generation + 1;
+        let written = slot_table_file(&revised)
+            .map_err(|_| Error::new(500, "The slot table could not be written"))
+            .and_then(|text| durable::write_private(&live.sites, text.as_bytes()))
+            .and_then(|()| {
+                durable::write_private(&live.generation, format!("{next}\n").as_bytes())
+            });
+        match written {
+            Ok(()) => {
+                slots.table = table;
+                slots.generation = next;
+                slots.error = None;
+            }
+            Err(error) => {
+                slots.error = Some(format!(
+                    "This capture could not follow the saved functions: {}",
+                    error.message
+                ));
+            }
+        }
+    }
+
+    /// Whether this capture's table arms the site now.
+    fn arms(&self, site: &Site) -> bool {
+        let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        slots
+            .table
+            .iter()
+            .any(|slot| slot.armed && slot.saved.site.same_function(site))
+    }
+
     pub fn value(&self) -> Value {
+        let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         json!({
             "state": self.state,
-            "count": self.sites.len(),
+            "live": self.live.is_some(),
+            "count": slots.table.iter().filter(|slot| slot.armed).count(),
             "digests": self.digests,
-            "sites": self.sites.iter().map(|saved| json!({
-                "source_sha256": saved.site.source_sha256,
-                "anchor_offset": saved.site.anchor_offset,
-                "label": saved.label,
-                "source_url": saved.source_url,
+            "revision": slots.generation,
+            "revision_error": slots.error,
+            "sites": slots.table.iter().map(|slot| json!({
+                "source_sha256": slot.saved.site.source_sha256,
+                "anchor_offset": slot.saved.site.anchor_offset,
+                "armed": slot.armed,
+                "label": slot.saved.label,
+                "source_url": slot.saved.source_url,
             })).collect::<Vec<_>>(),
         })
     }
@@ -574,9 +800,10 @@ pub fn set_document(saved: &[Saved], retained: Vec<Value>, session: &Session) ->
         "sites": saved.iter().zip(retained).map(|(saved, retained)| {
             let mut value = saved.value();
             value["retained"] = retained;
+            value["armed_in_capture"] = json!(session.arms(&saved.site));
             value
         }).collect::<Vec<_>>(),
-        "next_capture": NEXT_CAPTURE,
+        "next_capture": session.applies(),
         "session": session.value(),
     })
 }
@@ -636,23 +863,44 @@ fn identifier(value: &str) -> bool {
         && chars.all(|c| c == '$' || c == '_' || c.is_alphanumeric())
 }
 
-/// The worker request for `target`, with offsets in the BOM-free text.
-pub fn worker_request(raw: &[u8], target: &Target) -> Result<Value> {
+/// The BOM-free script text the worker indexes.
+pub fn indexed_text(raw: &[u8]) -> Result<&str> {
+    script_text(raw)
+        .map(|(text, _)| text)
+        .ok_or_else(|| Error::bad("Artifact is not valid UTF-8 JavaScript"))
+}
+
+/// The answer to `target` from the index of the artifact's script text, in
+/// the worker's `reb-invocation-site-worker-v1` shape, with offsets in the
+/// BOM-free text. `index` is the worker's refusal when it could not index
+/// the text. The answer is checked by [`validate_worker`] like any reply.
+pub fn answer(
+    raw: &[u8],
+    target: &Target,
+    index: &std::result::Result<Index, String>,
+) -> Result<Value> {
     let (text, bom) =
         script_text(raw).ok_or_else(|| Error::bad("Artifact is not valid UTF-8 JavaScript"))?;
-    let mut request = json!({"operation": "invocation_site", "source": text});
-    match target {
-        Target::Name(name) => request["name"] = json!(name),
-        Target::Offset(offset) => {
-            if *offset < bom || *offset >= raw.len() || !text.is_char_boundary(offset - bom) {
-                return Err(Error::bad(
-                    "byte_offset must name a character of the script text in this artifact",
-                ));
-            }
-            request["byte_offset"] = json!(offset - bom);
-        }
+    if let Target::Offset(offset) = target
+        && (*offset < bom || *offset >= raw.len() || !text.is_char_boundary(offset - bom))
+    {
+        return Err(Error::bad(
+            "byte_offset must name a character of the script text in this artifact",
+        ));
     }
-    Ok(request)
+    let response = match index {
+        Err(message) => invocation_site::invalid(message, text.len()),
+        Ok(index) => match target {
+            Target::Name(name) => {
+                let name = invocation_site::parse_name(name).ok_or_else(|| {
+                    Error::bad("name must be 1 to 8 dot-separated JavaScript identifiers")
+                })?;
+                index.answer(Query::Name(&name))
+            }
+            Target::Offset(offset) => index.answer(Query::Offset((offset - bom) as u32)),
+        },
+    };
+    Ok(serde_json::to_value(response)?)
 }
 
 fn invalid_worker() -> Error {
@@ -843,6 +1091,7 @@ pub fn resolution(
     response: &Value,
     requested_label: Option<&str>,
     saved: &[Saved],
+    applies: &str,
 ) -> Result<Value> {
     let mut document = json!({
         "format": "reb-js-invocation-site-resolution-v1",
@@ -859,7 +1108,7 @@ pub fn resolution(
         "site": Value::Null,
         "label": Value::Null,
         "saved": false,
-        "next_capture": NEXT_CAPTURE,
+        "next_capture": applies,
     });
     let refuse = |document: &mut Value, reason: &str, message: String| {
         document["reason"] = json!(reason);
@@ -969,7 +1218,7 @@ pub fn resolution(
     };
     document["status"] = json!("resolved");
     document["message"] = json!(format!(
-        "Resolved to the function at line {}, column {}. {NEXT_CAPTURE}",
+        "Resolved to the function at line {}, column {}. {applies}",
         function["line"], function["column"]
     ));
     document["saved"] = json!(saved.iter().any(|prior| prior.site.same_function(&site)));
@@ -1073,6 +1322,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_slot_table_keeps_slot_order_and_is_accepted_only_in_canonical_form() {
+        let fixture = fixture();
+        let file = fixture["files"][0]["file"].as_str().unwrap();
+        let sites = parse_sites_file(file).unwrap();
+        // Version 1 is a table whose slots are all armed.
+        assert_eq!(
+            parse_slot_table(file).unwrap(),
+            sites
+                .iter()
+                .map(|site| (site.clone(), true))
+                .collect::<Vec<_>>()
+        );
+        let slots = sites
+            .iter()
+            .enumerate()
+            .map(|(index, site)| (site.clone(), index % 2 == 1))
+            .collect::<Vec<_>>();
+        let table = slot_table_file(&slots).unwrap();
+        assert!(table.ends_with(r#"],"version":2}"#));
+        assert!(table.starts_with(r#"{"sites":[{"anchor_offset":"#));
+        assert!(table.contains(r#","armed":false,"artifact_id":"#));
+        assert_eq!(parse_slot_table(&table).unwrap(), slots);
+        // A slot table is not a version 1 file, and the empty table is valid.
+        assert!(parse_sites_file(&table).is_none());
+        assert_eq!(slot_table_file(&[]).unwrap(), r#"{"sites":[],"version":2}"#);
+        assert_eq!(
+            parse_slot_table(r#"{"sites":[],"version":2}"#),
+            Some(Vec::new())
+        );
+        assert!(parse_slot_table(r#"{"sites":[],"version":1}"#).is_none());
+        let pretty =
+            serde_json::to_string_pretty(&serde_json::from_str::<Value>(&table).unwrap()).unwrap();
+        for bad in [
+            pretty.as_str(),
+            &table.replacen("\"armed\":false", "\"armed\":0", 1),
+            &table.replacen(",\"armed\":false", "", 1),
+            &table.replace("\"version\":2", "\"version\":3"),
+            &file.replace("\"version\":1", "\"version\":2"),
+        ] {
+            assert!(parse_slot_table(bad).is_none(), "{bad}");
+        }
+        let duplicate = [slots[0].clone(), (slots[0].0.clone(), false)];
+        assert_eq!(slot_table_file(&duplicate), Err(SiteError::Duplicate));
+    }
+
     fn saved(index: u32) -> Saved {
         Saved {
             site: Site {
@@ -1080,7 +1375,7 @@ mod tests {
                 artifact_id: "12".into(),
                 artifact_sha256: "a".repeat(64),
                 byte_offset: index,
-                source_length: 100,
+                source_length: 1000,
                 source_sha256: "b".repeat(64),
             },
             label: format!("f{index}"),
@@ -1090,18 +1385,18 @@ mod tests {
     }
 
     #[test]
-    fn the_saved_set_is_bounded_unique_private_and_exact() {
+    fn the_saved_set_is_unique_private_and_exact_past_the_old_256() {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("app/js-invocation-sites-v1.json");
         let store = Store::new(path.clone());
         assert!(store.load().unwrap().is_empty());
-        for index in 0..8 {
+        // No fixed count: the only bound is the browser's shared memory
+        // region, millions of sites.
+        assert_eq!(SITE_LIMIT, 48_806_446);
+        for index in 0..300 {
             store.add(saved(index)).unwrap();
         }
-        let ninth = store.add(saved(8)).unwrap_err();
-        assert_eq!(ninth.status, 409);
-        assert!(ninth.message.contains("8 functions"));
         let duplicate = store.add(saved(3)).unwrap_err();
         assert_eq!(
             (
@@ -1116,15 +1411,19 @@ mod tests {
         assert_eq!(mode(path.parent().unwrap()), 0o700);
         let text = std::fs::read_to_string(&path).unwrap();
         let sites = parse_sites_file(&text).expect("the browser's exact format");
-        assert_eq!(sites.len(), 8);
+        assert_eq!(sites.len(), 300);
+        assert!(text.len() > 64 * 1024);
         let loaded = store.load().unwrap();
-        assert_eq!(loaded[3], saved(3));
-        assert_eq!(store.remove(&"b".repeat(64), 3).unwrap().len(), 7);
+        assert_eq!(
+            (loaded[3].clone(), loaded[299].clone()),
+            (saved(3), saved(299))
+        );
+        assert_eq!(store.remove(&"b".repeat(64), 3).unwrap().len(), 299);
         assert_eq!(store.remove(&"b".repeat(64), 3).unwrap_err().status, 404);
         // A lost sidecar never loses a site, only its label.
         std::fs::remove_file(labels_path(&path)).unwrap();
         assert_eq!(store.load().unwrap()[0].label, "Unlabeled function");
-        assert_eq!(store.clear().unwrap(), 7);
+        assert_eq!(store.clear().unwrap(), 299);
         assert!(!path.exists() && !labels_path(&path).exists());
         assert!(store.load().unwrap().is_empty());
         // An invalid site file is reported, and clearing repairs it.
@@ -1136,7 +1435,7 @@ mod tests {
 
     fn worker(source: &str, target: &Target) -> Value {
         let raw = source.as_bytes();
-        let request = worker_request(raw, target).unwrap();
+        let request = json!({"source": indexed_text(raw).unwrap()});
         // The fixture stands in for the worker with what it would return.
         let anchor = source
             .find("(aGh")
@@ -1165,7 +1464,8 @@ mod tests {
         let target = Target::Name("window.hsw".into());
         let response = worker(source, &target);
         validate_worker(raw, &target, &response).unwrap();
-        let document = resolution(raw, &artifact, &target, &response, None, &[]).unwrap();
+        let document =
+            resolution(raw, &artifact, &target, &response, None, &[], NEXT_CAPTURE).unwrap();
         assert_eq!(document["status"], "resolved", "{document}");
         assert_eq!(document["label"], "window.hsw");
         let anchor = source.find("(aGh").unwrap();
@@ -1196,6 +1496,7 @@ mod tests {
             &response,
             Some("hsw entry"),
             std::slice::from_ref(&saved),
+            NEXT_CAPTURE,
         )
         .unwrap();
         assert_eq!(
@@ -1207,8 +1508,16 @@ mod tests {
         let target = Target::Offset(2);
         let response = worker(arrow, &target);
         validate_worker(arrow.as_bytes(), &target, &response).unwrap();
-        let refused =
-            resolution(arrow.as_bytes(), &artifact, &target, &response, None, &[]).unwrap();
+        let refused = resolution(
+            arrow.as_bytes(),
+            &artifact,
+            &target,
+            &response,
+            None,
+            &[],
+            NEXT_CAPTURE,
+        )
+        .unwrap();
         assert_eq!(refused["status"], "refused");
         assert_eq!(refused["reason"], "unsupported_function");
         assert!(
@@ -1228,8 +1537,9 @@ mod tests {
                 .status,
             502
         );
-        assert!(worker_request(raw, &Target::Offset(1)).is_err());
-        assert!(worker_request(raw, &Target::Offset(raw.len())).is_err());
+        let empty = Ok(Index::default());
+        assert!(answer(raw, &Target::Offset(1), &empty).is_err());
+        assert!(answer(raw, &Target::Offset(raw.len()), &empty).is_err());
         assert!(Target::from_fields(Some(&json!("1a")), None).is_err());
         assert!(Target::from_fields(Some(&json!("a")), Some(&json!(1))).is_err());
     }

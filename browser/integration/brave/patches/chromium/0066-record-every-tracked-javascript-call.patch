@@ -1,0 +1,135 @@
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+index 86ca759e1109b43b83bcfe6f9953c9e828472846..9f001c98f9102ad9039f2cb84d53c7bebb34d108 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+@@ -625,17 +625,17 @@ void CaptureJsDispatch(v8::Local<v8::Context> context,
+   const std::uint64_t frame_id = window && window->GetFrame() && window->document()
+                                      ? StableFrameId(*execution_context)
+                                      : 0;
++  // A slot past the record's one-byte field is refused, never narrowed.
+   if (frame_id == 0 || !observation.source_sha256 || observation.script_id <= 0 ||
+-      observation.handler_script_id < 0) {
++      observation.handler_script_id < 0 ||
++      observation.slot >= reb::kNativeJsDispatchSiteLimit) {
+     sink.NoteNativeJsDispatchInputUnavailable(epoch, frame_id);
+     return;
+   }
+   reb::NativeJsDispatchObservationPayload payload;
+   payload.shape = static_cast<std::uint8_t>(observation.shape);
+   payload.selector_kind = static_cast<std::uint8_t>(observation.selector_kind);
+-  payload.site_slot = observation.slot < reb::kNativeJsDispatchSiteLimit
+-                          ? static_cast<std::uint8_t>(observation.slot)
+-                          : static_cast<std::uint8_t>(reb::kNativeJsDispatchSiteLimit);
++  payload.site_slot = static_cast<std::uint8_t>(observation.slot);
+   payload.flags = static_cast<std::uint8_t>(
+       (observation.new_activation ? reb::kNativeJsDispatchNewActivation : 0) |
+       (observation.parent_unknown ? reb::kNativeJsDispatchParentUnknown : 0) |
+@@ -665,10 +665,18 @@ void NoteJsDispatchStatus(const std::uint64_t epoch,
+                           const std::uint32_t slot,
+                           const v8::JsDispatchSiteStatus status,
+                           int /*script_id*/) {
+-  if (status == v8::JsDispatchSiteStatus::kCompiledBeforeArming) {
+-    reb::NativeProbeSink::Get().NoteNativeJsDispatchStatus(
+-        epoch, slot, reb::NativeJsDispatchSiteStatus::kCompiledBeforeArming);
++  reb::NativeJsDispatchSiteStatus native;
++  switch (status) {
++    case v8::JsDispatchSiteStatus::kCompiledBeforeArming:
++      native = reb::NativeJsDispatchSiteStatus::kCompiledBeforeArming;
++      break;
++    case v8::JsDispatchSiteStatus::kIdsExhausted:
++      native = reb::NativeJsDispatchSiteStatus::kIdsExhausted;
++      break;
++    default:
++      return;
+   }
++  reb::NativeProbeSink::Get().NoteNativeJsDispatchStatus(epoch, slot, native);
+ }
+ 
+ // Native JavaScript invocation identity. V8 pulls the epoch and armed
+@@ -729,21 +737,20 @@ std::pair<std::uint64_t, std::uint64_t> NativeInvocationDocument(
+               token.GetLowForSerialization()};
+ }
+ 
+-void CaptureJsInvocationStart(v8::Local<v8::Context> context,
++// Returns whether the sink recorded the start; V8 settles only those calls.
++bool CaptureJsInvocationStart(v8::Local<v8::Context> context,
+                               const std::uint64_t epoch,
+                               const v8::JsInvocationStart& start) {
+   reb::NativeProbeSink& sink = reb::NativeProbeSink::Get();
+   const auto [frame_id, document_id] = NativeInvocationDocument(context);
++  // A slot past the record's one-byte field is refused, never narrowed.
+   if (frame_id == 0 || document_id == 0 || !start.source_sha256 ||
+-      start.script_id <= 0) {
++      start.script_id <= 0 || start.slot >= reb::kNativeJsInvocationSiteLimit) {
+     sink.NoteNativeJsInvocationInputUnavailable(epoch, frame_id);
+-    return;
++    return false;
+   }
+   reb::NativeJsInvocationStartPayload payload;
+-  payload.site_slot =
+-      start.slot < reb::kNativeJsInvocationSiteLimit
+-          ? static_cast<std::uint8_t>(start.slot)
+-          : static_cast<std::uint8_t>(reb::kNativeJsInvocationSiteLimit);
++  payload.site_slot = static_cast<std::uint8_t>(start.slot);
+   payload.argument_count = static_cast<std::uint16_t>(
+       std::min<std::uint32_t>(start.argument_count, 0xFFFF));
+   payload.flags = static_cast<std::uint8_t>(
+@@ -771,7 +778,7 @@ void CaptureJsInvocationStart(v8::Local<v8::Context> context,
+           base::span<const std::uint8_t, 32>(start.source_sha256, 32u)));
+   payload.document_id = document_id;
+   // The sink validates every wire rule and the configured site of the slot.
+-  sink.RecordNativeJsInvocationStart(epoch, frame_id, payload);
++  return sink.RecordNativeJsInvocationStart(epoch, frame_id, payload);
+ }
+ 
+ void CaptureJsInvocationSettle(v8::Local<v8::Context> context,
+@@ -779,18 +786,16 @@ void CaptureJsInvocationSettle(v8::Local<v8::Context> context,
+                                const v8::JsInvocationSettle& settle) {
+   reb::NativeProbeSink& sink = reb::NativeProbeSink::Get();
+   const auto [frame_id, document_id] = NativeInvocationDocument(context);
+-  if (frame_id == 0 || document_id == 0) {
++  if (frame_id == 0 || document_id == 0 ||
++      settle.slot >= reb::kNativeJsInvocationSiteLimit) {
+     // The settle job ran after its document went away. The ID still closes
+-    // the admitted start.
++    // the recorded start.
+     sink.NoteNativeJsInvocationSettleUnavailable(epoch, frame_id,
+                                                  settle.invocation_id);
+     return;
+   }
+   reb::NativeJsInvocationSettlePayload payload;
+-  payload.site_slot =
+-      settle.slot < reb::kNativeJsInvocationSiteLimit
+-          ? static_cast<std::uint8_t>(settle.slot)
+-          : static_cast<std::uint8_t>(reb::kNativeJsInvocationSiteLimit);
++  payload.site_slot = static_cast<std::uint8_t>(settle.slot);
+   payload.outcome = static_cast<std::uint8_t>(settle.outcome);
+   payload.via = static_cast<std::uint8_t>(settle.via);
+   payload.value_kind = static_cast<std::uint8_t>(settle.value_kind);
+@@ -812,11 +817,21 @@ void NoteJsInvocationStatus(const std::uint64_t epoch,
+                             const std::uint32_t slot,
+                             const v8::JsInvocationSiteStatus status,
+                             int /*script_id*/) {
+-  reb::NativeProbeSink::Get().NoteNativeJsInvocationStatus(
+-      epoch, slot,
+-      status == v8::JsInvocationSiteStatus::kUnsupportedFunction
+-          ? reb::NativeJsInvocationSiteStatus::kUnsupportedFunction
+-          : reb::NativeJsInvocationSiteStatus::kCompiledBeforeArming);
++  reb::NativeJsInvocationSiteStatus native;
++  switch (status) {
++    case v8::JsInvocationSiteStatus::kCompiledBeforeArming:
++      native = reb::NativeJsInvocationSiteStatus::kCompiledBeforeArming;
++      break;
++    case v8::JsInvocationSiteStatus::kUnsupportedFunction:
++      native = reb::NativeJsInvocationSiteStatus::kUnsupportedFunction;
++      break;
++    case v8::JsInvocationSiteStatus::kIdsExhausted:
++      native = reb::NativeJsInvocationSiteStatus::kIdsExhausted;
++      break;
++    default:
++      return;
++  }
++  reb::NativeProbeSink::Get().NoteNativeJsInvocationStatus(epoch, slot, native);
+ }
+ 
+ // The invocation the running main-thread code belongs to, for Wasm, guest

@@ -377,6 +377,19 @@ one). An indexed-call claim's static claim is the table entry for the opcode: it
 entry was replaced at run time. `native_js_observation_count` counts every
 accepted record; at most 4096 rows are retained.
 
+Producer 2.18.0 reads payload version 2, which records every dispatch of up to
+256 armed sites. Its rows take any `site_slot` from 0 to 255, its
+`site_sample_index` is the record's u32 ordinal among its site's records in the
+configuration, and its `sample_index` is null. A version 1 row keeps its 8
+slots, its per-site index below 64 and its per-configuration index below 256.
+The arming export lists at most 256 sites.
+
+Producer 2.19.0 reads a native Wasm `sample_index` as its capture
+configuration's ordinal for that stream, from 0 to 4294967294, because the
+browser now paces each stream per one-second window instead of keeping its
+first 16 samples. Documents from earlier producers keep indexes below 16 and
+stay valid.
+
 A JavaScript dispatch sample names its interpreter artifact, not a dispatch
 site. Its claims attach only when the artifact has an interpreter-candidate
 site. They name that site only when the complete classification (no omission

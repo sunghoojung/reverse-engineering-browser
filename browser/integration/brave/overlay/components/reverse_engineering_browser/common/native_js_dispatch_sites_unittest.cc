@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -58,16 +58,32 @@ TEST(NativeJsDispatchSites, RejectsAmbiguityAndUnsupportedInputs) {
       ParseNativeJsDispatchSites(Replace(kSites, "\"byte_offset\":118", "\"byte_offset\":-1"))
           .empty());
   EXPECT_TRUE(ParseNativeJsDispatchSites(R"({"sites":[],"version":1})").empty());
-  EXPECT_TRUE(ParseNativeJsDispatchSites(std::string(4097, ' ')).empty());
-  std::string nine = R"({"sites":[)";
-  for (int n = 0; n < 9; ++n) {
-    const std::string anchor = std::to_string(10 + n);
-    nine +=
-        std::string(n ? "," : "") + R"({"anchor_offset":)" + anchor +
-        R"(,"artifact_id":"1","artifact_sha256":"00000000000000000000000000000000000000000000000000000000000000ab","byte_offset":0,"shape":"switch","source_length":456,"source_sha256":"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"})";
+  EXPECT_TRUE(
+      ParseNativeJsDispatchSites(std::string(kNativeJsDispatchSitesFileLimit + 1, ' ')).empty());
+}
+// Every one-byte slot is armable, and a full list of the longest canonical
+// sites fits the file limit.
+std::string ManySites(std::size_t count, std::string_view shape) {
+  std::string json = R"({"sites":[)";
+  for (std::size_t n = 0; n < count; ++n) {
+    json +=
+        std::string(n ? "," : "") + R"({"anchor_offset":)" + std::to_string(10 + n) +
+        R"(,"artifact_id":"18446744073709551615","artifact_sha256":"00000000000000000000000000000000000000000000000000000000000000ab","byte_offset":2147483647,"shape":")" +
+        std::string(shape) +
+        R"(","source_length":2147483647,"source_sha256":"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"})";
   }
-  nine += R"(],"version":1})";
-  EXPECT_TRUE(ParseNativeJsDispatchSites(nine).empty());
+  return json + R"(],"version":1})";
+}
+TEST(NativeJsDispatchSites, EverySlotUpToTheLimit) {
+  const auto full = ManySites(kNativeJsDispatchSiteLimit, "switch");
+  ASSERT_LE(full.size(), kNativeJsDispatchSitesFileLimit);
+  const auto records = ParseNativeJsDispatchSites(full);
+  ASSERT_EQ(records.size(), kNativeJsDispatchSiteLimit * kNativeJsDispatchSiteRecordSize);
+  std::array<NativeJsDispatchSite, kNativeJsDispatchSiteLimit> sites{};
+  ASSERT_EQ(DecodeNativeJsDispatchSites(records, sites), kNativeJsDispatchSiteLimit);
+  EXPECT_EQ(sites.back().anchor_offset, 10U + kNativeJsDispatchSiteLimit - 1);
+  EXPECT_TRUE(
+      ParseNativeJsDispatchSites(ManySites(kNativeJsDispatchSiteLimit + 1, "switch")).empty());
 }
 }  // namespace
 }  // namespace reb

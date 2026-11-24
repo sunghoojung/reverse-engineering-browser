@@ -2,7 +2,7 @@
 
 [`openapi.json`](openapi.json) describes the Rust loopback backend in
 `apps/origin-trace-backend`, including the [native console](native-console-v2.md)
-state and action routes and the
+state and action routes, whose records [v4](native-console-v4.md) carries whole, and the
 [live Wasm instance commands](live-wasm-instance-v1.md). Those commands are
 confirmed reads, writes, and calls on an already attached instance. They do
 not restore the retired `/api/debugger` routes. Without a command peer they
@@ -260,6 +260,11 @@ A retained artifact whose bytes no longer match the size or SHA-256 in its
 manifest record answers 500 with `artifact_integrity`. Reading it again cannot
 help, unlike any other 500.
 
+A request whose target needs a confirmation that only stored state shows, such
+as an analyst run over a sensitive artifact, answers 400 with
+`confirmation_required` and names the field in `details.confirmation`. Nothing
+was read or run. Set that field to true only after the researcher confirms.
+
 Health, events, session context, session summary and capture action results
 report `capture_state`, the live capture lifecycle: `running`,
 `stop_requested`, `stopped`, `ended`, `lost`, or `not_live` for idle and demo
@@ -310,8 +315,9 @@ This describes the CLI build, not a live server's identity, version or abilities
 reading the endpoint file or request body, opening the output file, or dispatching
 HTTP. Eligibility requires the supported execution policy, metadata valid under
 `RebExecutionMetadata`, `kind: operation`, effects limited to `analysis` (or no
-effects), and empty `state_dependent_effects`, `uncertainties` and `confirmations`.
-Missing, malformed, unsupported and action-dependent metadata fails closed.
+effects), empty `state_dependent_effects`, `uncertainties` and `confirmations`,
+and no `state_dependent_confirmations`. Missing, malformed, unsupported and
+action-dependent metadata fails closed.
 The discovery flag uses this same predicate. There is no method-based shortcut:
 inert evidence comparison POSTs qualify, but VM cache GETs, source-helper GETs,
 native session retirement and live browser controls do not.
@@ -458,6 +464,27 @@ fonts included, so `capture_options` has no limits to report. The
 `content_limits` object that earlier backends added there named the removed
 per-session budgets and media choice; no backend reports it now.
 
+`wasm_sampling` is a second versioned addition: for a session that records
+Wasm `br_table` or `call_indirect` it is `{"version": 1, "streams",
+"window_ms", "every_record", "records_per_window", "samples_per_function",
+"samples_per_indirect_site", "function_allow_count", "function_deny_count",
+"module_allowlist", "reset"}`. Each renderer keeps at most
+`records_per_window` (1024) full records per stream in each `window_ms`
+(1000) window, and the next window records again. An allowance the launcher
+did not name is null, and the browser's default then applies (64 per
+function). `every_record` true means the session keeps every record the
+filters admit, with no window budget, browser ceiling or allowance, so
+`records_per_window` and both allowances are null; a backend from before
+v0.6.0 omits it, which means false. `reset` is `available` when
+`reset_wasm_sample_budgets` has a reset file to write. The launcher passes
+`--session-wasm-dispatch`, `--session-wasm-call-indirect`,
+`--session-wasm-every-record`, `--session-wasm-samples-per-function`,
+`--session-wasm-samples-per-indirect-site`,
+`--session-wasm-function-allow-count`, `--session-wasm-function-deny-count`
+and `--session-wasm-module-allowlist`; they are labels only. Otherwise it is
+null, and a backend from before the addition omits it. The VM view shows it
+beside its sample-window reset control.
+
 CDP was removed. Version 1 keeps its debugger fields with fixed retirement
 values so existing clients still parse it: `debugger_state` is `unavailable`,
 `target` is null, `wasm_scripts` is empty, `generation`, `capture_epoch` and
@@ -491,8 +518,10 @@ backend belongs to. Both actions refuse with 409 `idle_backend` unless
   was recorded, for example because the configured browser is not a capture
   build. It never runs page JavaScript.
 - `{"action":"reset_wasm_sample_budgets"}` increments the session's Wasm
-  sample-budget reset file. The capture browser restarts both sample indexes
-  at 0 without closing the profile or replacing the capture configuration.
+  sample-budget reset file. The capture browser closes the current one-second
+  sample window of both streams at once, as if its second had passed, without
+  closing the profile or replacing the capture configuration. Sample indexes
+  keep counting.
   It needs recording capture, `--wasm-budget-reset-file`, and a live process
   holding the profile, and otherwise returns 409. The browser applies the new
   generation on its writer wake, about 250ms later. A rebuilt Brave is
@@ -539,20 +568,24 @@ returns 409 `dependency_unavailable` for these actions.
 `LiveSessionStart` options: `url`, `wasm_dispatch`, `wasm_call_indirect`,
 `guest_adapter`, `js_dispatch_sites`, `quiet`, `category_mask`,
 `duration_seconds`, `localhost_only`, `canvas_images`, `request_content`,
-`request_stacks`, `document_start`, `browser_internal`, `extension_traffic`,
-`fresh_profile`, `js_invocation_sites`, `js_invocation_saved_sites`,
+`request_stacks`, `promise_stacks`, `document_start`, `browser_internal`,
+`extension_traffic`, `fresh_profile`, `js_invocation_sites`, `js_invocation_saved_sites`,
 `js_invocation_digests`, `confirm_sensitive_capture`,
 `publish_canonical_endpoint`, `brave_binary`, `timeout_seconds`,
-`wasm_samples_per_function`, `wasm_samples_per_indirect_site`,
-`wasm_function_allow`, `wasm_function_deny` and `wasm_module_allowlist`.
-The Wasm budget options require `wasm_dispatch` or `wasm_call_indirect` and
-do not raise the 16-record cap. A switch left unset takes the Origin Trace
-app's default, and `false` turns it off: `wasm_dispatch` and
+`wasm_every_record`, `wasm_samples_per_function`,
+`wasm_samples_per_indirect_site`, `wasm_function_allow`, `wasm_function_deny`
+and `wasm_module_allowlist`.
+The Wasm budget options require `wasm_dispatch` or `wasm_call_indirect`. They
+pace within the one-second window, which keeps at most 1024 full records per
+stream; without them a function keeps 64 per window. `wasm_every_record`
+keeps every record the filters admit instead, and takes neither per-function
+nor per-site count. A switch left unset takes
+the Origin Trace app's default, and `false` turns it off: `wasm_dispatch` and
 `wasm_call_indirect` (mask bits 512 and 1024), `quiet`, `request_stacks`
 (bits 256 and 1024, and only where the browser has `--reb-request-stacks`) and
 `document_start` are on; with the consent, `request_content` (bits 256 and
 1024), `canvas_images` (bits 1 and 1024) and, with named sites and request
-content, `js_invocation_digests` are on; `browser_internal`,
+content, `js_invocation_digests` are on; `promise_stacks`, `browser_internal`,
 `extension_traffic` and `fresh_profile` are off. A switch whose bits the mask
 lacks stays off. `duration_seconds` left unset runs the session until it is
 ended. Sessions use one persistent agent research profile,
@@ -563,23 +596,26 @@ refused with a cause that names it. Defaults come from the start request
 alone; an inherited capture switch, site file,
 browser profile or embedded-session variable is ignored, so an inherited
 `REB_CAPTURE_REQUEST_CONTENT`, `REB_CONSOLE_DOCUMENT_START`,
-`REB_NATIVE_JS_INVOCATION_SITES`, `REB_NATIVE_JS_INVOCATION_DIGESTS` or
-`REB_NATIVE_REQUEST_STACKS` never reaches an agent session.
+`REB_NATIVE_JS_INVOCATION_SITES`, `REB_NATIVE_JS_INVOCATION_DIGESTS`,
+`REB_NATIVE_REQUEST_STACKS` or `REB_NATIVE_PROMISE_STACKS` never reaches an
+agent session.
 
 | Option | Launcher switch | Rule |
 | --- | --- | --- |
 | `request_content` | `REB_CAPTURE_REQUEST_CONTENT=1` | Sensitive: on by default with the consent (`confirm_sensitive_capture` for `reb-api session start`, session start through MCP) and category bits 256 and 1024. Keeps every request and response body whole, media and fonts included; the artifact receiver refuses only what would leave less free disk than its reserve. Off, request body length, type and digest are still recorded, but no path, query or body bytes. |
 | `request_stacks` | `REB_NATIVE_REQUEST_STACKS=1` | The stack that started each renderer request, read with `get_request_stack`. Needs category bits 256 and 1024. Left unset, it is on with `REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED=1`, so a Brave without `--reb-request-stacks` starts without it; named `true`, it is strict and such a Brave refuses the start. |
+| `promise_stacks` | `REB_NATIVE_PROMISE_STACKS=1` | Also records the stack that registered each Promise reaction a request is later made in, as the app's start panel offers. Needs `request_stacks` and follows its strictness: with the default request stacks a Brave without `--reb-promise-stacks` starts without them. |
 | `document_start` | `REB_CONSOLE_DOCUMENT_START=1` | Permits document-start Console scripts in this capture browser. Arms nothing: a rule still needs a live Console connection and a confirmed `arm_document_start`. |
 | `browser_internal` | `REB_CAPTURE_BROWSER_INTERNAL=1` | Records requests of browser pages such as `brave://settings` and DevTools, which are otherwise counted and not recorded. |
 | `extension_traffic` | `REB_CAPTURE_EXTENSION_TRAFFIC=1` | Records requests of extension workers, which are otherwise counted and not recorded. |
 | `fresh_profile` | `REB_FRESH_PROFILE=1` | A new, empty browser profile for this session, in its session folder, instead of the shared agent research profile. |
 | `js_invocation_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Absolute path of a `native-js-invocation-sites-v1` file. Checked, then armed from a private copy under the agent session directory. Needs category bit 512. |
-| `js_invocation_saved_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Arms the agent sessions' own saved set, `~/.config/origin-trace/agent-sessions/js-invocation-sites-v1.json`, which `js_invocation_site_action` edits in an agent session. Never the app's set. Refused when empty. Not with `js_invocation_sites`. |
+| `js_invocation_saved_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Arms the agent sessions' own saved set, `~/.config/origin-trace/agent-sessions/js-invocation-sites-v1.json`, which `js_invocation_site_action` edits in an agent session, and follows it while the session runs: an empty set starts with nothing armed. Never the app's set. Not with `js_invocation_sites`. |
 | `js_invocation_digests` | `REB_NATIVE_JS_INVOCATION_DIGESTS=1` | Sensitive: needs named sites and the consent; on by default with both and request content. |
 | `canvas_images` | `REB_CAPTURE_CANVAS_IMAGES=1` | Sensitive: on by default with the consent and category bits 1 and 1024. |
-| `wasm_samples_per_function` | `REB_NATIVE_WASM_SAMPLES_PER_FUNCTION` | 1..16 retained samples of each function on each Wasm stream. Needs `wasm_dispatch` or `wasm_call_indirect`. |
-| `wasm_samples_per_indirect_site` | `REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE` | 1..16 retained `call_indirect` samples of each caller and module offset. |
+| `wasm_every_record` | `REB_NATIVE_WASM_EVERY_RECORD=1` | Every `br_table`, `call_indirect` and execution record the filters admit, with no one-second window, browser ceiling or per-function count. Needs `wasm_dispatch` or `wasm_call_indirect`; not with either count below. A hot loop can write millions of records. |
+| `wasm_samples_per_function` | `REB_NATIVE_WASM_SAMPLES_PER_FUNCTION` | 1..1024 retained samples of each function on each Wasm stream per one-second window (default 64). Needs `wasm_dispatch` or `wasm_call_indirect`. |
+| `wasm_samples_per_indirect_site` | `REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE` | 1..1024 retained `call_indirect` samples of each caller and module offset per window. |
 | `wasm_function_allow` | `REB_NATIVE_WASM_FUNCTION_ALLOW` | Up to 32 function indexes. Other functions do not consume either sample index. Deny wins. |
 | `wasm_function_deny` | `REB_NATIVE_WASM_FUNCTION_DENY` | Up to 32 function indexes to exclude. |
 | `wasm_module_allowlist` | `REB_NATIVE_WASM_MODULE_ALLOWLIST` | Up to 8 SHA-256 digests, written to a private file. Other modules do not advance either sample index. |
@@ -655,9 +691,17 @@ state lasts until `stop` or the next `connect_live`. A command for any other
 `status: stale_target`, `code: target_unavailable` and text that names the next
 step, and nothing is sent to the browser. A second `connect_live` while one is
 open, a stale `session_id` and a stale `binding_id` are 409 refusals that say
-what to read or send next. Document-start rules for a child frame name that
-frame's exact origin with `frame: child`; see
-[Native Console v3](native-console-v3.md).
+what to read or send next. A command runs until it returns, with no execution
+budget, and its request waits that long; a client that stops waiting leaves it
+running. Meanwhile `get_native_console` answers at once with `command`, other
+actions are 409 refusals, and `interrupt` (`session_id`) stops it: the command
+answers `status: stopped`, `code: cancelled`, and keeps the changes it already
+made. Sources, values, messages and listings are whole, and a drained read
+(`poll`, `traffic`, document-start state) says with `more` that another page
+remains; see [Native Console v4](native-console-v4.md). Document-start rules
+for a child frame name that frame's exact origin with `frame: child`;
+`add_document_start` and `remove_document_start` change the armed set one
+script at a time; see [Native Console v3](native-console-v3.md).
 
 ## Session summary
 
@@ -680,7 +724,7 @@ plain message:
 | `artifact_receiver_disconnected` | New scripts and Wasm modules are not stored. |
 | `no_events` | The store is empty. |
 | `wasm_without_artifacts` | Wasm compiled, but no Wasm module was stored. |
-| `artifact_capture_failed` | Some artifact bodies were not stored; `reason` names why. `disk_reserve` is the artifact receiver's free-disk reserve, and `compiled_script_source_backlog` and `wasm_module_backlog` a renderer whose 256 MiB of earlier sources and modules the browser had not yet copied out. |
+| `artifact_capture_failed` | Some artifact bodies were not stored; `reason` names why. `disk_reserve` is the artifact receiver's free-disk reserve, and `compiled_script_source_backlog`, `stack_script_source_backlog`, `wasm_module_backlog`, `runtime_typed_array_backlog`, `canvas_data_url_backlog` and `generated_artifact_backlog` a renderer whose 256 MiB of earlier sources, modules, buffers and canvas images the browser had not yet copied out. |
 | `request_content_not_retained` | A content session kept less than the whole of some request bodies, full targets, response bodies, header blocks or cookie lists; `category` names which (`request_headers`, `response_headers` and `cookie_list` among them), `reason` the state and `count` how many. `not_captured_disk_reserve` means the artifact receiver's free-disk reserve refused the content. The budget reasons (`not_captured_session_budget`, `not_retained_session_budget`), `captured_truncated` and `not_captured_type` appear only in records an older browser wrote, and their messages say so; current capture has no budget, size limit or media exception. |
 | `network_headers_unattributed` | Severity `warning`: `blocks` network header blocks and `lists` cookie lists arrived for requests the capture no longer tracked, so no row shows them. |
 | `final_headers_missing` | `count` requests of a content session ended with provisional headers and no cookie lists, one check per `reason`: `download`, `service_worker`, `from_cache` or `failed` (`info`, no request reached the network or it failed first), `not_reported` (`warning`, no observer or an untracked block) and `record_dropped` (`warning`, a full queue dropped records while it ran, so the block may have been lost). See [missing final blocks](native-network-v3.md#missing-final-blocks). |
@@ -689,7 +733,7 @@ plain message:
 | `named_gap` | A producer named why it stopped, with `category`, `reason` and `count`. A reason containing `budget` or `limit` means a sampling budget filled. A Wasm reason ending in `filtered` is a sample-policy exclusion: that execution was not sampled and did not take a slot. |
 | `browser_internal_excluded` | Capture counted `chrome:`, `devtools:` and other browser-internal requests, requests WebUI renderers sent (`webui_request`), or WebUI renderers, instead of recording them; `count` is the requests. Not a gap. |
 | `no_tab_traffic_excluded` | Capture counted extension-worker requests, DevTools loads, requests of service workers no page used in this browser, and browser-initiated prefetches with no page, instead of recording them; `count` is the requests. Not a gap. `REB_CAPTURE_EXTENSION_TRAFFIC=1` records the extension requests instead. |
-| `memory_cache_reuse_not_recorded` | Renderers counted memory-cache reuses past their 4,096 records per capture configuration instead of recording them; `count` is the reuses. Not a gap. Reuses in pages that are not ordinary (an SVG image's own document or a page popup), which no tab owns, are the separate `non_ordinary_page_reuse` exclusion. |
+| `memory_cache_reuse_not_recorded` | Renderers from an earlier build counted memory-cache reuses past their 4,096 records per capture configuration instead of recording them; `count` is the reuses. Not a gap. Current renderers record every reuse, so it appears only for such evidence. Reuses in pages that are not ordinary (an SVG image's own document or a page popup), which no tab owns, are the separate `non_ordinary_page_reuse` exclusion. |
 | `response_bodies_not_observed` | `count` responses never reached the browser proxy, so their bodies are not retained under their own request: the message counts those a service worker served, those reused from the memory cache and those answered in the renderer. Traffic links a reuse to the request whose response it reused, and a service worker answer to the worker's own fetch of the same URL, where those were retained. |
 | `response_snapshots_withheld` | `count` response bodies had a snapshot withheld while they arrived: one body's snapshots together copy at most four times what it kept plus 64 MiB, so their newest snapshot is older than the schedule would make it ([partial bodies](native-network-v3.md#partial-bodies)). Older sessions also withheld snapshots at their response body budget's shares. The body itself is retained whole when it ends. |
 | `network_tab_unresolved` | Severity `error`: `count` request rows have no tab, and the message counts them by reason. A capture bug; `request_tabs.unresolved_requests` names up to 16 by `process_id` and `request_id`, each with its `reason`. |
@@ -736,10 +780,15 @@ read mid-store never revalidates as the complete one.
 
 ## Saved JavaScript invocation sites
 
-The Origin Trace app keeps one saved set of at most 8
+The Origin Trace app keeps one saved set of at most 256
 [native JavaScript invocation sites](native-js-invocation-v1.md#site-file)
-and arms it in the next capture it starts. These routes name, save and list
-those sites; none of them changes the open page or a running capture.
+and arms it in every capture it starts. A capture whose `session.live` is
+true follows the set while it runs
+([revisions](native-js-invocation-v1.md#revisions)): a saved site arms at
+once and a removed one disarms. Otherwise a change applies from the next
+capture. These routes name, save and list those sites; none of them changes
+the open page, and a function the page compiled before its site was armed is
+tracked only after a reload.
 
 - `GET /api/js-invocation-sites/resolve` (`resolve_js_invocation_site`) takes
   an exact `session_id` and `artifact_id` and exactly one of `name` (a dotted
@@ -753,16 +802,18 @@ those sites; none of them changes the open page or a running capture.
   set with each site's label, source URL and session, whether this session
   retained the saved script version (`retained.state`: `matches`,
   `other_version` or `not_retained`, over every JavaScript artifact of the
-  manifest with the saved bytes or URL, through its index), and what this
-  session's launcher armed
+  manifest with the saved bytes or URL, through its index) and whether this
+  capture arms it now (`armed_in_capture`), and what this capture arms
   (`session.state`: `not_armed`, `armed`, `browser_unsupported` or
-  `unreadable`, with `digests`).
+  `unreadable`, with `live`, `digests`, its slot table in `sites` with each
+  slot's `armed` flag, `revision` and `revision_error`). Reading the set is
+  also when a following capture publishes a change made by another writer.
 - `POST /api/js-invocation-sites/actions` (`js_invocation_site_action`) takes
   `add` (the resolve inputs and an optional `label`), `remove`
   (`source_sha256` and `anchor_offset`) or `clear` with `confirm: true`. `add`
   resolves the artifact again on the server and never accepts a site from the
   caller. A refused resolution returns HTTP 200 with `added: false` and the
-  resolution; a duplicate `(source_sha256, anchor_offset)` or a ninth site is
+  resolution; a duplicate `(source_sha256, anchor_offset)` or a 257th site is
   a 409. Every action returns the updated set.
 
 A name matches only syntax that binds it: an assignment to that identifier or
@@ -933,9 +984,13 @@ The action routes are multiplexed, not invented REST resources:
 - Analyst execution requires the current saved JavaScript script and explicit
   confirmation. Protocol 2 names the selected artifact by `artifact_id` and
   `sha256`; the host reads the whole stored artifact, verifies it, and refuses
-  non-source kinds (400) and a changed SHA-256 (409). A sensitive artifact
-  needs `confirmed_sensitive=true`. A run has no deadline; dropping the request
-  stops its helper process.
+  non-source kinds (400) and a changed SHA-256 (409). Only the stored record
+  says whether the artifact is sensitive, so the host checks at run time: a
+  sensitive artifact without `confirmed_sensitive=true` is refused with 400
+  `confirmation_required` and `details.confirmation: "confirmed_sensitive"`
+  before any byte is read. A client asks the researcher and retries with the
+  confirmation; a non-sensitive artifact, or none, runs with `false`. A run has
+  no deadline; dropping the request stops its helper process.
 
 Known behavior worth preserving in clients:
 
@@ -944,8 +999,15 @@ Known behavior worth preserving in clients:
   bounds; offsets and identifiers must be canonical unsigned decimals.
 - At the application handler, malformed JSON, non-object bodies, invalid body
   lengths and unsupported chunked bodies return JSON 400 errors. A body read
-  exceeding five seconds, plus one second per declared 16 MiB, returns 408. Transport-level HTTP framing failures
-  may be rejected before the application handler and have no JSON guarantee.
+  exceeding five seconds, plus one second per declared 16 MiB, returns 408.
+  The Local Analyst and VM pack routes instead parse their body as it
+  arrives, so it is held once, as its parsed value, and their
+  `x-max-body-bytes` is 2^53 - 1, no practical bound. Their deadline follows
+  what arrived: five seconds plus one per 16 MiB received, not counting time
+  the parser takes, so a client that keeps sending is never refused for its
+  size and one that stalls is refused within seconds. Transport-level HTTP
+  framing failures may be rejected before the application handler and have
+  no JSON guarantee.
 - Unknown API paths return JSON 404; unsupported methods return JSON 405.
   Every application response includes `Cache-Control: no-store` and
   `X-Content-Type-Options: nosniff`. HEAD is not an equivalent of API GET.
@@ -1001,11 +1063,19 @@ descriptions. Individual execution entries have these fields:
   JSON Schema 2020-12 `when` predicate over the entire request. `{}` means
   unconditional. For example, unsigned JWT creation needs
   `allow_unsigned_confirmed=true` when `algorithm` is `none`; selected-field
-  capture needs `confirmed=true` when `enabled` is true. Analyst execution
-  lists `confirmed_sensitive=true` whenever the run names a selected artifact,
-  because only the stored manifest says whether it is sensitive; the
-  `sensitive-selected-artifact` prerequisite names that dependency.
-  Ordinary requiredness and boolean types remain in the request schema.
+  capture needs `confirmed=true` when `enabled` is true. Ordinary requiredness
+  and boolean types remain in the request schema.
+- `state_dependent_confirmations`, when present, lists confirmations that only
+  stored state decides, with the same `field` and `value: true` and a
+  human-readable `when`. A predicate over the request cannot see that state,
+  so listing one in `confirmations` would ask for it whenever it might apply.
+  The host reads the state when the request arrives. When it holds and the
+  field is not true, the request is refused with 400 `confirmation_required`
+  and `details.confirmation` naming the field, before anything is read or run.
+  A client asks the researcher then, or earlier when it already knows the
+  state, and never sets the field by default. Analyst execution's
+  `confirmed_sensitive` is the one such field: a run asks for it only when the
+  stored record of its selected artifact is sensitive.
 - `notes` supplies the effect scope and caveats. `sources` gives repository
   `path` and Rust `symbol` pointers for auditing, without fragile line numbers.
 
@@ -1051,8 +1121,8 @@ that static metadata cannot establish. Check the uncertainty and condition text.
 
 Important distinctions captured by the catalog:
 
-- VM GET can write its analysis cache. Native-console GET can retire an expired
-  or poisoned session, stop processes, and delete its temporary profile.
+- VM GET can write its analysis cache. Native-console GET can retire a
+  poisoned session, stop processes, and delete its temporary profile.
 - Capture clear truncates stored records after capture stops, while leaving
   artifact files. Workspace replacements and clear-history actions discard
   data even when they do not touch the live target.
@@ -1209,7 +1279,7 @@ include `js_invocation` beside the hex `payload`, decoded with the rules of
 
 | `kind` | Fields |
 | --- | --- |
-| `start` | `site_slot`, `invocation_id`, `parent_invocation_id` (0 for none), `parent_unknown`, `argument_count`, `script_id`, `anchor_offset` (UTF-16), `source_sha256`, `site_sample_index`, `sample_index`, `document_id` |
+| `start` | `site_slot`, `invocation_id`, `parent_invocation_id` (0 for none), `parent_unknown`, `argument_count`, `script_id`, `anchor_offset` (UTF-16), `source_sha256`, `site_sample_index` (the call's ordinal among its site's calls; a version 1 record's budget index), `sample_index` (null for version 2), `document_id` |
 | `settle` | `site_slot`, `invocation_id`, `fulfilled`, `via` (`sync_return`, `sync_throw` or `promise`), `value_kind`, `value_length`, `digest_state` (`not_requested`, `present`, `not_digestible`, `too_large` or `unavailable`), `document_id` |
 | `request` | `inside`, `invocation_id` (0 exactly when `inside` is false), `request_id` |
 

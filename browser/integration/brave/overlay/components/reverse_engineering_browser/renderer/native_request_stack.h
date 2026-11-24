@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -25,34 +25,21 @@ inline constexpr std::size_t kNativeRequestStackFrameCapacity =
     kNativeRequestStackSyncLimit + kNativeRequestStackAsyncLimit;
 inline constexpr std::size_t kNativeRequestStackDigestTable = 256;
 inline constexpr std::size_t kNativeRequestStackScriptTable = 1024;
-inline constexpr std::uint32_t kNativeRequestStackArtifactBudget = 1024;
-inline constexpr std::uint64_t kNativeRequestStackSourceBytes = 64ULL * 1024ULL * 1024ULL;
 inline constexpr std::size_t kNativeAsyncTaskRing = 2048;
 inline constexpr std::size_t kNativeTaskAttributionTable = 4096;
-inline constexpr std::uint32_t kNativeAsyncTaskArtifactBudget = 1024;
 inline constexpr std::size_t kNativeFormNavigationTable = 8;
-// Promise registrations a thread remembers until their reactions run, and
-// the registration stacks it sends per configuration (--reb-promise-stacks).
+// Promise registrations a thread remembers until their reactions run
+// (--reb-promise-stacks).
 inline constexpr std::size_t kNativePromiseRegistrationRing = 2048;
-inline constexpr std::uint32_t kNativePromiseStackArtifactBudget = 1024;
 // Browser refusals a thread can fall behind on before it forgets every
 // digest and stops calling any of its segments captured.
 inline constexpr std::size_t kNativeStackRefusalMailbox = 256;
 // Stack artifacts whose owning thread a refusal is routed to directly; an
 // older one's refusal goes to every attached thread.
 inline constexpr std::size_t kNativeStackOwnerRing = 8192;
-// The artifacts a thread queued in this configuration whose refusal can
-// still arrive. A power of two above the sum of the three artifact budgets,
-// which bounds how many can be outstanding, so an entry is never displaced.
-inline constexpr std::size_t kNativeStackQueuedIndex = 4096;
 // Messages a thread remembers having posted, so a receipt on the same
 // thread links the posting segment in place instead of copying.
 inline constexpr std::size_t kNativeStackRecentPosts = 16;
-// Worker threads per renderer process with stack tables (about 650 KiB each
-// with Blink's frame buffer and a promise registration ring). The document
-// main thread is not counted. A worker past the limit walks nothing; its
-// request stacks read not_walked_thread_limit.
-inline constexpr std::uint32_t kNativeStackThreadLimit = 32;
 
 enum class NativeRequestStackWalkResult : std::uint8_t {
   kWalked,
@@ -65,9 +52,6 @@ struct NativeStackScriptSource final {
   std::uint32_t script_id = 0;
   NativeScriptIdentityKind kind = NativeScriptIdentityKind::kJavaScript;
   bool is_eval = false;
-  // Longer than kNativeScriptIdentityMaxSourceBytes, so not converted.
-  bool too_large = false;
-  std::uint64_t too_large_length = 0;
   std::uint32_t start_line = 0;
   std::uint32_t start_column = 0;
   std::uint64_t execution_context_id = 0;
@@ -272,12 +256,9 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
   [[nodiscard]] static bool NetworkActive(const NativeProbeSink& sink) noexcept;
   // The calling thread's tables with its routed refusals applied, made by
   // its first walk or message receipt while capture is active when `make`;
-  // null without. Emits
-  // the gaps that counts: a mailbox overflow, and once per configuration a
-  // worker past kNativeStackThreadLimit, which also sets `*limited`.
+  // null without. A refusal mailbox overflow emits its gap.
   [[nodiscard]] static NativeRequestStackTables* Tables(std::uint64_t generation,
-                                                        bool make,
-                                                        bool* limited = nullptr) noexcept;
+                                                        bool make) noexcept;
   static void EmitGap(std::string_view reason,
                       std::uint64_t frame_id,
                       std::uint64_t generation) noexcept;

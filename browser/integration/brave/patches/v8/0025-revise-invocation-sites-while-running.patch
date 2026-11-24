@@ -1,0 +1,279 @@
+diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
+index 8efdab9..3cea08d 100644
+--- a/include/v8-callbacks.h
++++ b/include/v8-callbacks.h
+@@ -896,6 +896,12 @@ using JsInvocationEpochCallback = uint64_t (*)();
+ using JsInvocationSitesCallback = size_t (*)(uint64_t epoch,
+                                              JsInvocationSite* sites,
+                                              size_t capacity);
++// The revision of epoch's sites. When it changes, V8 copies the sites again
++// and keeps every invocation ID, so a call started under one revision settles
++// under a later one. A slot keeps its site for the epoch, and a slot copied
++// with source_length 0 is disarmed. Optional; without it the sites of an
++// epoch never change. Must not call into V8.
++using JsInvocationRevisionCallback = uint64_t (*)(uint64_t epoch);
+ // Admission for a new invocation, before any allocation. Must not allocate
+ // or call into V8.
+ using JsInvocationEnabledCallback = bool (*)(uint64_t epoch, uint32_t slot);
+@@ -926,6 +932,7 @@ struct JsInvocationCallbacks {
+   JsInvocationStartCallback start = nullptr;
+   JsInvocationSettleCallback settle = nullptr;
+   JsInvocationStatusCallback status = nullptr;
++  JsInvocationRevisionCallback revision = nullptr;
+ };
+ 
+ #if defined(V8_OS_WIN)
+diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
+index 63d2f5d..f124e82 100644
+--- a/src/flags/flag-definitions.h
++++ b/src/flags/flag-definitions.h
+@@ -3235,11 +3235,14 @@ DEFINE_NEG_IMPLICATION(reb_js_dispatch_capture, stress_lazy_source_positions)
+ 
+ // REB native JavaScript invocation identity, a research mode that is off by
+ // default. Function-entry sites are armed at bytecode generation exactly like
+-// dispatch sites, so it takes the dispatch flag's compile-path guarantees.
++// dispatch sites, so it takes the dispatch flag's compile-path guarantees. The
++// embedder may revise the armed sites of an epoch while it runs. Launchers
++// find "armed sites revisable while running" in this help text to tell a V8
++// that follows revisions from one that copies an epoch's sites once.
+ DEFINE_BOOL(reb_js_invocation_capture, false,
+             "give calls of armed JavaScript functions a native invocation "
+-            "identity carried across their continuations (implies "
+-            "--reb-js-dispatch-capture)")
++            "identity carried across their continuations, with armed sites "
++            "revisable while running (implies --reb-js-dispatch-capture)")
+ DEFINE_IMPLICATION(reb_js_invocation_capture, reb_js_dispatch_capture)
+ 
+ DEFINE_BOOL(cache_prototype_transitions, true, "cache prototype transitions")
+diff --git a/src/interpreter/reb-js-invocation.cc b/src/interpreter/reb-js-invocation.cc
+index 8631697..9f7b4db 100644
+--- a/src/interpreter/reb-js-invocation.cc
++++ b/src/interpreter/reb-js-invocation.cc
+@@ -267,10 +267,36 @@ bool RebJsInvocation::Sync(Isolate* isolate) {
+     return false;
+   }
+   const uint64_t epoch = callbacks_.epoch();
+-  if (synced_ && epoch == epoch_) return any_armed_;
++  const uint64_t revision = epoch != 0 && callbacks_.revision != nullptr
++                                ? callbacks_.revision(epoch)
++                                : 0;
++  if (synced_ && epoch == epoch_) {
++    if (revision == revision_) return any_armed_;
++    // The same configuration with other sites armed: its calls in flight
++    // keep their IDs and settle.
++    revision_ = revision;
++    CopySites(isolate, epoch);
++    return any_armed_;
++  }
+   synced_ = true;
+   Reset(epoch);
++  revision_ = revision;
+   if (epoch == 0) return false;
++  digests_ = callbacks_.digests(epoch);
++  CopySites(isolate, epoch);
++  return any_armed_;
++#else
++  // Without continuation-preserved embedder data no continuation can carry an
++  // invocation, so nothing is ever armed.
++  return false;
++#endif
++}
++
++void RebJsInvocation::CopySites(Isolate* isolate, uint64_t epoch) {
++  any_armed_ = false;
++  // Bindings cache masks of the previous sites.
++  binding_count_ = 0;
++  next_binding_ = 0;
+   std::vector<v8::JsInvocationSite> copied(v8::kJsInvocationSiteLimit);
+   size_t count =
+       callbacks_.sites(epoch, copied.data(), v8::kJsInvocationSiteLimit);
+@@ -289,14 +315,7 @@ bool RebJsInvocation::Sync(Isolate* isolate) {
+     any_armed_ = any_armed_ || to.usable;
+   }
+   site_count_ = count;
+-  digests_ = callbacks_.digests(epoch);
+   if (any_armed_) ReportCompiledBeforeArming(isolate);
+-  return any_armed_;
+-#else
+-  // Without continuation-preserved embedder data no continuation can carry an
+-  // invocation, so nothing is ever armed.
+-  return false;
+-#endif
+ }
+ 
+ bool RebJsInvocation::NamesLength(uint32_t length) const {
+@@ -583,7 +602,9 @@ Tagged<Object> RebJsInvocation::Exit(Isolate* isolate,
+ void RebJsInvocation::Watch(Isolate* isolate, DirectHandle<JSPromise> promise,
+                             DirectHandle<NativeContext> context, uint32_t id,
+                             uint32_t slot) {
+-  if (!Sync(isolate) || !IsCurrentId(id)) return;
++  // A current ID settles even when a revision disarmed every site.
++  Sync(isolate);
++  if (!IsCurrentId(id)) return;
+   v8::Isolate* v8_isolate = reinterpret_cast<v8::Isolate*>(isolate);
+   v8::Local<v8::Context> local_context = Utils::ToLocal(context);
+   v8::Local<v8::Value> data = v8::Number::New(
+@@ -640,8 +661,9 @@ void RebJsInvocation::Settle(Isolate* isolate,
+                              v8::JsInvocationSettleVia via,
+                              DirectHandle<Object> value) {
+   // An invocation of an earlier configuration is never reported under the
+-  // current one.
+-  if (!Sync(isolate) || !IsCurrentId(id) || slot >= site_count_) return;
++  // current one. A revision keeps the ID range, and slots only grow.
++  Sync(isolate);
++  if (!IsCurrentId(id) || slot >= site_count_) return;
+   v8::JsInvocationSettle settle = {};
+   settle.slot = slot;
+   settle.invocation_id = id;
+diff --git a/src/interpreter/reb-js-invocation.h b/src/interpreter/reb-js-invocation.h
+index dca369c..e49c11f 100644
+--- a/src/interpreter/reb-js-invocation.h
++++ b/src/interpreter/reb-js-invocation.h
+@@ -59,7 +59,8 @@ class RebJsInvocation final {
+ 
+   // Pulls the embedder epoch. When it changed, refreshes the armed sites,
+   // starts a new ID range and reports sites whose function already had
+-  // bytecode. Returns whether any site is armed.
++  // bytecode. A new revision of the same epoch refreshes the sites and keeps
++  // the ID range. Returns whether any site is armed.
+   bool Sync(Isolate* isolate);
+ 
+   // Whether the function literal starting at |start_position| in |script| is
+@@ -122,6 +123,9 @@ class RebJsInvocation final {
+ 
+   bool Complete() const;
+   void Reset(uint64_t epoch);
++  // Copies the epoch's sites and reports those already compiled unarmed.
++  // Slots keep their sites across revisions, so per-slot reports stay.
++  void CopySites(Isolate* isolate, uint64_t epoch);
+   RebSiteSet BindingMask(Tagged<Script> script);
+   bool SlotFor(Tagged<Script> script, int start_position, uint32_t* slot);
+   bool IsArmedFunction(int script_id, int start_position) const;
+@@ -140,6 +144,7 @@ class RebJsInvocation final {
+   bool any_armed_ = false;
+   bool digests_ = false;
+   uint64_t epoch_ = 0;
++  uint64_t revision_ = 0;
+   std::vector<Site> sites_;
+   size_t site_count_ = 0;
+   // Statuses already reported this configuration, one bit per slot.
+diff --git a/test/cctest/test-api.cc b/test/cctest/test-api.cc
+index 063977c..fed97cc 100644
+--- a/test/cctest/test-api.cc
++++ b/test/cctest/test-api.cc
+@@ -33602,6 +33602,7 @@ namespace {
+ // reports; sites are keyed like dispatch sites.
+ struct RebJsInvocationEmbedder {
+   uint64_t epoch = 0;
++  uint64_t revision = 0;
+   std::vector<v8::JsInvocationSite> sites;
+   bool enabled = true;
+   bool digests = false;
+@@ -33629,6 +33630,12 @@ size_t RebJsInvocationSites(uint64_t epoch, v8::JsInvocationSite* sites,
+   return copied;
+ }
+ 
++uint64_t RebJsInvocationRevision(uint64_t epoch) {
++  RebJsInvocationEmbedder* embedder = reb_js_invocation_embedder;
++  return embedder != nullptr && epoch == embedder->epoch ? embedder->revision
++                                                         : 0;
++}
++
+ bool RebJsInvocationEnabled(uint64_t epoch, uint32_t slot) {
+   RebJsInvocationEmbedder* embedder = reb_js_invocation_embedder;
+   CHECK_LT(slot, v8::kJsInvocationSiteLimit);
+@@ -33721,6 +33728,7 @@ class RebJsInvocationScope final {
+     callbacks.start = &RebJsInvocationStarted;
+     callbacks.settle = &RebJsInvocationSettled;
+     callbacks.status = &RebJsInvocationStatus;
++    callbacks.revision = &RebJsInvocationRevision;
+     isolate_->SetJsInvocationCallbacks(callbacks);
+     for (auto [name, callback] :
+          {std::pair{"observe", &RebJsInvocationObserve},
+@@ -33992,6 +34000,86 @@ TEST(RebNativeJsInvocationInterleavedAsyncCallsKeepTheirIds) {
+   CHECK_EQ(starts[0].invocation_id, settles[1].invocation_id);
+ }
+ 
++// A revision of the same configuration disarms, arms and re-arms sites while
++// a call started under the first revision is still in flight. That call keeps
++// its ID, stays current in its continuation and settles; a slot keeps its
++// site, and a function compiled before its revision armed it is reported.
++TEST(RebNativeJsInvocationRevisionKeepsCallsInFlight) {
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
++  RebJsInvocationScope capture(env);
++  const std::string source =
++      "async function rebAsync(n, gate) { observe(n); await gate; observe(n); "
++      "return n; }"
++      "function rebLater(n) { observe(n); return n; }"
++      "function rebEarly() { return 0; }"
++      "var rebOpen = [], rebGate = new Promise(r => rebOpen.push(r));";
++  const v8::JsInvocationSite async_site =
++      RebInvocationSite(source, RebAnchor(source, "rebAsync(", 8));
++  const v8::JsInvocationSite later_site =
++      RebInvocationSite(source, RebAnchor(source, "rebLater(", 8));
++  const v8::JsInvocationSite early_site =
++      RebInvocationSite(source, RebAnchor(source, "rebEarly(", 8));
++  v8::JsInvocationSite disarmed = async_site;
++  disarmed.source_length = 0;
++  capture.Arm(5, {async_site});
++  CompileRun(source.c_str());
++  CompileRun("rebAsync(1, rebGate); rebEarly();");
++  isolate->PerformMicrotaskCheckpoint();
++  auto& embedder = capture.embedder();
++  CHECK_EQ(1u, embedder.starts.size());
++  const uint32_t first = embedder.starts[0].invocation_id;
++
++  // Revision 1: slot 0 disarmed, rebLater (not compiled yet) and rebEarly
++  // (already compiled) appended.
++  embedder.sites = {disarmed, later_site, early_site};
++  embedder.revision = 1;
++  CompileRun("rebLater(2); rebAsync(3, null);");
++  isolate->PerformMicrotaskCheckpoint();
++  CHECK_EQ(2u, embedder.starts.size());
++  CHECK_EQ(1u, embedder.starts[1].slot);
++  CHECK_GT(embedder.starts[1].invocation_id, first);
++  CHECK_EQ(1u, embedder.statuses.size());
++  CHECK_EQ(2u, embedder.statuses[0].first);
++  CHECK(embedder.statuses[0].second ==
++        v8::JsInvocationSiteStatus::kCompiledBeforeArming);
++
++  // The first call resumes inside its own invocation and settles.
++  CompileRun("rebOpen[0]();");
++  isolate->PerformMicrotaskCheckpoint();
++  bool settled_first = false;
++  for (const auto& settle : embedder.settles) {
++    if (settle.invocation_id != first) continue;
++    CHECK(!settled_first);
++    settled_first = true;
++    CHECK_EQ(0u, settle.slot);
++    CHECK(settle.via == v8::JsInvocationSettleVia::kPromise);
++  }
++  CHECK(settled_first);
++  int inside_first = 0;
++  for (const auto& [tag, context] : embedder.observed) {
++    if (tag == 1) {
++      CHECK(context.state == v8::JsInvocationContextState::kInside);
++      CHECK_EQ(first, context.invocation_id);
++      ++inside_first;
++    } else if (tag == 3) {
++      // Armed bytecode of a disarmed slot records nothing.
++      CHECK(context.state == v8::JsInvocationContextState::kNone);
++    }
++  }
++  CHECK_EQ(2, inside_first);
++
++  // Revision 2 re-arms slot 0: its armed bytecode records again unrecompiled.
++  embedder.sites = {async_site, later_site, early_site};
++  embedder.revision = 2;
++  CompileRun("rebAsync(4, null);");
++  isolate->PerformMicrotaskCheckpoint();
++  CHECK_EQ(3u, embedder.starts.size());
++  CHECK_EQ(0u, embedder.starts[2].slot);
++  CHECK_EQ(1u, embedder.statuses.size());
++}
++
+ TEST(RebNativeJsInvocationPreservesEmbedderData) {
+   LocalContext env;
+   v8::Isolate* isolate = env.isolate();

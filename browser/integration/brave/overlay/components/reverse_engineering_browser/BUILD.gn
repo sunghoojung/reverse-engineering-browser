@@ -1,4 +1,4 @@
-# Copyright (c) 2026 The Brave Authors. All rights reserved.
+# Copyright 2026 The Reverse Engineering Browser Authors
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this file,
 # You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -192,8 +192,8 @@ static_library("renderer") {
     "common/native_wasm_sample_budget.h",
     "renderer/native_console_agent.cc",
     "renderer/native_console_agent.h",
-    "renderer/native_console_deadline.cc",
-    "renderer/native_console_deadline.h",
+    "renderer/native_console_execution.cc",
+    "renderer/native_console_execution.h",
     "renderer/native_console_document_start.cc",
     "renderer/native_console_document_start.h",
     "renderer/native_console_runtime.cc",

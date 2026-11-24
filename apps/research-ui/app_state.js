@@ -35,15 +35,12 @@
         updated_at_ms: 0,
         folders: [{id: 1, name: 'Analyst Workspace', parent_id: null}],
         files: [],
-        limits: {
-          folders: 32,
-          files: 64,
-          folder_depth: 4,
-          variables: 32,
-          variable_value_bytes: 4 * 1024,
-          variable_bytes: 16 * 1024
-        }
+        // The library records no limits: it holds as many folders and files,
+        // as deep and as large, as the researcher makes.
+        limits: {}
       });
+      // Rows a long Analyst list adds each time the researcher asks for more.
+      const ANALYST_LIST_PAGE = 200;
 
       const emptyDecoderEngine = () => ({
         protocol_version: 1,
@@ -58,7 +55,6 @@
           secret_bytes: 4 * 1024,
           json_depth: 64,
           json_tokens: 100000,
-          timeout_ms: 2000,
           operations: [],
           jwt_algorithms: ['HS256', 'HS384', 'HS512', 'none']
         }
@@ -194,6 +190,12 @@
         vmHostLinksStatus: 'loading',
         vmHostLinksGeneration: 0,
         vmStealthSession: false,
+        // capture_options.wasm_sampling from the session context (app.js):
+        // null until that read answers, and for a session without Wasm streams.
+        vmWasmSampling: null,
+        vmWasmSamplingRead: null,
+        // The last reset_wasm_sample_budgets answer: pending, done or failed.
+        vmWasmSamplingReset: null,
         deobfuscationCache: new Map(),
         deobfuscationRequests: new Map(),
         deobfuscationAssumeIntrinsics: false,
@@ -255,7 +257,11 @@
         analystCancelRunId: null,
         analystNextRunId: 1,
         analystRunStartedAt: null,
-        analystHistoryEvictions: 0,
+        // Rows shown in each folder of the tree, run history rows and log rows of
+        // the selected result; each list shows more on request, never less.
+        analystFolderRowsShown: new Map(),
+        analystHistoryShown: ANALYST_LIST_PAGE,
+        analystLogsShown: ANALYST_LIST_PAGE,
         analystRuns: [],
         analystSelectedRunId: null,
         decoderEngine: emptyDecoderEngine(),
@@ -448,6 +454,10 @@
         quickOpenResults: document.querySelector('#quick-open-results'),
         vmNotice: document.querySelector('#vm-notice'),
         vmSessionStatus: document.querySelector('#vm-session-status'),
+        vmWasmSampling: document.querySelector('#vm-wasm-sampling'),
+        vmWasmSamplingPolicy: document.querySelector('#vm-wasm-sampling-policy'),
+        vmWasmSamplingStatus: document.querySelector('#vm-wasm-sampling-status'),
+        vmWasmSamplingReset: document.querySelector('#vm-wasm-sampling-reset'),
         vmCount: document.querySelector('#vm-count'),
         vmList: document.querySelector('#vm-list'),
         vmDetail: document.querySelector('#vm-detail'),
@@ -460,7 +470,9 @@
         notice: document.querySelector('#analyst-notice'),
         fileCount: document.querySelector('#analyst-file-count'),
         folderUsage: document.querySelector('#analyst-folder-usage'),
+        fileUsage: document.querySelector('#analyst-file-usage'),
         contentUsage: document.querySelector('#analyst-content-usage'),
+        depthUsage: document.querySelector('#analyst-depth-usage'),
         newFolder: document.querySelector('#analyst-new-folder'),
         newScript: document.querySelector('#analyst-new-script'),
         newNote: document.querySelector('#analyst-new-note'),
@@ -498,6 +510,7 @@
         run: document.querySelector('#analyst-run'),
         cancel: document.querySelector('#analyst-cancel'),
         clearHistory: document.querySelector('#analyst-clear-history'),
+        historyMore: document.querySelector('#analyst-history-more'),
         snapshotBadge: document.querySelector('#analyst-snapshot-badge'),
         historyBadge: document.querySelector('#analyst-history-badge'),
         history: document.querySelector('#analyst-history'),

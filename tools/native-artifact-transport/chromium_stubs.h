@@ -10,10 +10,12 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <compare>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <iterator>
@@ -103,6 +105,7 @@ constexpr TimeDelta Milliseconds(std::int64_t value) {
 
 class TimeTicks {
  public:
+  TimeTicks() = default;
   static TimeTicks Now() {
     return TimeTicks(std::chrono::duration_cast<std::chrono::nanoseconds>(
                          std::chrono::steady_clock::now().time_since_epoch())
@@ -113,6 +116,7 @@ class TimeTicks {
     return TimeTicks(ns_ + delta.InNanoseconds());
   }
   TimeDelta operator-(const TimeTicks other) const { return TimeDelta(ns_ - other.ns_); }
+  auto operator<=>(const TimeTicks&) const = default;
 
  private:
   explicit TimeTicks(std::int64_t ns) : ns_(ns) {}
@@ -129,6 +133,7 @@ struct TestThreadId {
 };
 struct PlatformThread {
   static TestThreadId CurrentId() { return {}; }
+  static void YieldCurrentThread() { std::this_thread::yield(); }
 };
 
 class FilePath {
@@ -146,6 +151,22 @@ class FilePath {
 };
 inline FilePath MakeAbsoluteFilePath(const FilePath& path) {
   return path;
+}
+// Chromium's contract: false for an unreadable file or one over max_size.
+inline bool ReadFileToStringWithMaxSize(const FilePath& path,
+                                        std::string* contents,
+                                        std::size_t max_size) {
+  std::ifstream file(path.value(), std::ios::binary);
+  if (!file)
+    return false;
+  std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+  if (text.size() > max_size)
+    return false;
+  *contents = std::move(text);
+  return true;
+}
+inline bool ReadFileToString(const FilePath& path, std::string* contents) {
+  return ReadFileToStringWithMaxSize(path, contents, std::string::npos);
 }
 
 inline bool StringToUint64(std::string_view text, std::uint64_t* value) {
@@ -413,6 +434,8 @@ class NativeProbeSession {
     return true;
   }
   void ResetWasmSampleBudgets() noexcept {}
+  // Each site file revision the writer read, on the browser sequence.
+  void UpdateJsInvocationSites(const std::string& json) { site_revisions.push_back(json); }
   void StopSession() noexcept {
     downstream_.store(nullptr);
     session_id_ = 0;
@@ -434,6 +457,7 @@ class NativeProbeSession {
 
   bool start_result = true;
   int start_calls = 0;
+  std::vector<std::string> site_revisions;
   std::atomic<int> stop_calls{0};
   // Far above any renderer sequence used by the tests, so attribution shows.
   static constexpr std::uint64_t kFirstBrowserSequence = 1'000'000;

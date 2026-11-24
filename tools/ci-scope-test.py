@@ -35,6 +35,7 @@ class CiScope(unittest.TestCase):
 
     def test_documentation_only(self):
         self.assertEqual(self.mode("README.md"), "docs")
+        self.assertEqual(self.mode("AUTHORS"), "docs")
         self.assertEqual(self.mode("AGENTS.md", "docs/architecture/technical-architecture.md"), "docs")
         self.assertEqual(self.mode(".agents/skills/reb-validation/SKILL.md"), "docs")
         self.assertEqual(self.mode("apps/research-ui/README.md"), "docs")

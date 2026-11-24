@@ -39,12 +39,17 @@ filtered rows, original-byte ranges and explicit unknown coverage.
 layout that changes only whitespace, its fidelity checks and limits.
 
 [Native Console v2](native-console-v2.md) defines the opt-in mutable console,
-its disposable browser ownership, wire layouts, and limits.
+its disposable browser ownership and live binding.
 
 [Native Console v3](native-console-v3.md) adds the separately armed
 document-start script experiment: exact origin and frame-kind rules, main-world
-injection before a new document's own scripts, and bounded page-JavaScript
-output that never becomes evidence.
+injection before a new document's own scripts, and page-JavaScript output that
+never becomes evidence.
+
+[Native Console v4](native-console-v4.md) carries every Console source, value,
+message, listing, document-start record and transcript entry whole, pages
+drained reads, ends the connection's lifetime, and lists the bounds that
+remain.
 
 [Native debugger pause v1](native-debugger-pause-v1.md) defines the pausing
 debugger: its command socket, the one confirmed document, breakpoints,

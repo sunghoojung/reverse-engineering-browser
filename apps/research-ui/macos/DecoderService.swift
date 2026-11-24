@@ -12,7 +12,6 @@ final class NativeDecoderService {
   private static let outputBytes = 1 << 20
   private static let jwtBytes = 64 << 10
   private static let secretBytes = 4 << 10
-  private static let timeoutSeconds = 2.0
   private static let operations = [
     "base64-encode", "base64-decode", "base64url-encode", "base64url-decode",
     "hex-encode", "hex-decode", "url-encode", "url-decode", "base36-encode",
@@ -30,20 +29,31 @@ final class NativeDecoderService {
   private static let algorithms = ["HS256", "HS384", "HS512", "none"]
 
   private let executableURL: URL
-  private let lock = NSLock()
+  // One decoder runs at a time. A request waits its turn on this serial
+  // queue as a work item, not as a blocked thread, so a long queue cannot
+  // take the threads that read the running decoder's output. The decoder's
+  // own CPU-time limit stops runaway work; a wall-clock deadline would only
+  // refuse it on a busy machine. The page's request going away cancels it,
+  // waiting or running.
+  private let queue = DispatchQueue(label: "origin-trace.native-decoder", qos: .userInitiated)
+  private let requestsLock = NSLock()
+  private var requests = Set<ObjectIdentifier>()
+  private var cancelled = Set<ObjectIdentifier>()
+  private var running: (task: ObjectIdentifier, process: Process)?
 
   init(executableURL: URL) {
     self.executableURL = executableURL
   }
 
   func state() throws -> Data {
-    let idle = lock.try()
-    if idle { lock.unlock() }
+    requestsLock.lock()
+    let busy = !requests.isEmpty
+    requestsLock.unlock()
     return try JSONSerialization.data(
       withJSONObject: [
         "protocol_version": 1,
         "available": available,
-        "busy": !idle,
+        "busy": busy,
         "limits": Self.limits,
       ]
     )
@@ -53,21 +63,53 @@ final class NativeDecoderService {
     FileManager.default.isExecutableFile(atPath: executableURL.path)
   }
 
-  func action(_ request: [String: Any]) throws -> Data {
+  /// Answers one request after those before it, calling `completion` on the
+  /// decoder's queue.
+  func action(
+    _ request: [String: Any],
+    task: ObjectIdentifier,
+    completion: @escaping (Result<Data, Error>) -> Void
+  ) {
+    requestsLock.lock()
+    requests.insert(task)
+    requestsLock.unlock()
+    queue.async {
+      let result = Result { try self.perform(request, task: task) }
+      self.requestsLock.lock()
+      self.requests.remove(task)
+      self.cancelled.remove(task)
+      self.requestsLock.unlock()
+      completion(result)
+    }
+  }
+
+  private func perform(_ request: [String: Any], task: ObjectIdentifier) throws -> Data {
     guard integer(request["protocol_version"]) == 1, let action = request["action"] as? String else {
       throw NativeDecoderError(status: 400, message: "Decoder protocol version is unsupported")
     }
     switch action {
       case "transform":
-        return try transform(request)
+        return try transform(request, task: task)
       case "jwt_inspect":
-        return try inspectJWT(request)
+        return try inspectJWT(request, task: task)
       case "jwt_verify":
-        return try verifyJWT(request)
+        return try verifyJWT(request, task: task)
       case "jwt_create":
-        return try createJWT(request)
+        return try createJWT(request, task: task)
       default:
         throw NativeDecoderError(status: 400, message: "Decoder action is unsupported")
+    }
+  }
+
+  /// Called when WebKit stops a request: a waiting one never starts, and a
+  /// running one's decoder is stopped.
+  func cancel(_ task: ObjectIdentifier) {
+    requestsLock.lock()
+    defer { requestsLock.unlock() }
+    guard requests.contains(task) else { return }
+    cancelled.insert(task)
+    if let running, running.task == task {
+      running.process.terminate()
     }
   }
 
@@ -81,13 +123,12 @@ final class NativeDecoderService {
       "secret_bytes": secretBytes,
       "json_depth": 64,
       "json_tokens": 100_000,
-      "timeout_ms": 2_000,
       "operations": operations,
       "jwt_algorithms": algorithms,
     ]
   }
 
-  private func transform(_ request: [String: Any]) throws -> Data {
+  private func transform(_ request: [String: Any], task: ObjectIdentifier) throws -> Data {
     guard exactKeys(
       request,
       ["protocol_version", "action", "operation_id", "operation", "input_base64"]
@@ -97,7 +138,7 @@ final class NativeDecoderService {
     else {
       throw NativeDecoderError(status: 400, message: "Decoder transform shape is invalid")
     }
-    let result = try run(arguments: ["transform", operation], input: input)
+    let result = try run(arguments: ["transform", operation], input: input, task: task)
     guard result.status == 0 else {
       let error = boundedUTF8(result.error, maximumBytes: 4_096)
       throw NativeDecoderError(
@@ -126,19 +167,19 @@ final class NativeDecoderService {
     )
   }
 
-  private func inspectJWT(_ request: [String: Any]) throws -> Data {
+  private func inspectJWT(_ request: [String: Any], task: ObjectIdentifier) throws -> Data {
     guard exactKeys(request, ["protocol_version", "action", "token"]),
       let token = boundedText(request["token"], maximumBytes: Self.jwtBytes)
     else {
       throw NativeDecoderError(status: 400, message: "JWT inspection shape is invalid")
     }
     return try jwtResponse(
-      run(arguments: ["jwt-inspect"], input: Data(token.utf8)),
+      run(arguments: ["jwt-inspect"], input: Data(token.utf8), task: task),
       creation: false
     )
   }
 
-  private func verifyJWT(_ request: [String: Any]) throws -> Data {
+  private func verifyJWT(_ request: [String: Any], task: ObjectIdentifier) throws -> Data {
     guard exactKeys(request, ["protocol_version", "action", "token", "secret"]),
       let token = boundedText(request["token"], maximumBytes: Self.jwtBytes),
       let secret = boundedText(request["secret"], maximumBytes: Self.secretBytes),
@@ -149,13 +190,14 @@ final class NativeDecoderService {
     return try jwtResponse(
       run(
         arguments: ["jwt-verify"],
-        input: frame([Data(token.utf8), Data(secret.utf8)])
+        input: frame([Data(token.utf8), Data(secret.utf8)]),
+        task: task
       ),
       creation: false
     )
   }
 
-  private func createJWT(_ request: [String: Any]) throws -> Data {
+  private func createJWT(_ request: [String: Any], task: ObjectIdentifier) throws -> Data {
     guard exactKeys(
       request,
       [
@@ -194,7 +236,8 @@ final class NativeDecoderService {
     return try jwtResponse(
       run(
         arguments: ["jwt-create", algorithm, expiration],
-        input: frame([Data(payload.utf8), Data(secret.utf8)])
+        input: frame([Data(payload.utf8), Data(secret.utf8)]),
+        task: task
       ),
       creation: true
     )
@@ -228,14 +271,15 @@ final class NativeDecoderService {
     let durationMicroseconds: Int
   }
 
-  private func run(arguments: [String], input: Data) throws -> ProcessResult {
+  private func run(arguments: [String], input: Data, task: ObjectIdentifier) throws -> ProcessResult {
     guard available else {
       throw NativeDecoderError(status: 503, message: "The packaged native decoder is unavailable")
     }
-    guard lock.lock(before: Date().addingTimeInterval(Self.timeoutSeconds)) else {
-      throw NativeDecoderError(status: 408, message: "The packaged native decoder is busy")
-    }
-    defer { lock.unlock() }
+    let cancelledError = NativeDecoderError(status: 499, message: "Decoder operation cancelled")
+    requestsLock.lock()
+    let waitedOut = cancelled.contains(task)
+    requestsLock.unlock()
+    if waitedOut { throw cancelledError }
     let process = Process()
     process.executableURL = executableURL
     process.arguments = arguments
@@ -253,6 +297,15 @@ final class NativeDecoderService {
     } catch {
       throw NativeDecoderError(status: 500, message: "Could not start the packaged native decoder")
     }
+    // A process can be terminated only once it runs, so a cancellation that
+    // arrived while it started stops it here.
+    requestsLock.lock()
+    if cancelled.contains(task) {
+      process.terminate()
+    } else {
+      running = (task, process)
+    }
+    requestsLock.unlock()
     let outputGroup = DispatchGroup()
     let outputLock = NSLock()
     var output = Data()
@@ -274,19 +327,31 @@ final class NativeDecoderService {
       outputGroup.leave()
     }
     let started = DispatchTime.now().uptimeNanoseconds
-    inputPipe.fileHandleForWriting.write(input)
-    try? inputPipe.fileHandleForWriting.close()
-    let timedOut = terminated.wait(timeout: .now() + Self.timeoutSeconds) == .timedOut
-    if timedOut {
-      process.terminate()
-      if terminated.wait(timeout: .now() + 0.25) == .timedOut {
-        kill(process.processIdentifier, SIGKILL)
-        _ = terminated.wait(timeout: .now() + 0.25)
-      }
+    // The input is written apart from this wait, so a decoder that never
+    // reads it can still be cancelled. A write after the decoder ended fails
+    // with EPIPE instead of signalling this app.
+    let writer = inputPipe.fileHandleForWriting
+    _ = fcntl(writer.fileDescriptor, F_SETNOSIGPIPE, 1)
+    DispatchQueue.global(qos: .userInitiated).async {
+      try? writer.write(contentsOf: input)
+      try? writer.close()
     }
+    terminated.wait()
     outputGroup.wait()
-    if timedOut {
-      throw NativeDecoderError(status: 408, message: "Decoder operation exceeded two seconds")
+    requestsLock.lock()
+    running = nil
+    let stopped = cancelled.contains(task)
+    requestsLock.unlock()
+    if stopped { throw cancelledError }
+    // The decoder limits its own CPU time, and the kernel ends it with
+    // SIGXCPU when an input needs more.
+    if process.terminationReason == .uncaughtSignal {
+      throw NativeDecoderError(
+        status: 422,
+        message: process.terminationStatus == SIGXCPU
+          ? "The native decoder reached its two-second CPU-time limit"
+          : "The native decoder stopped on signal \(process.terminationStatus)"
+      )
     }
     let elapsed = DispatchTime.now().uptimeNanoseconds - started
     return ProcessResult(

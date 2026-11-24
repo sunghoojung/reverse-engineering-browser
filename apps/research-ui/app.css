@@ -1199,7 +1199,9 @@ var(--panel);
         top: calc(var(--source-row, 0) * 24px);
         height: 24px;
         display: grid;
-        grid-template-columns: 12px 16px minmax(0, 1fr) auto;
+        /* The name takes its width first and the meta column what is left,
+           so a 20-digit artifact ID never squeezes the name it labels. */
+        grid-template-columns: 12px 16px minmax(0, max-content) minmax(0, 1fr);
         align-items: center;
         gap: 4px;
         padding: 0 8px 0 calc(4px + var(--source-depth, 0) * 10px);
@@ -1214,7 +1216,11 @@ var(--panel);
       .source-tree-row[aria-selected="true"] { background: var(--accent-soft); color: var(--text); }
       .source-tree-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .source-tree-suffix { flex: 0 4 auto; min-width: 0; overflow: hidden; color: var(--faint); font: 10px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
-      .source-tree-meta { color: var(--faint); font: 10px var(--mono); font-variant-numeric: tabular-nums; }
+      /* A meta that does not fit loses its leading digits, since IDs that sit
+         together differ at the end; the row's title and label keep it whole.
+         Right to left only moves the clipped edge: digits still read left to
+         right. */
+      .source-tree-meta { min-width: 0; overflow: hidden; color: var(--faint); font: 10px var(--mono); font-variant-numeric: tabular-nums; text-align: right; text-overflow: ellipsis; white-space: nowrap; direction: rtl; }
       .source-tree-twisty { width: 12px; height: 12px; background: var(--faint); -webkit-mask: var(--source-twisty) center / 12px 12px no-repeat; mask: var(--source-twisty) center / 12px 12px no-repeat; }
       .source-tree-row[aria-expanded="true"] > .source-tree-twisty { transform: rotate(90deg); }
       .source-tree-row[data-source-tree-kind="file"] > .source-tree-twisty { visibility: hidden; }
@@ -1568,6 +1574,7 @@ var(--panel);
       .native-console-empty { margin: 0; padding: 12px 10px; color: var(--faint); font: 11px/1.6 var(--sans); }
       .native-console-result { position: relative; padding: 6px 10px; border-bottom: 1px solid var(--line-soft); }
       .native-console-result pre { margin: 0; font: 12px/18px var(--code-font); white-space: pre-wrap; overflow-wrap: anywhere; }
+      .native-console-word { word-break: break-all; }
       .native-console-expression { padding-left: 16px; padding-right: 60px; text-indent: -16px; color: var(--muted); }
       .native-console-value { position: relative; padding-left: 16px; color: var(--text); }
       .native-console-value::before { content: '←'; position: absolute; left: 0; color: var(--faint); font-size: 10px; }
@@ -1732,7 +1739,10 @@ var(--panel);
       .analyst-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
       .analyst-actions button { min-height: 28px; padding: 4px 8px; }
       .analyst-tree { display: grid; padding: 4px 0; }
-      .analyst-tree-row { width: 100%; min-height: 35px; display: grid; grid-template-columns: 17px minmax(0, 1fr) auto; gap: 4px; align-items: center; padding: 6px 8px 6px calc(8px + var(--analyst-depth, 0) * 12px); border: 0; background: transparent; color: var(--text); text-align: left; }
+      .analyst-tree-row { width: 100%; min-height: 35px; display: grid; grid-template-columns: 17px minmax(0, 1fr) auto; gap: 4px; align-items: center; padding: 6px 8px 6px calc(8px + min(var(--analyst-depth, 0), 8) * 12px); border: 0; background: transparent; color: var(--text); text-align: left; }
+      /* Past eight levels the indent stays put so a deep folder keeps room for
+         its name; aria-level still gives its depth. */
+      .analyst-tree-more .analyst-tree-name { color: var(--accent); }
       .analyst-tree-row:hover, .analyst-tree-row:focus { background: var(--panel-3); }
       .analyst-tree-row[aria-selected="true"] { background: var(--accent-soft); box-shadow: inset 3px 0 var(--accent); }
       .analyst-tree-glyph { color: var(--faint); font: 11px var(--mono); text-align: center; }
@@ -1785,6 +1795,10 @@ var(--panel);
       .analyst-history-row strong { color: var(--green); font: 10px var(--mono); text-transform: none; }
       .analyst-history-row strong[data-kind="error"] { color: var(--red); }
       .analyst-history-row small { grid-column: 1 / -1; color: var(--faint); font: 10px var(--mono); }
+      .analyst-history-more { padding: 8px 10px; border-top: 1px solid var(--line-soft); }
+      .analyst-history-more:empty { display: none; }
+      .analyst-show-more { width: 100%; min-height: 28px; padding: 4px 8px; font: 10px/1.45 var(--mono); }
+      .analyst-result-code { max-height: 220px; padding: 8px; overflow: auto; border: 1px solid var(--line-soft); border-radius: 4px; }
       .analyst-result { display: grid; gap: 8px; min-height: 150px; padding: 10px; }
       .analyst-result pre { max-height: 220px; margin: 0; padding: 8px; overflow: auto; border: 1px solid var(--line-soft); background: var(--panel); color: var(--muted); font: 10px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
       .analyst-log-list { display: grid; gap: 4px; }
@@ -2543,8 +2557,8 @@ var(--panel);
       .traffic-payload-note { margin: 0 0 8px; color: var(--muted); font: 12px/1.5 var(--sans); }
       .traffic-payload-view { max-height: max(160px, 55vh); padding: 4px 0; overflow: auto; border: 1px solid var(--line); border-radius: 4px; }
       /* Captured code reads on the Sources editor surface its syntax colors are tuned for. */
-      .traffic-response-code, .traffic-payload-view { background: var(--code-bg); color: var(--code-text); font: 12px/18px var(--code-font); }
-      :is(.traffic-response-code, .traffic-payload-view) ::selection { background: var(--code-selection); }
+      .traffic-response-code, .traffic-payload-view, .analyst-result-code, .code-view.vm-pack-output, .code-view.vm-pack-row-json { background: var(--code-bg); color: var(--code-text); font: 12px/18px var(--code-font); }
+      :is(.traffic-response-code, .traffic-payload-view, .analyst-result-code, .vm-pack-output, .vm-pack-row-json) ::selection { background: var(--code-selection); }
       .traffic-payload-view:focus-visible, .traffic-payload-view [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
       .traffic-payload-line { padding: 0 8px; }
       .code-view-mark { border-radius: 2px; background: color-mix(in srgb, var(--amber) 30%, transparent); color: inherit; }
@@ -2793,7 +2807,8 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .native-console-ds .native-console-setting select { height: 24px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--text); font: 11px var(--sans); }
 .native-console-ds .native-console-setting input[type="checkbox"] { width: auto; }
 .native-console-ds-armed { margin: 6px 0 0; padding: 0; list-style: none; }
-.native-console-ds-armed li { color: var(--muted); font: 10px/16px var(--mono); overflow-wrap: anywhere; }
+.native-console-ds-armed li { display: flex; gap: 6px; align-items: flex-start; margin-top: 4px; color: var(--muted); font: 10px/16px var(--mono); overflow-wrap: anywhere; }
+.native-console-ds-armed li > span { flex: 1; min-width: 0; }
 #native-console-ds-state, #native-console-ds-counters, #native-console-ds-privacy, #native-console-ds-rule-help { margin: 6px 0 0; color: var(--faint); font: 10px/16px var(--sans); overflow-wrap: anywhere; }
 .native-console-ds-record { border-left: 2px solid color-mix(in srgb, var(--amber) 55%, transparent); }
 .native-console-ds-record[data-record="script_error"] { border-left-color: var(--red); }
@@ -2906,7 +2921,8 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .native-console-input { display: block; padding: 4px 10px 4px; background: var(--chrome); border-top: 1px solid var(--line); }
 .native-console-input:focus-within { box-shadow: inset 2px 0 var(--accent); }
 .native-console-composer-line { display: flex; align-items: flex-start; gap: 6px; }
-#native-console-run { min-width: 52px; margin: 0 0 0 6px; }
+#native-console-run, #native-console-interrupt { min-width: 52px; margin: 0 0 0 6px; }
+#native-console-interrupt:not(:disabled) { border-color: color-mix(in srgb, var(--red) 45%, transparent); color: var(--red); }
 .native-console-composer-footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 2px 14px; color: var(--faint); font: 10px/16px var(--sans); }
 #native-console-composer-status { color: var(--muted); overflow-wrap: anywhere; }
 #native-console-input-help { position: static; width: auto; height: auto; white-space: normal; clip-path: none; }
@@ -3895,7 +3911,9 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .vm-experiment-form input, .vm-experiment-form select { box-sizing: border-box; max-width: 100%; }
 
 /* Bounded inert pack output; long source identities never widen the workspace. */
-.vm-pack-output { max-height: 28rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Code views scroll in their own box, which is what mounts their rows. */
+.vm-pack-output, .code-view.vm-pack-row-json { max-height: 28rem; padding: 8px; overflow: auto; border: 1px solid var(--line-soft); border-radius: 4px; }
+.code-view.vm-pack-row-json { max-height: 20rem; }
 .vm-pack-inputs label { display: grid; gap: 0.35rem; min-width: 0; max-width: 100%; }
 .vm-pack-inputs input { max-width: 100%; min-width: 0; }
 
@@ -3940,12 +3958,25 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #screen-vm .vm-session-status { grid-column: 3; grid-row: 1; justify-self: end; padding: 0; min-width: 0; }
 #screen-vm .vm-session-copy { display: none; }
 #screen-vm .vm-session-chip { padding: 3px 6px; font-size: 10px; letter-spacing: 0; }
-#vm-findings-workspace:not([hidden]) { display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; overflow: hidden; }
+#vm-findings-workspace:not([hidden]) { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; overflow: hidden; }
 #vm-findings-workspace > .vm-notice { margin: 0; padding: 4px 12px; font-size: 10px; max-height: 48px; overflow: auto; border-bottom: 1px solid var(--line); }
 #vm-findings-workspace > .vm-grid { height: auto; min-height: 0; max-height: none; grid-template-columns: 210px minmax(0, 1fr); }
 #vm-findings-workspace > .vm-notice { grid-row: 1; }
-#vm-findings-workspace > .vm-grid { grid-row: 2; }
-#vm-findings-workspace > .vm-program-example { grid-row: 3; }
+#vm-findings-workspace > .vm-wasm-sampling { grid-row: 2; }
+#vm-findings-workspace > .vm-grid { grid-row: 3; }
+#vm-findings-workspace > .vm-program-example { grid-row: 4; }
+/* The Wasm sample policy this session runs with, beside its window reset.
+   Reset keeps its place at the end of the first line in every state, and a
+   reset's answer goes under the policy. */
+.vm-wasm-sampling { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px 12px; padding: 4px 12px; border-bottom: 1px solid var(--line); background: var(--chrome); color: var(--muted); font-size: 10px; line-height: 1.4; }
+.vm-wasm-sampling-policy { grid-column: 1; grid-row: 1; min-width: 0; }
+.vm-wasm-sampling-part { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
+.vm-wasm-sampling-status { grid-column: 1; grid-row: 2; min-width: 0; overflow-wrap: anywhere; }
+.vm-wasm-sampling-status:empty { display: none; }
+.vm-wasm-sampling-status[data-kind="failed"] { color: var(--red); }
+.vm-wasm-sampling-status[data-kind="done"] { color: var(--text); }
+.vm-wasm-sampling > .secondary-button { grid-column: 2; grid-row: 1; min-height: 22px; padding: 0 8px; font-size: 10px; white-space: nowrap; }
+.vm-wasm-sampling > .secondary-button[aria-disabled="true"] { cursor: progress; opacity: .45; }
 #vm-analysis-toggle { display: none; }
 #screen-vm .vm-list-pane { background: var(--chrome); }
 #screen-vm .vm-list-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 12px; font: 600 10px var(--sans); text-transform: none; letter-spacing: 0; color: var(--muted); }
@@ -4042,10 +4073,10 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 @media (max-width: 900px), (max-height: 650px) {
   /* A short workbench shows either the analysis or the dock. The complete
      disclosure header stays outside both scrollers, never a sliver of text. */
-  #vm-findings-workspace:not([hidden]) { grid-template-rows: auto auto minmax(0, 1fr) auto; }
-  #vm-findings-workspace > #vm-analysis-toggle { grid-row: 2; }
-  #vm-findings-workspace > .vm-grid { grid-row: 3; }
-  #vm-findings-workspace > .vm-program-example { grid-row: 4; }
+  #vm-findings-workspace:not([hidden]) { grid-template-rows: auto auto auto minmax(0, 1fr) auto; }
+  #vm-findings-workspace > #vm-analysis-toggle { grid-row: 3; }
+  #vm-findings-workspace > .vm-grid { grid-row: 4; }
+  #vm-findings-workspace > .vm-program-example { grid-row: 5; }
   #vm-findings-workspace:has(.vm-workbench-inspector) > #vm-analysis-toggle { display: flex; align-items: center; gap: 6px; min-height: 30px; padding: 4px 10px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: var(--chrome); color: var(--text); font: 600 11px/20px var(--sans); text-align: left; }
   #vm-analysis-toggle::before { content: '▸'; }
   #vm-analysis-toggle[aria-expanded="true"]::before { content: '▾'; }
@@ -4824,7 +4855,9 @@ input[type="file"]:hover::file-selector-button { background: var(--panel-3); }
 #screen-vm .vm-tool-shell .vm-review-inspector h3 { margin: 8px 0 4px; font-size: 13px; }
 #vm-ledger-workspace .vm-review-inspector > .vm-tool-subtitle { margin: 0 0 8px; }
 #vm-packs-workspace .vm-review-detail > h4, #vm-ledger-workspace .vm-review-field > h4 { margin: 12px 0 4px; color: var(--muted); font-size: 11px; font-weight: 400; }
-#vm-packs-workspace .vm-review-detail > h4 + p, #vm-ledger-workspace .vm-review-field > p { margin: 0; color: var(--text); font: 12px/1.5 var(--mono); }
+#vm-packs-workspace .vm-review-detail > h4 + p, #vm-ledger-workspace .vm-review-field > p { margin: 0; color: var(--text); font: 12px/1.5 var(--mono); overflow-wrap: anywhere; }
+/* A cell shows the start of a long value; the inspector shows all of it. */
+#vm-packs-workspace .vm-pack-cell { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 #vm-ledger-workspace .vm-review-inspector section > h4 { margin: 16px 0 4px; font-size: 12px; font-weight: 500; }
 #vm-ledger-workspace [data-ledger-editor] > label { display: block; margin-top: 8px; color: var(--muted); font-size: 11px; }
 
@@ -5333,7 +5366,7 @@ details.decoder-card > header p { margin-top: 0; }
 #screen-vm .vm-selection-inspector .evidence-name-editor { padding: 8px 10px; }
 
 /* Saved JavaScript invocation sites. The header chip names what this capture
-   tracks; the Sources pane saves functions for the next capture. Context lines
+   tracks; the Sources pane saves the functions captures track. Context lines
    are captured text and wrap rather than widen the sidebar. */
 .session-tracking {
   min-width: 0; max-width: min(46vw, 420px); min-height: 20px; padding: 0 8px; overflow: hidden;

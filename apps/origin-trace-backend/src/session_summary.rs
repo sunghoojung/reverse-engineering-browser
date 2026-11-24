@@ -692,10 +692,22 @@ fn failure_meaning(reason: &str) -> Option<&'static str> {
             "storing them would have left less free disk than the artifact receiver's reserve (4 GiB by default). Free space on the store's volume: later artifacts are kept again once there is room"
         }
         "compiled_script_source_backlog" => {
-            "a renderer was still waiting for the browser to copy out 256 MiB of earlier script sources and Wasm modules; each such script_compiled record keeps its source length and digest"
+            "a renderer was still waiting for the browser to copy out 256 MiB of earlier script sources, Wasm modules, buffers and canvas images; each such script_compiled record keeps its source length and digest"
+        }
+        "stack_script_source_backlog" => {
+            "a renderer was still waiting for the browser to copy out 256 MiB of earlier script sources, Wasm modules, buffers and canvas images; each such script_identity record keeps its source length and digest, and its frames report source_backlog"
         }
         "wasm_module_backlog" => {
-            "a renderer was still waiting for the browser to copy out 256 MiB of earlier script sources and Wasm modules; the module's compile record keeps its length and digest"
+            "a renderer was still waiting for the browser to copy out 256 MiB of earlier script sources, Wasm modules, buffers and canvas images; the module's compile record keeps its length and digest"
+        }
+        "runtime_typed_array_backlog" => {
+            "a renderer was still waiting for the browser to copy out 256 MiB of earlier script sources, Wasm modules, buffers and canvas images, so a typed array was not copied"
+        }
+        "canvas_data_url_backlog" => {
+            "a renderer was still waiting for the browser to copy out 256 MiB of earlier script sources, Wasm modules, buffers and canvas images; the canvas.toDataURL call is recorded without its image"
+        }
+        "generated_artifact_backlog" => {
+            "a renderer was still waiting for the browser to copy out 256 MiB of earlier script sources, Wasm modules, buffers and canvas images, so a generated artifact was not sent"
         }
         "compiled_script_source_budget" | "compiled_script_source_too_large" => {
             "a source budget or size limit of the browser that recorded this session. Current capture keeps every source whole"
@@ -723,10 +735,10 @@ fn content_meaning(category: &str, reason: &str, count: u64) -> String {
     );
     let why = match reason {
         "not_captured_block_limit" if category == "cookie_list" => {
-            "were longer than the 2 MiB list limit, so only their counts and size are recorded"
+            "were longer than a cookie list record can describe (4 GiB), or than the 2 MiB list limit of the browser that recorded this session, so only their counts and size are recorded"
         }
         "not_captured_block_limit" => {
-            "were longer than the 320 KiB block limit, so only their header count and size are recorded"
+            "were longer than a header record can describe (4 GiB), or than the 320 KiB block limit of the browser that recorded this session, so only their header count and size are recorded"
         }
         "not_captured_session_budget" if headers => {
             "arrived after their configuration retained 64 MiB of header blocks and cookie lists, a limit of the browser that recorded this session. Current capture has none"
@@ -738,7 +750,7 @@ fn content_meaning(category: &str, reason: &str, count: u64) -> String {
             "were refused because storing them would have left less free disk than the artifact receiver's reserve (4 GiB by default). Free space on the store's volume: later content is kept again once there is room"
         }
         "not_captured_url" if headers => {
-            "had no HTTP(S) URL, a URL longer than 8 KiB, or a hop the capture no longer tracked"
+            "had no HTTP(S) URL or a hop the capture no longer tracked, or, from a browser older than this one, a URL longer than 8 KiB"
         }
         "captured_truncated" => {
             "were longer than 16 MiB, so only their first 16 MiB is retained, a limit of the browser that recorded this session. Current capture keeps every body whole"
@@ -858,6 +870,10 @@ fn check(code: &str, severity: &str, message: impl Into<String>) -> Value {
 fn gap_meaning(reason: &str) -> &'static str {
     if reason == "service_worker_page_decision_unshared" {
         "A service-worker request's class 68 answer was evicted before its other half asked, so that half decided alone: the request may have one half recorded without the other, as a row without a tab, or one half left out. The count is the evicted answers (protocol/native-network-v3.md)."
+    } else if reason == "native_js_invocation_ids_exhausted" {
+        "V8 used every invocation ID of this renderer process, so its later calls of tracked functions were not recorded. A new session starts new renderer processes."
+    } else if reason == "native_js_dispatch_ids_exhausted" {
+        "V8 used every dispatch activation ID of this renderer process, so later activations of armed dispatch sites were not recorded. A new session starts new renderer processes."
     } else if reason.contains("filtered") {
         "A sample policy excluded these observations before a sample slot was taken. Retained observations are unchanged."
     } else if reason.contains("limit_or_invalid") || reason.contains("module_invalid") {
@@ -1139,6 +1155,7 @@ pub fn build(
             Position {
                 epoch: String::new(),
                 indexed_to: 0,
+                scanned_to: 0,
                 file_end: 0,
                 reopened: false,
             },
@@ -1364,7 +1381,7 @@ pub fn build(
             "memory_cache_reuse_not_recorded",
             "info",
             format!(
-                "{reuses} memory-cache reuses were counted, not recorded: each renderer records at most 4,096 per capture configuration. This is a named exclusion, not a gap. Reuses in pages that are not ordinary (an SVG image's own document or a page popup), which no tab owns, are counted apart as non_ordinary_page_reuse."
+                "{reuses} memory-cache reuses were counted, not recorded: renderers from an earlier build recorded at most 4,096 per capture configuration. This is a named exclusion, not a gap. Reuses in pages that are not ordinary (an SVG image's own document or a page popup), which no tab owns, are counted apart as non_ordinary_page_reuse."
             ),
         );
         item["count"] = json!(reuses.to_string());

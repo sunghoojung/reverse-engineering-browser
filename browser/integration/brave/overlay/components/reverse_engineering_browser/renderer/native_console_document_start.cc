@@ -1,26 +1,29 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "brave/components/reverse_engineering_browser/renderer/native_console_document_start.h"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <charconv>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "base/command_line.h"
 #include "base/functional/bind.h"
+#include "base/memory/read_only_shared_memory_region.h"
 #include "base/no_destructor.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/task/sequenced_task_runner.h"
 #include "brave/components/reverse_engineering_browser/common/native_console_document_start.h"
-#include "brave/components/reverse_engineering_browser/renderer/native_console_deadline.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_console_execution.h"
 #include "content/public/renderer/render_frame.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
@@ -51,29 +54,24 @@ std::uint64_t FrameIdentity(const blink::WebLocalFrame* frame) noexcept {
 }
 
 // Never formats an object, invokes an accessor, or calls a page-replaceable
-// conversion: only primitives reach this function.
+// conversion: only primitives reach this function. The text is whole.
 std::string PrimitiveText(v8::Isolate* isolate,
                           v8::Local<v8::Context> context,
-                          v8::Local<v8::Value> value,
-                          bool& truncated) {
+                          v8::Local<v8::Value> value) {
   if (value->IsString() || value->IsBigInt()) {
     v8::Local<v8::String> text;
     if (value->IsBigInt()) {
-      if (value.As<v8::BigInt>()->WordCount() > 16) {
-        truncated = true;
-        return "[BigInt larger than 1024 bits]";
-      }
+      // BigInt formatting is engine code and calls nothing the page defined.
       if (!value->ToString(context).ToLocal(&text))
         return std::string();
     } else {
       text = value.As<v8::String>();
     }
-    std::array<char, kNativeConsoleDocumentStartReportLimit> buffer{};
-    std::size_t characters = 0;
-    const auto bytes = text->WriteUtf8(isolate, buffer.data(), buffer.size(),
-                                       v8::String::WriteFlags::kReplaceInvalidUtf8, &characters);
-    truncated = truncated || characters < static_cast<std::size_t>(text->Length());
-    return std::string(buffer.data(), bytes);
+    // A lone surrogate becomes U+FFFD, which has the same UTF-8 length.
+    std::string result(text->Utf8Length(isolate), '\0');
+    result.resize(text->WriteUtf8(isolate, result.data(), result.size(),
+                                  v8::String::WriteFlags::kReplaceInvalidUtf8));
+    return result;
   }
   if (value->IsBoolean())
     return value.As<v8::Boolean>()->Value() ? "true" : "false";
@@ -114,7 +112,9 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
       return;
     host_.Bind(std::move(pending), base::SequencedTaskRunner::GetCurrentDefault());
     host_.set_disconnect_handler(base::BindOnce(&DocumentStart::Disarm, base::Unretained(this)));
-    host_->BindClient(receiver_.BindNewPipeAndPassRemote());
+    mojo::PendingRemote<mojom::NativeConsoleControl> control;
+    BindNativeConsoleControl(control.InitWithNewPipeAndPassReceiver());
+    host_->BindClient(receiver_.BindNewPipeAndPassRemote(), std::move(control));
   }
 
   void Inject(content::RenderFrame* render_frame,
@@ -136,7 +136,26 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
     const std::string serialized = origin.Serialize();
     const std::string_view path = url.path();
     const bool top = frame->IsOutermostMainFrame();
-    for (std::size_t index = 0; index < scripts_.size(); ++index) {
+    // Only scripts for this exact origin can match, so the work per document
+    // grows with that origin's scripts, not with the whole set. The index is
+    // stably sorted, so they still run in the order they were armed.
+    const std::string_view key(serialized);
+    const auto first = std::lower_bound(by_origin_.begin(), by_origin_.end(), key,
+                                        [this](std::uint32_t index, std::string_view origin) {
+                                          return scripts_[index].rule.origin < origin;
+                                        });
+    const auto last = std::upper_bound(first, by_origin_.end(), key,
+                                       [this](std::string_view origin, std::uint32_t index) {
+                                         return origin < scripts_[index].rule.origin;
+                                       });
+    // Positions, not iterators, and the epoch is rechecked before each run:
+    // the set can only change between tasks, but a stale position must never
+    // be read if it ever did.
+    const auto epoch = epoch_;
+    const auto end = static_cast<std::size_t>(last - by_origin_.begin());
+    for (auto position = static_cast<std::size_t>(first - by_origin_.begin());
+         position < end && epoch == epoch_; ++position) {
+      const auto index = by_origin_[position];
       if (NativeConsoleDocumentStartMatches(scripts_[index].rule, serialized, path, top))
         Run(frame, context, index);
     }
@@ -151,39 +170,41 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
     Inject(render_frame, frame->MainWorldScriptContext(), state);
   }
 
-  // Called from the `report` function the injected snippet received. A function
-  // the page retained past a re-arm or clear resolves to no script and becomes
-  // an inert no-op, so clearing the experiment stops all output.
+  // Called from the `report` function the injected snippet received, which
+  // names its script by id. Ids are never reused, so a function the page
+  // retained keeps working while its script stays armed, through any add or
+  // remove of another, and becomes an inert no-op once its own script is
+  // removed, replaced or cleared.
   void Report(const v8::FunctionCallbackInfo<v8::Value>& info) {
     auto* frame = blink::WebLocalFrame::FrameForCurrentContext();
     // V8 15.7 deprecates Data() in favor of DataV2(), which returns v8::Data.
     const v8::Local<v8::Data> bound = info.DataV2();
-    const auto data = !bound.IsEmpty() && bound->IsValue() && bound.As<v8::Value>()->IsInt32()
-                          ? bound.As<v8::Int32>()->Value()
-                          : -1;
-    if (!frame || data < 0)
+    if (!frame || bound.IsEmpty() || !bound->IsValue() || !bound.As<v8::Value>()->IsBigInt())
       return;
-    const auto epoch = static_cast<std::uint32_t>(data) / kNativeConsoleDocumentStartScriptLimit;
-    const std::size_t index =
-        static_cast<std::uint32_t>(data) % kNativeConsoleDocumentStartScriptLimit;
-    if (epoch != epoch_ || index >= scripts_.size())
+    bool lossless = false;
+    const auto script_id = bound.As<v8::BigInt>()->Uint64Value(&lossless);
+    // The decoded set is in increasing id order.
+    const auto found = std::lower_bound(scripts_.begin(), scripts_.end(), script_id,
+                                        [](const NativeConsoleDocumentStartScript& script,
+                                           std::uint64_t id) { return script.script_id < id; });
+    if (!lossless || found == scripts_.end() || found->script_id != script_id)
       return;
+    const auto index = static_cast<std::size_t>(found - scripts_.begin());
     if (info.Length() != 1) {
-      Emit(frame, index, NativeConsoleDocumentStartRecord::kRefused, false,
+      Emit(frame, index, NativeConsoleDocumentStartRecord::kRefused,
            "report(value) takes exactly one argument");
       return;
     }
     const auto value = info[0];
     if (!value->IsString() && !value->IsNumber() && !value->IsBoolean() && !value->IsBigInt()) {
-      Emit(frame, index, NativeConsoleDocumentStartRecord::kRefused, false,
+      Emit(frame, index, NativeConsoleDocumentStartRecord::kRefused,
            std::string("report(value) refused ") + ValueKind(value) +
                "; pass a string, number, boolean or bigint");
       return;
     }
-    bool truncated = false;
     auto* const isolate = info.GetIsolate();
-    const auto text = PrimitiveText(isolate, isolate->GetCurrentContext(), value, truncated);
-    Emit(frame, index, NativeConsoleDocumentStartRecord::kReport, truncated, text);
+    Emit(frame, index, NativeConsoleDocumentStartRecord::kReport,
+         PrimitiveText(isolate, isolate->GetCurrentContext(), value));
   }
 
  private:
@@ -191,22 +212,27 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
   DocumentStart() = default;
   ~DocumentStart() override = default;
 
-  struct Budget {
-    base::UnguessableToken document;
-    std::uint32_t records = 0;
-  };
-
   void Arm(std::uint64_t generation,
-           const std::vector<std::uint8_t>& scripts,
+           base::ReadOnlySharedMemoryRegion scripts,
            ArmCallback callback) override {
     Disarm();
-    std::array<NativeConsoleDocumentStartScript, kNativeConsoleDocumentStartScriptLimit> decoded{};
-    const auto count =
-        generation ? DecodeNativeConsoleDocumentStartScripts(scripts, decoded) : std::size_t{0};
-    if (count) {
-      generation_ = generation;
-      scripts_.assign(decoded.begin(), decoded.begin() + static_cast<std::ptrdiff_t>(count));
+    // The decoded scripts are views into this read-only mapping, which every
+    // renderer shares, so arming copies no source.
+    if (generation && scripts.IsValid())
+      mapping_ = scripts.Map();
+    if (mapping_.IsValid() && DecodeNativeConsoleDocumentStartScripts(
+                                  mapping_.GetMemoryAsSpan<std::uint8_t>(), scripts_)) {
+      by_origin_.resize(scripts_.size());
+      for (std::uint32_t index = 0; index < by_origin_.size(); ++index)
+        by_origin_[index] = index;
+      // Script indices by their rule's origin, for the per-document lookup.
+      std::stable_sort(by_origin_.begin(), by_origin_.end(),
+                       [this](std::uint32_t left, std::uint32_t right) {
+                         return scripts_[left].rule.origin < scripts_[right].rule.origin;
+                       });
       g_armed = true;
+    } else {
+      mapping_ = base::ReadOnlySharedMemoryMapping();
     }
     // Acknowledge the count this renderer can actually run. The owner marks the
     // generation delivered only on an exact match, so a refused or partially
@@ -215,12 +241,13 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
   }
 
   void Disarm() {
-    // Every retained `report` function becomes inert, and the decoded source
-    // bytes are released rather than retained at their peak size.
+    // A retained `report` function finds its script again only in a set that
+    // still holds it, and the mapping and the views into it are released
+    // rather than retained at their peak size.
     ++epoch_;
-    generation_ = 0;
     std::vector<NativeConsoleDocumentStartScript>().swap(scripts_);
-    std::vector<Budget>().swap(budgets_);
+    std::vector<std::uint32_t>().swap(by_origin_);
+    mapping_ = base::ReadOnlySharedMemoryMapping();
     g_armed = false;
   }
 
@@ -232,15 +259,12 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
     v8::Context::Scope entered(context);
     if (isolate->IsExecutionTerminating())
       return;
-    auto& deadline = NativeConsoleDeadline::Get();
-    // A snippet that synchronously creates a frame reenters this path. The
-    // single watchdog slot refuses the nested injection and records it, rather
-    // than running page JavaScript that nothing could interrupt.
-    if (!deadline.Begin(isolate, kNativeConsoleDocumentStartExecutionMillis)) {
-      Emit(frame, index, NativeConsoleDocumentStartRecord::kScriptError, false,
-           "Execution watchdog unavailable; the snippet did not run");
-      return;
-    }
+    // Runs until it returns. Removing its script, a Clear, a new arm or the
+    // end of the session stops it from the IO thread. A snippet that
+    // synchronously creates a matching frame nests here, and stopping the
+    // outer execution ends both.
+    auto& execution = NativeConsoleExecution::Get();
+    execution.Begin(isolate, kNativeConsoleDocumentStartStopBit | scripts_[index].script_id);
     v8::TryCatch failure(isolate);
     bool ran = false;
     {
@@ -250,31 +274,40 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
                                      v8::MicrotasksScope::kDoNotRunMicrotasks);
       // The wrapper only supplies `report`. It is not a sandbox: a snippet runs
       // with the page's full main-world authority, exactly like an explicit
-      // console command would.
-      const std::string wrapped = "(function(report){\"use strict\";\n" +
-                                  std::string(NativeConsoleDocumentStartSource(scripts_[index])) +
-                                  "\n})";
+      // console command would. The wrapper is joined as V8 cons strings, so
+      // the snippet is copied once, into V8, however large it is.
+      const auto snippet = scripts_[index].source;
       const std::string name =
           "reb-console-document-start://" + base::NumberToString(scripts_[index].script_id);
-      v8::Local<v8::String> source;
+      v8::Local<v8::String> body;
       v8::Local<v8::String> resource;
       v8::Local<v8::Script> script;
       v8::Local<v8::Value> wrapper;
       v8::Local<v8::Function> report;
       v8::Local<v8::Value> ignored;
-      const auto data = static_cast<std::int32_t>(epoch_ * kNativeConsoleDocumentStartScriptLimit +
-                                                  static_cast<std::uint32_t>(index));
-      if (v8::String::NewFromUtf8(isolate, wrapped.data(), v8::NewStringType::kNormal,
-                                  static_cast<int>(wrapped.size()))
-              .ToLocal(&source) &&
+      const auto script_id = scripts_[index].script_id;
+      // A snippet past V8's string length fails to build, and is reported as
+      // failing to compile rather than cut.
+      if (snippet.size() <= static_cast<std::size_t>(std::numeric_limits<int>::max()) &&
+          v8::String::NewFromUtf8(isolate, snippet.data(), v8::NewStringType::kNormal,
+                                  static_cast<int>(snippet.size()))
+              .ToLocal(&body) &&
           v8::String::NewFromUtf8(isolate, name.data(), v8::NewStringType::kNormal,
                                   static_cast<int>(name.size()))
               .ToLocal(&resource)) {
+        const auto source = v8::String::Concat(
+            isolate,
+            v8::String::Concat(
+                isolate,
+                v8::String::NewFromUtf8Literal(isolate, "(function(report){\"use strict\";\n"),
+                body),
+            v8::String::NewFromUtf8Literal(isolate, "\n})"));
         v8::ScriptOrigin script_origin(resource);
         const bool compiled =
             v8::Script::Compile(context, source, &script_origin).ToLocal(&script) &&
             script->Run(context).ToLocal(&wrapper) && wrapper->IsFunction() &&
-            v8::Function::New(context, &DocumentStart::Dispatch, v8::Integer::New(isolate, data))
+            v8::Function::New(context, &DocumentStart::Dispatch,
+                              v8::BigInt::NewFromUnsigned(isolate, script_id))
                 .ToLocal(&report);
         if (compiled) {
           // Announce before calling, so this document's own records follow the
@@ -287,20 +320,20 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
         }
       }
     }
-    if (deadline.Finish()) {
+    if (execution.Finish() != NativeConsoleExecution::End::kReturned) {
       failure.Reset();
-      Emit(frame, index, NativeConsoleDocumentStartRecord::kScriptError, false,
-           "Snippet exceeded its 50 ms document-start budget; changes are not rolled back");
+      Emit(frame, index, NativeConsoleDocumentStartRecord::kScriptError,
+           "Snippet stopped by removing it, a Clear, a new arm or the end of the session; changes "
+           "are not rolled back");
       return;
     }
     if (!ran) {
       std::string text = "Snippet failed to compile or threw";
-      bool truncated = false;
       const auto message = failure.Message();
       if (!message.IsEmpty()) {
-        text = PrimitiveText(isolate, context, message->Get(), truncated);
+        text = PrimitiveText(isolate, context, message->Get());
       }
-      Emit(frame, index, NativeConsoleDocumentStartRecord::kScriptError, truncated, text);
+      Emit(frame, index, NativeConsoleDocumentStartRecord::kScriptError, text);
     }
   }
 
@@ -313,65 +346,32 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
         blink::WebString::FromUtf8("Reverse Engineering Browser: document-start Console script " +
                                    base::NumberToString(scripts_[index].script_id) +
                                    " runs in this document's main world before its own scripts")));
-    Emit(frame, index, NativeConsoleDocumentStartRecord::kInjected, false,
+    Emit(frame, index, NativeConsoleDocumentStartRecord::kInjected,
          "Snippet injected before this document's own scripts");
   }
 
   static void Dispatch(const v8::FunctionCallbackInfo<v8::Value>& info) { Get().Report(info); }
 
-  // Bounded per-document record budget: 64 payload records, then exactly one
-  // refusal notice, then nothing. The table holds a fixed number of documents;
-  // a renderer with more live reporting documents recycles the oldest budget,
-  // and the browser's ring drop count stays the visible bound.
-  enum class Charge { kAllow, kNotice, kDrop };
-
-  Charge ChargeDocument(const base::UnguessableToken& document) {
-    for (auto& budget : budgets_) {
-      if (budget.document != document)
-        continue;
-      if (budget.records > kNativeConsoleDocumentStartRecordsPerDocument)
-        return Charge::kDrop;
-      ++budget.records;
-      return budget.records > kNativeConsoleDocumentStartRecordsPerDocument ? Charge::kNotice
-                                                                            : Charge::kAllow;
-    }
-    if (budgets_.size() >= kNativeConsoleDocumentStartTrackedDocuments)
-      budgets_.erase(budgets_.begin());
-    budgets_.push_back({document, 1});
-    return Charge::kAllow;
-  }
-
   void Emit(blink::WebLocalFrame* frame,
             std::size_t index,
             NativeConsoleDocumentStartRecord record,
-            bool truncated,
             const std::string& text) {
     if (!host_.is_bound() || index >= scripts_.size())
       return;
     const base::UnguessableToken document = frame->GetDocument().Token().value();
     if (document.is_empty())
       return;
-    const auto charge = ChargeDocument(document);
-    if (charge == Charge::kDrop)
-      return;
-    auto kind = record;
-    std::string payload = text;
-    if (charge == Charge::kNotice) {
-      // The last record this document may send explains why it is the last.
-      kind = NativeConsoleDocumentStartRecord::kRefused;
-      payload = "Document reached its " +
-                base::NumberToString(kNativeConsoleDocumentStartRecordsPerDocument) +
-                " record budget; later reports from this document are dropped";
-      truncated = false;
-    }
-    host_->Observed(generation_, scripts_[index].script_id, FrameIdentity(frame), document,
-                    static_cast<std::uint32_t>(kind), truncated, payload);
+    // Every record is sent whole: a document has no record budget. The
+    // browser keeps what it holds for readers and counts what it evicts.
+    host_->Observed(scripts_[index].script_id, FrameIdentity(frame), document,
+                    static_cast<std::uint32_t>(record), text);
   }
 
-  std::uint64_t generation_ = 0;
   std::uint32_t epoch_ = 1;
+  base::ReadOnlySharedMemoryMapping mapping_;
+  // Views into `mapping_`, in arming order.
   std::vector<NativeConsoleDocumentStartScript> scripts_;
-  std::vector<Budget> budgets_;
+  std::vector<std::uint32_t> by_origin_;
   mojo::Remote<mojom::NativeConsoleScriptHost> host_;
   mojo::Receiver<mojom::NativeConsoleScriptClient> receiver_{this};
 };

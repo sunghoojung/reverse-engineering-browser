@@ -58,28 +58,29 @@ it.
   snapshots that the recipe names. Recipes are evidence inputs, not proof of
   guest semantics. Guest capture is native only; no debugger protocol is used.
   Native JavaScript dispatch-site capture is a separate opt-in: it needs a
-  rebuilt browser and a researcher-supplied site file, observes at most 8
-  sites, and records only selector kinds and integer low bits, V8 script IDs,
-  source positions and the armed site's source digest, never argument,
-  receiver or string contents.
+  rebuilt browser and a researcher-supplied site file, observes up to 256
+  sites and every dispatch of them, and records only selector kinds and
+  integer low bits, V8 script IDs, source positions and the armed site's
+  source digest, never argument, receiver or string contents.
   Native JavaScript invocation identity is a separate opt-in with the same
   rebuilt-browser and site-file requirements (`REB_NATIVE_JS_INVOCATION_SITES`,
-  at most 8 functions). It records, per admitted call (at most 256 per
-  configuration), argument kinds and integer low bits, the result's kind and
-  length, the frame and a digest of the document token, and which Wasm
-  records and loader requests ran inside the call. It never records argument,
+  up to 256 functions). It records, for every call of a tracked function,
+  argument kinds and integer low bits, the result's kind and length, the
+  frame and a digest of the document token, and which Wasm records and
+  loader requests ran inside the call. It never records argument,
   receiver, return or exception contents. Captures the packaged app starts arm
-  its saved site set (at most 8 functions, saved from Sources with **Track
+  its saved site set (up to 256 functions, saved from Sources with **Track
   calls**), which the start panel lists and the titlebar names while the
-  session runs. Saving a site changes nothing in the open page or the running
-  capture; tracking starts with the next capture. Each saved site keeps its
+  session runs. Saving a site changes nothing in the open page; a running
+  capture that follows the saved set arms it at once, and any other capture
+  arms it next time. Each saved site keeps its
   script's raw source URL beside it, locally and user-only, like the artifact
   manifest. An explicit `REB_NATIVE_JS_INVOCATION_SITES`, even an empty one,
   replaces the saved set. Agent-started sessions arm invocation sites only when
   the start request names them (`js_invocation_sites`, a file the agent wrote,
   or `js_invocation_saved_sites`), never inherited, and keep their own saved
-  set, so an agent cannot read or change what the researcher's next capture
-  arms.
+  set, so an agent cannot read or change what the researcher's captures
+  arm.
 - Request call stacks (`REB_NATIVE_REQUEST_STACKS`, on by default in the
   packaged app when Network and Artifact are captured) record script IDs and
   positions of the stack that started each document or worker request or
@@ -171,10 +172,10 @@ it.
   and is still recorded as one row: its host, status, decoded size, Blink
   resource type, frame and the ID of the renderer request that loaded it
   always, and its path and query only in content
-  capture and only as a 116-byte prefix, which for a `data:` URL is the start
-  of the data itself. At most 4,096 are recorded per renderer configuration;
-  the rest, and those in pages that are not ordinary, such as an SVG image's
-  own document, are counted
+  capture: an http(s) path and query whole, the part past a 116-byte prefix as
+  the row's `request_target` artifact, and a `data:` URL only as its first 116
+  bytes, the start of the data itself. Every reuse is recorded; those in pages
+  that are not ordinary, such as an SVG image's own document, are counted
   ([Native network v3](protocol/native-network-v3.md#memory-cache-reuse)).
 - Browser-internal pages (WebUI, DevTools) and extension background workers are
   counted, not recorded. `REB_CAPTURE_BROWSER_INTERNAL=1` and
@@ -359,11 +360,12 @@ it.
   browser without an explicit mode change. The console
   cannot set breakpoints, step, or inspect paused frames; those
   belong to the pausing debugger commands above, never to a console command. Expressions and
-  primitive results may contain sensitive values; they stay in bounded,
-  ephemeral panel memory and are not automatically captured, redacted, logged,
+  primitive results may contain sensitive values; they stay in ephemeral
+  panel memory and are not automatically captured, redacted, logged,
   exported, or added to evidence. Clear output before sharing the interface.
   Commands require an explicit document selection and are never automatically
-  retried. See [Native Console v2](protocol/native-console-v2.md) for these limits.
+  retried. See [Native Console v2](protocol/native-console-v2.md) and
+  [v4](protocol/native-console-v4.md) for these limits.
 
 - Document-start Console scripts are a separate, separately armed experiment and
   a deliberate exception to the explicit-document rule above, not a loophole in
@@ -387,9 +389,9 @@ it.
   MCP `start_live_session`) receive it only when the start request names it
   (`document_start: true`), never inherited. An agent arms a rule only through
   the same live Console connection to a selected document and the same
-  confirmed action. Clearing the set, disconnecting, ending the session, or session expiry
-  removes the scripts and their output; when the browser cannot confirm a removal,
-  the Console reports it unconfirmed instead of idle. Snippet output is bounded, ephemeral
+  confirmed action. Clearing the set, disconnecting or ending the session
+  removes the scripts and their output, and removing one script stops it; when the browser cannot confirm a removal,
+  the Console reports it unconfirmed instead of idle. Snippet output is ephemeral
   page-JavaScript observation with provenance `console-document-start-script`: it
   is never native evidence, never correlated, and never exported automatically. A
   snippet runs in the page main world, so log only argument kinds, lengths,

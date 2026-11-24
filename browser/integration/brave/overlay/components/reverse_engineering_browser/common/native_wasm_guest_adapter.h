@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -160,8 +160,8 @@ inline std::shared_ptr<const NativeWasmGuestAdapter> ParseNativeWasmGuestAdapter
   } else {
     return {};
   }
-  if (!U32(dict, "sample_limit", result->sample_limit) || !result->sample_limit ||
-      result->sample_limit > kNativeGuestSampleLimit)
+  // Any positive count the JSON reader keeps as an integer, up to 2^31 - 1.
+  if (!U32(dict, "sample_limit", result->sample_limit) || !result->sample_limit)
     return {};
   const auto* digest = dict.FindString("module_sha256");
   if (!digest || digest->size() != 64)

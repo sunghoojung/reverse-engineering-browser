@@ -15,7 +15,6 @@ use std::{
 };
 
 const COLUMN_CHECKPOINT: usize = 4096;
-const MAX_SITES: usize = 4096;
 const PARSER_STACK: usize = 32 << 20;
 /// Stack reserved per measured nesting level on top of `PARSER_STACK`. Debug
 /// Oxc needs about 3.3 KB per parenthesis level to parse; the semantic builder
@@ -1945,8 +1944,8 @@ fn parsed(
     let mut sites = Vec::new();
     let mut roles = HashMap::new();
     let mut tables = HashMap::<Key<'_>, Vec<(NodeId, Role)>>::new();
-    for (ordinal, index) in order.iter().enumerate() {
-        if ordinal >= MAX_SITES || meter.exhausted() {
+    for index in &order {
+        if meter.exhausted() {
             meter.count_unclassified(1);
             continue;
         }
@@ -2349,15 +2348,11 @@ fn classify_local(source: &str, meter: &Meter) -> Classified {
 
 // The upstream parser and semantic builder use infallible allocations. Keep
 // them unmodified, but isolate their allocations behind a hard, pre-allocation
-// ceiling. Only compact site/proof records return; source never goes to disk.
-const MAX_SOURCE: usize = 8 << 20;
-const MAX_REPLY: usize = 64 << 20;
-
-fn heap_limit(source_bytes: usize) -> u64 {
-    // Small dense artifacts already analyzed by earlier versions need room
-    // for arena chunk growth; this is a limit, never an eager reservation.
-    (64 << 20) + source_bytes.min(MAX_SOURCE) as u64 * 80
-}
+// ceiling: the machine's, so a source of any size is parsed whole and a
+// refusal says the machine cannot hold it. Only compact site/proof records
+// return; source never goes to disk. Oxc addresses source with 32-bit
+// offsets, the parser's own representation rather than a size chosen here.
+const MAX_OXC_SOURCE: u64 = u32::MAX as u64;
 const REPLY_MAGIC: &[u8; 8] = b"REBJS001";
 const WORKER_FAILED: &str = "JavaScript analysis worker unavailable or refused its resource boundary; recovered handlers have no binding proof.";
 
@@ -2390,10 +2385,8 @@ pub fn worker_main() -> std::io::Result<()> {
         |offset: usize| u64::from_le_bytes(header[offset + 8..offset + 16].try_into().unwrap());
     let (work, retained, heap, length) = (number(0), number(8), number(16), number(24));
     if &header[..8] != REPLY_MAGIC
-        || length > MAX_SOURCE as u64
-        || work > super::MAX_ARTIFACT_WORK
-        || retained > super::MAX_RETAINED_BYTES
-        || heap > heap_limit(length as usize)
+        || length > MAX_OXC_SOURCE
+        || heap > crate::js_worker_alloc::machine_ceiling()
     {
         return Err(std::io::Error::other("Invalid JavaScript worker limits"));
     }
@@ -2442,11 +2435,6 @@ pub fn worker_main() -> std::io::Result<()> {
     // Serialize before the success marker: allocation refusal must not leave a
     // partial reply that could be mistaken for complete binding proof.
     let mut bytes = serde_json::to_vec(&reply)?;
-    if bytes.len() > MAX_REPLY - 16 {
-        return Err(std::io::Error::other(
-            "JavaScript proof reply exceeds limit",
-        ));
-    }
     let peak = crate::js_worker_alloc::peak();
     let mut output = std::io::stdout().lock();
     output.write_all(REPLY_MAGIC)?;
@@ -2611,8 +2599,10 @@ fn worker_deadline(source_bytes: usize) -> std::time::Duration {
     if WORKER_FAULT.get() == Some("timeout") {
         return std::time::Duration::from_millis(100);
     }
-    // Deterministic metering owns admission. This is only a generous hang
-    // backstop: five minutes plus one minute per started MiB (13 at the cap).
+    // Deterministic metering owns admission. This is only a hang backstop,
+    // far past any real parse: five minutes plus one minute per started MiB.
+    // The analysis is shared by every reader of one store, so no single
+    // request can cancel it; a parser that never returns must still end.
     std::time::Duration::from_secs(300 + 60 * source_bytes.div_ceil(1 << 20) as u64)
 }
 
@@ -2622,18 +2612,26 @@ fn worker_failure(meter: &Meter, work: u64, detail: &'static str) -> Classified 
 }
 
 pub(crate) fn classify(source: &str, meter: &Meter) -> Classified {
-    classify_with_heap(source, meter, heap_limit(source.len()))
+    classify_with_heap(source, meter, crate::js_worker_alloc::machine_ceiling())
 }
 
 fn classify_with_heap(source: &str, meter: &Meter, heap: u64) -> Classified {
     #[cfg(test)]
     PARSER_ARENA.set(0);
-    if source.len() > MAX_SOURCE || meter.exhausted() {
+    if source.len() as u64 > MAX_OXC_SOURCE {
+        meter.count_unexamined(1);
+        return unavailable(
+            meter,
+            "classification-unavailable",
+            "JavaScript source is larger than the 4 GiB that Oxc can address.",
+        );
+    }
+    if meter.exhausted() {
         meter.count_unexamined(1);
         return unavailable(
             meter,
             "classification-work-limit",
-            "JavaScript source exceeds the 8 MiB analysis ceiling or the artifact budget.",
+            "The artifact's classification work budget was spent before the parser ran.",
         );
     }
     // Include IPC copies in the shared work meter; the worker receives only
@@ -2643,8 +2641,8 @@ fn classify_with_heap(source: &str, meter: &Meter, heap: u64) -> Classified {
         meter.count_unexamined(1);
         return unavailable(meter, "classification-work-limit", WORKER_FAILED);
     }
-    let work = meter.remaining_work().min(super::MAX_ARTIFACT_WORK);
-    let retained = meter.remaining_memory().min(super::MAX_RETAINED_BYTES);
+    let work = meter.remaining_work();
+    let retained = meter.remaining_memory();
     #[cfg(test)]
     let fault = WORKER_FAULT.get();
     let output = std::thread::scope(|scope| {
@@ -2667,7 +2665,7 @@ fn classify_with_heap(source: &str, meter: &Meter, heap: u64) -> Classified {
                     .block_on(crate::worker::run(
                         &mut command,
                         &input,
-                        Some(MAX_REPLY),
+                        None,
                         Some(worker_deadline(source.len())),
                     ))
                     .map_err(|error| match error.reason.code {
@@ -2716,7 +2714,6 @@ fn classify_with_heap(source: &str, meter: &Meter, heap: u64) -> Classified {
                 .handlers
                 .iter()
                 .all(|handler| handler.0 < source.len())
-            && reply.sites.len() <= MAX_SITES
         {
             meter.charge(reply.work);
             meter.peak.set(
@@ -2809,13 +2806,23 @@ fn allocation_refusal_is_counted_and_does_not_poison_the_next_artifact() {
 
 #[cfg(test)]
 #[test]
-fn oversized_source_is_refused_before_worker_allocation() {
-    let source = " ".repeat(MAX_SOURCE + 1);
+fn a_source_past_the_former_8_mib_ceiling_is_classified_whole() {
+    // The interpreter sits after 9 MiB, where the classifier used to refuse.
+    let padding = 9 << 20;
+    let source = format!(
+        "{}{}",
+        " ".repeat(padding),
+        crate::vm::review_inputs::CONTROL_VM
+    );
     let meter = Meter::new();
     let result = classify(&source, &meter);
-    assert_eq!(result.omissions[0]["omitted_records"], 1);
-    assert_eq!(result.omissions[0]["reason"], "classification-work-limit");
-    assert_eq!(meter.parser_peak(), 0);
+    assert!(result.omissions.is_empty(), "{:?}", result.omissions);
+    assert!(meter.parser_peak() > 0);
+    assert!(
+        result.sites.iter().any(|site| {
+            site.role() == Role::InterpreterCandidate && site.byte_offset >= padding
+        })
+    );
 }
 
 #[cfg(test)]

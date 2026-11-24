@@ -617,11 +617,12 @@ async fn assert_contract_response(
     route: &str,
     expected_status: u16,
 ) -> Vec<u8> {
-    assert_eq!(
-        response.status().as_u16(),
-        expected_status,
-        "{method} {route}"
-    );
+    let status = response.status().as_u16();
+    if status != expected_status {
+        // The answer's reason says which deadline or check refused it.
+        let text = response.text().await.unwrap_or_default();
+        panic!("{method} {route}: expected {expected_status}, got {status}: {text}");
+    }
     let spec = specification();
     let operation = &spec["paths"][route][method];
     assert!(
@@ -847,7 +848,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             let entry = &variant["x-reb-execution"];
             check(entry, action);
             assert_eq!(entry["kind"], "action");
-            let fields = entry["confirmations"]
+            let mut fields = entry["confirmations"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -861,6 +862,20 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
                     field
                 })
                 .collect::<BTreeSet<_>>();
+            // A confirmation that stored state decides is listed once, apart
+            // from the request predicates.
+            for confirmation in entry["state_dependent_confirmations"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                let field = confirmation["field"].as_str().unwrap();
+                assert!(
+                    variant["properties"].get(field).is_some(),
+                    "Unknown confirmation: {action}/{field}"
+                );
+                assert!(fields.insert(field), "Listed twice: {action}/{field}");
+            }
             let expected = variant["properties"]
                 .as_object()
                 .unwrap()
@@ -876,8 +891,10 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
     // reset_wasm_sample_budgets is the extra SessionAction. The four
     // LiveWasmAction variants are read_memory, write_memory, call_export,
     // and call_function. set_wasm_function_name is the narrow AnalystAction
-    // write of one researcher Wasm name.
-    assert_eq!(action_count, 41);
+    // write of one researcher Wasm name. interrupt is the NativeConsoleAction
+    // that stops a running command, and add_document_start and
+    // remove_document_start change an armed set without replacing it.
+    assert_eq!(action_count, 44);
     // Source checks intentionally follow the dispatch syntax. If it changes,
     // audit the new handler before updating this narrow test helper.
     fn arms<'a>(source: &'a str, start: &str, end: &str, indent: usize) -> BTreeSet<&'a str> {
@@ -921,9 +938,9 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
         (
             "AnalystAction",
             include_str!("../src/app.rs"),
-            "\"/api/local-analyst/actions\" => match",
-            "\"/api/capture/actions\"",
-            16,
+            "async fn analyst_action(",
+            "    async fn post(",
+            12,
         ),
     ] {
         assert_eq!(
@@ -1058,20 +1075,18 @@ fn execution_metadata_keeps_destructive_conditional_and_unproven_effects_visible
     assert!(predicate.is_valid(&json!({"algorithm":"none"})));
     assert!(!predicate.is_valid(&json!({"algorithm":"HS256"})));
     assert!(!predicate.is_valid(&json!({})));
+    // Only the stored record says whether the named artifact is sensitive. A
+    // request predicate would ask for the confirmation on every run that
+    // names one, so it is a state-dependent confirmation the host asks for.
     let run = action("AnalystAction", "run_local_analyst_script");
-    let sensitive = run["confirmations"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|c| c["field"] == "confirmed_sensitive")
-        .unwrap();
-    // Only the stored manifest says whether the named artifact is sensitive,
-    // so the confirmation is listed whenever a run names one.
-    let predicate = jsonschema::validator_for(&sensitive["when"]).unwrap();
-    assert!(predicate.is_valid(
-        &json!({"evidence":{"selected_artifact":{"artifact_id":"1","sha256":"0".repeat(64)}}})
-    ));
-    assert!(!predicate.is_valid(&json!({"evidence":{"selected_artifact":null}})));
+    assert_eq!(
+        run["confirmations"],
+        json!([{"field":"confirmed","value":true,"when":{}}])
+    );
+    assert_eq!(
+        run["state_dependent_confirmations"][0]["field"],
+        "confirmed_sensitive"
+    );
     // Empty records or invented-safe effects are not valid metadata.
     let schema =
         jsonschema::validator_for(&spec["components"]["schemas"]["RebExecutionMetadata"]).unwrap();
@@ -1504,6 +1519,74 @@ async fn incomplete_request_body_keeps_coarse_reason_and_legacy_text() {
     assert_eq!(value["error"], "The request body exceeds its size limit");
     assert_eq!(value["code"], "invalid_request");
     assert_eq!(value["details"], json!({}));
+}
+#[tokio::test]
+async fn streamed_request_bodies_keep_deadline_interruption_and_malformed_answers() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let server = Server::start().await;
+    let address = server.url.strip_prefix("http://").unwrap();
+    // These routes parse their body as it arrives instead of buffering it.
+    // A late, cut off or malformed body still answers as a buffered one did,
+    // and work never starts on part of a body.
+    for route in [
+        "/api/local-analyst/actions",
+        "/api/analysis/vm/packs/apply",
+        "/api/analysis/vm/packs/compare",
+    ] {
+        for (body, length, interrupted, status, error) in [
+            (
+                "{",
+                100,
+                false,
+                408,
+                "The request body deadline was exceeded",
+            ),
+            (
+                "{",
+                100,
+                true,
+                400,
+                "The request body exceeds its size limit",
+            ),
+            ("{\"pack\":{} ]", 12, false, 400, ""),
+            ("{\"pack\":{}}  ", 13, false, 400, ""),
+        ] {
+            let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            stream.write_all(format!("POST {route} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{body}").as_bytes()).await.unwrap();
+            if interrupted {
+                stream.shutdown().await.unwrap();
+            }
+            let mut raw = Vec::new();
+            tokio::time::timeout(Duration::from_secs(15), stream.read_to_end(&mut raw))
+                .await
+                .unwrap()
+                .unwrap();
+            let response = String::from_utf8(raw).unwrap();
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status} ")),
+                "{route} {body:?}: {response}"
+            );
+            let value: Value =
+                serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+            if status == 408 {
+                assert_eq!(value["code"], "timeout");
+                assert_eq!(value["details"], json!({"phase":"request_body"}));
+            }
+            if !error.is_empty() {
+                assert_eq!(value["error"], error, "{route} {body:?}");
+            }
+        }
+    }
+    // A refused or late pack body releases the comparison permit.
+    let pack: Value =
+        serde_json::from_str(include_str!("../assets/anti-bot-pack-v1.json")).unwrap();
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/analysis/vm/packs/apply", server.url))
+        .json(&json!({"pack":pack,"analysis":{}}))
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(response.status(), 503);
 }
 fn metadata_event(sequence: u64) -> Value {
     json!({"protocol_version":3,"session_id":"1","sequence_number":sequence.to_string(),"monotonic_time_ns":(sequence*1000).to_string(),"navigation_id":"1","frame_id":"1","artifact_id":"0","request_id":sequence.to_string(),"process_id":100,"thread_id":101,"tab_id":1,"category":"network","type":"request_started","payload_encoding":"hex","payload":hex::encode("GET fixture.local"),"payload_size":17,"parent_event_id":"0","browser_context_id_high":"1","browser_context_id_low":"2","initiator_request_id":0,"initiator_process_id":0,"status_code":0,"error_code":0,"resource_type":13,"flags":0,"payload_truncated":false,"encoded_data_length":"0","decoded_body_length":"0"})
@@ -3130,7 +3213,7 @@ fn vm_runtime_audio_is_bounded_relevance_not_vm_structure_or_value_capture() {
                 "events_filter":{"session_id":"1","navigation_id":"2","frame_id":"3"}})
         );
         assert!(!document.to_string().contains("must-not-copy"));
-        assert_eq!(document["producer"]["version"], "1.11.0");
+        assert_eq!(document["producer"]["version"], "1.12.0");
         assert_eq!(
             document["profile"]["runtime_rule_weights"]["antibot.runtime-web-audio"],
             25
@@ -3992,7 +4075,7 @@ async fn vm_lexical_scoring_retains_dispatch_families_and_original_artifacts() {
         .unwrap()
         .validate(&document)
         .unwrap();
-    assert_eq!(document["producer"]["version"], "1.11.0");
+    assert_eq!(document["producer"]["version"], "1.12.0");
     assert_eq!(document["profile"]["javascript_scoring_version"], 3);
     assert_eq!(document["profile"]["runtime_evidence_version"], 2);
     let profile = origin_trace_backend::vm::canonical(&document["profile"]).unwrap();
@@ -4162,13 +4245,11 @@ async fn vm_lexical_scoring_preserves_region_failures_and_limits() {
             .iter()
             .any(|omission| omission["reason"] == "javascript-unterminated-function")
     );
-    assert_eq!(results[1]["status"], "partial");
+    // 4,098 functions, past the 4,096 regions that used to be scored.
+    assert_eq!(results[1]["status"], "complete");
     assert_eq!(results[1]["tier"], "none");
-    assert_eq!(results[1]["coverage"]["complete"], false);
-    assert_eq!(
-        results[1]["coverage"]["omissions"][0]["reason"],
-        "javascript-function-region-limit"
-    );
+    assert_eq!(results[1]["coverage"]["complete"], true);
+    assert_eq!(results[1]["coverage"]["omissions"], json!([]));
     assert_eq!(results[2]["tier"], "candidate");
     assert_eq!(results[2]["vm_score"], 75);
     assert!(
@@ -6340,7 +6421,8 @@ async fn analyst_runs_read_whole_selected_artifacts_and_evidence_with_no_limits(
     assert_eq!(result["result_truncated"], false);
     eprintln!("20 MiB text artifact run: {:?}", started.elapsed());
 
-    // The binary artifact: sensitivity comes from the manifest, not the request.
+    // The binary artifact: sensitivity comes from the manifest, not the
+    // request, and the refusal names the confirmation it needs.
     let reference = json!({"artifact_id":"2","sha256":sha(&binary)});
     let refused = server
         .action(
@@ -6348,7 +6430,13 @@ async fn analyst_runs_read_whole_selected_artifacts_and_evidence_with_no_limits(
             run(2, reference.clone(), false),
         )
         .await;
-    assert_contract_response(refused, "post", "/api/local-analyst/actions", 400).await;
+    let bytes = assert_contract_response(refused, "post", "/api/local-analyst/actions", 400).await;
+    let refusal: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(refusal["code"], "confirmation_required");
+    assert_eq!(
+        refusal["details"],
+        json!({"confirmation":"confirmed_sensitive"})
+    );
     let response = server
         .action("/api/local-analyst/actions", run(3, reference, true))
         .await;
@@ -6387,6 +6475,135 @@ async fn analyst_runs_read_whole_selected_artifacts_and_evidence_with_no_limits(
     let response = server.action("/api/local-analyst/actions", old).await;
     assert_eq!(response.status(), 400);
     assert!(response.text().await.unwrap().contains("protocol 2"));
+}
+
+/// The library, a run's variables and its error have no shape limits: 40
+/// folders nested 39 deep, 100 files, 64 variables of 8 KiB each and a 4,000
+/// character error all go through, where 32 folders, 4 levels, 64 files, 32
+/// variables of 4 KiB in 16 KiB and a 512-character error were the limits.
+#[tokio::test]
+async fn analyst_libraries_variables_and_errors_have_no_shape_limits() {
+    let server = Server::start().await;
+    let runner: Value = server
+        .get("/api/local-analyst/runner")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(runner["available"], true, "Node.js 22+ must be on PATH");
+    assert_eq!(runner["limits"], json!({}));
+    let mut folders = vec![json!({"id":1,"name":"Analyst Workspace","parent_id":null})];
+    folders.extend(
+        (2..=40).map(|id| json!({"id":id,"name":format!("Level {id}"),"parent_id":id - 1})),
+    );
+    let mut files: Vec<Value> = (1..=100)
+        .map(|id| {
+            json!({"id":id,"folder_id":1 + id % 40,"name":format!("Note {id}"),"kind":"scratchpad",
+            "language":"text","content":"x"})
+        })
+        .collect();
+    let sum = "let bytes = 0; for (let i = 0; i < 64; i++) bytes += Utils.getVar(`v${i}`).length; return bytes;";
+    files.push(json!({"id":101,"folder_id":40,"name":"Sum","kind":"analyst-script","language":"javascript","content":sum}));
+    let throws = "throw new Error('e'.repeat(4000));";
+    files.push(json!({"id":102,"folder_id":40,"name":"Throws","kind":"analyst-script","language":"javascript","content":throws}));
+    let saved = server
+        .action(
+            "/api/local-analyst/actions",
+            json!({"action":"replace_local_analyst_workspace","expected_generation":0,"folders":folders,"files":files}),
+        )
+        .await;
+    let bytes = assert_contract_response(saved, "post", "/api/local-analyst/actions", 200).await;
+    let library: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(library["folders"].as_array().unwrap().len(), 40);
+    assert_eq!(library["files"].as_array().unwrap().len(), 102);
+    assert_eq!(library["limits"], json!({}));
+    let loaded: Value = server.get("/api/local-analyst").await.json().await.unwrap();
+    assert_eq!(loaded, library, "the library reads back whole");
+    let mut cyclic = json!({"action":"replace_local_analyst_workspace","expected_generation":1,
+        "folders":library["folders"],"files":[]});
+    cyclic["folders"][1]["parent_id"] = json!(40);
+    let refused = server.action("/api/local-analyst/actions", cyclic).await;
+    assert_contract_response(refused, "post", "/api/local-analyst/actions", 400).await;
+
+    let variables: serde_json::Map<String, Value> = (0..64)
+        .map(|i| (format!("v{i}"), json!("a".repeat(8192))))
+        .collect();
+    let run = |id: u64, script: u64, source: &str| {
+        json!({"action":"run_local_analyst_script","protocol_version":2,"run_id":id,"script_id":script,
+        "library_generation":1,"source":source,"variables":variables,
+        "evidence":{"events":[],"artifacts":[],"trace_edges":[],"signal_profiles":[],"vm_analysis":null,
+            "selected_artifact":null,"summary":{}},"confirmed":true,"confirmed_sensitive":false})
+    };
+    let response = server
+        .action("/api/local-analyst/actions", run(1, 101, sum))
+        .await;
+    let bytes = assert_contract_response(response, "post", "/api/local-analyst/actions", 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["outcome"], "completed", "{result}");
+    assert_eq!(result["result_text"], (64 * 8192).to_string());
+    let response = server
+        .action("/api/local-analyst/actions", run(2, 102, throws))
+        .await;
+    let bytes = assert_contract_response(response, "post", "/api/local-analyst/actions", 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["outcome"], "failed");
+    assert_eq!(result["error"], "e".repeat(4000), "the error is kept whole");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn decoder_requests_wait_their_turn_and_its_cpu_limit_is_named() {
+    use std::os::unix::fs::PermissionsExt;
+    let helper_root = tempfile::tempdir().unwrap();
+    let decoder = helper_root.path().join("decoder-fixture");
+    // A transform takes 0.1 s, so the queue below waits well past the two
+    // seconds a request once had to reach the decoder. A JWT inspection
+    // ends the way the decoder's CPU-time limit ends it.
+    std::fs::write(
+        &decoder,
+        "#!/bin/sh\n/bin/cat >/dev/null\ncase \"$1\" in\n  transform) /bin/sleep 0.1; printf ok ;;\n  *) ulimit -c 0; kill -XCPU $$ ;;\nesac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&decoder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let server =
+        Server::start_with_args(&["--decoder".into(), decoder.display().to_string()]).await;
+    let mut queue = tokio::task::JoinSet::new();
+    for operation_id in 1..=30 {
+        let (client, url) = (server.client.clone(), server.url.clone());
+        queue.spawn(async move {
+            let response = client
+                .post(format!("{url}/api/decoder/actions"))
+                .json(&json!({"action":"transform","protocol_version":1,"operation_id":operation_id,"operation":"sha256","input_base64":"AA=="}))
+                .send()
+                .await
+                .unwrap();
+            (response.status().as_u16(), response.text().await.unwrap())
+        });
+    }
+    let started = std::time::Instant::now();
+    while let Some(answer) = queue.join_next().await {
+        let (status, text) = answer.unwrap();
+        assert_eq!(status, 200, "{text}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap()["output_base64"],
+            "b2s="
+        );
+    }
+    assert!(started.elapsed() >= std::time::Duration::from_secs(2));
+
+    let response = server
+        .action(
+            "/api/decoder/actions",
+            json!({"action":"jwt_inspect","protocol_version":1,"token":"a.b.c"}),
+        )
+        .await;
+    let bytes = assert_contract_response(response, "post", "/api/decoder/actions", 422).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["code"], "resource_limit");
+    assert_eq!(
+        result["error"],
+        "The native decoder reached its two-second CPU-time limit"
+    );
 }
 
 #[cfg(unix)]
@@ -6843,7 +7060,7 @@ async fn analysis_catalog_resolves_every_generated_rule_and_preserves_profile_id
     assert_eq!(catalog["current_producer"], document["producer"]);
     assert_eq!(
         catalog["current_producer"],
-        json!({"id":"origin-trace-vm-detector","version":"1.11.0"})
+        json!({"id":"origin-trace-vm-detector","version":"1.12.0"})
     );
     assert_eq!(catalog["compatibility"]["build_identity"], "not-recorded");
     assert_eq!(catalog["current_profile"], document["profile"]);
@@ -6899,11 +7116,24 @@ async fn analysis_catalog_resolves_every_generated_rule_and_preserves_profile_id
         .unwrap()
         .remove("javascript_likely_vm_requires_handlers");
     historical_profile["javascript_scoring_version"] = json!(2);
-    // Producer 1.11.0 removed the record and graph limits it still had.
+    // Producer 1.11.0 removed the record and graph limits it still had, and
+    // producer 1.12.0 the input limits.
     let limits = historical_profile["limits"].as_object_mut().unwrap();
-    limits.insert("max_artifact_records".into(), json!(10000));
-    limits.insert("max_event_records".into(), json!(100000));
-    limits.insert("max_graph_edges".into(), json!(1024));
+    for (name, value) in [
+        ("max_artifact_bytes", 16777216),
+        ("max_artifact_records", 10000),
+        ("max_event_records", 100000),
+        ("max_graph_edges", 1024),
+        ("max_js_function_regions", 4096),
+        ("max_js_matches_per_rule", 32),
+        ("max_js_region_work_bytes", 67108864),
+        ("max_wasm_functions", 100000),
+        ("max_wasm_instructions", 1000000),
+        ("max_wasm_sections", 128),
+        ("max_wasm_section_bytes", 2097152),
+    ] {
+        limits.insert(name.into(), json!(value));
+    }
     assert_eq!(
         hex::encode(Sha256::digest(
             origin_trace_backend::vm::canonical(&historical_profile).unwrap()
@@ -8045,13 +8275,32 @@ async fn guarded_export_verifies_full_blobs_safe_paths_shared_hashes_and_zero_by
         422,
     )
     .await;
-    manifest[0]["byte_size"] = json!(16 * 1024 * 1024 + 1);
-    server.file("artifacts/manifest.jsonl", &jsonl(&manifest));
-    error(
-        server.action(EXPORT_PACKAGE_ROUTE, selection.clone()).await,
-        413,
-    )
-    .await;
+    // A blob past the 16 MiB that used to be refused is hashed whole and
+    // named at its size.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let large = vec![b'x'; 16 * 1024 * 1024 + 1];
+        let hash = hex::encode(Sha256::digest(&large));
+        let mut record = manifest.clone();
+        record[0]["byte_size"] = json!(large.len());
+        record[0]["sha256"] = json!(hash);
+        record[0]["content_path"] = json!(format!("blobs/{hash}.bin"));
+        let path = server
+            .root
+            .path()
+            .join(format!("artifacts/blobs/{hash}.bin"));
+        fs::write(&path, &large).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        server.file("artifacts/manifest.jsonl", &jsonl(&record));
+        let response = server.action(EXPORT_PACKAGE_ROUTE, selection.clone()).await;
+        let bytes = assert_contract_response(response, "post", EXPORT_PACKAGE_ROUTE, 200).await;
+        let package: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            package["records"]["artifacts"][0]["byte_size"],
+            (16 * 1024 * 1024 + 1).to_string()
+        );
+        fs::remove_file(&path).unwrap();
+    }
     manifest[0]["byte_size"] = json!(original.len());
     for path in [
         "../CANARY_ESCAPE",
@@ -11655,8 +11904,8 @@ async fn capture_mode_rejects_contradictory_flags() {
 
 origin_trace_backend::javascript_worker_test_entry!();
 
-/// Stands in for the analysis worker: each reply is a file the test writes,
-/// keyed by the requested byte offset, or `name` for a name request.
+/// Stands in for the analysis worker: it answers an index request with the
+/// index the test writes, and notes each request in `index-requests`.
 #[cfg(unix)]
 fn invocation_site_worker(directory: &Path) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -11664,7 +11913,7 @@ fn invocation_site_worker(directory: &Path) -> std::path::PathBuf {
     std::fs::write(
         &worker,
         format!(
-            "#!/bin/sh\nrequest=$(/bin/cat)\ncase \"$request\" in *'\"operation\":\"invocation_site\"'*) ;; *) exit 2;; esac\nkey=$(printf '%s' \"$request\" | /usr/bin/sed -n 's/.*\"byte_offset\":\\([0-9]*\\).*/\\1/p')\n[ -n \"$key\" ] || key=name\nexec /bin/cat '{}/reply-'\"$key\"'.json'\n",
+            "#!/bin/sh\nrequest=$(/bin/cat)\ncase \"$request\" in *'\"operation\":\"invocation_site_index\"'*) ;; *) exit 2;; esac\nprintf x >> '{0}/index-requests'\nexec /bin/cat '{0}/index.json'\n",
             directory.display()
         ),
     )
@@ -11673,19 +11922,25 @@ fn invocation_site_worker(directory: &Path) -> std::path::PathBuf {
     worker
 }
 
-/// What the worker reports for the function whose `(` is at `anchor`.
-fn invocation_site_reply(source: &str, anchor: Option<usize>, by_name: bool) -> Value {
-    let candidate = anchor.map(|anchor| {
-        json!({"kind":"function","anchor_byte":anchor,"start":anchor.saturating_sub(8),
-            "end":anchor + 3,"binding":"window.hsw","unsupported":null})
-    });
-    json!({"schema":"reb-invocation-site-worker-v1","ok":true,"error":null,
+/// What the worker indexes in `source`: a function whose `(` is at each
+/// anchor, the first bound to `window.hsw`.
+fn invocation_site_index(source: &str, anchors: &[usize]) -> Value {
+    let functions = anchors
+        .iter()
+        .enumerate()
+        .map(|(index, &anchor)| {
+            let bindings = if index == 0 {
+                json!([{"global":true,"segments":["hsw"],"text":"window.hsw"}])
+            } else {
+                json!([])
+            };
+            json!({"kind":"function","anchor_byte":anchor,"start":anchor - 8,"end":anchor + 3,
+                "definition_start":anchor - 8,"unsupported":null,"bindings":bindings})
+        })
+        .collect::<Vec<_>>();
+    json!({"schema":"reb-invocation-site-index-v1","ok":true,"error":null,
         "source_bytes":source.len(),
-        "matches": if by_name { candidate.clone().into_iter().collect::<Vec<_>>() } else { vec![] },
-        "match_count": usize::from(by_name && candidate.is_some()),
-        "related":[],"related_count":0,
-        "selected": if by_name { Value::Null } else { candidate.clone().unwrap_or(Value::Null) },
-        "reason": if by_name || candidate.is_some() { Value::Null } else { json!("no_function") }})
+        "index":{"source_bytes":source.len(),"functions":functions,"initializers":[]}})
 }
 
 #[cfg(unix)]
@@ -11702,7 +11957,8 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
         store.display().to_string(),
     ])
     .await;
-    let source = (0..9)
+    // One function past the 256 one capture can arm.
+    let source = (0..257)
         .map(|index| format!("f{index}=function(a){{return a}};"))
         .collect::<String>();
     put_source_facts_artifact(&server, source.as_bytes(), "javascript");
@@ -11710,24 +11966,11 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
         .match_indices('(')
         .map(|(offset, _)| offset)
         .collect::<Vec<_>>();
-    for &anchor in &anchors {
-        std::fs::write(
-            directory.path().join(format!("reply-{anchor}.json")),
-            invocation_site_reply(&source, Some(anchor), false).to_string(),
-        )
-        .unwrap();
-    }
-    let reply = |name: &str, value: Value| {
-        std::fs::write(
-            directory.path().join(format!("reply-{name}.json")),
-            value.to_string(),
-        )
-        .unwrap();
-    };
-    reply(
-        "name",
-        invocation_site_reply(&source, Some(anchors[0]), true),
-    );
+    std::fs::write(
+        directory.path().join("index.json"),
+        invocation_site_index(&source, &anchors).to_string(),
+    )
+    .unwrap();
     let set = |bytes: Vec<u8>| serde_json::from_slice::<Value>(&bytes).unwrap();
     let list = set(assert_contract_response(
         server.get("/api/js-invocation-sites").await,
@@ -11738,7 +11981,7 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
     .await);
     assert_eq!(
         (list["count"].as_u64(), list["limit"].as_u64()),
-        (Some(0), Some(8))
+        (Some(0), Some(48_806_446))
     );
     assert_eq!(list["session"]["state"], "not_armed");
     assert!(
@@ -11861,7 +12104,7 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
     let bytes =
         assert_contract_response(duplicate, "post", "/api/js-invocation-sites/actions", 409).await;
     assert!(String::from_utf8_lossy(&bytes).contains("already saved"));
-    for &anchor in &anchors[1..8] {
+    for &anchor in &anchors[1..256] {
         let response = action(json!({"action":"add","session_id":"11","artifact_id":"7","byte_offset":anchor,"label":format!("f at {anchor}")})).await;
         assert_eq!(
             set(assert_contract_response(
@@ -11874,19 +12117,18 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
             true
         );
     }
-    let ninth = action(
-        json!({"action":"add","session_id":"11","artifact_id":"7","byte_offset":anchors[8]}),
+    // Past the old one-byte slot range: the set has no fixed count.
+    let past = action(
+        json!({"action":"add","session_id":"11","artifact_id":"7","byte_offset":anchors[256]}),
     )
     .await;
-    let bytes =
-        assert_contract_response(ninth, "post", "/api/js-invocation-sites/actions", 409).await;
-    assert!(String::from_utf8_lossy(&bytes).contains("8 functions"));
+    let past =
+        set(assert_contract_response(past, "post", "/api/js-invocation-sites/actions", 200).await);
+    assert_eq!(
+        (past["added"].clone(), past["set"]["count"].clone()),
+        (json!(true), json!(257))
+    );
     // A refused resolution saves nothing and returns its reason.
-    std::fs::write(
-        directory.path().join("reply-1.json"),
-        invocation_site_reply(&source, None, false).to_string(),
-    )
-    .unwrap();
     let refused = set(assert_contract_response(
         action(json!({"action":"add","session_id":"11","artifact_id":"7","byte_offset":1})).await,
         "post",
@@ -11901,7 +12143,12 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
         ),
         (Some(false), Some("no_function"))
     );
-    assert_eq!(refused["set"]["count"], 8);
+    assert_eq!(refused["set"]["count"], 257);
+    // Every query above was answered from one index of these bytes.
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("index-requests")).unwrap(),
+        "x"
+    );
 
     let sha = entry["site"]["source_sha256"].clone();
     let removed =
@@ -11911,7 +12158,7 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
             assert_contract_response(removed, "post", "/api/js-invocation-sites/actions", 200)
                 .await
         )["set"]["count"],
-        7
+        256
     );
     let missing =
         action(json!({"action":"remove","source_sha256":sha,"anchor_offset":anchors[0]})).await;
@@ -11930,7 +12177,7 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
             cleared["cleared"].as_u64(),
             cleared["set"]["count"].as_u64()
         ),
-        (Some(7), Some(0))
+        (Some(256), Some(0))
     );
     assert!(!store.exists());
 }
@@ -12027,6 +12274,225 @@ async fn js_invocation_site_set_reports_the_session_and_stale_script_versions() 
         500,
     )
     .await;
+}
+
+#[tokio::test]
+async fn js_invocation_live_session_follows_the_saved_set_in_a_stable_slot_table() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path().join("js-invocation-sites-v1.json");
+    let source = "window.a=function(x){};window.b=function(y){};window.c=function(z){};";
+    let units = source
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<u8>>();
+    let site = |name: &str| {
+        let anchor = source.find(&format!("({name})")).unwrap();
+        format!(
+            r#"{{"anchor_offset":{anchor},"artifact_id":"3","artifact_sha256":"{}","byte_offset":{anchor},"shape":"function-entry","source_length":{},"source_sha256":"{}"}}"#,
+            hex::encode(Sha256::digest(source.as_bytes())),
+            units.len() / 2,
+            hex::encode(Sha256::digest(&units))
+        )
+    };
+    let slot = |name: &str, armed: bool| {
+        let entry = site(name);
+        let at = entry.find(r#""artifact_id""#).unwrap();
+        format!(r#"{}"armed":{armed},{}"#, &entry[..at], &entry[at..])
+    };
+    let v1 = |names: &[&str]| {
+        format!(
+            r#"{{"sites":[{}],"version":1}}"#,
+            names
+                .iter()
+                .map(|name| site(name))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
+    let v2 = |slots: &[(&str, bool)]| {
+        format!(
+            r#"{{"sites":[{}],"version":2}}"#,
+            slots
+                .iter()
+                .map(|(name, armed)| slot(name, *armed))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
+    std::fs::write(&store, v1(&["x", "y"])).unwrap();
+    // The launcher's private copy and the generation file Brave polls.
+    let armed = directory.path().join("armed.json");
+    let generation = directory.path().join("generation");
+    std::fs::write(&armed, v1(&["x", "y"])).unwrap();
+    std::fs::write(&generation, "0\n").unwrap();
+    let server = Server::start_with_args(&[
+        "--js-invocation-site-store".into(),
+        store.display().to_string(),
+        "--js-invocation-session-sites".into(),
+        armed.display().to_string(),
+        "--js-invocation-session-generation".into(),
+        generation.display().to_string(),
+    ])
+    .await;
+    let list = || async {
+        serde_json::from_slice::<Value>(
+            &assert_contract_response(
+                server.get("/api/js-invocation-sites").await,
+                "get",
+                "/api/js-invocation-sites",
+                200,
+            )
+            .await,
+        )
+        .unwrap()
+    };
+    let published = || {
+        (
+            std::fs::read_to_string(&armed).unwrap(),
+            std::fs::read_to_string(&generation).unwrap(),
+        )
+    };
+    let slots = |set: &Value| {
+        set["session"]["sites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|slot| slot["armed"].as_bool().unwrap())
+            .collect::<Vec<_>>()
+    };
+    // The saved set equals the startup table, so nothing is published.
+    let first = list().await;
+    assert_eq!(first["session"]["live"], true);
+    assert_eq!(first["session"]["count"], 2);
+    assert_eq!(first["session"]["revision"], 0);
+    assert!(
+        first["next_capture"]
+            .as_str()
+            .unwrap()
+            .starts_with("This capture arms")
+    );
+    assert_eq!(published(), (v1(&["x", "y"]), "0\n".into()));
+
+    // Removing disarms its slot in place; slot 1 keeps its site.
+    let source_sha256 = first["sites"][1]["site"]["source_sha256"].clone();
+    let anchor_y = first["sites"][1]["site"]["anchor_offset"].clone();
+    let removed = serde_json::from_slice::<Value>(
+        &assert_contract_response(
+            server
+                .action(
+                    "/api/js-invocation-sites/actions",
+                    json!({"action":"remove","source_sha256":source_sha256,"anchor_offset":anchor_y}),
+                )
+                .await,
+            "post",
+            "/api/js-invocation-sites/actions",
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(slots(&removed["set"]), [true, false]);
+    assert_eq!(removed["set"]["session"]["count"], 1);
+    assert_eq!(removed["set"]["sites"][0]["armed_in_capture"], true);
+    assert_eq!(
+        published(),
+        (v2(&[("x", true), ("y", false)]), "1\n".into())
+    );
+
+    // Another writer's change reaches the capture at the next listing: a new
+    // site takes the next slot and a returning one its old slot.
+    std::fs::write(&store, v1(&["z", "y"])).unwrap();
+    let revised = list().await;
+    assert_eq!(slots(&revised), [false, true, true]);
+    assert_eq!(revised["session"]["revision"], 2);
+    assert_eq!(
+        published(),
+        (v2(&[("x", false), ("y", true), ("z", true)]), "2\n".into())
+    );
+    // An unchanged set publishes nothing.
+    list().await;
+    assert_eq!(published().1, "2\n");
+
+    // Clearing disarms every slot and keeps them.
+    let cleared = serde_json::from_slice::<Value>(
+        &assert_contract_response(
+            server
+                .action(
+                    "/api/js-invocation-sites/actions",
+                    json!({"action":"clear","confirm":true}),
+                )
+                .await,
+            "post",
+            "/api/js-invocation-sites/actions",
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(slots(&cleared["set"]), [false, false, false]);
+    assert_eq!(cleared["set"]["session"]["count"], 0);
+    assert_eq!(
+        published(),
+        (
+            v2(&[("x", false), ("y", false), ("z", false)]),
+            "3\n".into()
+        )
+    );
+
+    // A table that cannot be published is reported, the capture keeps the
+    // table it has, and the next listing retries.
+    std::fs::remove_file(&generation).unwrap();
+    std::fs::create_dir(&generation).unwrap();
+    std::fs::write(&store, v1(&["x"])).unwrap();
+    let failed = list().await;
+    assert!(
+        failed["session"]["revision_error"]
+            .as_str()
+            .unwrap()
+            .contains("could not follow"),
+        "{failed}"
+    );
+    assert_eq!(slots(&failed), [false, false, false]);
+    assert_eq!(failed["sites"][0]["armed_in_capture"], false);
+    std::fs::remove_dir(&generation).unwrap();
+    let recovered = list().await;
+    assert_eq!(recovered["session"]["revision_error"], Value::Null);
+    assert_eq!(slots(&recovered), [true, false, false]);
+    assert_eq!(
+        published(),
+        (v2(&[("x", true), ("y", false), ("z", false)]), "4\n".into())
+    );
+    drop(server);
+
+    // Without a generation file the capture keeps its startup sites.
+    std::fs::write(&armed, v1(&["x"])).unwrap();
+    let fixed = Server::start_with_args(&[
+        "--js-invocation-site-store".into(),
+        store.display().to_string(),
+        "--js-invocation-session-sites".into(),
+        armed.display().to_string(),
+    ])
+    .await;
+    std::fs::write(&store, v1(&["y"])).unwrap();
+    let kept = serde_json::from_slice::<Value>(
+        &assert_contract_response(
+            fixed.get("/api/js-invocation-sites").await,
+            "get",
+            "/api/js-invocation-sites",
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(kept["session"]["live"], false);
+    assert_eq!(kept["sites"][0]["armed_in_capture"], false);
+    assert!(
+        kept["next_capture"]
+            .as_str()
+            .unwrap()
+            .starts_with("Tracking starts with the next capture")
+    );
+    assert_eq!(std::fs::read_to_string(&armed).unwrap(), v1(&["x"]));
 }
 
 #[tokio::test]

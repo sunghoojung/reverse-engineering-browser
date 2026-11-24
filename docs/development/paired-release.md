@@ -204,15 +204,16 @@ prints PASS, FAIL or the exact MANUAL steps per case
 ([tools README](../../tools/README.md#live-acceptance)). The volume cases run in
 their own content session, which moves more than 768 MiB of bodies and
 measures the browser's memory, and the disk reserve case in another whose
-receiver reserve is above the free space. One content session covers most
-cases:
+receiver reserve is above the free space. Each session starts in a fresh
+profile, so no case reads an earlier run's HTTP cache or cookies. One content
+session covers most cases:
 
 ```sh
-REB_NATIVE_PROMISE_STACKS=1 "$REB_API" session start \
-  --url http://127.0.0.1:<port>/ --localhost-only \
+"$REB_API" session start \
+  --url http://127.0.0.1:<port>/ --localhost-only --fresh-profile \
   --request-content --confirm-sensitive-capture --canvas-images \
-  --request-stacks --document-start --wasm-dispatch --wasm-call-indirect \
-  --fresh-profile --brave-binary "$BRAVE" --sessions-root "$(mktemp -d)" \
+  --request-stacks --promise-stacks --document-start --wasm-dispatch --wasm-call-indirect \
+  --brave-binary "$BRAVE" --sessions-root "$(mktemp -d)" \
   --duration-seconds 3600 > session.json
 EP="$(python3 -c 'import json; print(json.load(open("session.json"))["endpoint_file"])')"
 "$REB_API" call get_session_context --read-only --endpoint-file "$EP"
@@ -241,7 +242,7 @@ debugger observations. An agent connected with
 | Content session | An 8 KB GraphQL GET URL; a 5 MiB JSON POST, a multipart upload with a file, a 17 MiB POST and a password form post kept whole with exact bytes and digest, the password form marked `credential_form`; a stream-body `fetch`; 40 parallel scripts all kept | #436 |
 | Volume session (the content start, in a session of its own) | Four 72 MiB POSTs (288 MiB) and six 96 MiB responses (576 MiB) kept whole with the server's digests; a 24 MiB script kept whole as its compiled source; 5,000 small POSTs kept, any the artifact queue refused counted in `get_session_summary`; no budget or truncation named; capture adds less than one body to the browser process's footprint while they pass, against the same page in the same Brave without a session | #428, #436 |
 | Disk reserve session (the content start with `REB_ARTIFACT_DISK_RESERVE_MIB` above the free space) | A request and a response body are `not_captured_disk_reserve`, none is stored, and `get_session_summary` counts them under that reason | #436 |
-| Content session | An agent waits for the next fetch to `/api/x` and reads its stack, the next click handler and its position, and the next CSP violation | #434 phase 1 |
+| Content session | An agent waits for the next fetch to `/api/x` and reads its stack, the next click handler and its position, and the next CSP violation; then it keeps the rules for the origin, a new tab's top document records from its first script while its same-origin iframe records nothing, and after `unwatch` a new document records nothing | #434 phase 1 |
 | Metadata session (the same start without `--request-content`, `--confirm-sensitive-capture` and `--canvas-images`) | No header, cookie or body value is recorded; an `eval` frame reports `source_not_retained` | #427, #429, #430 |
 | Session with `--request-stacks=false` in place of `--request-stacks` (request stacks are on unless a start turns them off) | No stack walk runs | #429 |
 | Not runnable from Origin Trace | The pausing debugger: conditional breakpoint, scopes, step, resume, navigation and idle disarm, the lease deadline and the review cases in [native-debugger-v1.md](../product/native-debugger-v1.md#acceptance-still-required) | #434 phase 3 |

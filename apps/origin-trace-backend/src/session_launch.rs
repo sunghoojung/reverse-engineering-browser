@@ -16,6 +16,9 @@ use std::{
 const READY_LINE: &str = "Origin Trace live session ";
 const FAILURE_LINE: &str = "REB_LIVE_SESSION_FAILURE: ";
 const POLL: Duration = Duration::from_millis(200);
+/// Full Wasm samples one renderer keeps per stream per second. A per-function
+/// or per-site allowance past it cannot change what is kept.
+const WASM_SAMPLE_WINDOW: u32 = 1024;
 /// run-live-session.sh's open-ended duration, the longest limit it accepts.
 const MAX_DURATION_SECONDS: u32 = 3_155_760_000;
 
@@ -35,6 +38,9 @@ pub struct StartOptions {
     pub wasm_function_deny: Vec<u32>,
     /// Lowercase SHA-256 digests. Empty admits every module.
     pub wasm_module_allowlist: Vec<String>,
+    /// Keep every Wasm record the filters admit: no per-window pacing, no
+    /// browser ceiling and no per-function or per-site allowance.
+    pub wasm_every_record: bool,
     /// Set when a budget field was present but not the documented shape.
     pub wasm_budget_malformed: bool,
     pub guest_adapter: Option<PathBuf>,
@@ -53,6 +59,10 @@ pub struct StartOptions {
     /// Set when request_stacks took its default: a Brave that predates the
     /// flag then starts without stacks and says so, as in the app.
     pub request_stacks_if_supported: bool,
+    /// Also record the stack that registered each Promise reaction a request
+    /// is later made in (protocol/native-network-v3.md, Promise registrations).
+    /// Off unless named, as in the app's start panel; needs request_stacks.
+    pub promise_stacks: bool,
     /// Permit document-start Console scripts in this capture browser. Arming
     /// one stays a separate confirmed Console action.
     pub document_start: bool,
@@ -187,6 +197,7 @@ impl StartOptions {
             wasm_function_allow: indexes("wasm_function_allow", &mut wasm_budget_malformed),
             wasm_function_deny: indexes("wasm_function_deny", &mut wasm_budget_malformed),
             wasm_module_allowlist: digests("wasm_module_allowlist", &mut wasm_budget_malformed),
+            wasm_every_record: flag("wasm_every_record"),
             wasm_budget_malformed,
             guest_adapter: path("guest_adapter"),
             js_dispatch_sites: path("js_dispatch_sites"),
@@ -199,6 +210,7 @@ impl StartOptions {
             browser_internal: flag("browser_internal"),
             extension_traffic: flag("extension_traffic"),
             fresh_profile: flag("fresh_profile"),
+            promise_stacks: flag("promise_stacks"),
             js_invocation_sites: path("js_invocation_sites"),
             js_invocation_saved_sites: flag("js_invocation_saved_sites"),
             confirm_sensitive_capture: flag("confirm_sensitive_capture"),
@@ -250,7 +262,14 @@ impl StartOptions {
         if self.wasm_budget_malformed {
             return Err("Wasm sample budget options must be integers, function indexes below 16777216, and 64-character hex module digests".into());
         }
-        let wasm_budget = self.wasm_samples_per_function.is_some()
+        if self.wasm_every_record
+            && (self.wasm_samples_per_function.is_some()
+                || self.wasm_samples_per_indirect_site.is_some())
+        {
+            return Err("wasm_every_record keeps every record, so it takes no wasm_samples_per_function or wasm_samples_per_indirect_site".into());
+        }
+        let wasm_budget = self.wasm_every_record
+            || self.wasm_samples_per_function.is_some()
             || self.wasm_samples_per_indirect_site.is_some()
             || !self.wasm_function_allow.is_empty()
             || !self.wasm_function_deny.is_empty()
@@ -262,15 +281,15 @@ impl StartOptions {
         }
         if self
             .wasm_samples_per_function
-            .is_some_and(|limit| !(1..=16).contains(&limit))
+            .is_some_and(|limit| !(1..=WASM_SAMPLE_WINDOW).contains(&limit))
         {
-            return Err("wasm_samples_per_function must be from 1 to 16".into());
+            return Err("wasm_samples_per_function must be from 1 to 1024".into());
         }
         if self
             .wasm_samples_per_indirect_site
-            .is_some_and(|limit| !(1..=16).contains(&limit))
+            .is_some_and(|limit| !(1..=WASM_SAMPLE_WINDOW).contains(&limit))
         {
-            return Err("wasm_samples_per_indirect_site must be from 1 to 16".into());
+            return Err("wasm_samples_per_indirect_site must be from 1 to 1024".into());
         }
         for (name, indexes) in [
             ("wasm_function_allow", &self.wasm_function_allow),
@@ -345,6 +364,11 @@ impl StartOptions {
         if self.request_stacks && mask & 1280 != 1280 {
             return Err("request_stacks needs Network and Artifact category bits (256 and 1024) in category_mask".into());
         }
+        if self.promise_stacks && !self.request_stacks {
+            return Err(
+                "promise_stacks rides on request stacks and requires request_stacks".into(),
+            );
+        }
         if invocation && mask & 512 == 0 {
             return Err(
                 "JavaScript invocation sites need the VM category bit (512) in category_mask"
@@ -383,12 +407,14 @@ impl StartOptions {
             "wasm_function_allow": self.wasm_function_allow,
             "wasm_function_deny": self.wasm_function_deny,
             "wasm_module_allowlist": self.wasm_module_allowlist,
+            "wasm_every_record": self.wasm_every_record,
             "quiet": self.quiet,
             "category_mask": self.category_mask.unwrap_or(4095),
             "localhost_only": self.localhost_only,
             "canvas_images": self.canvas_images,
             "request_content": self.request_content,
             "request_stacks": self.request_stacks,
+            "promise_stacks": self.promise_stacks,
             "document_start": self.document_start,
             "browser_internal": self.browser_internal,
             "extension_traffic": self.extension_traffic,
@@ -619,6 +645,7 @@ fn with_option_names(cause: &str) -> String {
     let names = [
         ("REB_CAPTURE_REQUEST_CONTENT", "request_content"),
         ("REB_NATIVE_REQUEST_STACKS", "request_stacks"),
+        ("REB_NATIVE_PROMISE_STACKS", "promise_stacks"),
         ("REB_CONSOLE_DOCUMENT_START", "document_start"),
         ("REB_CAPTURE_BROWSER_INTERNAL", "browser_internal"),
         ("REB_CAPTURE_EXTENSION_TRAFFIC", "extension_traffic"),
@@ -644,6 +671,7 @@ fn with_option_names(cause: &str) -> String {
         ("REB_NATIVE_WASM_FUNCTION_ALLOW", "wasm_function_allow"),
         ("REB_NATIVE_WASM_FUNCTION_DENY", "wasm_function_deny"),
         ("REB_NATIVE_WASM_MODULE_ALLOWLIST", "wasm_module_allowlist"),
+        ("REB_NATIVE_WASM_EVERY_RECORD", "wasm_every_record"),
         ("REB_NATIVE_QUIET_MODE", "quiet"),
         ("REB_CAPTURE_CANVAS_IMAGES", "canvas_images"),
         ("REB_CAPTURE_CATEGORY_MASK", "category_mask"),
@@ -667,9 +695,10 @@ fn with_option_names(cause: &str) -> String {
 }
 
 /// The agent's saved invocation sites, shared by the sessions agents start
-/// under this HOME and never the app's own set. Sites saved with
-/// `js_invocation_site_action` in one agent session arm the next one started
-/// with `js_invocation_saved_sites`.
+/// under this HOME and never the app's own set. A session started with
+/// `js_invocation_saved_sites` follows the sites `js_invocation_site_action`
+/// saves or removes while it runs, when its Brave follows site revisions,
+/// and every later such session starts with them.
 pub fn agent_site_store(home: &Path) -> PathBuf {
     home.join(".config/origin-trace/agent-sessions/js-invocation-sites-v1.json")
 }
@@ -711,14 +740,17 @@ fn wasm_module_allowlist_file(
     Ok(Some(path))
 }
 
-/// The site file this session arms, as a private copy nothing changes while
-/// it runs: the browser rereads the file it was given and refuses a session
-/// whose file changed. Returns the copy and how many sites it names.
+/// The site file this session arms, as a private copy. A named file is armed
+/// as it is for the whole session. The agent sessions' saved set, even an
+/// empty one, starts as that copy and the session's backend then follows the
+/// saved set, rewriting the copy as a slot table the browser applies while
+/// it runs. Returns the copy, how many sites it names, and whether the
+/// session follows the saved set.
 fn invocation_sites(
     options: &StartOptions,
     home: &Path,
     agent: &Path,
-) -> Result<Option<(PathBuf, usize)>, String> {
+) -> Result<Option<(PathBuf, usize, bool)>, String> {
     let sites = if options.js_invocation_saved_sites {
         let store = agent_site_store(home);
         let saved = js_invocation_sites::Store::new(store)
@@ -729,9 +761,6 @@ fn invocation_sites(
                     error.message
                 )
             })?;
-        if saved.is_empty() {
-            return Err("js_invocation_saved_sites names the agent's saved set, which is empty. In an agent session, resolve a function with resolve_js_invocation_site and save it with js_invocation_site_action add; it arms in the next session started with js_invocation_saved_sites.".into());
-        }
         saved.into_iter().map(|saved| saved.site).collect()
     } else if let Some(path) = &options.js_invocation_sites {
         let bytes = std::fs::read(path)
@@ -739,12 +768,16 @@ fn invocation_sites(
         std::str::from_utf8(&bytes)
             .ok()
             .and_then(js_invocation_sites::parse_sites_file)
-            .ok_or("js_invocation_sites is not a native-js-invocation-sites-v1 file: canonical JSON naming 1 to 8 distinct function-entry sites in at most 4096 bytes. resolve_js_invocation_site returns exact site entries.")?
+            .ok_or("js_invocation_sites is not a native-js-invocation-sites-v1 file: canonical JSON naming at least one distinct function-entry site. resolve_js_invocation_site returns exact site entries.")?
     } else {
         return Ok(None);
     };
-    let text = js_invocation_sites::sites_file(&sites)
-        .map_err(|_| "The invocation site set cannot be written as a site file")?;
+    let text = if sites.is_empty() {
+        js_invocation_sites::slot_table_file(&[])
+    } else {
+        js_invocation_sites::sites_file(&sites)
+    }
+    .map_err(|_| "The invocation site set cannot be written as a site file")?;
     let copy = agent.join("js-invocation-sites.json");
     crate::durable::write_private(&copy, text.as_bytes()).map_err(|error| {
         format!(
@@ -752,7 +785,7 @@ fn invocation_sites(
             error.message
         )
     })?;
-    Ok(Some((copy, sites.len())))
+    Ok(Some((copy, sites.len(), options.js_invocation_saved_sites)))
 }
 
 fn ready(log: &str) -> Option<String> {
@@ -871,7 +904,7 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         // is visible beside what the launcher reports it passed to Brave.
         use std::io::Write;
         let mut named = options.effective();
-        if let Some((_, count)) = &armed_sites {
+        if let Some((_, count, _)) = &armed_sites {
             named["js_invocation_site_count"] = json!(count);
         }
         writeln!(&log, "Agent session options: {named}")
@@ -908,10 +941,11 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         // without invocation capture refuses the start instead of dropping it.
         "REB_NATIVE_JS_INVOCATION_SITES",
         "REB_NATIVE_JS_INVOCATION_IF_SUPPORTED",
+        "REB_NATIVE_JS_INVOCATION_LIVE",
         "REB_NATIVE_REQUEST_STACKS",
         "REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED",
         // Request stacks are on by default, so an inherited Promise stacks
-        // switch would now apply silently; agent options name no such switch.
+        // switch would apply silently; only the named option turns it on.
         "REB_NATIVE_PROMISE_STACKS",
         "REB_BRAVE_BINARY",
         "REB_CAPTURE_DURATION_SECONDS",
@@ -925,13 +959,18 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
     command
         .env("REB_LIVE_SESSION_ROOT", &sessions_root)
         .env("REB_ACTIVE_ENDPOINT_FILE", &active_endpoint)
-        // The app's saved invocation sites arm its next capture, so agent
+        // The app's saved invocation sites arm its captures, so agent
         // sessions keep their own saved set and never change the researcher's.
         .env("REB_JS_INVOCATION_SITE_STORE", agent_site_store(&home))
         .env("REB_NATIVE_WASM_DISPATCH", switch(options.wasm_dispatch))
         .env(
             "REB_NATIVE_WASM_CALL_INDIRECT",
             switch(options.wasm_call_indirect),
+        )
+        // Named or off, never inherited, like the allowances it replaces.
+        .env(
+            "REB_NATIVE_WASM_EVERY_RECORD",
+            switch(options.wasm_every_record),
         )
         .env("REB_NATIVE_QUIET_MODE", switch(options.quiet))
         .env("REB_CAPTURE_CANVAS_IMAGES", switch(options.canvas_images))
@@ -948,6 +987,7 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
             "REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED",
             switch(options.request_stacks_if_supported),
         )
+        .env("REB_NATIVE_PROMISE_STACKS", switch(options.promise_stacks))
         // Browser-internal and extension evidence are opt-ins, never inherited.
         .env(
             "REB_CAPTURE_BROWSER_INTERNAL",
@@ -1021,8 +1061,11 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
     if let Some(path) = &options.js_dispatch_sites {
         command.env("REB_NATIVE_JS_DISPATCH_SITES", path);
     }
-    if let Some((path, _)) = &armed_sites {
+    if let Some((path, _, live)) = &armed_sites {
         command.env("REB_NATIVE_JS_INVOCATION_SITES", path);
+        if *live {
+            command.env("REB_NATIVE_JS_INVOCATION_LIVE", "1");
+        }
     }
     if let Some(path) = &brave {
         command.env("REB_BRAVE_BINARY", path);
@@ -1092,7 +1135,7 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
                         url_opened: None,
                         url_error: None,
                         capture_observed: None,
-                        js_invocation_sites_armed: armed_sites.as_ref().map(|(_, count)| *count),
+                        js_invocation_sites_armed: armed_sites.as_ref().map(|(_, count, _)| *count),
                     };
                 }
             }
@@ -1170,6 +1213,10 @@ mod tests {
                 "request_stacks needs Network and Artifact",
             ),
             (
+                json!({"promise_stacks":true,"request_stacks":false}),
+                "requires request_stacks",
+            ),
+            (
                 json!({"js_invocation_saved_sites":true,"category_mask":1024}),
                 "VM category",
             ),
@@ -1192,7 +1239,15 @@ mod tests {
             ),
             (
                 json!({"wasm_samples_per_function":0,"wasm_dispatch":true}),
-                "from 1 to 16",
+                "from 1 to 1024",
+            ),
+            (
+                json!({"wasm_every_record":true,"wasm_dispatch":false,"wasm_call_indirect":false}),
+                "require wasm_dispatch",
+            ),
+            (
+                json!({"wasm_every_record":true,"wasm_samples_per_indirect_site":2,"wasm_call_indirect":true}),
+                "takes no wasm_samples_per_function or wasm_samples_per_indirect_site",
             ),
             (
                 json!({"wasm_function_allow":[1,1],"wasm_dispatch":true}),
@@ -1249,6 +1304,7 @@ mod tests {
             ("browser_internal", false),
             ("extension_traffic", false),
             ("fresh_profile", false),
+            ("promise_stacks", false),
         ] {
             assert_eq!(effective[key], on, "{key}");
         }
@@ -1339,6 +1395,16 @@ mod tests {
         assert_eq!(effective["wasm_samples_per_indirect_site"], 1);
         assert_eq!(effective["wasm_function_deny"], json!([4]));
         assert_eq!(effective["wasm_module_allowlist"][0], digest);
+        assert_eq!(effective["wasm_every_record"], false);
+        let every =
+            StartOptions::from_json(&json!({"wasm_dispatch": true, "wasm_every_record": true,
+            "wasm_function_deny": [4]}));
+        assert!(
+            every.validate().is_ok(),
+            "{}",
+            every.validate().unwrap_err()
+        );
+        assert_eq!(every.effective()["wasm_every_record"], true);
     }
 
     #[test]

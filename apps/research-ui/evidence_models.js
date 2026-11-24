@@ -9,6 +9,12 @@
       // A named gap limits only the surface that shows its own category.
       const networkGapCategories = new Set(['network']);
       const vmGapCategories = new Set(['vm', 'wasm']);
+      // V8's largest Wasm module (kV8MaxWasmModuleSize) bounds a byte offset in
+      // one; include/reb/wasm_dispatch.hpp kWasmModuleByteOffsetLimit.
+      const WASM_MODULE_OFFSET_LIMIT = 2 ** 30;
+      // A guest sample's index is below its recipe's limit, a Chromium JSON
+      // integer; include/reb/wasm_guest.hpp kWasmGuestSampleIndexLimit.
+      const WASM_GUEST_SAMPLE_INDEX_LIMIT = 2 ** 31 - 1;
 
       function fingerprintEventsFromEvents(events) {
         return events.filter(event => fingerprintSignalCategories.has(event.category));
@@ -219,9 +225,11 @@
       // Same identifier rule as both stored-window readers, which list every pair.
       const namedGapCategoryPattern = /^[a-z][a-z0-9_]{0,31}$/;
       const namedGapReasonPattern = /^[a-z][a-z0-9_]{0,127}$/;
-      // Configured per-configuration sampling caps in the native dispatch and
-      // guest contracts: retained observations stay exact and later ones were
-      // not sampled. Filter reasons are policy exclusions. Every other reason,
+      // Configured sampling limits in the native dispatch and guest contracts:
+      // retained observations stay exact and later ones were not sampled. Wasm
+      // dispatch limits are per one-second window; captures from earlier builds
+      // held them per configuration, and their _browser_ function and site
+      // reasons. Filter reasons are policy exclusions. Every other reason,
       // known or not, is reported as lost.
       const samplingBudgetGapLabels = new Map([
         ['native_wasm_dispatch_budget_incomplete', 'Wasm br_table dispatch'],
@@ -238,6 +246,12 @@
         ['native_js_dispatch_site_budget_incomplete', 'JavaScript dispatch per site'],
         ['native_guest_sample_limit', 'Wasm guest samples'],
         ['native_guest_browser_sample_budget', 'Wasm guest samples (browser)']
+      ]);
+      // Renderer window limits whose later executions keep overflow identities.
+      const wasmWindowBudgetReasons = new Set([
+        'native_wasm_dispatch_budget_incomplete', 'native_wasm_indirect_budget_incomplete',
+        'native_wasm_dispatch_function_budget_incomplete', 'native_wasm_indirect_function_budget_incomplete',
+        'native_wasm_indirect_site_budget_incomplete'
       ]);
       // Allow and deny decisions. They are not capacity losses and they do not
       // spend a sample slot. The reason string stays in the sentence.
@@ -304,9 +318,8 @@
         }
         if (budgets.length) {
           messages.push(`Sampling budget reached in ${scope} for ${namedGapItems(budgets, gap => `${samplingBudgetGapLabels.get(gap.reason)} (${gap.reason})`)}. Retained observations are exact; later ones were not sampled.`);
-          if (budgets.some(gap => gap.reason === 'native_wasm_dispatch_budget_incomplete' ||
-              gap.reason === 'native_wasm_indirect_budget_incomplete')) {
-            messages.push('Wasm executions past that cap keep a compact identity in an overflow record, up to the ring; identities past the ring are a count on that record, not another full observation.');
+          if (budgets.some(gap => wasmWindowBudgetReasons.has(gap.reason))) {
+            messages.push('Wasm sampling is paced per second: executions past a full window or function allowance keep a compact identity in an overflow record, up to the ring, and identities past the ring are a count on that record, not another full observation. The next second samples again.');
           }
         }
         return messages.join(' ');
@@ -429,7 +442,7 @@
         return state ? {js_invocation: {state, invocation_id: String(context.id)}} : {};
       }
 
-      // Compact identity past a 16-record Wasm budget. Null is malformed, not a
+      // Compact identity past a Wasm sample window. Null is malformed, not a
       // partial observation. The callee index is not in an indirect identity.
       function decodeWasmOverflow(event) {
         const indirect = event?.type === 'wasm_indirect_overflow';
@@ -499,8 +512,8 @@
         const row = {function_index:view.getUint32(4,true),module_byte_offset:view.getUint32(8,true),
           selector:view.getUint32(12,true),table_count:view.getUint32(16,true),sample_index:view.getUint32(20,true),
           ...nativeInvocationRow(context), ...(directCaller ? {direct_caller: directCaller} : {})};
-        return row.function_index < 16777216 && row.module_byte_offset >= 8 && row.module_byte_offset < 16777216 &&
-          row.table_count < 16777216 && row.sample_index < 16 ? row : null;
+        return row.function_index < 16777216 && row.module_byte_offset >= 8 && row.module_byte_offset < WASM_MODULE_OFFSET_LIMIT &&
+          row.table_count < 16777216 && row.sample_index < 0xffffffff ? row : null;
       }
 
       // Physical call_indirect: function, offset, table, slot, callee, resolution, sample.
@@ -520,9 +533,9 @@
         const row = {function_index:view.getUint32(4,true),module_byte_offset:view.getUint32(8,true),
           table_index:view.getUint32(12,true),slot:view.getUint32(16,true),callee_function_index:view.getUint32(20,true),
           resolution:view.getUint32(24,true),sample_index:view.getUint32(28,true),...nativeInvocationRow(context)};
-        return row.function_index < 16777216 && row.module_byte_offset >= 8 && row.module_byte_offset < 16777216 &&
+        return row.function_index < 16777216 && row.module_byte_offset >= 8 && row.module_byte_offset < WASM_MODULE_OFFSET_LIMIT &&
           row.table_index < 16777216 && row.callee_function_index < 16777216 && row.resolution < 5 &&
-          (row.resolution === 0 || row.callee_function_index === 0) && row.sample_index < 16 ? row : null;
+          (row.resolution === 0 || row.callee_function_index === 0) && row.sample_index < 0xffffffff ? row : null;
       }
 
       // Trap or still-executing follow-up. A clear known bit stores 0, which is
@@ -548,10 +561,10 @@
         const offsetKnown = (row.known & 2) !== 0;
         if ((row.known & ~3) !== 0 || row.kind > 1 || row.related_stream > 2 || row.invocation_id === 0) return null;
         if (functionKnown ? row.function_index >= 16777216 : row.function_index !== 0) return null;
-        if (offsetKnown ? row.module_byte_offset < 8 || row.module_byte_offset >= 16777216 : row.module_byte_offset !== 0) return null;
+        if (offsetKnown ? row.module_byte_offset < 8 || row.module_byte_offset >= WASM_MODULE_OFFSET_LIMIT : row.module_byte_offset !== 0) return null;
         if (row.kind === 1 ? row.reason !== 0 || row.bounds !== 0 : row.reason >= 6) return null;
         if (row.reason === 3 ? row.bounds >= 7 : row.bounds !== 0) return null;
-        if (row.related_stream === 0 ? row.related_sample_index !== 0xffffffff : row.related_sample_index >= 16) return null;
+        if ((row.related_sample_index === 0xffffffff) !== (row.related_stream === 0)) return null;
         return row;
       }
       // Native JavaScript dispatch, protocol/native-js-dispatch-v1.md: a
@@ -568,13 +581,18 @@
         const view = new DataView(bytes.buffer);
         const u32 = at => view.getUint32(at, true);
         const [shape, kind, slot, flags] = [bytes[4], bytes[5], bytes[6], bytes[7]];
+        // Version 2 has a u32 site ordinal at 44 and any one-byte slot. Version
+        // 1, from earlier builds, had 8 slots and u16 indexes below 64 and 256.
+        const version = view.getUint16(0, true);
         const row = {shape, kind, slot, flags, script: u32(8), anchor: u32(12), length: u32(16), selector: u32(20),
           handler_script: u32(24), handler_start: u32(28), handler_end: u32(32), activation: u32(36), parent: u32(40),
-          site_sample: view.getUint16(44, true), sample: view.getUint16(46, true)};
+          site_sample: version === 1 ? view.getUint16(44, true) : u32(44),
+          sample: version === 1 ? view.getUint16(46, true) : null};
         const handler = (flags & 8) !== 0;
-        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || bytes.slice(80).some(byte => byte !== 0) ||
-          ![1, 2].includes(shape) || kind < 1 || kind > 9 || slot > 7 || (flags & ~0x0f) !== 0 || row.script === 0 ||
-          row.length === 0 || row.anchor >= row.length || row.activation === 0 || row.site_sample >= 64 || row.sample >= 256 ||
+        if (![1, 2].includes(version) || view.getUint16(2, true) !== 128 || bytes.slice(80).some(byte => byte !== 0) ||
+          (version === 1 && (slot > 7 || row.site_sample >= 64 || row.sample >= 256)) ||
+          ![1, 2].includes(shape) || kind < 1 || kind > 9 || (flags & ~0x0f) !== 0 || row.script === 0 ||
+          row.length === 0 || row.anchor >= row.length || row.activation === 0 ||
           (kind === 7 && row.selector > 1) || (kind !== 1 && kind !== 7 && row.selector !== 0) ||
           (handler ? shape !== 2 || row.handler_script === 0 || row.handler_start >= row.handler_end
             : row.handler_script !== 0 || row.handler_start !== 0 || row.handler_end !== 0) ||
@@ -808,7 +826,11 @@
       // net::ReferrerPolicy + 1, as the Fetch policy names DevTools shows.
       const referrerPolicies = [null, 'no-referrer-when-downgrade', 'strict-origin-when-cross-origin',
         'origin-when-cross-origin', 'unsafe-url', 'origin', 'same-origin', 'strict-origin', 'no-referrer'];
-      const HEADER_BLOCK_LIMIT = 320 * 1024;
+      // Version 2 retains a block or cookie list of any length, so its
+      // not_captured_block_limit is only a length past the 32-bit field;
+      // version 1 had a 320 KiB block and 2 MiB list limit.
+      const HEADER_BLOCK_LIMIT_V1 = 320 * 1024;
+      const LENGTH_UNREPRESENTABLE = 0xffffffff;
 
       // Every rule of the request_headers and response_headers payload
       // (protocol/native-network-v3.md), shared with the C++ core and the
@@ -825,7 +847,8 @@
         const address = bytes.slice(24, 40), digest = bytes.slice(48, 80);
         const zero = list => list.every(byte => byte === 0);
         const addressed = family !== 0;
-        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || state < 1 || state > 8 ||
+        const version = view.getUint16(0, true);
+        if ((version !== 1 && version !== 2) || view.getUint16(2, true) !== 128 || state < 1 || state > 8 ||
             !zero(bytes.slice(44, 48)) || !zero(bytes.slice(80))) return null;
         const httpStatus = status === 0 || (status >= 100 && status <= 999);
         if (response ? policy !== 0 || (source === 1 ? !httpStatus : source === 2 ? !httpStatus || addressed
@@ -835,7 +858,8 @@
             (family === 4 && !zero(address.slice(4)))) return null;
         const empty = state === 3, limited = state === 4;
         if ((count === 0) !== empty || (length === 0) !== empty || length < 5 * count ||
-            limited !== (length > HEADER_BLOCK_LIMIT) || zero(digest) !== limited) return null;
+            limited !== (version === 1 ? length > HEADER_BLOCK_LIMIT_V1 : length === LENGTH_UNREPRESENTABLE) ||
+            zero(digest) !== limited) return null;
         if ((event.artifact_id !== '0') !== (state === 1 || state === 2)) return null;
         const hex = list => Array.from(list, byte => byte.toString(16).padStart(2, '0')).join('');
         let remoteAddress = null;
@@ -854,7 +878,7 @@
         };
       }
 
-      const COOKIE_LIST_LIMIT = 2 * 1024 * 1024;
+      const COOKIE_LIST_LIMIT_V1 = 2 * 1024 * 1024;
 
       // The cookie_list record ("Cookies" in protocol/native-network-v3.md),
       // shared with the C++ core and the Python validator through
@@ -867,12 +891,14 @@
         const count = view.getUint32(8, true), blocked = view.getUint32(12, true), length = view.getUint32(16, true);
         const digest = bytes.slice(32, 64);
         const zero = list => list.every(byte => byte === 0);
-        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || ![1, 2].includes(direction) ||
+        const version = view.getUint16(0, true);
+        if ((version !== 1 && version !== 2) || view.getUint16(2, true) !== 128 || ![1, 2].includes(direction) ||
             state < 1 || state > 8 || !zero(bytes.slice(6, 8)) || !zero(bytes.slice(28, 32)) || !zero(bytes.slice(64)) ||
             blocked > count) return null;
         const empty = state === 3, limited = state === 4;
         if ((count === 0) !== empty || (length === 0) !== empty || (!empty && length < 16 + 64 * count) ||
-            limited !== (length > COOKIE_LIST_LIMIT) || zero(digest) !== limited) return null;
+            limited !== (version === 1 ? length > COOKIE_LIST_LIMIT_V1 : length === LENGTH_UNREPRESENTABLE) ||
+            zero(digest) !== limited) return null;
         if ((event.artifact_id !== '0') !== (state === 1 || state === 2)) return null;
         return {
           direction: direction === 1 ? 'sent' : 'received', state: headerStates[state], cookieCount: count,
@@ -1085,20 +1111,29 @@
         const u16 = at => view.getUint16(at, true);
         const u32 = at => view.getUint32(at, true);
         const u64 = at => view.getBigUint64(at, true);
-        if (u16(0) !== 1 || u16(2) !== 128) return null;
+        // Version 2 records every call of every site: byte 4 is zero and the
+        // u32 slot follows the payload (start 112, settle 72), with u32
+        // ordinals. Version 1, from earlier builds, had 8 one-byte slots and
+        // sampled indexes.
+        const v1 = u16(0) === 1;
+        const siteSlot = wide => v1 ? (bytes[4] < 8 ? [bytes[4], wide] : null)
+          : bytes[4] === 0 ? [u32(wide), wide + 4] : null;
+        if (![1, 2].includes(u16(0)) || u16(2) !== 128) return null;
         if (event.type === 'js_invocation_request') {
           const [state, id] = [bytes[4], u32(8)];
           return event.request_id !== '0' && BigInt(event.request_id) <= 0xffffffffn && [2, 3].includes(state) &&
-            (state === 2) === (id !== 0) && u16(12) < 256 && u16(14) === 0 &&
+            (state === 2) === (id !== 0) && (!v1 || (u16(12) < 256 && u16(14) === 0)) &&
             bytes.slice(5, 8).every(byte => byte === 0) && bytes.slice(16).every(byte => byte === 0)
             ? {state: state === 2 ? 'inside' : 'unknown', invocation_id: id} : null;
         }
         if (event.frame_id === '0' || event.request_id !== '0') return null;
         const validKind = (kind, low) => kind >= 1 && kind <= 14 && (kind === 1 || (kind === 7 ? low <= 1 : low === 0));
         if (event.type === 'js_invocation_start') {
-          const [slot, flags, argc, id, parent] = [bytes[4], bytes[5], u16(6), u32(20), u32(24)];
-          if (slot > 7 || (flags & ~0x03) !== 0 || u32(8) === 0 || u32(16) === 0 || u32(12) >= u32(16) || id === 0 ||
-            u16(28) >= 64 || u16(30) >= 256 || u64(104) === 0n || bytes.slice(112).some(byte => byte !== 0) ||
+          const named = siteSlot(112);
+          if (!named) return null;
+          const [[slot, reserved], flags, argc, id, parent] = [named, bytes[5], u16(6), u32(20), u32(24)];
+          if ((v1 && (u16(28) >= 64 || u16(30) >= 256)) || (flags & ~0x03) !== 0 || u32(8) === 0 ||
+            u32(16) === 0 || u32(12) >= u32(16) || id === 0 || u64(104) === 0n || bytes.slice(reserved).some(byte => byte !== 0) ||
             (parent !== 0 && (parent >= id || (flags & 1) !== 0)) || ((flags & 2) !== 0) !== (argc > 8)) return null;
           const kinds = [];
           for (let index = 0; index < 8; index += 1) {
@@ -1109,13 +1144,15 @@
           return {slot, invocation_id: id, parent_invocation_id: parent, parent_unknown: (flags & 1) !== 0,
             argument_count: argc, argument_kinds: kinds};
         }
-        const [slot, outcome, via, kind] = [bytes[4], bytes[5], bytes[6], bytes[7]];
+        const named = siteSlot(72);
+        if (!named) return null;
+        const [[slot, reserved], outcome, via, kind] = [named, bytes[5], bytes[6], bytes[7]];
         const [length, state, encoding, flags, byteLength, rolling] =
           [u32(12), bytes[16], bytes[17], bytes[18], u32(20), u64(24)];
         const [fulfilled, rejected] = [outcome === 1, outcome === 2];
         const [string, raw] = [kind === 3, kind === 12 || kind === 13];
-        if (slot > 7 || !(fulfilled || rejected) || kind < 1 || kind > 14 || u32(8) === 0 || u64(64) === 0n ||
-          bytes[19] !== 0 || (flags & ~1) !== 0 || bytes.slice(72).some(byte => byte !== 0) ||
+        if (!(fulfilled || rejected) || kind < 1 || kind > 14 || u32(8) === 0 || u64(64) === 0n ||
+          bytes[19] !== 0 || (flags & ~1) !== 0 || bytes.slice(reserved).some(byte => byte !== 0) ||
           !((via === 1 && fulfilled) || (via === 2 && rejected) || via === 3) ||
           (length !== 0 && !(string || raw || kind === 11))) return null;
         if (state === 1) {
@@ -1159,8 +1196,8 @@
         }
         const length = view.getUint32(72,true);
         return isCanonicalInteger(event.parent_event_id,1n,uint64Max) && BigInt(event.parent_event_id) < BigInt(event.sequence_number) &&
-          view.getUint32(8,true) >= 8 && view.getUint32(8,true) < 16777216 && view.getUint32(16,true) < 16777216 &&
-          view.getUint32(20,true) < 256 && u64(24) > 0n && u64(32) > 0n &&
+          view.getUint32(8,true) >= 8 && view.getUint32(8,true) < WASM_MODULE_OFFSET_LIMIT && view.getUint32(16,true) < 16777216 &&
+          view.getUint32(20,true) < WASM_GUEST_SAMPLE_INDEX_LIMIT && u64(24) > 0n && u64(32) > 0n &&
           u64(56) > 0n && u64(56) !== BigInt(event.artifact_id) && length > 0 && length <= 65536 &&
           u64(40) < BigInt(length) && u64(64) + BigInt(length) <= uint64Max && bytes.slice(96).some(b => b !== 0) ? {} : null;
       }
@@ -2761,8 +2798,8 @@
         if (!vmWorkspaceExact(row, vmNativeRowKeys(row, keys)) ||
           !vmSampleEvent(row.event) || !vmNativeRowTimeValid(row) || !vmNativeInvocationValid(row) ||
           !vmNativeDirectCallerValid(row) || !isSafeIntegerInRange(row.function_index,0,16777215) ||
-          !isSafeIntegerInRange(row.module_byte_offset,8,16777215) || !isSafeIntegerInRange(row.selector,0,0xffffffff) ||
-          !isSafeIntegerInRange(row.table_count,0,16777215) || !isSafeIntegerInRange(row.sample_index,0,15) ||
+          !isSafeIntegerInRange(row.module_byte_offset,8,WASM_MODULE_OFFSET_LIMIT - 1) || !isSafeIntegerInRange(row.selector,0,0xffffffff) ||
+          !isSafeIntegerInRange(row.table_count,0,16777215) || !isSafeIntegerInRange(row.sample_index,0,0xfffffffe) ||
           row.selected_arm !== Math.min(row.selector,row.table_count) || row.is_default !== (row.selector >= row.table_count)) return false;
         const site = workspace.dispatch_inventory?.candidates.find(site => site.byte_offset === row.module_byte_offset);
         return site ? site.kind === 'br_table' && site.function_index === row.function_index && site.arm_count === row.table_count
@@ -2775,9 +2812,9 @@
         if (!vmWorkspaceExact(row, vmNativeRowKeys(row, ['event','function_index','module_byte_offset','instruction','table_index',
           'slot','resolution','callee_function_index','sample_index'])) ||
           !vmSampleEvent(row.event) || !vmNativeRowTimeValid(row) || !isSafeIntegerInRange(row.function_index,0,16777215) ||
-          !isSafeIntegerInRange(row.module_byte_offset,8,16777215) || !['call_indirect','return_call_indirect'].includes(row.instruction) ||
+          !isSafeIntegerInRange(row.module_byte_offset,8,WASM_MODULE_OFFSET_LIMIT - 1) || !['call_indirect','return_call_indirect'].includes(row.instruction) ||
           !isSafeIntegerInRange(row.table_index,0,16777215) || !isSafeIntegerInRange(row.slot,0,0xffffffff) ||
-          !vmIndirectResolutions.includes(row.resolution) || !isSafeIntegerInRange(row.sample_index,0,15) ||
+          !vmIndirectResolutions.includes(row.resolution) || !isSafeIntegerInRange(row.sample_index,0,0xfffffffe) ||
           (row.resolution === 'resolved' ? !isSafeIntegerInRange(row.callee_function_index,0,16777215) : row.callee_function_index !== null)) return false;
         const site = workspace.dispatch_inventory?.candidates.find(site => site.byte_offset === row.module_byte_offset);
         if (site && (site.kind !== 'call_indirect' || row.instruction !== 'call_indirect' || site.function_index !== row.function_index)) return false;
@@ -2794,12 +2831,16 @@
           'parent_unknown', 'parent_search_truncated', 'site_sample_index', 'sample_index']) ||
           !vmSampleEvent(row.event) || !isCanonicalInteger(row.monotonic_time_ns, 1n, uint64Max) ||
           !isSafeIntegerInRange(row.thread_id, 1, 0xffffffff) || !['switch', 'indexed-call'].includes(row.shape) ||
-          !isSafeIntegerInRange(row.site_slot, 0, 7) || !isSafeIntegerInRange(row.script_id, 1, 0xffffffff) ||
+          !isSafeIntegerInRange(row.site_slot, 0, 255) || !isSafeIntegerInRange(row.script_id, 1, 0xffffffff) ||
           !isSafeIntegerInRange(row.anchor_offset, 0, Number.MAX_SAFE_INTEGER) ||
           !vmNativeJsSelectorKinds.includes(row.selector_kind) || !isSafeIntegerInRange(row.selector_bits, 0, 0xffffffff) ||
           !isSafeIntegerInRange(row.activation_id, 1, 0xffffffff) ||
           !['new_activation', 'parent_unknown', 'parent_search_truncated'].every(key => typeof row[key] === 'boolean') ||
-          !isSafeIntegerInRange(row.site_sample_index, 0, 63) || !isSafeIntegerInRange(row.sample_index, 0, 255)) return false;
+          // A version 2 record has a u32 site ordinal and no sample index;
+          // a version 1 record keeps its 8 slots and 64 and 256 indexes.
+          !isSafeIntegerInRange(row.site_sample_index, 0, 0xffffffff) ||
+          (row.sample_index !== null && (!isSafeIntegerInRange(row.sample_index, 0, 255) ||
+            row.site_slot > 7 || row.site_sample_index > 63))) return false;
         if (row.selector_kind === 'integer' ? row.selector !== row.selector_bits
           : row.selector !== null || row.selector_bits > (row.selector_kind === 'boolean' ? 1 : 0)) return false;
         if (row.parent_activation_id !== null && (!isSafeIntegerInRange(row.parent_activation_id, 1, row.activation_id - 1) ||
@@ -2839,7 +2880,7 @@
           arming.version !== 1 || !(arming.source_sha256 === null || vmWorkspaceDigest(arming.source_sha256)) ||
           !(arming.source_length === null || isSafeIntegerInRange(arming.source_length, 0, 0xffffffff)) ||
           (arming.source_sha256 === null) !== (arming.source_length === null) ||
-          !Array.isArray(arming.sites) || arming.sites.length > 8 || !Array.isArray(arming.refused) || arming.refused.length > 64 ||
+          !Array.isArray(arming.sites) || arming.sites.length > 256 || !Array.isArray(arming.refused) || arming.refused.length > 64 ||
           !isSafeIntegerInRange(arming.omitted_refused_count, 0, Number.MAX_SAFE_INTEGER) ||
           (arming.omitted_refused_count > 0 && arming.refused.length !== 64)) return false;
         const seen = new Set();
@@ -2858,7 +2899,8 @@
           isSafeIntegerInRange(row.byte_offset, 0, Number.MAX_SAFE_INTEGER) &&
           ['switch', 'indexed call', 'aliased call', 'if ladder', 'self call'].includes(row.instruction) &&
           ['js-dispatch-shape-unobservable', 'js-dispatch-anchor-unresolved', 'js-dispatch-site-limit', 'js-dispatch-source-not-utf8'].includes(row.reason) &&
-          (row.reason !== 'js-dispatch-site-limit' || arming.sites.length === 8))) return false;
+          // A full list: 256 sites, or 8 from a producer before 2.18.0.
+          (row.reason !== 'js-dispatch-site-limit' || [8, 256].includes(arming.sites.length)))) return false;
         if (arming.sites.length === 0) return arming.file === null;
         return typeof arming.file === 'string' && arming.file.length <= 4096 &&
           arming.file === vmCanonicalJson({sites: arming.sites, version: 1});
@@ -2878,8 +2920,8 @@
           !isCanonicalInteger(row.pc_adjustment,int64Min,int64Max,true) ||
           !['i32','i64'].includes(row.pc_value_type) || typeof row.pc_subtract_memory_base !== 'boolean' ||
           !['pc_local_index','memory_index','selector','opcode'].every(k => isSafeIntegerInRange(row[k],0,0xffffffff)) ||
-          !isSafeIntegerInRange(row.function_index,0,16777215) || !isSafeIntegerInRange(row.module_byte_offset,8,16777215) ||
-          !isSafeIntegerInRange(row.table_count,0,16777215) || !isSafeIntegerInRange(row.sample_index,0,255) ||
+          !isSafeIntegerInRange(row.function_index,0,16777215) || !isSafeIntegerInRange(row.module_byte_offset,8,WASM_MODULE_OFFSET_LIMIT - 1) ||
+          !isSafeIntegerInRange(row.table_count,0,16777215) || !isSafeIntegerInRange(row.sample_index,0,WASM_GUEST_SAMPLE_INDEX_LIMIT - 1) ||
           row.selected_arm !== Math.min(row.selector,row.table_count) || row.is_default !== (row.selector >= row.table_count) ||
           !isSafeIntegerInRange(row.memory_length,1,65536) || !isSafeIntegerInRange(row.instruction_pointer,0,65535) ||
           row.instruction_pointer_units !== 'byte-offset' || ![1,2,4].includes(row.opcode_width) ||
@@ -2888,7 +2930,7 @@
           !['explicit-adapter','verified-dataflow'].includes(row.interpretation) ||
           new Set([row.adapter_artifact_id,row.bytecode_artifact_id,workspace.interpreter_artifact_id]).size !== 3 ||
           !Array.isArray(row.host_import_call_offsets) || row.host_import_call_offsets.length > 64 ||
-          !row.host_import_call_offsets.every(n => isSafeIntegerInRange(n,8,16777215)) ||
+          !row.host_import_call_offsets.every(n => isSafeIntegerInRange(n,8,WASM_MODULE_OFFSET_LIMIT - 1)) ||
           new Set(row.host_import_call_offsets).size !== row.host_import_call_offsets.length) return false;
         const raw = BigInt(row.raw_pc_bits), base = BigInt(row.memory_base), adjusted = raw + BigInt(row.pc_adjustment);
         if ((row.pc_value_type === 'i32' && raw > 0xffffffffn) || adjusted < 0n || adjusted > uint64Max ||
@@ -3068,7 +3110,7 @@
             if (workspace.runtime !== 'webassembly' || claim.site_attribution !== 'exact' ||
               !vmWorkspaceExact(claim.site, ['function_index', 'byte_offset', 'line', 'column']) || claim.site.line !== null ||
               claim.site.column !== null || !isSafeIntegerInRange(claim.site.function_index, 0, 16777215) ||
-              !isSafeIntegerInRange(claim.site.byte_offset, 8, 16777215) || !vmObservedInterpreterSite(workspace, claim.site.byte_offset) ||
+              !isSafeIntegerInRange(claim.site.byte_offset, 8, WASM_MODULE_OFFSET_LIMIT - 1) || !vmObservedInterpreterSite(workspace, claim.site.byte_offset) ||
               !vmWorkspaceExact(claim.handler, ['kind', 'table_index', 'callee_function_index']) || claim.handler.kind !== 'table-entry' ||
               !isSafeIntegerInRange(claim.handler.table_index, 0, 16777215) ||
               !isSafeIntegerInRange(claim.handler.callee_function_index, 0, 16777215) ||
@@ -3091,7 +3133,7 @@
             if (workspace.runtime !== 'webassembly' || claim.site_attribution !== 'exact' ||
               !vmWorkspaceExact(claim.site, ['function_index', 'byte_offset', 'line', 'column']) || claim.site.line !== null ||
               claim.site.column !== null || !isSafeIntegerInRange(claim.site.function_index, 0, 16777215) ||
-              !isSafeIntegerInRange(claim.site.byte_offset, 8, 16777215) || !vmObservedInterpreterSite(workspace, claim.site.byte_offset) ||
+              !isSafeIntegerInRange(claim.site.byte_offset, 8, WASM_MODULE_OFFSET_LIMIT - 1) || !vmObservedInterpreterSite(workspace, claim.site.byte_offset) ||
               !vmWorkspaceExact(claim.handler, ['kind', 'arm', 'is_default']) || claim.handler.kind !== 'br-table-arm' ||
               typeof claim.handler.is_default !== 'boolean' || !isSafeIntegerInRange(claim.handler.arm, 0, 16777215) ||
               !isSafeIntegerInRange(claim.selector, 0, 0xffffffff) ||

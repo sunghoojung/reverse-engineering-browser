@@ -5,9 +5,11 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <new>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -83,12 +85,32 @@ class ThreadLocalOwnedPointer {
  private:
   inline static thread_local std::unique_ptr<T> value_;
 };
+struct Location {};
+#define FROM_HERE ::base::Location()
+using OnceClosure = std::function<void()>;
+// A thread's posted tasks wait until the test runs them, as they would wait
+// for the task that posted them to end.
+inline thread_local std::vector<OnceClosure> test_posted_tasks;
+inline thread_local bool test_has_task_runner = true;
 struct SequencedTaskRunner {
-  static int GetCurrentDefault() { return 0; }
+  static bool HasCurrentDefault() { return test_has_task_runner; }
+  static SequencedTaskRunner* GetCurrentDefault() {
+    static SequencedTaskRunner runner;
+    return &runner;
+  }
+  void PostTask(Location, OnceClosure task) { test_posted_tasks.push_back(std::move(task)); }
 };
+// The renderer's threads each have their own runner, so the test's is both.
+using SingleThreadTaskRunner = SequencedTaskRunner;
+inline void RunPostedTasks() {
+  auto tasks = std::move(test_posted_tasks);
+  test_posted_tasks.clear();
+  for (auto& task : tasks)
+    task();
+}
 template <class... Args>
-int BindOnce(Args&&...) {
-  return 0;
+OnceClosure BindOnce(Args&&... args) {
+  return std::bind_front(std::forward<Args>(args)...);
 }
 template <class T>
 T* Unretained(T* value) {
@@ -120,12 +142,42 @@ struct UnguessableToken {
 
 namespace mojo_base {
 struct BigBuffer {
-  explicit BigBuffer(std::span<const std::uint8_t> bytes) : data(bytes.begin(), bytes.end()) {}
-  std::vector<std::uint8_t> data;
+  enum class StorageType { kBytes, kSharedMemory, kInvalidBuffer };
+  explicit BigBuffer(std::span<const std::uint8_t> content)
+      : bytes(content.begin(), content.end()) {}
+  // Converts like the real BigBuffer, so tests pass record vectors directly.
+  BigBuffer(const std::vector<std::uint8_t>& content) : bytes(content) {}
+  BigBuffer(std::vector<std::uint8_t>&& content) : bytes(std::move(content)) {}
+  StorageType storage_type() const { return storage; }
+  const std::uint8_t* data() const { return bytes.data(); }
+  std::size_t size() const { return bytes.size(); }
+  // A contiguous range, as the real one is, so it converts to a span.
+  const std::uint8_t* begin() const { return bytes.data(); }
+  const std::uint8_t* end() const { return bytes.data() + bytes.size(); }
+  std::vector<std::uint8_t> bytes;
+  StorageType storage = StorageType::kBytes;
 };
 }  // namespace mojo_base
 
+#include "native_wasm_records_stub.h"
+
 namespace reb::mojom {
+struct NativeWatchRequestRule {
+  std::string url_contains;
+  std::string method;
+};
+struct NativeWatchScope {
+  std::uint64_t serial = 0;
+  std::string origin;
+  bool top_frame = false;
+  std::vector<std::unique_ptr<NativeWatchRequestRule>> requests;
+  std::vector<std::string> events;
+  bool timers = false;
+  bool csp = false;
+  bool uncaught = false;
+  bool caught = false;
+};
+using NativeWatchScopePtr = std::unique_ptr<NativeWatchScope>;
 struct NativeProbeClient {
   virtual ~NativeProbeClient() = default;
   virtual void Configure(std::uint64_t,
@@ -136,12 +188,14 @@ struct NativeProbeClient {
                          std::uint64_t,
                          const std::string&,
                          const std::vector<std::uint8_t>&,
-                         const std::vector<std::uint8_t>&,
+                         std::optional<mojo_base::BigBuffer>,
                          bool,
                          bool,
                          bool) = 0;
   virtual void SetWasmSampleBudget(const std::vector<std::uint8_t>&) = 0;
   virtual void ResetWasmSampleBudgets() = 0;
+  virtual void UpdateJsInvocationSites(mojo_base::BigBuffer) = 0;
+  virtual void SetDebuggerWatchScope(NativeWatchScopePtr) = 0;
   virtual void Disable() = 0;
   virtual void NativeGuestModuleStatus(std::uint64_t, std::uint64_t, bool) = 0;
   virtual void NativeStackArtifactRefused(std::uint64_t) = 0;
@@ -150,26 +204,57 @@ struct NativeProbeClient {
 struct NativeProbeHost {
   inline static std::atomic<unsigned> notifications{0};
   inline static std::atomic<unsigned> artifacts{0};
+  // Each message in the order it was sent: a CaptureWasmRecords batch as its
+  // records' sequence numbers, any other message as an empty entry.
+  inline static std::mutex sent_lock;
+  inline static std::vector<std::vector<std::uint64_t>> sent;
   void EventsAvailable() { ++notifications; }
-  template <class... Args>
-  void CaptureWasmDispatch(Args&&...) {
-    ++artifacts;
+  void CaptureWasmRecords(std::uint64_t, std::vector<NativeWasmRecordPtr> records) {
+    std::vector<std::uint64_t> batch;
+    for (auto& record : records) {
+      switch (record->which()) {
+        case NativeWasmRecord::Tag::kDispatch:
+          batch.push_back(record->get_dispatch()->sequence_number);
+          break;
+        case NativeWasmRecord::Tag::kIndirect:
+          batch.push_back(record->get_indirect()->sequence_number);
+          break;
+        case NativeWasmRecord::Tag::kExecution:
+          batch.push_back(record->get_execution()->sequence_number);
+          break;
+      }
+    }
+    artifacts += static_cast<unsigned>(batch.size());
+    const std::lock_guard<std::mutex> hold(sent_lock);
+    sent.push_back(std::move(batch));
   }
-  template <class... Args>
-  void CaptureWasmIndirect(Args&&...) {
-    ++artifacts;
-  }
-  template <class... Args>
-  void CaptureWasmExecution(Args&&...) {
-    ++artifacts;
+  static void Sent() {
+    const std::lock_guard<std::mutex> hold(sent_lock);
+    sent.emplace_back();
   }
   template <class... Args>
   void CaptureNativeGuest(Args&&...) {
     ++artifacts;
+    Sent();
   }
   template <class... Args>
   void CaptureNativeGuestHost(Args&&...) {
     ++artifacts;
+    Sent();
+  }
+  // The newest request_target child sent with its whole target.
+  inline static std::vector<std::uint8_t> target_record;
+  inline static std::string target_origin;
+  inline static std::string target_text;
+  inline static std::atomic<unsigned> targets{0};
+  void CaptureRendererTarget(std::vector<std::uint8_t> record,
+                             std::string origin,
+                             std::string text) {
+    ++targets;
+    Sent();
+    target_record = std::move(record);
+    target_origin = std::move(origin);
+    target_text = std::move(text);
   }
   // The newest stack artifact (capture origin 12), for content checks.
   inline static std::vector<std::uint8_t> generated;
@@ -184,8 +269,9 @@ struct NativeProbeHost {
                                 mojo_base::BigBuffer content,
                                 Args&&...) {
     ++artifacts;
+    Sent();
     if (origin == 12) {
-      generated = std::move(content.data);
+      generated = std::move(content.bytes);
       generated_creator = creator;
     }
   }
@@ -205,7 +291,8 @@ class SharedRemote {
  public:
   bool is_bound() const { return value_ != nullptr; }
   void Bind(PendingRemote<T> pending, int) { value_ = pending.value_; }
-  void set_disconnect_handler(int, int) {}
+  template <class... Args>
+  void set_disconnect_handler(Args&&...) {}
   T* operator->() const { return value_; }
   explicit operator bool() const { return value_ != nullptr; }
 
@@ -248,5 +335,14 @@ struct WebLocalFrame {
     return &frame;
   }
   FrameToken GetLocalFrameToken() const { return {}; }
+};
+// The transport binds its host remote to the IO thread's runner; the stub
+// remote takes any runner.
+struct Platform {
+  static Platform* Current() {
+    static Platform platform;
+    return &platform;
+  }
+  int GetIOTaskRunner() const { return 0; }
 };
 }  // namespace blink

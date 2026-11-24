@@ -1,5 +1,6 @@
-//! Bounded recognition of literal typed-array initializers. This module never
-//! evaluates JavaScript or invokes captured constructors, mappers, or decoders.
+//! Recognition of literal typed-array initializers in a source of any size.
+//! This module never evaluates JavaScript or invokes captured constructors,
+//! mappers, or decoders.
 use base64::{Engine, engine::general_purpose};
 use regex::Regex;
 use serde_json::{Value, json};
@@ -7,8 +8,6 @@ use sha2::{Digest, Sha256};
 use std::sync::LazyLock;
 
 const PREVIEW_BYTES: usize = 256;
-const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_CONSTRUCTORS: usize = 4096;
 
 static CONSTRUCTOR: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b(new\s+)?Uint8Array(?:\s*\.\s*(of|from|fromBase64))?\s*\(")
@@ -21,23 +20,6 @@ static REBOUND_BUILTIN: LazyLock<Regex> = LazyLock::new(|| {
 
 fn unavailable(id: &str, reason: &str) -> Value {
     json!({"artifact_id":id,"snapshot_hex":null,"unavailable_reason":reason})
-}
-
-fn closing_paren(source: &str, opening: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    for (offset, byte) in source.bytes().enumerate().skip(opening) {
-        match byte {
-            b'(' => depth += 1,
-            b')' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some(offset);
-                }
-            }
-            _ => (),
-        }
-    }
-    None
 }
 
 fn numeric_list(source: &str) -> Option<Vec<u8>> {
@@ -200,12 +182,6 @@ fn initializer(arguments: &str, method: Option<&str>, new: bool) -> Option<Vec<u
 }
 
 pub(crate) fn snapshot(source: &str, id: &str) -> Value {
-    if source.len() > MAX_SOURCE_BYTES {
-        return unavailable(
-            id,
-            "Static initializer source exceeds the 16 MiB analysis bound.",
-        );
-    }
     let masked = crate::vm::mask(source);
     // The mask blanks comments, quoted text and regular-expression bodies, but
     // without a parser a division can still be read as a literal or the
@@ -223,31 +199,37 @@ pub(crate) fn snapshot(source: &str, id: &str) -> Value {
             "A typed-array constructor or encoder is rebound or shadowed; its initializer is unknown.",
         );
     }
-    for (index, captures) in CONSTRUCTOR.captures_iter(&masked).enumerate() {
-        if index == MAX_CONSTRUCTORS {
-            return unavailable(
-                id,
-                "The bounded static initializer search reached 4096 constructors.",
-            );
-        }
-        let matched = captures.get(0).expect("constructor match");
-        if masked[..matched.start()].trim_end().ends_with(['.', '$']) {
+    let constructors = CONSTRUCTOR
+        .captures_iter(&masked)
+        .map(|captures| {
+            let matched = captures.get(0).expect("constructor match");
+            (
+                matched.start(),
+                matched.end(),
+                captures.get(2).map(|m| m.as_str()),
+                captures.get(1).is_some(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let openings = constructors
+        .iter()
+        .map(|(_, end, _, _)| end - 1)
+        .collect::<Vec<_>>();
+    let closings = crate::vm::closings(masked.as_bytes(), (b'(', b')'), &openings);
+    for (&(start, end, method, new), closing) in constructors.iter().zip(closings) {
+        if masked[..start].trim_end().ends_with(['.', '$']) {
             continue;
         }
-        let Some(closing) = closing_paren(&masked, matched.end() - 1) else {
+        let Some(closing) = closing else {
             continue;
         };
-        let Some(full) = initializer(
-            &source[matched.end()..closing],
-            captures.get(2).map(|m| m.as_str()),
-            captures.get(1).is_some(),
-        ) else {
+        let Some(full) = initializer(&source[end..closing], method, new) else {
             continue;
         };
         let size = full.len().min(PREVIEW_BYTES);
         return json!({
             "artifact_id":id,
-            "producer":{"kind":"static-initializer","byte_offset":matched.start()},
+            "producer":{"kind":"static-initializer","byte_offset":start},
             "consumer":{"kind":"indexed-read","status":"inferred"},
             "sha256":hex::encode(Sha256::digest(&full)),
             "original_byte_count":full.len(),"snapshot_byte_count":size,
@@ -460,27 +442,23 @@ mod tests {
     }
 
     #[test]
-    fn constructor_scan_and_input_bounds_are_explicit() {
-        let prefix = "new Uint8Array(unknown);".repeat(MAX_CONSTRUCTORS - 1);
-        assert_preview(&format!("{prefix}Uint8Array.of(80)"), &[80]);
-        let over = snapshot(
-            &format!("{prefix}new Uint8Array(unknown);Uint8Array.of(80)"),
-            "7",
-        );
-        assert!(over["snapshot_hex"].is_null());
-        assert!(
-            over["unavailable_reason"]
-                .as_str()
-                .unwrap()
-                .contains("4096")
-        );
-        let oversized = snapshot(&" ".repeat(MAX_SOURCE_BYTES + 1), "7");
-        assert!(oversized["snapshot_hex"].is_null());
-        assert!(
-            oversized["unavailable_reason"]
-                .as_str()
-                .unwrap()
-                .contains("16 MiB")
+    fn every_constructor_of_a_source_of_any_size_is_examined() {
+        // Past the old 4,096-constructor stop and 16 MiB source bound.
+        let prefix = "new Uint8Array(unknown);".repeat(800_000);
+        assert!(prefix.len() > 16 << 20);
+        let value = assert_preview(&format!("{prefix}Uint8Array.of(80)"), &[80]);
+        assert_eq!(value["producer"]["byte_offset"], prefix.len());
+        // An unclosed constructor before a complete one costs one pass, not a
+        // scan to the end of the source per constructor.
+        let unclosed = "new Uint8Array(".repeat(400_000);
+        let started = std::time::Instant::now();
+        assert_preview(&format!("{unclosed}Uint8Array.of(7, 8)"), &[7, 8]);
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+        // Nested constructors close at their own parenthesis.
+        assert_preview("new Uint8Array(new Uint8Array([1, 2]))", &[1, 2]);
+        assert_eq!(
+            crate::vm::closings(b"a((b)(c)) )(", (b'(', b')'), &[1, 2, 5, 11]),
+            vec![Some(8), Some(4), Some(7), None]
         );
     }
 

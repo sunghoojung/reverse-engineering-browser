@@ -16,6 +16,8 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "components/reverse_engineering_browser/common/native_console_io.h"
 #include "components/reverse_engineering_browser/common/native_console_protocol.h"
@@ -151,14 +153,19 @@ bool SameUser(int socket) {
 
 const char* StatusName(reb::NativeConsoleStatus status) {
   constexpr std::array names{"OK",        "MALFORMED", "STALE_TARGET", "FORBIDDEN",
-                             "EXCEPTION", "TIMEOUT",   "DISCONNECTED"};
+                             "EXCEPTION", "TIMEOUT",   "DISCONNECTED", "STOPPED"};
   return names[static_cast<std::size_t>(status)];
 }
 const char* TypeName(reb::NativeConsoleType type) {
-  constexpr std::array names{"undefined", "null",     "boolean", "number",  "string",  "bigint",
-                             "symbol",    "function", "object",  "promise", "targets", "runtime"};
+  constexpr std::array names{"undefined", "null",    "boolean",       "number", "string",
+                             "bigint",    "symbol",  "function",      "object", "promise",
+                             "targets",   "runtime", "document_start"};
   return names[static_cast<std::size_t>(type)];
 }
+
+// A record already being sent must keep moving; however large, it fails only
+// when it stalls this long.
+constexpr std::chrono::milliseconds kStall(reb::kNativeConsoleTransferMillis);
 
 class Console final {
  public:
@@ -173,27 +180,31 @@ class Console final {
         response_.type != reb::NativeConsoleType::kTargets)
       return ReportError();
     selected_ = 0;
-    target_count_ = response_.item_count;
-    std::cout << "targets[" << target_count_ << "]{id,origin}:\n";
-    for (std::size_t i = 0; i < target_count_; ++i) {
-      std::memcpy(&targets_[i], payload_.data() + i * sizeof(reb::NativeConsoleTarget),
-                  sizeof(reb::NativeConsoleTarget));
-      const auto& target = targets_[i];
-      if (target.id == 0 || target.origin_bytes > target.origin.size() || target.reserved != 0 ||
-          target.tail_reserved != 0 || target.label_bytes > target.label.size() ||
-          target.url_bytes > target.url.size() || (target.flags & ~3) != 0)
+    targets_.clear();
+    std::cout << "targets[" << response_.item_count << "]{id,origin}:\n";
+    const auto payload = std::as_bytes(std::span(payload_));
+    std::size_t offset = 0;
+    for (std::uint32_t i = 0; i < response_.item_count; ++i) {
+      reb::NativeConsoleTarget target;
+      std::string_view origin;
+      std::string_view label;
+      std::string_view url;
+      if (!reb::ReadNativeConsoleTarget(payload, offset, target, origin, label, url) ||
+          target.id == 0 || target.reserved != 0 ||
+          (target.flags & ~reb::kNativeConsoleTargetTopFrame) != 0)
         return Fail("Malformed target listing");
-      for (std::size_t j = 0; j < i; ++j)
-        if (targets_[j].id == target.id)
-          return Fail("Duplicate target ID");
-      std::cout << "  " << target.id << ','
-                << Quote(std::string_view(target.origin.data(), target.origin_bytes)) << '\n';
+      if (std::find(targets_.begin(), targets_.end(), target.id) != targets_.end())
+        return Fail("Duplicate target ID");
+      targets_.push_back(target.id);
+      std::cout << "  " << target.id << ',' << Quote(origin) << '\n';
     }
+    if (offset != payload.size())
+      return Fail("Malformed target listing");
     // Only the truncation bit changes the listing's meaning here; the
     // document-start capability bit is the owner's concern.
     std::cout << "truncated: "
               << ((response_.flags & reb::kNativeConsoleTruncated) ? "true" : "false") << '\n';
-    if (target_count_ == 0)
+    if (targets_.empty())
       std::cout << "state: no eligible HTTP or HTTPS frames\n";
     std::cout << "help: \"Use :use <id> to select a document; :targets refreshes and clears "
                  "selection\"\n";
@@ -203,8 +214,7 @@ class Console final {
 
   bool Select(std::string_view input) {
     std::uint64_t id = 0;
-    if (!Number(input, id) || std::none_of(targets_.begin(), targets_.begin() + target_count_,
-                                           [id](const auto& target) { return target.id == id; })) {
+    if (!Number(input, id) || std::find(targets_.begin(), targets_.end(), id) == targets_.end()) {
       exit_code_ = 2;
       Error("STALE_TARGET", "Select an ID from the current target listing",
             "Run :targets, then :use <id>", 2);
@@ -216,11 +226,16 @@ class Console final {
   }
 
   bool Evaluate(std::string_view expression) {
-    if (selected_ == 0 || expression.empty() ||
-        expression.size() > reb::kNativeConsoleSourceLimit) {
+    if (selected_ == 0 || expression.empty()) {
       exit_code_ = 2;
-      Error("INVALID_INPUT", "Select a target and supply 1 to 8192 bytes of JavaScript",
+      Error("INVALID_INPUT", "Select a target and supply JavaScript",
             "Run :targets, then :use <id>", 2);
+      return true;
+    }
+    if (expression.size() > reb::kNativeConsoleRecordLimit) {
+      exit_code_ = 2;
+      Error("SOURCE_LIMIT", "A Console record names at most 4 GiB of JavaScript",
+            "Split the expression", 2);
       return true;
     }
     reb::NativeConsoleRequest request;
@@ -234,33 +249,29 @@ class Console final {
       return ReportError();
     if (response_.type == reb::NativeConsoleType::kTargets)
       return Fail("Unexpected target listing");
-    std::cout << "result:\n  type: " << TypeName(response_.type) << "\n  value: "
-              << Quote(std::string_view(reinterpret_cast<const char*>(payload_.data()),
-                                        response_.payload_bytes))
-              << "\n  truncated: "
-              << ((response_.flags & reb::kNativeConsoleTruncated) ? "true" : "false") << '\n';
+    std::cout << "result:\n  type: " << TypeName(response_.type) << "\n  value: " << Quote(payload_)
+              << '\n';
     std::cout.flush();
     return true;
   }
 
  private:
   bool Exchange(const reb::NativeConsoleRequest& request, std::string_view source) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
-    if (!reb::NativeConsoleWrite(socket_, reb::NativeConsoleBytes(request), deadline) ||
+    // A command runs until it returns, so its answer is awaited for as long.
+    if (!reb::NativeConsoleWrite(socket_, reb::NativeConsoleBytes(request), kStall) ||
         !reb::NativeConsoleWrite(socket_, std::as_bytes(std::span(source.data(), source.size())),
-                                 deadline) ||
-        !reb::NativeConsoleRead(socket_, reb::NativeConsoleBytes(response_), deadline) ||
+                                 kStall) ||
+        !reb::NativeConsoleRead(socket_, reb::NativeConsoleBytes(response_),
+                                reb::NativeConsoleDeadline::max()) ||
         !reb::IsNativeConsoleResponseFor(response_, request) ||
-        !reb::NativeConsoleRead(socket_, std::span(payload_).first(response_.payload_bytes),
-                                deadline)) {
+        !reb::NativeConsoleReadPayload(socket_, response_.payload_bytes, kStall, payload_)) {
       return Fail("Native console disconnected, timed out, or returned a malformed response");
     }
     return true;
   }
   bool ReportError() {
     exit_code_ = std::max(exit_code_, 1);
-    Error(StatusName(response_.status),
-          std::string_view(reinterpret_cast<const char*>(payload_.data()), response_.payload_bytes),
+    Error(StatusName(response_.status), payload_,
           response_.status == reb::NativeConsoleStatus::kStaleTarget
               ? "Run :targets, then :use <id>"
               : "Correct the expression or restart the disposable console session");
@@ -275,10 +286,10 @@ class Console final {
   int exit_code_ = 0;
   std::uint64_t next_request_ = 1;
   std::uint64_t selected_ = 0;
-  std::uint32_t target_count_ = 0;
-  std::array<reb::NativeConsoleTarget, reb::kNativeConsoleTargetLimit> targets_{};
+  // The current listing's ids, however many.
+  std::vector<std::uint64_t> targets_;
   reb::NativeConsoleResponse response_;
-  std::array<std::byte, reb::kNativeConsolePayloadLimit> payload_{};
+  std::string payload_;
 };
 
 void Help() {
@@ -286,39 +297,119 @@ void Help() {
             << "usage: reb-console --socket <path> --token-file <path> --session <id> [--repl | "
                "--bridge]\n"
             << "commands: :targets, :use <id>, :begin ... :end, :quit, or JavaScript\n"
-            << "limits: 8192 source bytes, 8192 result bytes, 64 targets, 200 ms execution budget\n"
+            << "limits: none below the 4 GiB a Console record names; every source, result and "
+               "listing crosses whole, and a command runs until it returns\n"
             << "help: \"Run make native-console REB_BRAVE_BINARY=<binary>; pass REB_CONSOLE_REPL=0 "
                "for scripted stdin\"\n";
 }
 
+// Blocking reads of the owner's pipe. A pipe is not a socket, so this does not
+// share NativeConsoleRead. False on EOF or error; `*eof` reports a clean EOF
+// before the first byte.
+bool ReadInput(std::span<std::byte> bytes, bool* eof = nullptr) {
+  const std::size_t wanted = bytes.size();
+  while (!bytes.empty()) {
+    const ssize_t count = read(STDIN_FILENO, bytes.data(), bytes.size());
+    if (count > 0) {
+      bytes = bytes.subspan(static_cast<std::size_t>(count));
+    } else if (count == 0) {
+      if (eof)
+        *eof = bytes.size() == wanted;
+      return false;
+    } else if (errno != EINTR) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Reads a `bytes`-long payload from the owner's pipe into `out`, which grows
+// with the bytes that actually arrived.
+bool ReadInputPayload(std::size_t bytes, std::string& out) {
+  constexpr std::size_t kFirstStep = 1 << 20;
+  out.clear();
+  while (out.size() < bytes) {
+    const std::size_t offset = out.size();
+    out.resize(std::min(bytes, std::max(kFirstStep, offset * 2)));
+    if (!ReadInput(std::as_writable_bytes(std::span(out).subspan(offset))))
+      return false;
+  }
+  return true;
+}
+
+bool WriteOutput(std::span<const std::byte> bytes) {
+  while (!bytes.empty()) {
+    const ssize_t count = write(STDOUT_FILENO, bytes.data(), bytes.size());
+    if (count > 0)
+      bytes = bytes.subspan(static_cast<std::size_t>(count));
+    else if (count < 0 && errno != EINTR)
+      return false;
+  }
+  return true;
+}
+
+// Forwards the owner's records verbatim. A command runs as long as it runs:
+// while it is in flight the only record the owner may send is a Stop naming
+// it, which is forwarded at once, and the command's own answer still follows.
+// Nothing here times a command out.
 int Bridge(int socket) {
-  std::array<std::byte, reb::kNativeConsolePayloadLimit> buffer{};
+  std::string buffer;
   std::uint64_t previous = 0;
   for (;;) {
     reb::NativeConsoleRequest request;
-    std::cin.read(reinterpret_cast<char*>(&request), sizeof(request));
-    if (std::cin.gcount() == 0 && std::cin.eof())
-      return 0;
-    if (std::cin.gcount() != sizeof(request) || !reb::IsNativeConsoleRequest(request) ||
-        request.request_id <= previous)
+    bool eof = false;
+    if (!ReadInput(reb::NativeConsoleBytes(request), &eof))
+      return eof ? 0 : 1;
+    if (!reb::IsNativeConsoleRequest(request))
+      return 1;
+    // A Stop that crossed the answer to the request it names is spent.
+    if (request.operation == reb::NativeConsoleOperation::kStop) {
+      if (request.request_id != previous)
+        return 1;
+      continue;
+    }
+    if (request.request_id <= previous)
       return 1;
     previous = request.request_id;
-    std::cin.read(reinterpret_cast<char*>(buffer.data()), request.source_bytes);
-    if (std::cin.gcount() != request.source_bytes)
+    if (!ReadInputPayload(request.source_bytes, buffer))
       return 1;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    if (!reb::NativeConsoleWrite(socket, reb::NativeConsoleBytes(request), kStall) ||
+        !reb::NativeConsoleWrite(socket, std::as_bytes(std::span(buffer)), kStall))
+      return 1;
+    bool owner_open = true;
+    for (;;) {
+      std::array<pollfd, 2> ready{{{socket, POLLIN, 0}, {STDIN_FILENO, POLLIN, 0}}};
+      const int count = poll(ready.data(), owner_open ? 2 : 1, -1);
+      if (count < 0 && errno == EINTR)
+        continue;
+      if (count < 0)
+        return 1;
+      if (ready[0].revents != 0)
+        break;
+      if (ready[1].revents == 0)
+        continue;
+      reb::NativeConsoleRequest stop;
+      if (!ReadInput(reb::NativeConsoleBytes(stop), &eof)) {
+        // The owner left mid-command; still deliver the answer it may read.
+        if (!eof)
+          return 1;
+        owner_open = false;
+        continue;
+      }
+      if (!reb::IsNativeConsoleRequest(stop) ||
+          stop.operation != reb::NativeConsoleOperation::kStop || stop.request_id != previous ||
+          !reb::NativeConsoleWrite(socket, reb::NativeConsoleBytes(stop), kStall))
+        return 1;
+    }
     reb::NativeConsoleResponse response;
-    if (!reb::NativeConsoleWrite(socket, reb::NativeConsoleBytes(request), deadline) ||
-        !reb::NativeConsoleWrite(socket, std::span(buffer).first(request.source_bytes), deadline) ||
-        !reb::NativeConsoleRead(socket, reb::NativeConsoleBytes(response), deadline) ||
+    if (!reb::NativeConsoleRead(socket, reb::NativeConsoleBytes(response), kStall) ||
         !reb::IsNativeConsoleResponseFor(response, request) ||
-        !reb::NativeConsoleRead(socket, std::span(buffer).first(response.payload_bytes), deadline))
+        !reb::NativeConsoleReadPayload(socket, response.payload_bytes, kStall, buffer) ||
+        !WriteOutput(reb::NativeConsoleBytes(std::as_const(response))) ||
+        !WriteOutput(std::as_bytes(std::span(buffer))))
       return 1;
-    std::cout.write(reinterpret_cast<const char*>(&response), sizeof(response));
-    std::cout.write(reinterpret_cast<const char*>(buffer.data()), response.payload_bytes);
-    std::cout.flush();
-    if (!std::cout)
-      return 1;
+    if (!owner_open)
+      return 0;
   }
 }
 
@@ -409,6 +500,7 @@ int main(int argc, char** argv) {
       continue;
     }
 #endif
+    reb::NativeConsoleWidenBuffers(accepted);
     reb::NativeProbeLocalIpcHello hello;
     if (fcntl(accepted, F_SETFD, FD_CLOEXEC) == 0 && SameUser(accepted) &&
         reb::NativeConsoleRead(
@@ -438,29 +530,14 @@ int main(int argc, char** argv) {
   std::string line;
   std::string expression;
   bool multiline = false;
-  bool too_large = false;
   int input_exit_code = 0;
   for (;;) {
     if (interactive) {
       std::cerr << (multiline ? "... " : "js> ");
       std::cerr.flush();
     }
-    // Bound input before allocation. std::getline would retain an arbitrarily
-    // large pasted line even if validation rejected it afterward.
-    line.clear();
-    bool overflow = false;
-    char character = 0;
-    bool read_any = false;
-    while (std::cin.get(character)) {
-      read_any = true;
-      if (character == '\n')
-        break;
-      if (line.size() < reb::kNativeConsoleSourceLimit)
-        line += character;
-      else
-        overflow = true;
-    }
-    if (!read_any)
+    // A line of any length; Evaluate refuses only what a record cannot name.
+    if (!std::getline(std::cin, line))
       break;
     if (!line.empty() && line.back() == '\r')
       line.pop_back();
@@ -469,31 +546,17 @@ int main(int argc, char** argv) {
     if (multiline) {
       if (line == ":end") {
         multiline = false;
-        if (too_large) {
-          input_exit_code = 2;
-          Error("SOURCE_LIMIT", "Multiline input exceeds 8192 bytes", "Submit a smaller expression",
-                2);
-        } else if (!console.Evaluate(expression))
+        if (!console.Evaluate(expression))
           return 1;
         expression.clear();
         continue;
       }
-      if (overflow || expression.size() + line.size() + 1 > reb::kNativeConsoleSourceLimit)
-        too_large = true;
-      if (!too_large) {
-        expression += line;
-        expression += '\n';
-      }
-      continue;
-    }
-    if (overflow) {
-      input_exit_code = 2;
-      Error("SOURCE_LIMIT", "Input exceeds 8192 bytes", "Submit a smaller expression", 2);
+      expression += line;
+      expression += '\n';
       continue;
     }
     if (line == ":begin") {
       multiline = true;
-      too_large = false;
       expression.clear();
       continue;
     }

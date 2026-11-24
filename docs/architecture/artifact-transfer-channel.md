@@ -82,7 +82,7 @@ size. Native tests assert that the two definitions remain ABI-identical.
 | 12 | 4 | `reserved0` | zero |
 | 16 | 48 | correlation IDs | six unsigned 64-bit values |
 | 64 | 8 | `content_size` | checked before content is read |
-| 72 | 4 | `url_size` | 1 to 8,192 bytes |
+| 72 | 4 | `url_size` | 1 byte to 2 MiB, url::kMaxURLChars |
 | 76 | 4 | `mime_type_size` | 1 to 255 bytes |
 | 80 | 32 | expected SHA-256 | all zero if the sender omits preverification |
 | 112 | 8 | `execution_context_id` | stable renderer context ID, or zero when unavailable |
@@ -161,19 +161,21 @@ bounded is memory in flight and free disk:
   so an admitted stream can be closed. Streams stop at three quarters of the
   pool, leaving the rest for content that already arrived whole, and wait
   until a sixteenth of the pool drains below that mark;
-- 256 MiB renderer credit for compiled script sources and Wasm modules the
-  browser still holds ([native compiled scripts](../../protocol/native-compiled-scripts-v2.md#limits));
+- 256 MiB renderer credit for the content a renderer sent that the browser
+  still holds: compiled script and stack script sources, Wasm modules, runtime
+  buffers and Canvas images ([native compiled scripts](../../protocol/native-compiled-scripts-v2.md#limits));
 - the receiver's free-disk reserve, 4 GiB by default
   ([disk reserve](../../services/artifact-receiver/README.md#disk-reserve));
-- 8 KiB source URL;
+- 2 MiB source URL, url::kMaxURLChars, the longest URL Chromium carries
+  between processes;
 - 255-byte MIME type;
 - 64 KiB streaming copy, hashing and stream data chunk;
 - 2 MiB maximum UI content response and 20,000 rendered lines.
 
-Canvas data URLs use the 2 MiB UI limit as their capture limit so accepted
-images are always available as complete base64 content. The Wasm observation,
-guest, runtime buffer and stack paths keep a 16 MiB limit with records of their
-own. Network bodies, compiled script sources and Wasm modules have none.
+No artifact content has a size limit: network bodies, compiled script and
+stack script sources, Wasm modules and the modules Wasm observations carry,
+runtime buffers and Canvas images are all kept whole. Renderer content larger
+than one chunk streams from the renderer's buffer as the pool drains.
 
 The receiver validates declared sizes before it allocates metadata or reads
 content. Content is streamed to a temporary file while SHA-256 is computed, so

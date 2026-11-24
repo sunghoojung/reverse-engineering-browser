@@ -149,7 +149,7 @@ EVENT_TYPES = {
 SCHEME_CLASSES = {*range(0, 9), 15, *range(16, 21)}
 SCHEME_CLASS_TYPES = {"request_initiated", "request_started", "request_completed", "request_failed",
                       "memory_cache_reuse"}
-# 70 and 71 are memory-cache reuses past the budget and in pages that are not ordinary.
+# 70 is earlier renderers' memory-cache reuses past their budget, 71 those in pages that are not ordinary.
 EXCLUSION_CLASSES = {*range(16, 21), *range(64, 72)}
 # Loader kinds, shared with include/reb/tab_link.hpp.
 LOADER_KINDS = {"request_started": range(1, 11), "request_initiated": range(16, 23),
@@ -189,10 +189,13 @@ def valid_js_dispatch(event: dict, payload: bytes) -> bool:
     shape, kind, slot, flags = payload[4], payload[5], payload[6], payload[7]
     selector, activation, parent = at(20, 4), at(36, 4), at(40, 4)
     handler = (at(24, 4), at(28, 4), at(32, 4))
-    if (at(0, 2) != 1 or at(2, 2) != 128 or shape not in (1, 2) or not 1 <= kind <= 9
-            or slot >= 8 or flags & ~0x0F or at(8, 4) == 0 or at(16, 4) == 0
-            or at(12, 4) >= at(16, 4) or activation == 0 or at(44, 2) >= 64
-            or at(46, 2) >= 256 or any(payload[80:])):
+    # Version 2 has a u32 site ordinal at 44 and any one-byte slot. Version 1,
+    # from earlier builds, had 8 slots and u16 indexes below 64 and 256.
+    version = at(0, 2)
+    if (version not in (1, 2) or at(2, 2) != 128 or shape not in (1, 2) or not 1 <= kind <= 9
+            or (version == 1 and (slot >= 8 or at(44, 2) >= 64 or at(46, 2) >= 256))
+            or flags & ~0x0F or at(8, 4) == 0 or at(16, 4) == 0
+            or at(12, 4) >= at(16, 4) or activation == 0 or any(payload[80:])):
         return False
     if (kind == 7 and selector > 1) or (kind not in (1, 7) and selector != 0):
         return False
@@ -260,7 +263,7 @@ def valid_stack_scope(scope: bytes) -> bool:
 
 def scoped_tail(tail: bytes, version: int, scoped_version: int) -> bool:
     """A record tail: the scope then zero from scoped_version on, else all zero."""
-    if version != scoped_version:
+    if version < scoped_version:
         return not any(tail)
     return valid_stack_scope(tail[:16]) and not any(tail[16:])
 
@@ -463,30 +466,43 @@ def valid_stack_summary(payload: bytes) -> bool:
 
 
 def valid_script_identity(event: dict, payload: bytes) -> bool:
-    """Version 2 adds the scope at byte 72."""
-    if (not valid_stack_child(event, payload, (1, 2)) or event["request_id"] != "0"
+    """Version 2 adds the scope at byte 72. Version 3 digests a source of any
+    length, so it never sets source_too_large (0x04), and adds source_backlog
+    (0x20)."""
+    if (not valid_stack_child(event, payload, (1, 2, 3)) or event["request_id"] != "0"
             or not scoped_tail(payload[72:], payload[0], 2)):
         return False
+    any_length = payload[0] == 3
     kind, flags = payload[4], payload[5]
     script_id = int.from_bytes(payload[8:12], "little")
     context = int.from_bytes(payload[24:32], "little")
     length = int.from_bytes(payload[32:40], "little")
     digest = payload[40:72]
-    retention = flags & 0x1E
-    if (any(payload[20:24]) or script_id == 0 or context == 0 or flags & ~0x1F
+    retention = flags & 0x3E
+    if (any(payload[20:24]) or script_id == 0 or context == 0 or flags & ~0x3F
+            or flags & (0x04 if any_length else 0x20)
             or retention & (retention - 1) or kind not in (1, 2)
             or (kind == 2 and flags & ~0x0C) or (kind == 1 and retention == 0)):
         return False
     if retention == 0x08:
         return length == 0 and not any(digest)
     if retention == 0x04:
-        return length > 16 * 1024 * 1024 and not any(digest)
-    return 0 < length <= 16 * 1024 * 1024 and any(digest)
+        return length > SCRIPT_IDENTITY_V2_SOURCE_LIMIT and not any(digest)
+    return (0 < length and (any_length or length <= SCRIPT_IDENTITY_V2_SOURCE_LIMIT)
+            and any(digest))
 
 
 # Older sessions only: request body payload v1 and response body payloads v1
 # and v2 kept at most this prefix.
 RESPONSE_CAPTURE_BYTES = 16 * 1024 * 1024
+# V8's largest Wasm module (kV8MaxWasmModuleSize); include/reb/wasm_dispatch.hpp
+# kWasmModuleByteOffsetLimit.
+WASM_MODULE_OFFSET_LIMIT = 1 << 30
+# A guest sample's index is below its recipe's limit, a Chromium JSON integer;
+# include/reb/wasm_guest.hpp kWasmGuestSampleIndexLimit.
+WASM_GUEST_SAMPLE_INDEX_LIMIT = (1 << 31) - 1
+# script_identity versions 1 and 2 digest only a source of at most this length.
+SCRIPT_IDENTITY_V2_SOURCE_LIMIT = 16 * 1024 * 1024
 
 
 def request_body_fields_valid(payload: bytes) -> bool:
@@ -672,12 +688,20 @@ def valid_response_body(event: dict, payload: bytes) -> bool:
     }[state]
 
 
-HEADER_BLOCK_LIMIT = 320 * 1024
+# Version 2 retains a block or cookie list of any length, so its
+# not_captured_block_limit is only a length past the 32-bit field; version 1
+# had a 320 KiB block and 2 MiB list limit.
+HEADER_BLOCK_LIMIT_V1 = 320 * 1024
+LENGTH_UNREPRESENTABLE = 0xFFFFFFFF
+
+
+def too_long(version: int, length: int, v1_limit: int) -> bool:
+    return length > v1_limit if version == 1 else length == LENGTH_UNREPRESENTABLE
 
 
 def valid_header_block(event: dict, payload: bytes) -> bool:
     """Every rule of the native-network-v3.md header record, mirrored from the C++ core."""
-    if not valid_request_child(event, payload):
+    if not valid_request_child(event, payload, (1, 2)):
         return False
 
     def at(offset: int, size: int) -> int:
@@ -706,17 +730,18 @@ def valid_header_block(event: dict, payload: bytes) -> bool:
         return False
     empty, limited = state == 3, state == 4
     if ((count == 0) != empty or (length == 0) != empty or length < 5 * count
-            or limited != (length > HEADER_BLOCK_LIMIT) or (not any(digest)) != limited):
+            or limited != too_long(payload[0], length, HEADER_BLOCK_LIMIT_V1)
+            or (not any(digest)) != limited):
         return False
     return (event["artifact_id"] != "0") == (state in (1, 2))
 
 
-COOKIE_LIST_LIMIT = 2 * 1024 * 1024
+COOKIE_LIST_LIMIT_V1 = 2 * 1024 * 1024
 
 
 def valid_cookie_list(event: dict, payload: bytes) -> bool:
     """The native-network-v3.md cookie_list record, mirrored from the C++ core."""
-    if not valid_request_child(event, payload):
+    if not valid_request_child(event, payload, (1, 2)):
         return False
 
     def at(offset: int, size: int) -> int:
@@ -731,7 +756,8 @@ def valid_cookie_list(event: dict, payload: bytes) -> bool:
     empty, limited = state == 3, state == 4
     if ((count == 0) != empty or (length == 0) != empty
             or (not empty and length < 16 + 64 * count)
-            or limited != (length > COOKIE_LIST_LIMIT) or (not any(digest)) != limited):
+            or limited != too_long(payload[0], length, COOKIE_LIST_LIMIT_V1)
+            or (not any(digest)) != limited):
         return False
     return (event["artifact_id"] != "0") == (state in (1, 2))
 
@@ -825,23 +851,36 @@ def valid_js_invocation(event: dict, payload: bytes) -> bool:
     def at(offset: int, size: int) -> int:
         return int.from_bytes(payload[offset:offset + size], "little")
 
-    if at(0, 2) != 1 or at(2, 2) != 128:
+    # Version 2 records every call of every site with u32 ordinals: byte 4 is
+    # zero and the u32 slot is at 112 (start) or 72 (settle). Version 1, from
+    # earlier builds, had 8 one-byte slots and sampled indexes.
+    version = at(0, 2)
+    if version not in (1, 2) or at(2, 2) != 128:
         return False
+    v1 = version == 1
+
+    def reserved_from(wide: int) -> int | None:
+        if v1:
+            return wide if payload[4] < 8 else None
+        return wide + 4 if payload[4] == 0 else None
+
     kind = event["type"]
     if kind == "js_invocation_request":
         state = payload[4]
         return (event["request_id"] != "0" and int(event["request_id"]) <= 0xFFFFFFFF
                 and state in (2, 3) and valid_invocation_context(state, at(8, 4))
-                and at(12, 2) < 256 and not any(payload[5:8]) and at(14, 2) == 0
-                and not any(payload[16:]))
+                and (not v1 or (at(12, 2) < 256 and at(14, 2) == 0))
+                and not any(payload[5:8]) and not any(payload[16:]))
     if event["frame_id"] == "0" or event["request_id"] != "0":
         return False
     if kind == "js_invocation_start":
-        slot, flags, argc = payload[4], payload[5], at(6, 2)
+        reserved = reserved_from(112)
+        flags, argc = payload[5], at(6, 2)
         invocation, parent = at(20, 4), at(24, 4)
-        if (slot >= 8 or flags & ~0x03 or at(8, 4) == 0 or at(16, 4) == 0
-                or at(12, 4) >= at(16, 4) or invocation == 0 or at(28, 2) >= 64
-                or at(30, 2) >= 256 or at(104, 8) == 0 or any(payload[112:])):
+        if (reserved is None or (v1 and (at(28, 2) >= 64 or at(30, 2) >= 256))
+                or flags & ~0x03 or at(8, 4) == 0 or at(16, 4) == 0
+                or at(12, 4) >= at(16, 4) or invocation == 0 or at(104, 8) == 0
+                or any(payload[reserved:])):
             return False
         if parent != 0 and (parent >= invocation or flags & 0x01):
             return False
@@ -856,13 +895,14 @@ def valid_js_invocation(event: dict, payload: bytes) -> bool:
                 return False
         return True
     # js_invocation_settle
-    slot, outcome, via, value_kind = payload[4], payload[5], payload[6], payload[7]
+    reserved = reserved_from(72)
+    outcome, via, value_kind = payload[5], payload[6], payload[7]
     length, state, encoding, flags = at(12, 4), payload[16], payload[17], payload[18]
     byte_length, rolling = at(20, 4), at(24, 8)
     fulfilled, rejected = outcome == 1, outcome == 2
-    if (slot >= 8 or not (fulfilled or rejected) or not 1 <= value_kind <= 14
+    if (reserved is None or not (fulfilled or rejected) or not 1 <= value_kind <= 14
             or at(8, 4) == 0 or at(64, 8) == 0 or payload[19] != 0 or flags & ~0x01
-            or any(payload[72:])):
+            or any(payload[reserved:])):
         return False
     if not ((via == 1 and fulfilled) or (via == 2 and rejected) or via == 3):
         return False
@@ -1191,9 +1231,9 @@ def validate_event(event: object, line_number: int) -> None:
         or payload[0] not in (1, 2, 3)
         or payload[1:4] != bytes((0, 128, 0))
         or int.from_bytes(payload[4:8], "little") >= 16777216
-        or not 8 <= int.from_bytes(payload[8:12], "little") < 16777216
+        or not 8 <= int.from_bytes(payload[8:12], "little") < WASM_MODULE_OFFSET_LIMIT
         or int.from_bytes(payload[16:20], "little") >= 16777216
-        or int.from_bytes(payload[20:24], "little") >= 16
+        or int.from_bytes(payload[20:24], "little") == 0xFFFFFFFF
         or wasm_context_invalid(payload, payload[0], 2, 24)
         or wasm_direct_caller_invalid(payload)
     ):
@@ -1213,12 +1253,12 @@ def validate_event(event: object, line_number: int) -> None:
         or payload[0] not in (1, 2)
         or payload[1:4] != bytes((0, 128, 0))
         or int.from_bytes(payload[4:8], "little") >= 16777216
-        or not 8 <= int.from_bytes(payload[8:12], "little") < 16777216
+        or not 8 <= int.from_bytes(payload[8:12], "little") < WASM_MODULE_OFFSET_LIMIT
         or int.from_bytes(payload[12:16], "little") >= 16777216
         or int.from_bytes(payload[20:24], "little") >= 16777216
         or int.from_bytes(payload[24:28], "little") >= 5
         or (int.from_bytes(payload[24:28], "little") != 0 and any(payload[20:24]))
-        or int.from_bytes(payload[28:32], "little") >= 16
+        or int.from_bytes(payload[28:32], "little") == 0xFFFFFFFF
         or wasm_context_invalid(payload, payload[0], 2, 32)
         or any(payload[40:])
     ):
@@ -1253,10 +1293,11 @@ def validate_event(event: object, line_number: int) -> None:
             or stream > 2
             or invocation == 0
             or (function_index >= 16777216 if known & 1 else function_index != 0)
-            or (module_offset < 8 or module_offset >= 16777216 if known & 2 else module_offset != 0)
+            or (module_offset < 8 or module_offset >= WASM_MODULE_OFFSET_LIMIT
+                if known & 2 else module_offset != 0)
             or (reason != 0 or bounds != 0 if kind == 1 else reason >= 6)
             or (bounds >= 7 if reason == 3 else bounds != 0)
-            or (sample != 0xFFFFFFFF if stream == 0 else sample >= 16)
+            or ((sample == 0xFFFFFFFF) != (stream == 0))
             or any(payload[25:28])
             or wasm_context_invalid(payload, version, 1, 28)
             or any(payload[36:])
@@ -1350,8 +1391,8 @@ def validate_event(event: object, line_number: int) -> None:
                                  or parent_dispatch >= int(event["sequence_number"]))))
         else:
             invalid |= (not 0 < int(event["parent_event_id"]) < int(event["sequence_number"])
-                        or not 8 <= at(8, 4) < 16777216 or at(16, 4) >= 16777216
-                        or at(20, 4) >= 256 or at(24, 8) == 0 or at(32, 8) == 0
+                        or not 8 <= at(8, 4) < WASM_MODULE_OFFSET_LIMIT or at(16, 4) >= 16777216
+                        or at(20, 4) >= WASM_GUEST_SAMPLE_INDEX_LIMIT or at(24, 8) == 0 or at(32, 8) == 0
                         or at(56, 8) == 0 or at(56, 8) == int(event["artifact_id"])
                         or not 0 < at(72, 4) <= 65536 or at(40, 8) >= at(72, 4)
                         or at(64, 8) + at(72, 4) > 0xFFFFFFFFFFFFFFFF or not any(payload[96:]))

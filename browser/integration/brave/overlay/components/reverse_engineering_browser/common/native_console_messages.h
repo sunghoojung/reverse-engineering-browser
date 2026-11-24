@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -6,9 +6,9 @@
 #ifndef BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_COMMON_NATIVE_CONSOLE_MESSAGES_H_
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_COMMON_NATIVE_CONSOLE_MESSAGES_H_
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <string>
 #include <utility>
 
@@ -17,12 +17,17 @@
 namespace reb {
 
 // Renderer-thread only. Accepts complete JSON objects from the native serializer,
-// never page-authored JSON. Charge encoded bytes so escaping cannot overflow a
-// poll reply after its messages have already been removed from the queue.
+// never page-authored JSON. Every message is kept whole, however long, until
+// the Console owner polls for it.
 class NativeConsoleMessages final {
  public:
-  static constexpr std::size_t kCapacity = 32;
-  static constexpr std::size_t kByteLimit = 32768;
+  // What one document holds for an owner that is not polling. The Console
+  // polls continuously while it is connected, so a connected owner is never
+  // behind by this much; past it the oldest messages go, counted as dropped.
+  // A renderer must stay bounded in memory: without this, a page logging in a
+  // loop with no owner draining it would grow until the renderer is killed.
+  // One message larger than this is still kept, alone.
+  static constexpr std::size_t kRetainedBytes = 64 * 1024 * 1024;
   static constexpr std::uint32_t kDropLimit = 2147483647;
 
   NativeConsoleMessages() noexcept;
@@ -37,61 +42,71 @@ class NativeConsoleMessages final {
   }
 
   void Push(std::string encoded) {
-    if (encoded.empty() || encoded.size() > kByteLimit) {
+    if (encoded.empty()) {
       Drop();
       return;
     }
-    while (count_ == kCapacity || bytes_ + encoded.size() > kByteLimit) {
+    while (!messages_.empty() && bytes_ + encoded.size() > kRetainedBytes) {
       Pop();
       Drop();
     }
     bytes_ += encoded.size();
-    messages_[(head_ + count_) % kCapacity] = std::move(encoded);
-    ++count_;
+    messages_.push_back(std::move(encoded));
   }
 
+  // The oldest messages, whole: at least one, then more while the reply stays
+  // within one page. `more` says that the owner should poll again at once.
+  // The drop count travels with the first page after the drops, so it is
+  // reported exactly once.
   [[nodiscard]] std::string Poll() {
-    // Each record is serialized once on arrival. Poll needs one bounded output
+    // Each record is serialized once on arrival. Poll needs one output
     // allocation and byte copies, without rebuilding dictionaries or escaping.
+    std::size_t taken = 0;
+    std::size_t size = 0;
+    while (taken < messages_.size() &&
+           (taken == 0 || size + messages_[taken].size() <= kNativeConsolePageBytes)) {
+      size += messages_[taken].size() + 1;
+      ++taken;
+    }
     std::string result;
-    result.reserve(bytes_ + kCapacity + kEnvelopeLimit);
+    result.reserve(size + kEnvelopeBytes);
     result += "{\"status\":\"ok\",\"messages\":[";
-    for (std::size_t index = 0; index < count_; ++index) {
+    for (std::size_t index = 0; index < taken; ++index) {
       if (index)
         result += ',';
-      result += messages_[(head_ + index) % kCapacity];
+      result += messages_.front();
+      Pop();
     }
     result += "],\"dropped\":";
     result += std::to_string(dropped_);
+    result += ",\"more\":";
+    result += messages_.empty() ? "false" : "true";
     result += '}';
-    Reset();
+    dropped_ = 0;
+    if (messages_.empty())
+      std::deque<std::string>().swap(messages_);
     return result;
   }
 
   void Reset() noexcept {
-    while (count_)
-      Pop();
-    head_ = 0;
+    // Clear relinquishes storage instead of retaining peak capacities.
+    std::deque<std::string>().swap(messages_);
+    bytes_ = 0;
     dropped_ = 0;
   }
 
  private:
-  // JSON envelope and the saturated ten-digit drop count fit within 64 bytes.
-  static constexpr std::size_t kEnvelopeLimit = 64;
-  static_assert(kByteLimit + kCapacity + kEnvelopeLimit <= kNativeConsolePayloadLimit);
+  // The JSON envelope with a saturated ten-digit drop count.
+  static constexpr std::size_t kEnvelopeBytes = 80;
 
   void Pop() noexcept {
-    bytes_ -= messages_[head_].size();
-    // Clear/eviction relinquishes storage instead of retaining peak capacities.
-    std::string().swap(messages_[head_]);
-    head_ = (head_ + 1) % kCapacity;
-    --count_;
+    bytes_ -= messages_.front().size();
+    messages_.pop_front();
   }
 
-  // Unlike a deque, the inactive queue allocates no backing nodes or map.
-  std::array<std::string, kCapacity> messages_;
-  std::size_t head_ = 0;
-  std::size_t count_ = 0;
+  // libc++ allocates a deque's blocks on first use, so a document that never
+  // logs holds no message storage.
+  std::deque<std::string> messages_;
   std::size_t bytes_ = 0;
   std::uint32_t dropped_ = 0;
 };

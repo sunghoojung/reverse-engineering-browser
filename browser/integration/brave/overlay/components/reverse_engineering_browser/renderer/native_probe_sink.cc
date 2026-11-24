@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -21,6 +21,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <new>
 #include <span>
 #include <string_view>
 #include <type_traits>
@@ -37,6 +38,37 @@
 namespace reb {
 
 namespace {
+
+// prefix, the decimal slot and suffix in buffer: the per-site reason of a
+// JavaScript dispatch or invocation gap.
+std::string_view NativeJsSiteReason(std::array<char, 64>& buffer,
+                                    const std::string_view prefix,
+                                    const std::size_t slot,
+                                    const std::string_view suffix) noexcept {
+  std::array<char, 20> digits{};
+  std::size_t count = 0;
+  for (std::size_t value = slot; count == 0 || value != 0; value /= 10)
+    digits[count++] = static_cast<char>('0' + value % 10);
+  if (prefix.size() + count + suffix.size() > buffer.size())
+    return {};
+  std::size_t length = 0;
+  for (const char c : prefix)
+    buffer[length++] = c;
+  while (count != 0)
+    buffer[length++] = digits[--count];
+  for (const char c : suffix)
+    buffer[length++] = c;
+  return {buffer.data(), length};
+}
+
+// The next ordinal of a site's records, saturating rather than wrapping.
+std::uint32_t NextNativeJsOrdinal(std::atomic<std::uint32_t>& next) noexcept {
+  std::uint32_t ordinal = next.load(std::memory_order_relaxed);
+  while (ordinal != std::numeric_limits<std::uint32_t>::max() &&
+         !next.compare_exchange_weak(ordinal, ordinal + 1, std::memory_order_relaxed)) {
+  }
+  return ordinal;
+}
 
 std::uint64_t MonotonicTimeNs() noexcept {
   return static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
@@ -63,11 +95,6 @@ bool IsFingerprintSurfaceCategory(const NativeProbeCategory category) noexcept {
   return false;
 }
 
-// Origin Trace reads artifact content through a bounded 2 MiB local response.
-// Keep Canvas data URLs within that exact limit so an accepted image is always
-// complete enough to validate and display instead of becoming a partial base64
-// preview. Other generated artifact kinds retain their 16 MiB transport cap.
-constexpr std::size_t kCanvasDataUrlMaxBytes = 2U * 1024U * 1024U;
 constexpr std::size_t kRuntimeTypedArrayMinBytes = 32;
 
 struct RuntimeScriptCache final {
@@ -101,6 +128,7 @@ struct RuntimeThreadState final {
   RuntimeObservationCache observations;
 };
 struct WasmHostCall;
+struct WasmModuleBindings;
 struct GuestThreadState;
 
 // A thread's sink state beyond a few words. Each part is made by the first
@@ -115,6 +143,7 @@ struct SinkThreadState final {
   SinkThreadState& operator=(const SinkThreadState&) = delete;
   std::unique_ptr<RuntimeThreadState> runtime;
   std::unique_ptr<WasmHostCall> wasm;
+  std::unique_ptr<WasmModuleBindings> wasm_modules;
   std::unique_ptr<GuestThreadState> guest;
 };
 
@@ -143,6 +172,156 @@ SinkThreadState& EnsureSinkThreadState() {
 const RuntimeThreadState* FindRuntimeThreadState() noexcept {
   const SinkThreadState* const state = FindSinkThreadState();
   return state ? state->runtime.get() : nullptr;
+}
+
+// A Wasm window budget claim word: the budget epoch above kWasmWindowCountBits
+// and that epoch's retained count below. A word tagged with an older epoch is
+// an empty window, so a turnover never clears it. A newer tag means the
+// caller's epoch has closed.
+constexpr unsigned kWasmWindowCountBits = 24;
+constexpr std::uint64_t kWasmWindowCountMask = (std::uint64_t{1} << kWasmWindowCountBits) - 1;
+static_assert(kNativeWasmDispatchSampleBudget < kWasmWindowCountMask);
+static_assert(kNativeWasmIndirectSampleBudget < kWasmWindowCountMask);
+static_assert(kNativeWasmExecutionBudget < kWasmWindowCountMask);
+enum class WasmWindowClaim : std::uint8_t { kClaimed, kFull, kClosed };
+
+WasmWindowClaim ClaimWasmWindow(std::atomic<std::uint64_t>& claims,
+                                const std::uint64_t epoch,
+                                const std::size_t budget) noexcept {
+  // An epoch past the tag fails closed, after far more windows than a
+  // renderer lives through.
+  if (epoch >= (std::uint64_t{1} << (64 - kWasmWindowCountBits)))
+    return WasmWindowClaim::kClosed;
+  auto word = claims.load(std::memory_order_acquire);
+  for (;;) {
+    const auto tag = word >> kWasmWindowCountBits;
+    if (tag > epoch)
+      return WasmWindowClaim::kClosed;
+    const auto count = tag == epoch ? word & kWasmWindowCountMask : 0;
+    if (count >= budget)
+      return WasmWindowClaim::kFull;
+    if (claims.compare_exchange_weak(word, (epoch << kWasmWindowCountBits) | (count + 1),
+                                     std::memory_order_acq_rel, std::memory_order_acquire))
+      return WasmWindowClaim::kClaimed;
+  }
+}
+
+bool WasmWindowFull(const std::atomic<std::uint64_t>& claims,
+                    const std::uint64_t epoch,
+                    const std::size_t budget) noexcept {
+  const auto word = claims.load(std::memory_order_acquire);
+  return (word >> kWasmWindowCountBits) == epoch && (word & kWasmWindowCountMask) >= budget;
+}
+
+// Returns a claim whose record never reached the browser, while its window is
+// still open, so a later execution of the window can be kept instead.
+void ReleaseWasmWindow(std::atomic<std::uint64_t>& claims, const std::uint64_t epoch) noexcept {
+  auto word = claims.load(std::memory_order_acquire);
+  while ((word >> kWasmWindowCountBits) == epoch && (word & kWasmWindowCountMask) != 0) {
+    if (claims.compare_exchange_weak(word, word - 1, std::memory_order_acq_rel,
+                                     std::memory_order_acquire))
+      return;
+  }
+}
+
+// A module this thread sent in one budget epoch. A later Wasm record of the
+// same epoch names the record that carried the bytes instead of copying them
+// again. Both records go through this thread's host remote, so the browser
+// reads the bytes first. The next window sends each module once more, which
+// also replaces a binding the browser refused.
+struct WasmModuleBinding final {
+  std::uint64_t generation = 0;
+  std::uint64_t budget_epoch = 0;
+  std::uint64_t frame_id = 0;
+  std::uint64_t execution_context_id = 0;
+  std::uint64_t document_token_high = 0;
+  std::uint64_t document_token_low = 0;
+  // V8 keeps a module's wire bytes at one address for its lifetime. The
+  // fingerprint tells it from a module freed and replaced at that address.
+  const std::uint8_t* data = nullptr;
+  std::size_t size = 0;
+  std::uint64_t fingerprint = 0;
+  // The sequence number of the record that carried the bytes; 0 is unused.
+  std::uint64_t token = 0;
+  std::uint64_t last_use = 0;
+};
+struct WasmModuleBindings final {
+  std::array<WasmModuleBinding, 16> entries{};
+  std::uint64_t use_clock = 0;
+};
+
+// FNV-1a over the size and at most the first and last 64 bytes.
+std::uint64_t WasmModuleFingerprint(const std::span<const std::uint8_t> bytes) noexcept {
+  std::uint64_t hash = 0xcbf29ce484222325ULL ^ bytes.size();
+  const auto mix = [&hash](const std::uint8_t byte) { hash = (hash ^ byte) * 0x100000001b3ULL; };
+  const std::size_t head = std::min<std::size_t>(64, bytes.size());
+  for (std::size_t i = 0; i < head; ++i)
+    mix(bytes[i]);
+  for (std::size_t i = std::max(head, bytes.size() - std::min<std::size_t>(64, bytes.size()));
+       i < bytes.size(); ++i)
+    mix(bytes[i]);
+  return hash;
+}
+
+WasmModuleBinding DescribeWasmModule(const std::uint64_t generation,
+                                     const std::uint64_t budget_epoch,
+                                     const std::uint64_t frame_id,
+                                     const std::uint64_t execution_context_id,
+                                     const std::uint64_t document_token_high,
+                                     const std::uint64_t document_token_low,
+                                     const std::span<const std::uint8_t> bytes) noexcept {
+  return {.generation = generation,
+          .budget_epoch = budget_epoch,
+          .frame_id = frame_id,
+          .execution_context_id = execution_context_id,
+          .document_token_high = document_token_high,
+          .document_token_low = document_token_low,
+          .data = bytes.data(),
+          .size = bytes.size(),
+          .fingerprint = WasmModuleFingerprint(bytes)};
+}
+
+// The token of this thread's earlier record that sent the same module in the
+// same epoch, or 0 when this record must carry the bytes.
+std::uint64_t BoundWasmModuleToken(const WasmModuleBinding& wanted) noexcept {
+  SinkThreadState* const state = FindSinkThreadState();
+  if (!state || !state->wasm_modules || !wanted.data || !wanted.size)
+    return 0;
+  WasmModuleBindings& modules = *state->wasm_modules;
+  for (WasmModuleBinding& entry : modules.entries) {
+    if (entry.token && entry.generation == wanted.generation &&
+        entry.budget_epoch == wanted.budget_epoch && entry.frame_id == wanted.frame_id &&
+        entry.execution_context_id == wanted.execution_context_id &&
+        entry.document_token_high == wanted.document_token_high &&
+        entry.document_token_low == wanted.document_token_low && entry.data == wanted.data &&
+        entry.size == wanted.size && entry.fingerprint == wanted.fingerprint) {
+      entry.last_use = ++modules.use_clock;
+      return entry.token;
+    }
+  }
+  return 0;
+}
+
+// After a record carried this module's bytes to the browser. An entry of an
+// older epoch is free; otherwise the least recently named one is replaced.
+void BindWasmModule(WasmModuleBinding sent, const std::uint64_t token) {
+  SinkThreadState& state = EnsureSinkThreadState();
+  if (!state.wasm_modules)
+    state.wasm_modules = std::make_unique<WasmModuleBindings>();
+  WasmModuleBindings& modules = *state.wasm_modules;
+  WasmModuleBinding* victim = &modules.entries.front();
+  for (WasmModuleBinding& entry : modules.entries) {
+    if (!entry.token || entry.generation != sent.generation ||
+        entry.budget_epoch != sent.budget_epoch) {
+      victim = &entry;
+      break;
+    }
+    if (entry.last_use < victim->last_use)
+      victim = &entry;
+  }
+  sent.token = token;
+  sent.last_use = ++modules.use_clock;
+  *victim = sent;
 }
 
 RuntimeThreadState& EnsureRuntimeThreadState() {
@@ -297,13 +476,12 @@ constexpr char AsciiLower(unsigned char c) noexcept;
   return true;
 }
 
-// Bounded, allocation-free metadata sanitization. Ambiguous or control-containing
-// URLs are unavailable. data and javascript URLs must never become source metadata.
-// allow_blob is false while decoding the inner origin of a blob URL.
-std::string_view SanitizeRuntimeSourceUrl(std::string_view input,
-                                          std::array<char, kNativeArtifactMaxUrlBytes>& output,
-                                          const bool allow_blob) noexcept {
-  if (input.empty() || input.size() > output.size()) {
+// Metadata sanitization. Ambiguous or control-containing URLs are unavailable
+// (empty). data and javascript URLs must never become source metadata.
+// allow_blob is false while decoding the inner origin of a blob URL. A URL may
+// be as long as kNativeArtifactMaxUrlBytes, so the result is a heap string.
+std::string SanitizeRuntimeSourceUrl(std::string_view input, const bool allow_blob) noexcept {
+  if (input.empty() || input.size() > kNativeArtifactMaxUrlBytes) {
     return {};
   }
   for (const char character : input) {
@@ -314,23 +492,12 @@ std::string_view SanitizeRuntimeSourceUrl(std::string_view input,
   }
   input = input.substr(0, input.find_first_of("?#"));
   if (allow_blob && StartsWithAscii(input, "blob:")) {
-    std::array<char, kNativeArtifactMaxUrlBytes> inner_storage{};
-    const auto inner = SanitizeRuntimeSourceUrl(input.substr(5), inner_storage, false);
+    const std::string inner = SanitizeRuntimeSourceUrl(input.substr(5), false);
     if (inner.empty() ||
         (!StartsWithAscii(inner, "https://") && !StartsWithAscii(inner, "http://"))) {
       return {};
     }
-    constexpr std::string_view kBlob = "blob:";
-    if (kBlob.size() + inner.size() > output.size()) {
-      return {};
-    }
-    for (std::size_t index = 0; index < kBlob.size(); ++index) {
-      output[index] = kBlob[index];
-    }
-    for (std::size_t index = 0; index < inner.size(); ++index) {
-      output[kBlob.size() + index] = inner[index];
-    }
-    return {output.data(), kBlob.size() + inner.size()};
+    return "blob:" + inner;
   }
   const auto scheme = input.find("://");
   if (scheme == std::string_view::npos || scheme > 7) {
@@ -368,44 +535,21 @@ std::string_view SanitizeRuntimeSourceUrl(std::string_view input,
       }
     }
   }
-  std::size_t length = 0;
+  std::string output;
+  output.reserve(input.size());
   for (std::size_t index = 0; index < input.size(); ++index) {
     if (cut_end != 0 && index >= cut_begin && index < cut_end) {
       continue;
     }
-    output[length++] = input[index];
+    output.push_back(input[index]);
   }
-  return {output.data(), length};
-}
-
-std::string_view SanitizeRuntimeSourceUrl(
-    const std::string_view input,
-    std::array<char, kNativeArtifactMaxUrlBytes>& output) noexcept {
-  return SanitizeRuntimeSourceUrl(input, output, true);
+  return output;
 }
 
 // A script with no name is still the allocating script. The label is the id
 // only, so the page cannot put source text into the URL field.
-std::string_view RuntimeScriptIdentityLabel(
-    std::uint64_t script_id,
-    std::array<char, kNativeArtifactMaxUrlBytes>& output) noexcept {
-  constexpr std::string_view kPrefix = "script://";
-  std::array<char, 20> digits{};
-  std::size_t count = 0;
-  do {
-    digits[count++] = static_cast<char>('0' + static_cast<int>(script_id % 10U));
-    script_id /= 10U;
-  } while (script_id != 0 && count < digits.size());
-  if (kPrefix.size() + count > output.size()) {
-    return {};
-  }
-  for (std::size_t index = 0; index < kPrefix.size(); ++index) {
-    output[index] = kPrefix[index];
-  }
-  for (std::size_t index = 0; index < count; ++index) {
-    output[kPrefix.size() + index] = digits[count - 1U - index];
-  }
-  return {output.data(), kPrefix.size() + count};
+std::string RuntimeScriptIdentityLabel(const std::uint64_t script_id) noexcept {
+  return "script://" + std::to_string(script_id);
 }
 
 // Same structural weights as the offline JavaScript detector. Anti-bot lexical
@@ -1394,11 +1538,18 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
                                   std::memory_order_relaxed);
   exclusion_counter_.store(active ? network_scope.exclusion_counter : nullptr,
                            std::memory_order_relaxed);
+  target_emitter_.store(active ? network_scope.target_emitter : nullptr, std::memory_order_relaxed);
   emitter_.store(emitter, std::memory_order_relaxed);
   artifact_emitter_.store(artifact_emitter, std::memory_order_relaxed);
-  // A replacement configuration starts both Wasm sample indexes at 0. The
-  // pending policy is the one SetNativeWasmSampleBudgetPolicy last accepted.
+  // A replacement configuration starts both Wasm sample indexes at 0 and
+  // opens its first sample window. The pending policy is the one
+  // SetNativeWasmSampleBudgetPolicy last accepted.
   native_wasm_budget_policy_ = native_wasm_budget_policy_pending_;
+  native_wasm_every_record_.store(native_wasm_budget_policy_.every_record,
+                                  std::memory_order_relaxed);
+  native_wasm_next_sample_.store(0, std::memory_order_relaxed);
+  native_wasm_indirect_next_sample_.store(0, std::memory_order_relaxed);
+  native_wasm_window_started_ns_.store(MonotonicTimeNs(), std::memory_order_relaxed);
   const auto wasm_budget_epoch = native_wasm_budget_epoch_.load(std::memory_order_relaxed);
   if ((wasm_budget_epoch & 1U) == 0 &&
       wasm_budget_epoch <= std::numeric_limits<std::uint64_t>::max() - 2) {
@@ -1615,7 +1766,7 @@ bool NativeProbeSink::RuntimeBufferHasSignal(const std::uint64_t generation,
                                              const std::uint64_t script_id,
                                              const bool is_eval) noexcept {
   if (generation == 0 || generation != RuntimeCaptureGeneration() || bytes < 32 ||
-      bytes > kNativeArtifactMaxContentBytes || execution_context_id == 0 || script_id == 0)
+      execution_context_id == 0 || script_id == 0)
     return false;
   RuntimeObservationCache& runtime_observations = RuntimeObservationsFor(generation);
   const auto* observation =
@@ -1673,8 +1824,7 @@ void NativeProbeSink::CaptureRuntimeTypedArray(const std::uint64_t execution_con
   if (!artifact_emitter_.load(std::memory_order_acquire)) [[likely]] {
     return;
   }
-  if (content.size() < kRuntimeTypedArrayMinBytes ||
-      content.size() > kNativeArtifactMaxContentBytes) {
+  if (content.size() < kRuntimeTypedArrayMinBytes) {
     return;
   }
   const std::uint64_t generation = config_generation_.load(std::memory_order_acquire);
@@ -1695,18 +1845,18 @@ void NativeProbeSink::CaptureRuntimeTypedArray(const std::uint64_t execution_con
   }
   if (script.script_id == 0 ||
       (script.source.empty() &&
-       RuntimeScriptSourceNeeded(execution_context_id, script.script_id)) ||
-      script.source.size() > kNativeArtifactMaxContentBytes) {
+       RuntimeScriptSourceNeeded(execution_context_id, script.script_id))) {
     RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, frame_id,
                              "allocating_script_unavailable", generation);
     return;
   }
-  std::array<char, kNativeArtifactMaxUrlBytes> sanitized_storage{};
-  auto sanitized_url = SanitizeRuntimeSourceUrl(source_url, sanitized_storage);
-  if (sanitized_url.empty() && source_url.empty()) {
-    std::array<char, kNativeArtifactMaxUrlBytes> label_storage{};
-    const auto label = RuntimeScriptIdentityLabel(script.script_id, label_storage);
-    sanitized_url = SanitizeRuntimeSourceUrl(label, sanitized_storage);
+  // A name longer than any URL can carry source text; the buffer is named by
+  // its script's id, as one with no name is.
+  const std::string_view name =
+      source_url.size() > kNativeArtifactMaxUrlBytes ? std::string_view() : source_url;
+  std::string sanitized_url = SanitizeRuntimeSourceUrl(name, true);
+  if (sanitized_url.empty() && name.empty()) {
+    sanitized_url = SanitizeRuntimeSourceUrl(RuntimeScriptIdentityLabel(script.script_id), true);
   }
   if (execution_context_id == 0 || sanitized_url.empty()) {
     RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, frame_id,
@@ -1745,20 +1895,34 @@ void NativeProbeSink::CaptureRuntimeTypedArray(const std::uint64_t execution_con
     }
     return;
   }
+  // Release only our generation's reservation, never a slot reclaimed by a
+  // replacement session.
+  const auto release_claim = [&] {
+    auto expected = generation;
+    claim->compare_exchange_strong(expected, generation - 1U, std::memory_order_relaxed);
+  };
+  // The buffer and the allocating script source it carries, of any size, are
+  // kept against the renderer's credit.
+  const std::uint64_t credit_bytes = content.size() + script.source.size();
+  if (!TryChargeArtifactCredit(credit_bytes)) {
+    release_claim();
+    RecordRuntimeBufferOmission(generation, frame_id, "runtime_typed_array_backlog");
+    return;
+  }
   const std::uint64_t creator_event_id =
       RecordRuntimeBufferEvent(NativeProbeType::kApiCall, frame_id,
                                "runtime_typed_array_task_checkpoint_snapshot", generation);
-  // Rejected creator metadata cannot produce an artifact. Release only our
-  // generation's reservation, never a slot reclaimed by a replacement session.
+  // Rejected creator metadata cannot produce an artifact.
   if (creator_event_id == 0 || RuntimeCaptureGeneration() != generation) {
-    auto expected = generation;
-    claim->compare_exchange_strong(expected, generation - 1U, std::memory_order_relaxed);
+    ReleaseArtifactCredit(credit_bytes);
+    release_claim();
     return;
   }
   scoped_script.capture_generation = generation;
   artifact_emitter(NativeArtifactKind::kBytecodeBuffer,
                    NativeArtifactCaptureOrigin::kRuntimeTypedArray, creator_event_id,
-                   execution_context_id, frame_id, sanitized_url, content, scoped_script, 0);
+                   execution_context_id, frame_id, sanitized_url, content, scoped_script,
+                   credit_bytes);
   if (RuntimeCaptureGeneration() != generation) {
     return;
   }
@@ -1813,6 +1977,22 @@ bool NativeProbeSink::TryChargeArtifactCredit(const std::uint64_t bytes) noexcep
   } while (
       !artifact_credit_used_.compare_exchange_weak(used, used + bytes, std::memory_order_relaxed));
   return true;
+}
+
+template <typename Emitter, typename Observation>
+std::string_view NativeProbeSink::SendWasmObservation(const Emitter emitter,
+                                                      const Observation& observation,
+                                                      const std::uint64_t generation,
+                                                      const std::string_view unavailable) noexcept {
+  const std::uint64_t bytes = observation.module_bytes.size();
+  if (bytes != 0 && !TryChargeArtifactCredit(bytes)) {
+    return "native_wasm_module_backlog";
+  }
+  if (!emitter || !emitter(observation, generation)) {
+    ReleaseArtifactCredit(bytes);
+    return unavailable;
+  }
+  return {};
 }
 
 void NativeProbeSink::ReleaseArtifactCredit(const std::uint64_t bytes) noexcept {
@@ -1942,14 +2122,42 @@ void NativeProbeSink::CaptureGeneratedArtifact(
     const std::uint64_t frame_id,
     const std::string_view source_url,
     const std::span<const std::uint8_t> content) noexcept {
+  SendGeneratedArtifact(kind, capture_origin, creator_event_id, execution_context_id, frame_id,
+                        source_url, content, false);
+}
+
+void NativeProbeSink::CaptureChargedArtifact(const NativeArtifactKind kind,
+                                             const NativeArtifactCaptureOrigin capture_origin,
+                                             const std::uint64_t creator_event_id,
+                                             const std::uint64_t execution_context_id,
+                                             const std::uint64_t frame_id,
+                                             const std::string_view source_url,
+                                             const std::span<const std::uint8_t> content) noexcept {
+  SendGeneratedArtifact(kind, capture_origin, creator_event_id, execution_context_id, frame_id,
+                        source_url, content, true);
+}
+
+void NativeProbeSink::SendGeneratedArtifact(const NativeArtifactKind kind,
+                                            const NativeArtifactCaptureOrigin capture_origin,
+                                            const std::uint64_t creator_event_id,
+                                            const std::uint64_t execution_context_id,
+                                            const std::uint64_t frame_id,
+                                            const std::string_view source_url,
+                                            const std::span<const std::uint8_t> content,
+                                            const bool charged) noexcept {
+  // Content of any size is kept against the renderer's credit. A stack
+  // artifact is at most kNativeStackArtifactMaxBytes, and its refusal has a
+  // path of its own, so it is not charged.
+  const std::uint64_t credit_bytes = kind == NativeArtifactKind::kStack ? 0 : content.size();
+  // Content the caller already charged returns its credit when it is not sent.
+  const auto refuse = [&] {
+    if (charged) {
+      ReleaseArtifactCredit(credit_bytes);
+    }
+  };
   if (!artifact_emitter_.load(std::memory_order_acquire) || source_url.empty() ||
       source_url.size() > kNativeArtifactMaxUrlBytes || content.empty()) [[likely]] {
-    return;
-  }
-  // A Wasm module of any size is kept against the renderer's credit; the other
-  // kinds keep their own limits.
-  const bool wasm = kind == NativeArtifactKind::kWasm;
-  if (!wasm && content.size() > kNativeArtifactMaxContentBytes) {
+    refuse();
     return;
   }
   const bool valid_kind_and_origin =
@@ -1968,10 +2176,12 @@ void NativeProbeSink::CaptureGeneratedArtifact(
        capture_origin == NativeArtifactCaptureOrigin::kStackScript && creator_event_id != 0);
   if (!valid_kind_and_origin ||
       (kind != NativeArtifactKind::kCanvasDataUrl && execution_context_id == 0)) {
+    refuse();
     return;
   }
   const std::uint64_t generation = config_generation_.load(std::memory_order_acquire);
   if ((generation & 1U) != 0) {
+    refuse();
     return;
   }
   const std::uint64_t category_mask = category_mask_.load(std::memory_order_relaxed);
@@ -1984,15 +2194,20 @@ void NativeProbeSink::CaptureGeneratedArtifact(
                                                    ? NativeProbeCategory::kVm
                                                    : NativeProbeCategory::kArtifact)) == 0 ||
       MonotonicTimeNs() >= expires_at) {
+    refuse();
     return;
   }
-  if (wasm && !TryChargeArtifactCredit(content.size())) {
+  if (!charged && credit_bytes != 0 && !TryChargeArtifactCredit(credit_bytes)) {
     RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, frame_id,
-                             "wasm_module_backlog", generation, NativeProbeCategory::kArtifact);
+                             kind == NativeArtifactKind::kWasm ? "wasm_module_backlog"
+                             : kind == NativeArtifactKind::kCanvasDataUrl
+                                 ? "canvas_data_url_backlog"
+                                 : "generated_artifact_backlog",
+                             generation, NativeProbeCategory::kArtifact);
     return;
   }
   artifact_emitter(kind, capture_origin, creator_event_id, execution_context_id, frame_id,
-                   source_url, content, {}, wasm ? content.size() : 0);
+                   source_url, content, {}, credit_bytes);
 }
 
 std::uint64_t NativeProbeSink::RecordSurfaceOperation(
@@ -2070,8 +2285,7 @@ void NativeProbeSink::RecordCanvasToDataUrl() noexcept {
 void NativeProbeSink::RecordCanvasToDataUrl(const std::string_view data_url) noexcept {
   constexpr std::string_view kImageDataUrlPrefix = "data:image/";
   if (!IsCanvasImageCaptureEnabled() || !data_url.starts_with(kImageDataUrlPrefix) ||
-      data_url.find(";base64,") == std::string_view::npos ||
-      data_url.size() > kCanvasDataUrlMaxBytes) {
+      data_url.find(";base64,") == std::string_view::npos) {
     RecordCanvasToDataUrl();
     return;
   }
@@ -2183,11 +2397,12 @@ void NativeProbeSink::NameRequestOwner(NativeProbeHeader& header,
 }
 
 void NativeProbeSink::EmitRendererTarget(const NativeRendererRequest& start,
-                                         const std::string_view target_prefix,
+                                         const std::string_view target_text,
                                          const std::size_t target_length,
                                          const int port,
                                          const std::uint64_t config_generation,
-                                         const NativeRendererProbeEmitter emitter) noexcept {
+                                         const NativeRendererProbeEmitter emitter,
+                                         const std::string_view host) noexcept {
   // The same child the browser records after request_started, here of the
   // renderer's own start record.
   NativeRequestTarget target;
@@ -2199,14 +2414,45 @@ void NativeProbeSink::EmitRendererTarget(const NativeRendererRequest& start,
   target.port = port > 0 && port <= 65535 ? static_cast<std::uint16_t>(port) : 0;
   target.target_length = static_cast<std::uint32_t>(
       std::min<std::size_t>(target_length, std::numeric_limits<std::uint32_t>::max()));
-  std::copy_n(target_prefix.begin(),
-              std::min({target_prefix.size(), target_length, target.prefix.size()}),
+  std::copy_n(target_text.begin(),
+              std::min({target_text.size(), target_length, target.prefix.size()}),
               target.prefix.begin());
-  // The renderer has no artifact channel for the rest of a long target.
+  // The scheme, host and explicit port that name a long target's artifact,
+  // as the browser names its own (an origin, never user info). It can be as
+  // long as kNativeArtifactMaxUrlBytes, so it is a heap string, built only for
+  // a target the record's prefix does not hold.
+  std::string origin;
   if (target_length > target.prefix.size()) {
-    target.retention = target.scheme == NativeRequestScheme::kOther
-                           ? NativeRequestTargetRetention::kNotRetainedUrl
-                           : NativeRequestTargetRetention::kNotRetainedArtifactUnavailable;
+    // As the browser decides for its own requests: no origin or a target past
+    // what an artifact keeps is not retained.
+    const std::string_view scheme = target.scheme == NativeRequestScheme::kHttps  ? "https://"
+                                    : target.scheme == NativeRequestScheme::kHttp ? "http://"
+                                    : target.scheme == NativeRequestScheme::kWss  ? "wss://"
+                                    : target.scheme == NativeRequestScheme::kWs   ? "ws://"
+                                                                                  : "";
+    std::array<char, 8> port_text{};
+    std::size_t port_length = 0;
+    if (target.port != 0) {
+      port_text[0] = ':';
+      std::array<char, 5> digits{};
+      std::size_t count = 0;
+      for (std::uint16_t value = target.port; value != 0; value /= 10) {
+        digits[count++] = static_cast<char>('0' + value % 10);
+      }
+      for (port_length = 1; count != 0; ++port_length) {
+        port_text[port_length] = digits[--count];
+      }
+    }
+    if (scheme.empty() || target_length > kNativeRequestTargetMaxBytes ||
+        scheme.size() + host.size() + port_length > kNativeArtifactMaxUrlBytes) {
+      target.retention = NativeRequestTargetRetention::kNotRetainedUrl;
+    } else if (host.empty() || target_text.size() != target_length) {
+      // A row whose caller converted only the prefix.
+      target.retention = NativeRequestTargetRetention::kNotRetainedArtifactUnavailable;
+    } else {
+      origin.reserve(scheme.size() + host.size() + port_length);
+      origin.append(scheme).append(host).append(port_text.data(), port_length);
+    }
   }
   NativeProbeEvent child;
   child.header.category = NativeProbeCategory::kNetwork;
@@ -2220,6 +2466,16 @@ void NativeProbeSink::EmitRendererTarget(const NativeRendererRequest& start,
   child.header.request_id = start.request_id;
   child.header.parent_event_id = start.initiated_sequence;
   child.header.payload_size = static_cast<std::uint32_t>(kNativeRequestPayloadSize);
+  if (!origin.empty()) {
+    // The browser fills in the retention and artifact it keeps.
+    child.inline_payload = EncodeNativeRequestTargetPayload(target);
+    const NativeRendererTargetEmitter target_emitter =
+        target_emitter_.load(std::memory_order_relaxed);
+    if (target_emitter && target_emitter(child, origin, target_text, config_generation)) {
+      return;
+    }
+    target.retention = NativeRequestTargetRetention::kNotRetainedArtifactUnavailable;
+  }
   child.inline_payload = EncodeNativeRequestTargetPayload(target);
   static_cast<void>(emitter(child, config_generation));
 }
@@ -2342,37 +2598,15 @@ NativeMemoryCacheAdmission NativeProbeSink::AdmitMemoryCacheReuse(
       monotonic_time_ns >= expires_at_monotonic_ns) {
     return {};
   }
-  const auto count_not_recorded = [&](const std::uint8_t exclusion_class) {
-    if (exclusion_counter) {
-      exclusion_counter(exclusion_class, session_id, config_generation);
-    }
-  };
-  // An SVG image's own document or a page popup belongs to no tab, so its
-  // count is kept apart from the budget's overflow.
+  // An SVG image's own document or a page popup belongs to no tab, so it is
+  // counted instead of recorded.
   if (!ordinary_page) {
-    count_not_recorded(kNativeNonOrdinaryPageReuseExclusion);
+    if (exclusion_counter) {
+      exclusion_counter(kNativeNonOrdinaryPageReuseExclusion, session_id, config_generation);
+    }
     return {};
   }
-  // Reuses can be frequent, so a configuration records a bounded number and
-  // counts the rest. The count is tagged with its generation.
-  const auto tag = static_cast<std::uint32_t>(config_generation);
-  std::uint64_t word = memory_cache_budget_.load(std::memory_order_relaxed);
-  for (;;) {
-    const auto word_tag = static_cast<std::uint32_t>(word >> 32U);
-    if (word_tag != tag && static_cast<std::int32_t>(word_tag - tag) > 0) {
-      // A newer configuration owns the budget; this one was replaced.
-      return {};
-    }
-    const std::uint32_t used = word_tag == tag ? static_cast<std::uint32_t>(word) : 0;
-    if (used >= kNativeMemoryCacheReuseBudget) {
-      count_not_recorded(kNativeMemoryCacheReuseExclusion);
-      return {};
-    }
-    if (memory_cache_budget_.compare_exchange_weak(word, (std::uint64_t{tag} << 32U) | (used + 1U),
-                                                   std::memory_order_relaxed)) {
-      return {.generation = config_generation, .capture_request_content = capture_request_content};
-    }
-  }
+  return {.generation = config_generation, .capture_request_content = capture_request_content};
 }
 
 void NativeProbeSink::RecordMemoryCacheReuse(const NativeMemoryCacheAdmission& admission,
@@ -2396,13 +2630,7 @@ void NativeProbeSink::RecordMemoryCacheReuse(const NativeMemoryCacheAdmission& a
   }
   const NativeSchemeClass scheme_class = ClassifyNativeScheme(reuse.scheme);
   if (IsBrowserInternalSchemeClass(scheme_class) && !capture_browser_internal) {
-    // Counted as the scheme class a request would be, not against the budget.
-    const auto tag = static_cast<std::uint32_t>(config_generation);
-    std::uint64_t word = memory_cache_budget_.load(std::memory_order_relaxed);
-    while (static_cast<std::uint32_t>(word >> 32U) == tag &&
-           static_cast<std::uint32_t>(word) != 0 &&
-           !memory_cache_budget_.compare_exchange_weak(word, word - 1, std::memory_order_relaxed)) {
-    }
+    // Counted as the scheme class a request would be.
     if (exclusion_counter) {
       exclusion_counter(static_cast<std::uint8_t>(scheme_class), session_id, config_generation);
     }
@@ -2445,8 +2673,8 @@ void NativeProbeSink::RecordMemoryCacheReuse(const NativeMemoryCacheAdmission& a
   row.thread_id = event.header.thread_id;
   row.request_id = static_cast<std::uint32_t>(event.header.request_id);
   row.scheme_class = scheme_class;
-  EmitRendererTarget(row, reuse.target, reuse.target_length, reuse.port, config_generation,
-                     emitter);
+  EmitRendererTarget(row, reuse.target, reuse.target_length, reuse.port, config_generation, emitter,
+                     reuse.host);
 }
 
 void NativeProbeSink::NoteVmDispatchLoss(const std::uint64_t generation,
@@ -3197,13 +3425,14 @@ void NativeProbeSink::SetNativeWasmDispatchEmitter(NativeWasmDispatchEmitter emi
 }
 bool NativeProbeSink::IsNativeWasmDispatchEnabled() const noexcept {
   // Called by V8 before handle allocation/frame walking. Do not invoke the
-  // frame-id provider here: its Blink implementation re-enters V8. The
-  // 16-observation cap does not clear this; later executions are identified
-  // until the omitted counter saturates.
+  // frame-id provider here: its Blink implementation re-enters V8. A full
+  // window does not clear this; later executions are identified until the
+  // omitted counter saturates, and the next window samples again.
   const auto generation = config_generation_.load(std::memory_order_acquire);
   const auto epoch = native_wasm_budget_epoch_.load(std::memory_order_acquire);
   if (generation == 0 || (generation & 1U) != 0 || epoch < 2 || (epoch & 1U) != 0 ||
-      native_wasm_capped_epoch_.load(std::memory_order_acquire) >= epoch ||
+      (native_wasm_capped_epoch_.load(std::memory_order_acquire) >= epoch &&
+       !NativeWasmWindowElapsed()) ||
       !native_wasm_emitter_.load(std::memory_order_acquire))
     return false;
   const auto categories = category_mask_.load(std::memory_order_relaxed);
@@ -3293,12 +3522,22 @@ void NativeProbeSink::RecordNativeWasmDispatch(std::uint64_t execution_context_i
   const NativeJsInvocationContext invocation = CurrentNativeJsInvocation();
   observation.js_invocation_state = invocation.state;
   observation.js_invocation_id = invocation.invocation_id;
+  AdvanceNativeWasmWindow(admission.monotonic_time_ns);
   const auto epoch = native_wasm_budget_epoch_.load(std::memory_order_acquire);
   if (epoch < 2 || (epoch & 1U) != 0 ||
       config_generation_.load(std::memory_order_acquire) != admission.generation)
     return;
   if (!IsValidNativeWasmDispatchInput(observation)) {
     NoteNativeWasmDispatchOmission(admission, NativeWasmOmission::kInput, epoch);
+    return;
+  }
+  // Every record claims no window: each admitted execution is a full record.
+  const bool every_record = native_wasm_every_record_.load(std::memory_order_relaxed);
+  // A full window needs no key scan: every later execution of it is an
+  // overflow identity or the omitted count.
+  if (!every_record &&
+      WasmWindowFull(native_wasm_window_claims_, epoch, kNativeWasmDispatchSampleBudget)) {
+    RecordDispatchBudgetOverflow(admission, epoch, NativeWasmOmission::kBudget, observation);
     return;
   }
   const auto policy = native_wasm_budget_policy_;
@@ -3324,46 +3563,64 @@ void NativeProbeSink::RecordNativeWasmDispatch(std::uint64_t execution_context_i
   const auto release_keys = [&] {
     ReleaseNativeWasmBudgetAdmission(keys, native_wasm_function_keys_, {}, epoch);
   };
-  for (std::size_t i = 0; i < native_wasm_slots_.size(); ++i) {
-    auto& slot = native_wasm_slots_[i];
-    auto previous = slot.load(std::memory_order_acquire);
-    while (previous < epoch) {
-      if (slot.compare_exchange_weak(previous, epoch, std::memory_order_acq_rel)) {
-        if (native_wasm_budget_epoch_.load(std::memory_order_acquire) != epoch ||
-            config_generation_.load(std::memory_order_acquire) != admission.generation) {
-          auto claimed = epoch;
-          slot.compare_exchange_strong(claimed, previous, std::memory_order_acq_rel);
-          release_keys();
-          return;
-        }
-        observation.sample_index = static_cast<std::uint32_t>(i);
-        observation.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
-        const auto emitter = native_wasm_emitter_.load(std::memory_order_acquire);
-        if (native_wasm_budget_epoch_.load(std::memory_order_acquire) != epoch ||
-            config_generation_.load(std::memory_order_acquire) != admission.generation ||
-            !emitter || !emitter(observation, admission.generation)) {
-          auto claimed = epoch;
-          slot.compare_exchange_strong(claimed, previous, std::memory_order_acq_rel);
-          release_keys();
-          FillSequenceGap(observation.header, "native_wasm_dispatch_transport_unavailable",
-                          admission.generation);
-        } else {
-          NoteWasmInstrumentedSite(admission.generation, execution_context_id, frame_id, source_url,
-                                   document_token_high, document_token_low, function_index,
-                                   module_byte_offset, observation.sample_index,
-                                   NativeWasmExecutionStream::kBrTable,
-                                   observation.js_invocation_state, observation.js_invocation_id);
-        }
-        return;
-      }
-    }
+  const auto release_window = [&] {
+    if (!every_record)
+      ReleaseWasmWindow(native_wasm_window_claims_, epoch);
+  };
+  const auto claim = every_record ? WasmWindowClaim::kClaimed
+                                  : ClaimWasmWindow(native_wasm_window_claims_, epoch,
+                                                    kNativeWasmDispatchSampleBudget);
+  const auto ordinal = claim == WasmWindowClaim::kClaimed
+                           ? native_wasm_next_sample_.fetch_add(1, std::memory_order_relaxed)
+                           : 0;
+  if (claim != WasmWindowClaim::kClaimed || ordinal > kNativeWasmLastSampleIndex) {
+    // A full window keeps this execution as a compact identity, or, past the
+    // ring, the omitted count. The per-function key is released: an overflow
+    // identity is not a retained sample. The stream stays enabled so later
+    // executions can still be named.
+    if (claim == WasmWindowClaim::kClaimed)
+      release_window();
+    release_keys();
+    if (claim != WasmWindowClaim::kClosed)
+      RecordDispatchBudgetOverflow(admission, epoch, NativeWasmOmission::kBudget, observation);
+    return;
   }
-  // The 16 full observations stay capped. This execution keeps a compact
-  // identity, or, past the ring, increments the omitted count. The per-function
-  // key is released: an overflow identity is not a retained sample. The stream
-  // stays enabled so later executions can still be named.
-  release_keys();
-  RecordDispatchBudgetOverflow(admission, epoch, NativeWasmOmission::kBudget, observation);
+  // A window that turns over from here keeps this claim: the sample index
+  // and the module binding stay valid. A retired configuration does not.
+  if (config_generation_.load(std::memory_order_acquire) != admission.generation) {
+    release_window();
+    release_keys();
+    return;
+  }
+  observation.sample_index = static_cast<std::uint32_t>(ordinal);
+  const auto module =
+      DescribeWasmModule(admission.generation, epoch, frame_id, execution_context_id,
+                         document_token_high, document_token_low, module_bytes);
+  observation.module_token = BoundWasmModuleToken(module);
+  if (observation.module_token)
+    observation.module_bytes = {};
+  observation.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+  constexpr std::string_view kUnavailable = "native_wasm_dispatch_transport_unavailable";
+  const std::string_view refused =
+      config_generation_.load(std::memory_order_acquire) != admission.generation
+          ? kUnavailable
+          : SendWasmObservation(native_wasm_emitter_.load(std::memory_order_acquire), observation,
+                                admission.generation, kUnavailable);
+  if (!refused.empty()) {
+    // Unbound, so a module the credit refused is offered again with the next
+    // sample.
+    release_window();
+    release_keys();
+    FillSequenceGap(observation.header, refused, admission.generation);
+    return;
+  }
+  if (!observation.module_token)
+    BindWasmModule(module, observation.header.sequence_number);
+  NoteWasmInstrumentedSite(admission.generation, execution_context_id, frame_id, source_url,
+                           document_token_high, document_token_low, function_index,
+                           module_byte_offset, observation.sample_index,
+                           NativeWasmExecutionStream::kBrTable, observation.js_invocation_state,
+                           observation.js_invocation_id);
 }
 
 void NativeProbeSink::SetNativeWasmSampleBudgetPolicy(
@@ -3373,19 +3630,44 @@ void NativeProbeSink::SetNativeWasmSampleBudgetPolicy(
   native_wasm_budget_policy_pending_ = policy;
 }
 
-void NativeProbeSink::ResetNativeWasmSampleBudgets() noexcept {
-  const auto epoch = native_wasm_budget_epoch_.load(std::memory_order_acquire);
+void NativeProbeSink::CloseNativeWasmBudgetEpoch() noexcept {
+  auto epoch = native_wasm_budget_epoch_.load(std::memory_order_acquire);
   if (epoch < 2 || (epoch & 1U) != 0 || epoch > std::numeric_limits<std::uint64_t>::max() - 2)
     return;
   // Publish the epoch being closed before its ring slots become reusable.
-  // An omitted count must not be retagged onto the next epoch.
+  // An omitted count must not be retagged onto the next epoch. Two closers
+  // may both publish; the second finds nothing left to count.
   PublishNativeWasmOverflow(native_wasm_overflow_, NativeProbeType::kWasmDispatchOverflow);
   PublishNativeWasmOverflow(native_wasm_indirect_overflow_, NativeProbeType::kWasmIndirectOverflow);
-  // Odd stops admission. The following even value makes every previous sample
-  // slot and overflow ring slot reusable, so the next record of each stream
-  // is sample index 0.
-  native_wasm_budget_epoch_.store(epoch + 1, std::memory_order_release);
+  // Odd stops admission. The following even value makes every window count,
+  // key and overflow ring slot of the closed epoch reusable. A closer that
+  // lost the exchange leaves the turnover to the one that won it.
+  if (!native_wasm_budget_epoch_.compare_exchange_strong(epoch, epoch + 1,
+                                                         std::memory_order_acq_rel))
+    return;
   native_wasm_budget_epoch_.store(epoch + 2, std::memory_order_release);
+}
+
+void NativeProbeSink::AdvanceNativeWasmWindow(const std::uint64_t now) noexcept {
+  auto started = native_wasm_window_started_ns_.load(std::memory_order_acquire);
+  if (now < started || now - started < kNativeWasmSampleWindowNs ||
+      !native_wasm_window_started_ns_.compare_exchange_strong(started, now,
+                                                              std::memory_order_acq_rel))
+    return;
+  CloseNativeWasmBudgetEpoch();
+}
+
+bool NativeProbeSink::NativeWasmWindowElapsed() const noexcept {
+  // A saturated stream stops its hook for the rest of the window only. The
+  // first execution after the window's second turns the window over.
+  const auto started = native_wasm_window_started_ns_.load(std::memory_order_acquire);
+  const auto now = MonotonicTimeNs();
+  return now >= started && now - started >= kNativeWasmSampleWindowNs;
+}
+
+void NativeProbeSink::ResetNativeWasmSampleBudgets() noexcept {
+  native_wasm_window_started_ns_.store(MonotonicTimeNs(), std::memory_order_release);
+  CloseNativeWasmBudgetEpoch();
 }
 
 void NativeProbeSink::SetNativeWasmIndirectEmitter(NativeWasmIndirectEmitter emitter) noexcept {
@@ -3393,12 +3675,13 @@ void NativeProbeSink::SetNativeWasmIndirectEmitter(NativeWasmIndirectEmitter emi
 }
 bool NativeProbeSink::IsNativeWasmIndirectEnabled() const noexcept {
   // Called by V8 before handle allocation/frame walking, like the br_table
-  // predicate. Do not invoke the frame-id provider here. The 16-record cap
-  // does not clear this; later calls are identified until saturation.
+  // predicate. Do not invoke the frame-id provider here. A full window does
+  // not clear this; later calls are identified until saturation.
   const auto generation = config_generation_.load(std::memory_order_acquire);
   const auto epoch = native_wasm_budget_epoch_.load(std::memory_order_acquire);
   if (generation == 0 || (generation & 1U) != 0 || epoch < 2 || (epoch & 1U) != 0 ||
-      native_wasm_indirect_capped_epoch_.load(std::memory_order_acquire) >= epoch ||
+      (native_wasm_indirect_capped_epoch_.load(std::memory_order_acquire) >= epoch &&
+       !NativeWasmWindowElapsed()) ||
       !native_wasm_indirect_emitter_.load(std::memory_order_acquire))
     return false;
   const auto categories = category_mask_.load(std::memory_order_relaxed);
@@ -3515,15 +3798,23 @@ void NativeProbeSink::RecordNativeWasmIndirect(NativeWasmIndirectObservation obs
   observation.header.thread_id = admission.thread_id;
   observation.header.frame_id = frame_id;
   observation.sample_index = 0;
+  observation.module_token = 0;
   const NativeJsInvocationContext invocation = CurrentNativeJsInvocation();
   observation.js_invocation_state = invocation.state;
   observation.js_invocation_id = invocation.invocation_id;
+  AdvanceNativeWasmWindow(admission.monotonic_time_ns);
   const auto epoch = native_wasm_budget_epoch_.load(std::memory_order_acquire);
   if (epoch < 2 || (epoch & 1U) != 0 ||
       config_generation_.load(std::memory_order_acquire) != admission.generation)
     return;
   if (!IsValidNativeWasmIndirectInput(observation)) {
     NoteNativeWasmIndirectOmission(admission, NativeWasmOmission::kInput, epoch);
+    return;
+  }
+  const bool every_record = native_wasm_every_record_.load(std::memory_order_relaxed);
+  if (!every_record &&
+      WasmWindowFull(native_wasm_indirect_window_claims_, epoch, kNativeWasmIndirectSampleBudget)) {
+    RecordIndirectBudgetOverflow(admission, epoch, NativeWasmOmission::kBudget, observation);
     return;
   }
   const auto policy = native_wasm_budget_policy_;
@@ -3553,43 +3844,60 @@ void NativeProbeSink::RecordNativeWasmIndirect(NativeWasmIndirectObservation obs
     ReleaseNativeWasmBudgetAdmission(keys, native_wasm_indirect_function_keys_,
                                      native_wasm_indirect_site_keys_, epoch);
   };
-  for (std::size_t i = 0; i < native_wasm_indirect_slots_.size(); ++i) {
-    auto& slot = native_wasm_indirect_slots_[i];
-    auto previous = slot.load(std::memory_order_acquire);
-    while (previous < epoch) {
-      if (slot.compare_exchange_weak(previous, epoch, std::memory_order_acq_rel)) {
-        if (native_wasm_budget_epoch_.load(std::memory_order_acquire) != epoch ||
-            config_generation_.load(std::memory_order_acquire) != admission.generation) {
-          auto claimed = epoch;
-          slot.compare_exchange_strong(claimed, previous, std::memory_order_acq_rel);
-          release_keys();
-          return;
-        }
-        observation.sample_index = static_cast<std::uint32_t>(i);
-        observation.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
-        const auto emitter = native_wasm_indirect_emitter_.load(std::memory_order_acquire);
-        if (native_wasm_budget_epoch_.load(std::memory_order_acquire) != epoch ||
-            config_generation_.load(std::memory_order_acquire) != admission.generation ||
-            !emitter || !emitter(observation, admission.generation)) {
-          auto claimed = epoch;
-          slot.compare_exchange_strong(claimed, previous, std::memory_order_acq_rel);
-          release_keys();
-          FillSequenceGap(observation.header, "native_wasm_indirect_transport_unavailable",
-                          admission.generation);
-        } else {
-          NoteWasmInstrumentedSite(admission.generation, observation.execution_context_id, frame_id,
-                                   observation.source_url, observation.document_token_high,
-                                   observation.document_token_low, observation.function_index,
-                                   observation.module_byte_offset, observation.sample_index,
-                                   NativeWasmExecutionStream::kCallIndirect,
-                                   observation.js_invocation_state, observation.js_invocation_id);
-        }
-        return;
-      }
-    }
+  const auto release_window = [&] {
+    if (!every_record)
+      ReleaseWasmWindow(native_wasm_indirect_window_claims_, epoch);
+  };
+  const auto claim = every_record ? WasmWindowClaim::kClaimed
+                                  : ClaimWasmWindow(native_wasm_indirect_window_claims_, epoch,
+                                                    kNativeWasmIndirectSampleBudget);
+  const auto ordinal =
+      claim == WasmWindowClaim::kClaimed
+          ? native_wasm_indirect_next_sample_.fetch_add(1, std::memory_order_relaxed)
+          : 0;
+  if (claim != WasmWindowClaim::kClaimed || ordinal > kNativeWasmLastSampleIndex) {
+    if (claim == WasmWindowClaim::kClaimed)
+      release_window();
+    release_keys();
+    if (claim != WasmWindowClaim::kClosed)
+      RecordIndirectBudgetOverflow(admission, epoch, NativeWasmOmission::kBudget, observation);
+    return;
   }
-  release_keys();
-  RecordIndirectBudgetOverflow(admission, epoch, NativeWasmOmission::kBudget, observation);
+  if (config_generation_.load(std::memory_order_acquire) != admission.generation) {
+    release_window();
+    release_keys();
+    return;
+  }
+  observation.sample_index = static_cast<std::uint32_t>(ordinal);
+  const auto module = DescribeWasmModule(
+      admission.generation, epoch, frame_id, observation.execution_context_id,
+      observation.document_token_high, observation.document_token_low, observation.module_bytes);
+  observation.module_token = BoundWasmModuleToken(module);
+  if (observation.module_token)
+    observation.module_bytes = {};
+  observation.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+  constexpr std::string_view kUnavailable = "native_wasm_indirect_transport_unavailable";
+  const std::string_view refused =
+      config_generation_.load(std::memory_order_acquire) != admission.generation
+          ? kUnavailable
+          : SendWasmObservation(native_wasm_indirect_emitter_.load(std::memory_order_acquire),
+                                observation, admission.generation, kUnavailable);
+  if (!refused.empty()) {
+    // Unbound, so a module the credit refused is offered again with the next
+    // sample.
+    release_window();
+    release_keys();
+    FillSequenceGap(observation.header, refused, admission.generation);
+    return;
+  }
+  if (!observation.module_token)
+    BindWasmModule(module, observation.header.sequence_number);
+  NoteWasmInstrumentedSite(admission.generation, observation.execution_context_id, frame_id,
+                           observation.source_url, observation.document_token_high,
+                           observation.document_token_low, observation.function_index,
+                           observation.module_byte_offset, observation.sample_index,
+                           NativeWasmExecutionStream::kCallIndirect,
+                           observation.js_invocation_state, observation.js_invocation_id);
 }
 
 namespace {
@@ -3614,8 +3922,9 @@ struct WasmHostCall {
   std::uint64_t frame_id = 0;
   std::uint64_t document_token_high = 0;
   std::uint64_t document_token_low = 0;
-  std::array<char, kNativeArtifactMaxUrlBytes> url{};
-  std::uint32_t url_size = 0;
+  // The site's document URL; empty when none. Cleared, not freed, so its
+  // capacity serves the thread's later calls.
+  std::string url;
   // The thread's next invocation ID; CloseHostCall keeps it.
   std::uint32_t next_invocation_id = 1;
 };
@@ -3644,7 +3953,7 @@ void CloseHostCall(WasmHostCall& call) noexcept {
   call.has_site = false;
   call.entry_function_known = false;
   call.entry_function = 0;
-  call.url_size = 0;
+  call.url.clear();
 }
 
 void OpenHostCall(WasmHostCall& call,
@@ -3715,24 +4024,27 @@ bool NativeProbeSink::SnapshotWasmExecutionAdmission(VmAdmission& admission) con
 }
 
 bool NativeProbeSink::NoteNativeWasmExecutionOmission(const VmAdmission& admission,
-                                                      const std::size_t reason) noexcept {
-  if (reason >= native_wasm_execution_gap_generations_.size())
+                                                      const std::size_t reason,
+                                                      const std::uint64_t budget_epoch) noexcept {
+  if (reason >= native_wasm_execution_gap_epochs_.size() || budget_epoch < 2 ||
+      (budget_epoch & 1U) != 0)
     return false;
-  auto& slot = native_wasm_execution_gap_generations_[reason];
+  // Once per reason and budget epoch. The odd value is an in-flight claim.
+  auto& slot = native_wasm_execution_gap_epochs_[reason];
   auto previous = slot.load(std::memory_order_acquire);
-  while (previous < admission.generation - 1) {
-    if (slot.compare_exchange_weak(previous, admission.generation - 1, std::memory_order_acq_rel)) {
+  while (previous < budget_epoch - 1) {
+    if (slot.compare_exchange_weak(previous, budget_epoch - 1, std::memory_order_acq_rel)) {
       constexpr std::array<std::string_view, 2> reasons{"native_wasm_execution_input_unavailable",
                                                         "native_wasm_execution_budget_incomplete"};
       const bool retained = RecordRuntimeBufferEvent(NativeProbeType::kGap, admission.frame_id,
                                                      reasons[reason], admission.generation) != 0;
-      auto claimed = admission.generation - 1;
-      slot.compare_exchange_strong(claimed, retained ? admission.generation : previous,
+      auto claimed = budget_epoch - 1;
+      slot.compare_exchange_strong(claimed, retained ? budget_epoch : previous,
                                    std::memory_order_acq_rel);
       return retained;
     }
   }
-  return previous == admission.generation;
+  return previous == budget_epoch;
 }
 
 bool NativeProbeSink::NoteWasmHostCallEntered(const bool outermost,
@@ -3843,8 +4155,7 @@ void NativeProbeSink::NoteWasmInstrumentedSite(const std::uint64_t generation,
   call.frame_id = frame_id;
   call.document_token_high = document_token_high;
   call.document_token_low = document_token_low;
-  UNSAFE_BUFFERS(std::memcpy(call.url.data(), source_url.data(), source_url.size()));
-  call.url_size = static_cast<std::uint32_t>(source_url.size());
+  call.url.assign(source_url);
 }
 
 bool NativeProbeSink::EmitWasmExecution(const NativeWasmExecutionKind kind,
@@ -3899,42 +4210,43 @@ bool NativeProbeSink::EmitWasmExecution(const NativeWasmExecutionKind kind,
   observation.js_invocation_id = js_id;
   observation.source_url = source_url;
   observation.module_bytes = module_bytes;
+  AdvanceNativeWasmWindow(admission.monotonic_time_ns);
+  const auto epoch = native_wasm_budget_epoch_.load(std::memory_order_acquire);
+  if (epoch < 2 || (epoch & 1U) != 0)
+    return false;
   if (!IsValidNativeWasmExecutionInput(observation)) {
-    NoteNativeWasmExecutionOmission(admission, 0);
+    NoteNativeWasmExecutionOmission(admission, 0, epoch);
     return false;
   }
-  if (native_wasm_execution_capped_generation_.load(std::memory_order_acquire) >=
-      admission.generation) {
-    NoteNativeWasmExecutionOmission(admission, 1);
+  const bool every_record = native_wasm_every_record_.load(std::memory_order_relaxed);
+  if (!every_record && ClaimWasmWindow(native_wasm_execution_window_claims_, epoch,
+                                       kNativeWasmExecutionBudget) != WasmWindowClaim::kClaimed) {
+    NoteNativeWasmExecutionOmission(admission, 1, epoch);
     return false;
   }
-  for (std::size_t i = 0; i < native_wasm_execution_slots_.size(); ++i) {
-    auto& slot = native_wasm_execution_slots_[i];
-    auto previous = slot.load(std::memory_order_acquire);
-    while (previous < admission.generation) {
-      if (slot.compare_exchange_weak(previous, admission.generation, std::memory_order_acq_rel)) {
-        observation.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
-        const auto emitter = native_wasm_execution_emitter_.load(std::memory_order_acquire);
-        if (config_generation_.load(std::memory_order_acquire) != admission.generation ||
-            !emitter || !emitter(observation, admission.generation)) {
-          auto claimed = admission.generation;
-          slot.compare_exchange_strong(claimed, previous, std::memory_order_acq_rel);
-          FillSequenceGap(observation.header, "native_wasm_execution_transport_unavailable",
-                          admission.generation);
-          return false;
-        }
-        return true;
-      }
-    }
+  // Bytes go once per window per module, like the observation streams.
+  const auto module =
+      DescribeWasmModule(admission.generation, epoch, frame_id, execution_context_id,
+                         document_token_high, document_token_low, module_bytes);
+  observation.module_token = BoundWasmModuleToken(module);
+  if (observation.module_token)
+    observation.module_bytes = {};
+  observation.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+  constexpr std::string_view kUnavailable = "native_wasm_execution_transport_unavailable";
+  const std::string_view refused =
+      config_generation_.load(std::memory_order_acquire) != admission.generation
+          ? kUnavailable
+          : SendWasmObservation(native_wasm_execution_emitter_.load(std::memory_order_acquire),
+                                observation, admission.generation, kUnavailable);
+  if (!refused.empty()) {
+    if (!every_record)
+      ReleaseWasmWindow(native_wasm_execution_window_claims_, epoch);
+    FillSequenceGap(observation.header, refused, admission.generation);
+    return false;
   }
-  if (NoteNativeWasmExecutionOmission(admission, 1)) {
-    auto previous = native_wasm_execution_capped_generation_.load(std::memory_order_acquire);
-    while (previous < admission.generation &&
-           !native_wasm_execution_capped_generation_.compare_exchange_weak(
-               previous, admission.generation, std::memory_order_acq_rel)) {
-    }
-  }
-  return false;
+  if (!observation.module_token && !module_bytes.empty())
+    BindWasmModule(module, observation.header.sequence_number);
+  return true;
 }
 
 bool NativeProbeSink::IsWasmHostCallOpen() const noexcept {
@@ -3965,15 +4277,14 @@ void NativeProbeSink::ReportWasmTrap(const NativeWasmExecutionReason reason,
       CloseHostCall(call);
     return;
   }
-  const bool stashed = call.url_size != 0;
+  const bool stashed = !call.url.empty();
   const auto stream = call.has_site ? call.site_stream : NativeWasmExecutionStream::kNone;
   const auto sample = call.has_site ? call.site_sample : kNativeWasmExecutionNoSample;
   static_cast<void>(EmitWasmExecution(
       NativeWasmExecutionKind::kTrap, reason, bounds, function_known, function_index, offset_known,
       module_byte_offset, stream, sample,
       stashed ? call.execution_context_id : execution_context_id,
-      stashed ? call.frame_id : frame_id,
-      stashed ? std::string_view(call.url.data(), call.url_size) : source_url,
+      stashed ? call.frame_id : frame_id, stashed ? std::string_view(call.url) : source_url,
       stashed ? call.document_token_high : document_token_high,
       stashed ? call.document_token_low : document_token_low, call.has_site ? call.js_state : 0,
       call.has_site ? call.js_id : 0, module_bytes));
@@ -3986,7 +4297,7 @@ std::uint64_t NativeProbeSink::WasmExecutionNudgeDelayNs() const noexcept {
   if (!open)
     return kNativeWasmExecutionNoNudge;
   const auto& call = *open;
-  if (call.depth == 0 || !call.has_site || call.still_emitted || call.url_size == 0)
+  if (call.depth == 0 || !call.has_site || call.still_emitted || call.url.empty())
     return kNativeWasmExecutionNoNudge;
   const auto generation = config_generation_.load(std::memory_order_acquire);
   if (call.generation != generation || !IsNativeWasmExecutionEnabled())
@@ -4026,20 +4337,19 @@ NativeWasmExecutionHeartbeat NativeProbeSink::PollWasmExecutionHeartbeat() noexc
       const std::uint32_t offset = offset_known ? call.site_offset : 0;
       const auto stream = call.has_site ? call.site_stream : NativeWasmExecutionStream::kNone;
       const auto sample = call.has_site ? call.site_sample : kNativeWasmExecutionNoSample;
-      if (call.url_size != 0) {
+      if (!call.url.empty()) {
         static_cast<void>(EmitWasmExecution(
             NativeWasmExecutionKind::kTrap, NativeWasmExecutionReason::kInterrupt,
             NativeWasmExecutionBounds::kNone, function_known, function, offset_known, offset,
-            stream, sample, call.execution_context_id, call.frame_id,
-            std::string_view(call.url.data(), call.url_size), call.document_token_high,
-            call.document_token_low, call.has_site ? call.js_state : 0,
+            stream, sample, call.execution_context_id, call.frame_id, call.url,
+            call.document_token_high, call.document_token_low, call.has_site ? call.js_state : 0,
             call.has_site ? call.js_id : 0, {}));
       }
       CloseHostCall(call);
       return NativeWasmExecutionHeartbeat::kInterrupt;
     }
   }
-  if (call.depth == 0 || !call.has_site || call.still_emitted || call.url_size == 0 ||
+  if (call.depth == 0 || !call.has_site || call.still_emitted || call.url.empty() ||
       !IsNativeWasmExecutionEnabled())
     return NativeWasmExecutionHeartbeat::kContinue;
   const auto now = MonotonicTimeNs();
@@ -4048,9 +4358,8 @@ NativeWasmExecutionHeartbeat NativeProbeSink::PollWasmExecutionHeartbeat() noexc
   static_cast<void>(EmitWasmExecution(
       NativeWasmExecutionKind::kStillExecuting, NativeWasmExecutionReason::kUnknown,
       NativeWasmExecutionBounds::kNone, true, call.site_function, true, call.site_offset,
-      call.site_stream, call.site_sample, call.execution_context_id, call.frame_id,
-      std::string_view(call.url.data(), call.url_size), call.document_token_high,
-      call.document_token_low, call.js_state, call.js_id, {}));
+      call.site_stream, call.site_sample, call.execution_context_id, call.frame_id, call.url,
+      call.document_token_high, call.document_token_low, call.js_state, call.js_id, {}));
   // One attempt. A refused record already filled its gap or its sequence slot.
   call.still_emitted = true;
   return NativeWasmExecutionHeartbeat::kContinue;
@@ -4087,6 +4396,8 @@ void NativeProbeSink::ConfigureNativeJsDispatch(
     NoteNativeJsDispatchOmission(generation, 0, kNativeJsInputGap);
     return;
   }
+  for (auto& ordinal : native_js_site_ordinals_)
+    ordinal.store(0, std::memory_order_relaxed);
   native_js_generation_.store(generation, std::memory_order_release);
 }
 
@@ -4125,8 +4436,6 @@ std::size_t NativeProbeSink::CopyNativeJsDispatchSites(
 bool NativeProbeSink::IsNativeJsDispatchEnabled(const std::uint64_t epoch,
                                                 const std::uint32_t slot) const noexcept {
   return slot < native_js_site_count_.load(std::memory_order_acquire) &&
-         native_js_capped_generation_.load(std::memory_order_acquire) < epoch &&
-         native_js_site_capped_generations_[slot].load(std::memory_order_acquire) < epoch &&
          NativeJsDispatchActive(epoch);
 }
 
@@ -4135,27 +4444,22 @@ bool NativeProbeSink::NoteNativeJsDispatchOmission(const std::uint64_t generatio
                                                    const std::size_t gap) noexcept {
   if (generation == 0 || (generation & 1U) != 0 || gap >= native_js_gap_generations_.size())
     return false;
-  static constexpr std::array<std::string_view,
-                              kNativeJsCompiledBeforeArmingGap + kNativeJsDispatchSiteLimit>
-      kReasons{"native_js_dispatch_budget_incomplete",
-               "native_js_dispatch_site_budget_incomplete",
-               "native_js_dispatch_transport_unavailable",
-               "native_js_dispatch_input_unavailable",
-               "native_js_dispatch_site_0_compiled_before_arming",
-               "native_js_dispatch_site_1_compiled_before_arming",
-               "native_js_dispatch_site_2_compiled_before_arming",
-               "native_js_dispatch_site_3_compiled_before_arming",
-               "native_js_dispatch_site_4_compiled_before_arming",
-               "native_js_dispatch_site_5_compiled_before_arming",
-               "native_js_dispatch_site_6_compiled_before_arming",
-               "native_js_dispatch_site_7_compiled_before_arming"};
+  static constexpr std::array<std::string_view, kNativeJsCompiledBeforeArmingGap> kReasons{
+      "native_js_dispatch_transport_unavailable", "native_js_dispatch_input_unavailable",
+      "native_js_dispatch_ids_exhausted"};
+  std::array<char, 64> text{};
+  const std::string_view reason =
+      gap < kNativeJsCompiledBeforeArmingGap
+          ? kReasons[gap]
+          : NativeJsSiteReason(text, "native_js_dispatch_site_",
+                               gap - kNativeJsCompiledBeforeArmingGap, "_compiled_before_arming");
   auto& slot = native_js_gap_generations_[gap];
   auto previous = slot.load(std::memory_order_acquire);
   // Odd generation is an in-flight claim; never overwrite a newer configuration.
   while (previous < generation - 1) {
     if (slot.compare_exchange_weak(previous, generation - 1, std::memory_order_acq_rel)) {
       const bool retained =
-          RecordRuntimeBufferEvent(NativeProbeType::kGap, frame_id, kReasons[gap], generation) != 0;
+          RecordRuntimeBufferEvent(NativeProbeType::kGap, frame_id, reason, generation) != 0;
       auto claimed = generation - 1;
       slot.compare_exchange_strong(claimed, retained ? generation : previous,
                                    std::memory_order_acq_rel);
@@ -4164,40 +4468,6 @@ bool NativeProbeSink::NoteNativeJsDispatchOmission(const std::uint64_t generatio
   }
   return previous == generation;
 }
-
-namespace {
-// Claims the first slot not yet held by this generation.
-template <std::size_t N>
-bool ClaimNativeJsSlot(std::array<std::atomic<std::uint64_t>, N>& slots,
-                       const std::uint64_t generation,
-                       std::size_t& index,
-                       std::uint64_t& previous_value) noexcept {
-  for (std::size_t i = 0; i < N; ++i) {
-    auto previous = slots[i].load(std::memory_order_acquire);
-    while (previous < generation) {
-      if (slots[i].compare_exchange_weak(previous, generation, std::memory_order_acq_rel)) {
-        index = i;
-        previous_value = previous;
-        return true;
-      }
-    }
-  }
-  return false;
-}
-void ReleaseNativeJsSlot(std::atomic<std::uint64_t>& slot,
-                         const std::uint64_t generation,
-                         const std::uint64_t previous) noexcept {
-  auto claimed = generation;
-  slot.compare_exchange_strong(claimed, previous, std::memory_order_acq_rel);
-}
-void CapNativeJsGeneration(std::atomic<std::uint64_t>& capped,
-                           const std::uint64_t generation) noexcept {
-  auto previous = capped.load(std::memory_order_acquire);
-  while (previous < generation &&
-         !capped.compare_exchange_weak(previous, generation, std::memory_order_acq_rel)) {
-  }
-}
-}  // namespace
 
 void NativeProbeSink::RecordNativeJsDispatch(const std::uint64_t epoch,
                                              const std::uint64_t frame_id,
@@ -4211,9 +4481,8 @@ void NativeProbeSink::RecordNativeJsDispatch(const std::uint64_t epoch,
   std::atomic_thread_fence(std::memory_order_acquire);
   if (config_generation_.load(std::memory_order_acquire) != epoch || session_id == 0)
     return;
-  // Sample indices are assigned below; the caller's values are not trusted.
-  payload.site_sample_index = 0;
-  payload.sample_index = 0;
+  // The ordinal is assigned below; the caller's value is not trusted.
+  payload.site_ordinal = 0;
   const std::size_t site_slot = payload.site_slot;
   bool matches = frame_id != 0 && site_slot < native_js_site_count_.load(std::memory_order_acquire);
   if (matches) {
@@ -4227,22 +4496,9 @@ void NativeProbeSink::RecordNativeJsDispatch(const std::uint64_t epoch,
     NoteNativeJsDispatchOmission(epoch, frame_id, kNativeJsInputGap);
     return;
   }
-  auto& site_slots = native_js_site_slots_[site_slot];
-  std::size_t site_index = 0, index = 0;
-  std::uint64_t site_previous = 0, previous = 0;
-  if (!ClaimNativeJsSlot(site_slots, epoch, site_index, site_previous)) {
-    if (NoteNativeJsDispatchOmission(epoch, frame_id, kNativeJsSiteBudgetGap))
-      CapNativeJsGeneration(native_js_site_capped_generations_[site_slot], epoch);
-    return;
-  }
-  if (!ClaimNativeJsSlot(native_js_slots_, epoch, index, previous)) {
-    ReleaseNativeJsSlot(site_slots[site_index], epoch, site_previous);
-    if (NoteNativeJsDispatchOmission(epoch, frame_id, kNativeJsBudgetGap))
-      CapNativeJsGeneration(native_js_capped_generation_, epoch);
-    return;
-  }
-  payload.site_sample_index = static_cast<std::uint16_t>(site_index);
-  payload.sample_index = static_cast<std::uint16_t>(index);
+  // Every dispatch takes the next ordinal, so a dropped record leaves a
+  // missing ordinal beside the ring's drop count.
+  payload.site_ordinal = NextNativeJsOrdinal(native_js_site_ordinals_[site_slot]);
   NativeProbeEvent event;
   event.header.category = NativeProbeCategory::kVm;
   event.header.type = NativeProbeType::kJsDispatchObservation;
@@ -4255,25 +4511,22 @@ void NativeProbeSink::RecordNativeJsDispatch(const std::uint64_t epoch,
   event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
   const auto bytes = EncodeNativeJsDispatchObservationPayload(payload);
   std::copy(bytes.begin(), bytes.end(), event.inline_payload.begin());
-  const auto status = EmitStatus(event, epoch);
-  if (status == NativeProbeEmitStatus::kAdmitted)
-    return;
-  // A full ring counts its own drop; both claims return so a later dispatch
-  // can be retained. Any other refusal is an explicit transport gap.
-  ReleaseNativeJsSlot(native_js_slots_[index], epoch, previous);
-  ReleaseNativeJsSlot(site_slots[site_index], epoch, site_previous);
-  if (status == NativeProbeEmitStatus::kRejected)
+  // A full ring counts its own drop. Any other refusal is an explicit
+  // transport gap.
+  if (EmitStatus(event, epoch) == NativeProbeEmitStatus::kRejected)
     NoteNativeJsDispatchOmission(epoch, frame_id, kNativeJsTransportGap);
 }
 
 void NativeProbeSink::NoteNativeJsDispatchStatus(const std::uint64_t epoch,
                                                  const std::uint32_t slot,
                                                  const NativeJsDispatchSiteStatus status) noexcept {
-  if (status != NativeJsDispatchSiteStatus::kCompiledBeforeArming ||
-      slot >= native_js_site_count_.load(std::memory_order_acquire) ||
+  if (slot >= native_js_site_count_.load(std::memory_order_acquire) ||
       !NativeJsDispatchActive(epoch))
     return;
-  NoteNativeJsDispatchOmission(epoch, 0, kNativeJsCompiledBeforeArmingGap + slot);
+  if (status == NativeJsDispatchSiteStatus::kCompiledBeforeArming)
+    NoteNativeJsDispatchOmission(epoch, 0, kNativeJsCompiledBeforeArmingGap + slot);
+  else if (status == NativeJsDispatchSiteStatus::kIdsExhausted)
+    NoteNativeJsDispatchOmission(epoch, 0, kNativeJsIdsGap);
 }
 
 void NativeProbeSink::NoteNativeJsDispatchInputUnavailable(const std::uint64_t epoch,
@@ -4282,31 +4535,104 @@ void NativeProbeSink::NoteNativeJsDispatchInputUnavailable(const std::uint64_t e
     NoteNativeJsDispatchOmission(epoch, frame_id, kNativeJsInputGap);
 }
 
+NativeProbeSink::NativeJsInvocationSlot& NativeProbeSink::InvocationSlot(
+    const std::size_t slot) const noexcept {
+  const std::size_t segment =
+      static_cast<std::size_t>(std::bit_width(slot / kInvocationFirstSegment + 1)) - 1;
+  const std::size_t first = kInvocationFirstSegment * ((std::size_t{1} << segment) - 1);
+  // SAFETY: ReserveNativeJsInvocationSlots allocated this segment with
+  // kInvocationFirstSegment << segment slots before publishing a count past
+  // first, and slot - first is below that.
+  const auto slots =
+      UNSAFE_BUFFERS(std::span(native_invocation_segments_[segment].load(std::memory_order_acquire),
+                               kInvocationFirstSegment << segment));
+  return slots[slot - first];
+}
+
+NativeProbeSink::NativeJsInvocationGapState& NativeProbeSink::InvocationGap(
+    const std::size_t gap) noexcept {
+  if (gap < kInvocationSlotGap)
+    return native_invocation_gaps_[gap];
+  return InvocationSlot((gap - kInvocationSlotGap) / 2).gaps[(gap - kInvocationSlotGap) % 2];
+}
+
+bool NativeProbeSink::ReserveNativeJsInvocationSlots(const std::size_t count) noexcept {
+  if (count > kNativeJsInvocationSiteListLimit)
+    return false;
+  for (std::size_t segment = 0; segment < kInvocationSegments; ++segment) {
+    const std::size_t first = kInvocationFirstSegment * ((std::size_t{1} << segment) - 1);
+    if (first >= count)
+      break;
+    if (native_invocation_segments_[segment].load(std::memory_order_acquire))
+      continue;
+    auto* const slots =
+        new (std::nothrow) NativeJsInvocationSlot[kInvocationFirstSegment << segment];
+    if (!slots)
+      return false;
+    native_invocation_segments_[segment].store(slots, std::memory_order_release);
+  }
+  return true;
+}
+
+bool NativeProbeSink::MergeNativeJsInvocationSites(
+    const std::span<const NativeJsInvocationSite> sites) noexcept {
+  if (!std::all_of(sites.begin(), sites.end(), IsValidNativeJsInvocationSite))
+    return false;
+  // Records name sites by slot, so a slot never names another site.
+  const auto retained = native_invocation_site_count_.load(std::memory_order_acquire);
+  const std::size_t kept = std::min(retained, sites.size());
+  for (std::size_t slot = 0; slot < kept; ++slot) {
+    if (!IsSameNativeJsInvocationSite(sites[slot], InvocationSlot(slot).site))
+      return false;
+  }
+  if (HasRepeatedNativeJsInvocationSite(sites) || !ReserveNativeJsInvocationSlots(sites.size()))
+    return false;
+  for (std::size_t slot = 0; slot < retained; ++slot) {
+    InvocationSlot(slot).armed.store(slot < sites.size() && sites[slot].armed,
+                                     std::memory_order_release);
+  }
+  for (std::size_t slot = retained; slot < sites.size(); ++slot) {
+    auto& entry = InvocationSlot(slot);
+    entry.site = sites[slot];
+    entry.site.armed = true;
+    entry.armed.store(sites[slot].armed, std::memory_order_release);
+  }
+  if (sites.size() > retained)
+    native_invocation_site_count_.store(sites.size(), std::memory_order_release);
+  native_invocation_revision_.fetch_add(1, std::memory_order_acq_rel);
+  return true;
+}
+
 void NativeProbeSink::ConfigureNativeJsInvocation(
     const std::span<const NativeJsInvocationSite> sites,
-    const bool digests) noexcept {
+    const bool digests,
+    const bool valid) noexcept {
   const auto generation = config_generation_.load(std::memory_order_acquire);
-  if (sites.empty() || generation == 0 || (generation & 1U) != 0)
+  if (generation == 0 || (generation & 1U) != 0)
     return;
-  if (sites.size() > kNativeJsInvocationSiteLimit ||
-      !std::all_of(sites.begin(), sites.end(), IsValidNativeJsInvocationSite)) {
+  if (!valid || !MergeNativeJsInvocationSites(sites)) {
     NoteNativeJsInvocationOmission(generation, 0, kInvocationInputGap);
     return;
   }
-  const auto retained = native_invocation_site_count_.load(std::memory_order_acquire);
-  if (retained == 0) {
-    std::copy(sites.begin(), sites.end(), native_invocation_sites_.begin());
-    native_invocation_site_count_.store(sites.size(), std::memory_order_release);
-  } else if (retained != sites.size() ||
-             !std::equal(sites.begin(), sites.end(), native_invocation_sites_.begin())) {
-    // A changed list needs a browser restart; never retarget armed bytecode.
-    NoteNativeJsInvocationOmission(generation, 0, kInvocationInputGap);
-    return;
-  }
+  const auto count = native_invocation_site_count_.load(std::memory_order_acquire);
+  for (std::size_t slot = 0; slot < count; ++slot)
+    InvocationSlot(slot).ordinal.store(0, std::memory_order_relaxed);
+  native_invocation_request_ordinal_.store(0, std::memory_order_relaxed);
   native_invocation_open_.store(0, std::memory_order_relaxed);
   native_invocation_open_generation_.store(generation, std::memory_order_release);
   native_invocation_digest_generation_.store(digests ? generation : 0, std::memory_order_release);
   native_invocation_generation_.store(generation, std::memory_order_release);
+}
+
+void NativeProbeSink::UpdateNativeJsInvocationSites(
+    const std::span<const NativeJsInvocationSite> sites,
+    const bool valid) noexcept {
+  const auto generation = native_invocation_generation_.load(std::memory_order_acquire);
+  // Only a configuration that tracks functions takes a revision.
+  if (generation == 0 || config_generation_.load(std::memory_order_acquire) != generation)
+    return;
+  if (!valid || !MergeNativeJsInvocationSites(sites))
+    NoteNativeJsInvocationOmission(generation, 0, kInvocationInputGap);
 }
 
 bool NativeProbeSink::NativeJsInvocationActive(const std::uint64_t generation) const noexcept {
@@ -4331,22 +4657,34 @@ std::uint64_t NativeProbeSink::NativeJsInvocationEpoch() const noexcept {
   return NativeJsInvocationActive(generation) ? generation : 0;
 }
 
+std::uint64_t NativeProbeSink::NativeJsInvocationRevision(
+    const std::uint64_t epoch) const noexcept {
+  return NativeJsInvocationActive(epoch)
+             ? native_invocation_revision_.load(std::memory_order_acquire)
+             : 0;
+}
+
 std::size_t NativeProbeSink::CopyNativeJsInvocationSites(
     const std::uint64_t epoch,
+    const std::size_t first,
     const std::span<NativeJsInvocationSite> out) const noexcept {
   if (!NativeJsInvocationActive(epoch))
     return 0;
-  const auto count =
-      std::min(native_invocation_site_count_.load(std::memory_order_acquire), out.size());
-  std::copy_n(native_invocation_sites_.begin(), count, out.begin());
+  const auto count = native_invocation_site_count_.load(std::memory_order_acquire);
+  for (std::size_t i = 0; i < out.size() && first < count && i < count - first; ++i) {
+    const auto& entry = InvocationSlot(first + i);
+    out[i] = entry.site;
+    out[i].armed = entry.armed.load(std::memory_order_acquire);
+    if (!out[i].armed)
+      out[i].source_length = 0;
+  }
   return count;
 }
 
 bool NativeProbeSink::IsNativeJsInvocationEnabled(const std::uint64_t epoch,
                                                   const std::uint32_t slot) const noexcept {
   return slot < native_invocation_site_count_.load(std::memory_order_acquire) &&
-         native_invocation_capped_generation_.load(std::memory_order_acquire) < epoch &&
-         native_invocation_site_capped_generations_[slot].load(std::memory_order_acquire) < epoch &&
+         InvocationSlot(slot).armed.load(std::memory_order_acquire) &&
          NativeJsInvocationActive(epoch);
 }
 
@@ -4358,120 +4696,122 @@ bool NativeProbeSink::NativeJsInvocationDigests(const std::uint64_t epoch) const
 bool NativeProbeSink::NoteNativeJsInvocationOmission(const std::uint64_t generation,
                                                      const std::uint64_t frame_id,
                                                      const std::size_t gap) noexcept {
-  if (generation == 0 || (generation & 1U) != 0 || gap >= native_invocation_gap_generations_.size())
+  if (generation == 0 || (generation & 1U) != 0 ||
+      (gap >= kInvocationSlotGap &&
+       (gap - kInvocationSlotGap) / 2 >=
+           native_invocation_site_count_.load(std::memory_order_acquire)))
     return false;
-  static constexpr std::array<std::string_view, kInvocationGapCount> kReasons{
-      "native_js_invocation_budget_incomplete",
-      "native_js_invocation_site_budget_incomplete",
-      "native_js_invocation_request_budget_incomplete",
-      "native_js_invocation_transport_unavailable",
-      "native_js_invocation_input_unavailable",
-      "native_js_invocation_settle_unavailable",
-      "native_js_invocation_site_0_compiled_before_arming",
-      "native_js_invocation_site_1_compiled_before_arming",
-      "native_js_invocation_site_2_compiled_before_arming",
-      "native_js_invocation_site_3_compiled_before_arming",
-      "native_js_invocation_site_4_compiled_before_arming",
-      "native_js_invocation_site_5_compiled_before_arming",
-      "native_js_invocation_site_6_compiled_before_arming",
-      "native_js_invocation_site_7_compiled_before_arming",
-      "native_js_invocation_site_0_unsupported_function",
-      "native_js_invocation_site_1_unsupported_function",
-      "native_js_invocation_site_2_unsupported_function",
-      "native_js_invocation_site_3_unsupported_function",
-      "native_js_invocation_site_4_unsupported_function",
-      "native_js_invocation_site_5_unsupported_function",
-      "native_js_invocation_site_6_unsupported_function",
-      "native_js_invocation_site_7_unsupported_function"};
-  auto& slot = native_invocation_gap_generations_[gap];
+  static constexpr std::array<std::string_view, kInvocationSlotGap> kReasons{
+      "native_js_invocation_transport_unavailable", "native_js_invocation_input_unavailable",
+      "native_js_invocation_settle_unavailable", "native_js_invocation_ids_exhausted"};
+  std::array<char, 64> text{};
+  const std::string_view reason =
+      gap < kInvocationSlotGap ? kReasons[gap]
+      : (gap - kInvocationSlotGap) % 2 == kInvocationCompiledReason
+          ? NativeJsSiteReason(text, "native_js_invocation_site_", (gap - kInvocationSlotGap) / 2,
+                               "_compiled_before_arming")
+          : NativeJsSiteReason(text, "native_js_invocation_site_", (gap - kInvocationSlotGap) / 2,
+                               "_unsupported_function");
+  auto& slot = InvocationGap(gap).retained;
   auto previous = slot.load(std::memory_order_acquire);
   // Odd generation is an in-flight claim; never overwrite a newer configuration.
   while (previous < generation - 1) {
     if (slot.compare_exchange_weak(previous, generation - 1, std::memory_order_acq_rel)) {
       const bool retained =
-          RecordRuntimeBufferEvent(NativeProbeType::kGap, frame_id, kReasons[gap], generation) != 0;
+          RecordRuntimeBufferEvent(NativeProbeType::kGap, frame_id, reason, generation) != 0;
       auto claimed = generation - 1;
       slot.compare_exchange_strong(claimed, retained ? generation : previous,
                                    std::memory_order_acq_rel);
-      if (!retained) {
-        // The ring counted this record's drop; the reason is written once
-        // the ring has room.
-        CapNativeJsGeneration(native_invocation_gap_wanted_[gap], generation);
-        CapNativeJsGeneration(native_invocation_gap_held_, generation);
-      }
+      // The ring counted this record's drop; the reason is written once the
+      // ring has room.
+      if (!retained)
+        HoldNativeJsInvocationGap(gap, generation);
       return retained;
     }
   }
   return previous == generation;
 }
 
-void NativeProbeSink::PublishNativeJsInvocationGaps(const std::uint64_t generation) noexcept {
-  if (generation == 0 || (generation & 1U) != 0)
+void NativeProbeSink::HoldNativeJsInvocationGap(const std::size_t gap,
+                                                const std::uint64_t generation) noexcept {
+  auto& state = InvocationGap(gap);
+  auto wanted = state.wanted.load(std::memory_order_acquire);
+  while (wanted < generation) {
+    if (!state.wanted.compare_exchange_weak(wanted, generation, std::memory_order_acq_rel))
+      continue;
+    // Only the writer that made wanted nonzero pushes, so a gap is on the
+    // stack at most once.
+    if (wanted == 0) {
+      auto top = native_invocation_held_.load(std::memory_order_relaxed);
+      do {
+        state.next_held.store(top, std::memory_order_relaxed);
+      } while (!native_invocation_held_.compare_exchange_weak(
+          top, gap + 1, std::memory_order_release, std::memory_order_relaxed));
+    }
     return;
-  auto held = native_invocation_gap_held_.load(std::memory_order_acquire);
-  if (held != generation || !native_invocation_gap_held_.compare_exchange_strong(
-                                held, generation - 1, std::memory_order_acq_rel))
-    return;
-  // A gap that fails again is held again by NoteNativeJsInvocationOmission.
-  for (std::size_t gap = 0; gap < kInvocationGapCount; ++gap) {
-    if (native_invocation_gap_wanted_[gap].load(std::memory_order_acquire) == generation &&
-        native_invocation_gap_generations_[gap].load(std::memory_order_acquire) != generation)
-      NoteNativeJsInvocationOmission(generation, 0, gap);
   }
 }
 
-void NativeProbeSink::RecordNativeJsInvocationStart(
+void NativeProbeSink::PublishNativeJsInvocationGaps(const std::uint64_t generation) noexcept {
+  if (generation == 0 || (generation & 1U) != 0 ||
+      native_invocation_held_.load(std::memory_order_acquire) == 0)
+    return;
+  // Taking the whole stack at once means a node is never read after another
+  // writer could push it again: it is pushed only once its wanted is cleared,
+  // which happens below after its link is read.
+  auto top = native_invocation_held_.exchange(0, std::memory_order_acq_rel);
+  while (top != 0) {
+    const std::size_t gap = static_cast<std::size_t>(top - 1);
+    auto& state = InvocationGap(gap);
+    top = state.next_held.load(std::memory_order_relaxed);
+    const auto wanted = state.wanted.exchange(0, std::memory_order_acq_rel);
+    // A gap that fails again is held again by NoteNativeJsInvocationOmission.
+    // One an earlier configuration wanted is forgotten with it.
+    if (wanted == generation) {
+      if (state.retained.load(std::memory_order_acquire) != generation)
+        NoteNativeJsInvocationOmission(generation, 0, gap);
+    } else if (wanted > generation) {
+      HoldNativeJsInvocationGap(gap, wanted);
+    }
+  }
+}
+
+bool NativeProbeSink::RecordNativeJsInvocationStart(
     const std::uint64_t epoch,
     const std::uint64_t frame_id,
     NativeJsInvocationStartPayload payload) noexcept {
   // No frame-id provider: Blink supplies the frame, and the provider would
   // re-enter V8 inside its runtime call.
   if (!NativeJsInvocationActive(epoch))
-    return;
+    return false;
   const std::uint64_t session_id = session_id_.load(std::memory_order_relaxed);
   const std::uint64_t monotonic_time_ns = MonotonicTimeNs();
   std::atomic_thread_fence(std::memory_order_acquire);
   if (config_generation_.load(std::memory_order_acquire) != epoch || session_id == 0)
-    return;
+    return false;
   PublishNativeJsInvocationGaps(epoch);
-  payload.site_sample_index = 0;
-  payload.sample_index = 0;
-  // V8 has already given this call an ID, a wrapper and a coming settle, so
-  // every reported start spends its claims whether or not it is retained, and
-  // a spent budget stops admission at once even when the ring cannot take its
-  // gap yet. Refused calls therefore never keep V8 wrapping past the budget.
+  // The ordinal is assigned below; the caller's value is not trusted.
+  payload.site_ordinal = 0;
   const std::size_t site_slot = payload.site_slot;
-  const bool known_site = site_slot < native_invocation_site_count_.load(std::memory_order_acquire);
-  std::size_t site_index = 0, index = 0;
-  std::uint64_t site_previous = 0, previous = 0;
-  if (known_site && !ClaimNativeJsSlot(native_invocation_site_slots_[site_slot], epoch, site_index,
-                                       site_previous)) {
-    CapNativeJsGeneration(native_invocation_site_capped_generations_[site_slot], epoch);
-    NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationSiteBudgetGap);
-    return;
-  }
-  if (!ClaimNativeJsSlot(native_invocation_slots_, epoch, index, previous)) {
-    if (known_site)
-      ReleaseNativeJsSlot(native_invocation_site_slots_[site_slot][site_index], epoch,
-                          site_previous);
-    CapNativeJsGeneration(native_invocation_capped_generation_, epoch);
-    NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationBudgetGap);
-    return;
-  }
-  native_invocation_open_starts_[index].store(0, std::memory_order_release);
-  bool matches = known_site && frame_id != 0;
+  bool matches =
+      frame_id != 0 && site_slot < native_invocation_site_count_.load(std::memory_order_acquire);
   if (matches) {
-    const auto& site = native_invocation_sites_[site_slot];
+    // V8 asks IsNativeJsInvocationEnabled first on this thread, and revisions
+    // arrive on it too, so a disarmed slot here is not an input fault.
+    if (!InvocationSlot(site_slot).armed.load(std::memory_order_acquire))
+      return false;
+    const auto& site = InvocationSlot(site_slot).site;
     matches = payload.source_length == site.source_length &&
               payload.anchor_offset == site.anchor_offset &&
               payload.source_sha256 == site.source_sha256;
   }
   if (!matches || !IsValidNativeJsInvocationStartPayload(payload)) {
     NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationInputGap);
-    return;
+    return false;
   }
-  payload.site_sample_index = static_cast<std::uint16_t>(site_index);
-  payload.sample_index = static_cast<std::uint16_t>(index);
+  // Every reported start takes the next ordinal, so a dropped start leaves a
+  // missing ordinal beside the ring's drop count.
+  payload.site_ordinal = NextNativeJsOrdinal(InvocationSlot(site_slot).ordinal);
   NativeProbeEvent event;
   event.header.category = NativeProbeCategory::kVm;
   event.header.type = NativeProbeType::kJsInvocationStart;
@@ -4485,21 +4825,15 @@ void NativeProbeSink::RecordNativeJsInvocationStart(
   event.inline_payload = EncodeNativeJsInvocationStartPayload(payload);
   const auto status = EmitStatus(event, epoch);
   if (status == NativeProbeEmitStatus::kAdmitted) {
-    native_invocation_open_starts_[index].store(
-        (static_cast<std::uint64_t>(payload.invocation_id) << 8) | site_slot,
-        std::memory_order_release);
     if (native_invocation_open_generation_.load(std::memory_order_acquire) == epoch)
       native_invocation_open_.fetch_add(1, std::memory_order_relaxed);
-    return;
+    return true;
   }
-  // A full ring counts its own drop and drains, so it returns both claims for
-  // a later call. Any other refusal keeps them and is a transport gap.
-  if (status == NativeProbeEmitStatus::kQueueFull) {
-    ReleaseNativeJsSlot(native_invocation_slots_[index], epoch, previous);
-    ReleaseNativeJsSlot(native_invocation_site_slots_[site_slot][site_index], epoch, site_previous);
-    return;
-  }
-  NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationTransportGap);
+  // A full ring counts its own drop. Any other refusal is a transport gap.
+  // Either way V8 neither wraps nor settles the call.
+  if (status == NativeProbeEmitStatus::kRejected)
+    NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationTransportGap);
+  return false;
 }
 
 void NativeProbeSink::RecordNativeJsInvocationSettle(
@@ -4514,17 +4848,15 @@ void NativeProbeSink::RecordNativeJsInvocationSettle(
   if (config_generation_.load(std::memory_order_acquire) != epoch || session_id == 0)
     return;
   PublishNativeJsInvocationGaps(epoch);
-  // Each admitted call settles once. The settle closes its start before its
-  // own record is attempted, so a refused or dropped settle record never
-  // leaves the start open. A settle whose start was refused or dropped is not
-  // recorded: that start's loss is already a gap or a ring drop.
-  std::uint8_t site_slot = 0;
-  if (!CloseNativeJsInvocation(epoch, payload.invocation_id, site_slot))
-    return;
+  // V8 settles only a start this sink recorded, and each at most once. The
+  // settle closes its start before its own record is attempted, so a refused
+  // or dropped settle record never leaves the start open.
+  CloseNativeJsInvocation(epoch);
   // A digest without the session's opt-in is refused, never stored.
   const bool digests =
       native_invocation_digest_generation_.load(std::memory_order_acquire) == epoch;
-  if (frame_id == 0 || payload.site_slot != site_slot ||
+  if (frame_id == 0 ||
+      payload.site_slot >= native_invocation_site_count_.load(std::memory_order_acquire) ||
       !IsValidNativeJsInvocationSettlePayload(payload) ||
       (!digests && payload.digest_state !=
                        static_cast<std::uint8_t>(NativeJsInvocationDigestState::kNotRequested))) {
@@ -4546,27 +4878,13 @@ void NativeProbeSink::RecordNativeJsInvocationSettle(
     NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationTransportGap);
 }
 
-bool NativeProbeSink::CloseNativeJsInvocation(const std::uint64_t generation,
-                                              const std::uint32_t invocation_id,
-                                              std::uint8_t& site_slot) noexcept {
-  if (invocation_id == 0)
-    return false;
-  for (std::size_t i = 0; i < native_invocation_open_starts_.size(); ++i) {
-    auto open = native_invocation_open_starts_[i].load(std::memory_order_acquire);
-    if ((open >> 8) != invocation_id ||
-        native_invocation_slots_[i].load(std::memory_order_acquire) != generation)
-      continue;
-    // IDs are unique per isolate, so a lost exchange is the same call's
-    // second settle and closes nothing.
-    if (!native_invocation_open_starts_[i].compare_exchange_strong(open, 0,
-                                                                   std::memory_order_acq_rel))
-      return false;
-    site_slot = static_cast<std::uint8_t>(open & 0xFF);
-    if (native_invocation_open_generation_.load(std::memory_order_acquire) == generation)
-      native_invocation_open_.fetch_sub(1, std::memory_order_relaxed);
-    return true;
+void NativeProbeSink::CloseNativeJsInvocation(const std::uint64_t generation) noexcept {
+  if (native_invocation_open_generation_.load(std::memory_order_acquire) != generation)
+    return;
+  auto open = native_invocation_open_.load(std::memory_order_relaxed);
+  while (open > 0 && !native_invocation_open_.compare_exchange_weak(open, open - 1,
+                                                                    std::memory_order_relaxed)) {
   }
-  return false;
 }
 
 void NativeProbeSink::NoteNativeJsInvocationStatus(
@@ -4576,10 +4894,13 @@ void NativeProbeSink::NoteNativeJsInvocationStatus(
   if (slot >= native_invocation_site_count_.load(std::memory_order_acquire) ||
       !NativeJsInvocationActive(epoch))
     return;
+  const std::size_t slot_gap = kInvocationSlotGap + 2 * std::size_t{slot};
   if (status == NativeJsInvocationSiteStatus::kCompiledBeforeArming)
-    NoteNativeJsInvocationOmission(epoch, 0, kInvocationCompiledGap + slot);
+    NoteNativeJsInvocationOmission(epoch, 0, slot_gap + kInvocationCompiledReason);
   else if (status == NativeJsInvocationSiteStatus::kUnsupportedFunction)
-    NoteNativeJsInvocationOmission(epoch, 0, kInvocationUnsupportedGap + slot);
+    NoteNativeJsInvocationOmission(epoch, 0, slot_gap + kInvocationUnsupportedReason);
+  else if (status == NativeJsInvocationSiteStatus::kIdsExhausted)
+    NoteNativeJsInvocationOmission(epoch, 0, kInvocationIdsGap);
 }
 
 void NativeProbeSink::NoteNativeJsInvocationInputUnavailable(
@@ -4588,16 +4909,6 @@ void NativeProbeSink::NoteNativeJsInvocationInputUnavailable(
   if (!NativeJsInvocationActive(epoch))
     return;
   PublishNativeJsInvocationGaps(epoch);
-  // V8 already wrapped this call, so its refusal spends a start like any
-  // other; calls from a detached document stop at the budget.
-  std::size_t index = 0;
-  std::uint64_t previous = 0;
-  if (!ClaimNativeJsSlot(native_invocation_slots_, epoch, index, previous)) {
-    CapNativeJsGeneration(native_invocation_capped_generation_, epoch);
-    NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationBudgetGap);
-    return;
-  }
-  native_invocation_open_starts_[index].store(0, std::memory_order_release);
   NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationInputGap);
 }
 
@@ -4605,9 +4916,10 @@ void NativeProbeSink::NoteNativeJsInvocationSettleUnavailable(
     const std::uint64_t epoch,
     const std::uint64_t frame_id,
     const std::uint32_t invocation_id) noexcept {
-  std::uint8_t site_slot = 0;
-  if (NativeJsInvocationActive(epoch) && CloseNativeJsInvocation(epoch, invocation_id, site_slot))
-    NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationSettleGap);
+  if (invocation_id == 0 || !NativeJsInvocationActive(epoch))
+    return;
+  CloseNativeJsInvocation(epoch);
+  NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationSettleGap);
 }
 
 void NativeProbeSink::SetNativeJsInvocationContextProvider(
@@ -4633,10 +4945,6 @@ void NativeProbeSink::RecordNativeJsInvocationRequestSlow(const std::int32_t req
       (category_mask_.load(std::memory_order_relaxed) &
        NativeProbeCategoryMask(NativeProbeCategory::kNetwork)) == 0)
     return;
-  // After the request budget no loader start pays for the context read, which
-  // enters V8, or the frame lookup.
-  if (native_invocation_request_capped_generation_.load(std::memory_order_acquire) >= generation)
-    return;
   const auto provider = native_invocation_context_provider_.load(std::memory_order_acquire);
   if (!provider)
     return;
@@ -4659,20 +4967,11 @@ void NativeProbeSink::RecordNativeJsInvocationRequestSlow(const std::int32_t req
   const NativeProbeFrameIdProvider frame_id_provider =
       frame_id_provider_.load(std::memory_order_relaxed);
   const std::uint64_t frame_id = frame_id_provider ? frame_id_provider() : 0;
-  std::size_t index = 0;
-  std::uint64_t previous = 0;
-  if (!ClaimNativeJsSlot(native_invocation_request_slots_, generation, index, previous)) {
-    // Capped even when the ring cannot take the gap yet; the gap is held.
-    CapNativeJsGeneration(native_invocation_request_capped_generation_, generation);
-    NoteNativeJsInvocationOmission(generation, frame_id, kInvocationRequestBudgetGap);
-    return;
-  }
-  payload.sample_index = static_cast<std::uint16_t>(index);
   if (!IsValidNativeJsInvocationRequestPayload(payload)) {
-    ReleaseNativeJsSlot(native_invocation_request_slots_[index], generation, previous);
     NoteNativeJsInvocationOmission(generation, frame_id, kInvocationInputGap);
     return;
   }
+  payload.ordinal = NextNativeJsOrdinal(native_invocation_request_ordinal_);
   const std::uint64_t session_id = session_id_.load(std::memory_order_relaxed);
   NativeProbeEvent event;
   event.header.category = NativeProbeCategory::kVm;
@@ -4686,11 +4985,7 @@ void NativeProbeSink::RecordNativeJsInvocationRequestSlow(const std::int32_t req
   event.header.request_id = static_cast<std::uint64_t>(static_cast<std::uint32_t>(request_id));
   event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
   event.inline_payload = EncodeNativeJsInvocationRequestPayload(payload);
-  const auto status = EmitStatus(event, generation);
-  if (status == NativeProbeEmitStatus::kAdmitted)
-    return;
-  ReleaseNativeJsSlot(native_invocation_request_slots_[index], generation, previous);
-  if (status == NativeProbeEmitStatus::kRejected)
+  if (EmitStatus(event, generation) == NativeProbeEmitStatus::kRejected)
     NoteNativeJsInvocationOmission(generation, frame_id, kInvocationTransportGap);
 }
 
@@ -4954,21 +5249,34 @@ NativeProbeSink::GuestModuleVerdict NativeProbeSink::NativeGuestModuleVerdict(
              ? GuestModuleVerdict::kLost
              : GuestModuleVerdict::kPending;
 }
-bool NativeProbeSink::ClaimNativeGuestHostRoute(std::uint64_t generation) noexcept {
-  if (native_guest_host_capped_generation_.load(std::memory_order_acquire) >= generation)
-    return false;
-  for (auto& slot : native_guest_host_slots_) {
-    auto previous = slot.load(std::memory_order_acquire);
-    while (previous < generation) {
-      if (slot.compare_exchange_weak(previous, generation, std::memory_order_acq_rel))
-        return true;
-    }
+std::optional<std::uint32_t> NativeProbeSink::ClaimNativeGuestSample(
+    const std::uint64_t generation,
+    const std::uint32_t limit) noexcept {
+  const auto tag = static_cast<std::uint32_t>(generation);
+  auto word = native_guest_samples_.load(std::memory_order_acquire);
+  for (;;) {
+    const auto owner = static_cast<std::uint32_t>(word >> 32U);
+    const auto ahead = static_cast<std::int32_t>(tag - owner);
+    // A replacement configuration owns the budget; this work is stale.
+    if (ahead < 0)
+      return std::nullopt;
+    const auto claimed = ahead ? 0U : static_cast<std::uint32_t>(word);
+    if (claimed >= limit)
+      return std::nullopt;
+    if (native_guest_samples_.compare_exchange_weak(
+            word, (static_cast<std::uint64_t>(tag) << 32U) | (claimed + 1U),
+            std::memory_order_acq_rel))
+      return claimed;
   }
-  auto previous = native_guest_host_capped_generation_.load(std::memory_order_acquire);
-  while (previous < generation && !native_guest_host_capped_generation_.compare_exchange_weak(
-                                      previous, generation, std::memory_order_acq_rel)) {
-  }
-  return false;
+}
+void NativeProbeSink::ReleaseNativeGuestSample(const std::uint64_t generation,
+                                               const std::uint32_t index) noexcept {
+  // Only the newest claim is given back, so every index stays unique. If
+  // another thread claimed since, this index stays used: the budget is one
+  // sample smaller, and the refused sample is still a gap in its own slots.
+  auto expected = (static_cast<std::uint64_t>(static_cast<std::uint32_t>(generation)) << 32U) |
+                  (static_cast<std::uint64_t>(index) + 1U);
+  native_guest_samples_.compare_exchange_strong(expected, expected - 1U, std::memory_order_acq_rel);
 }
 void NativeProbeSink::SetNativeWasmGuestRuntime(NativeWasmGuestContextProvider context,
                                                 NativeWasmGuestReset reset) noexcept {
@@ -5011,8 +5319,7 @@ NativeWasmGuestModuleDecision NativeProbeSink::AdmitNativeWasmGuestModule(
   if (!adapter || !FindNativeGuestDispatcher(*adapter, function_index) ||
       !IsNativeWasmGuestEnabled())
     return NativeWasmGuestModuleDecision::kNotDispatcher;
-  return !module.empty() && module.size() <= kNativeArtifactMaxContentBytes &&
-                 NativeGuestDigest(module) == adapter->module_sha256
+  return !module.empty() && NativeGuestDigest(module) == adapter->module_sha256
              ? NativeWasmGuestModuleDecision::kAdmit
              : NativeWasmGuestModuleDecision::kRejectModule;
 }
@@ -5051,8 +5358,7 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
       }
   if (state)
     state->dispatch_sequence = 0;
-  if (!IsNativeWasmGuestEnabled() || module_bytes.empty() ||
-      module_bytes.size() > kNativeArtifactMaxContentBytes || source_url.empty() ||
+  if (!IsNativeWasmGuestEnabled() || module_bytes.empty() || source_url.empty() ||
       source_url.size() > kNativeArtifactMaxUrlBytes || !execution_context_id || !frame_id ||
       !(document_token_high || document_token_low))
     return;
@@ -5129,24 +5435,10 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
                             "native_guest_state_unavailable");
     return;
   }
-  // Generation tags prevent stale in-flight work consuming a replacement budget.
-  // Every site claims from these same slots, so sites share one sample limit.
-  std::uint32_t sample_index = UINT32_MAX;
-  std::uint64_t slot_previous = 0;
-  for (std::size_t index = 0; index < adapter->sample_limit; ++index) {
-    auto& slot = native_guest_slots_[index];
-    auto previous = slot.load(std::memory_order_acquire);
-    while (previous < generation) {
-      if (slot.compare_exchange_weak(previous, generation, std::memory_order_acq_rel)) {
-        sample_index = static_cast<std::uint32_t>(index);
-        slot_previous = previous;
-        break;
-      }
-    }
-    if (sample_index != UINT32_MAX)
-      break;
-  }
-  if (sample_index == UINT32_MAX) {
+  // Every site claims from this one budget, so sites share one sample limit.
+  // A claim is one atomic step whatever the limit.
+  const auto claimed = ClaimNativeGuestSample(generation, adapter->sample_limit);
+  if (!claimed) {
     auto previous = native_guest_capped_generation_.load(std::memory_order_acquire);
     while (previous < generation && !native_guest_capped_generation_.compare_exchange_weak(
                                         previous, generation, std::memory_order_acq_rel)) {
@@ -5155,6 +5447,7 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
                             "native_guest_sample_limit");
     return;
   }
+  const std::uint32_t sample_index = *claimed;
   NativeGuestCapture capture;
   auto& event = capture.dispatch;
   event.header.category = NativeProbeCategory::kVm;
@@ -5223,19 +5516,21 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
   const auto writes_before_send =
       send_module ? native_guest_module_status_next_.load(std::memory_order_acquire) : 0;
   const auto emit = native_guest_capture_.load(std::memory_order_acquire);
-  if (guest_thread.snapshot_cancelled ||
-      config_generation_.load(std::memory_order_acquire) != generation || !emit ||
-      !emit(capture, generation)) {
+  constexpr std::string_view kUnavailable = "native_guest_transport_unavailable";
+  const std::string_view refused =
+      guest_thread.snapshot_cancelled ||
+              config_generation_.load(std::memory_order_acquire) != generation
+          ? kUnavailable
+          : SendWasmObservation(emit, capture, generation, kUnavailable);
+  if (!refused.empty()) {
     // Nothing reached the browser. The sample index is free again, and each
     // sequence number this sample took becomes a gap in its own slot; a new
     // marker is dropped so the next sample of the activation takes another.
-    auto claimed = generation;
-    native_guest_slots_[sample_index].compare_exchange_strong(claimed, slot_previous,
-                                                              std::memory_order_acq_rel);
-    FillSequenceGap(event.header, "native_guest_transport_unavailable", generation);
+    // A module the credit refused is offered again with that next sample.
+    ReleaseNativeGuestSample(generation, sample_index);
+    FillSequenceGap(event.header, refused, generation);
     if (new_marker) {
-      FillSequenceGap(state->invocation_event.header, "native_guest_transport_unavailable",
-                      generation);
+      FillSequenceGap(state->invocation_event.header, refused, generation);
       state->invocation_event = {};
     }
     return;
@@ -5292,13 +5587,6 @@ bool NativeProbeSink::TryRecordNativeGuestHost(NativeProbeEvent& event,
     if (state.instance != context.instance_id || state.invocation != context.invocation_id ||
         state.frame != event.header.frame_id || !state.dispatch_sequence)
       continue;
-    // Beyond the routing budget the host stays on the ordinary queue without
-    // its parent link; the event itself is still retained.
-    if (!ClaimNativeGuestHostRoute(generation)) {
-      NoteNativeGuestOmission(generation, event.header.frame_id, kGuestHostParentBudgetGap,
-                              "native_guest_host_parent_budget");
-      return false;
-    }
     event.header.parent_event_id = state.dispatch_sequence;
     if (emit(event, generation))
       return true;

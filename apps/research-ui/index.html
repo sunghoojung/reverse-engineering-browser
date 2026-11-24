@@ -382,6 +382,7 @@
             <div id="vm-owned-controls" hidden></div>
             <div id="vm-findings-workspace" class="vm-findings-workspace">
             <div id="vm-notice" class="vm-notice" data-kind="loading" role="status" aria-live="polite">Waiting for VM findings from the local evidence broker.</div>
+            <div id="vm-wasm-sampling" class="vm-wasm-sampling" aria-label="Wasm sampling" hidden><span id="vm-wasm-sampling-policy" class="vm-wasm-sampling-policy"></span><span id="vm-wasm-sampling-status" class="vm-wasm-sampling-status" role="status" aria-live="polite"></span><button id="vm-wasm-sampling-reset" class="secondary-button" type="button">Reset sample budgets</button></div>
             <button id="vm-analysis-toggle" type="button" aria-expanded="true" aria-controls="vm-analysis-tree vm-analysis-handlers">Program Trees and handlers</button>
             <div class="vm-grid">
               <aside id="vm-analysis-tree" class="vm-list-pane" aria-label="VM findings">
@@ -619,7 +620,7 @@
             <div id="analyst-notice" class="analyst-notice" data-kind="loading" role="status" aria-live="polite">Loading your local analyst workspace…</div>
             <div id="analyst-grid" class="analyst-grid">
               <aside class="analyst-pane" aria-label="Analyst library">
-                <div class="analyst-pane-head"><div><h2>Saved work</h2><p>Scripts run only when you choose Run; notes never execute.</p></div><span id="analyst-file-count" class="experiment-card-badge">0 / 64</span></div>
+                <div class="analyst-pane-head"><div><h2>Saved work</h2><p>Scripts run only when you choose Run; notes never execute.</p></div><span id="analyst-file-count" class="experiment-card-badge">0 files</span></div>
                 <div class="analyst-actions">
                   <button id="analyst-new-folder" class="secondary-button" type="button">New folder</button>
                   <button id="analyst-new-script" class="secondary-button" type="button">New script</button>
@@ -638,10 +639,10 @@
                 <details class="analyst-storage"><summary class="workspace-disclosure-title">Storage usage</summary>
                   <header class="analyst-pane-head"><div><h2>Local storage</h2><p>No script, variable, result, or evidence is uploaded.</p></div></header>
                   <div class="analyst-storage-grid">
-                    <div><span>Folders</span><strong id="analyst-folder-usage">1 / 32</strong></div>
-                    <div><span>Content</span><strong id="analyst-content-usage">0 B / 512 KiB</strong></div>
-                    <div><span>Per file</span><strong>32 KiB</strong></div>
-                    <div><span>Depth</span><strong>4 folders</strong></div>
+                    <div><span>Folders</span><strong id="analyst-folder-usage">1</strong></div>
+                    <div><span>Files</span><strong id="analyst-file-usage">0</strong></div>
+                    <div><span>Content</span><strong id="analyst-content-usage">0 B</strong></div>
+                    <div><span>Deepest folder</span><strong id="analyst-depth-usage">0 levels</strong></div>
                   </div>
                 </details>
               </aside>
@@ -671,7 +672,7 @@
                 <article class="analyst-card">
                   <header><div><h2>Evidence to read</h2><p>Choose the captured evidence a script may read. Each run gets a separate local copy.</p></div><span id="analyst-snapshot-badge" class="experiment-card-badge">0 records</span></header>
                   <form id="analyst-run-form" class="analyst-form">
-                    <details class="workspace-disclosure"><summary>Script variables</summary><label>Variables (JSON object)<textarea id="analyst-variables" maxlength="16384" spellcheck="false" placeholder='{"seed":"verified"}'></textarea></label></details>
+                    <details class="workspace-disclosure"><summary>Script variables</summary><label>Variables (JSON object)<textarea id="analyst-variables" spellcheck="false" placeholder='{"seed":"verified"}'></textarea></label></details>
                     <div class="analyst-options">
                       <label class="analyst-check"><input id="analyst-include-events" type="checkbox" checked /> Events</label>
                       <label class="analyst-check"><input id="analyst-include-artifacts" type="checkbox" checked /> Artifact metadata</label>
@@ -693,8 +694,9 @@
 
                 </article>
                 <details class="analyst-card"><summary class="workspace-disclosure-title">Run history</summary>
-                  <header><div><h2>Run history</h2><p>Ephemeral results with source, outcome, time, and correlation IDs.</p></div><span id="analyst-history-badge" class="experiment-card-badge" data-kind="offline">0 / 64</span></header>
+                  <header><div><h2>Run history</h2><p>Ephemeral results with source, outcome, time, and correlation IDs.</p></div><span id="analyst-history-badge" class="experiment-card-badge" data-kind="offline">0 runs</span></header>
                   <div id="analyst-history" class="analyst-history" role="listbox" aria-label="Analyst script runs"><div class="analyst-empty" role="option" aria-disabled="true" aria-selected="false">Run a saved script to see results and logs.</div></div>
+                  <div id="analyst-history-more" class="analyst-history-more"></div>
                 </details>
                 <article class="analyst-card">
                   <header><div><h2>Selected result</h2><p id="analyst-result-meta">Select a completed run.</p></div><span id="analyst-result-badge" class="experiment-card-badge" data-kind="offline">No result</span></header>
@@ -839,7 +841,7 @@
                   <label class="native-console-setting">Execution mode <select id="native-console-mode" aria-label="Console execution mode"><option value="disposable">Disposable browser (default)</option><option value="live_capture">Live capture (explicit opt-in)</option></select></label>
                   <label id="native-console-live-confirmation" class="native-console-setting" hidden><input id="native-console-live-consent" type="checkbox" /> I authorize commands that can change this specifically selected captured document. Disconnect before choosing another document.</label>
                 <div class="native-console-controls">
-                  <input id="native-console-url" type="url" aria-label="Authorized page URL" maxlength="4096" placeholder="https://your-authorized-site.example" autocomplete="off" spellcheck="false" />
+                  <input id="native-console-url" type="url" aria-label="Authorized page URL" placeholder="https://your-authorized-site.example" autocomplete="off" spellcheck="false" />
                   <button id="native-console-start" type="button" class="native-console-button native-console-primary" disabled>Connect</button>
                 </div>
                 <button id="native-console-check" type="button" class="native-console-button">Check availability</button>
@@ -853,11 +855,11 @@
                   <summary>Document-start scripts (experiment)</summary>
                   <p id="native-console-ds-state" role="status">Checking document-start availability.</p>
                   <label class="native-console-setting"><input id="native-console-ds-enable" type="checkbox" /> Permit document-start scripts in the next disposable session</label>
-                  <label class="native-console-setting">Origin <input id="native-console-ds-origin" type="text" maxlength="256" placeholder="http://127.0.0.1:8080" autocomplete="off" spellcheck="false" aria-describedby="native-console-ds-rule-help" /></label>
+                  <label class="native-console-setting">Origin <input id="native-console-ds-origin" type="text" placeholder="http://127.0.0.1:8080" autocomplete="off" spellcheck="false" aria-describedby="native-console-ds-rule-help" /></label>
                   <label class="native-console-setting">Frame <select id="native-console-ds-frame" aria-label="Matching frame kind"><option value="top">Top frame</option><option value="child">Child frame</option></select></label>
-                  <label class="native-console-setting">Path prefix <input id="native-console-ds-path" type="text" maxlength="256" placeholder="/ (optional)" autocomplete="off" spellcheck="false" /></label>
+                  <label class="native-console-setting">Path prefix <input id="native-console-ds-path" type="text" placeholder="/ (optional)" autocomplete="off" spellcheck="false" /></label>
                   <p id="native-console-ds-rule-help">One exact origin and one frame kind. No pattern, wildcard or host suffix. Documents already open are never injected; reload them.</p>
-                  <label class="native-console-setting">Snippet <textarea id="native-console-ds-source" maxlength="4096" rows="4" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" aria-describedby="native-console-ds-privacy"></textarea></label>
+                  <label class="native-console-setting">Snippet <textarea id="native-console-ds-source" rows="4" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" aria-describedby="native-console-ds-privacy"></textarea></label>
                   <label class="native-console-setting"><input id="native-console-ds-consent" type="checkbox" /> I authorize this snippet to run automatically in every new matching document, before that document&rsquo;s own scripts.</label>
                   <div class="native-console-session-actions">
                     <button id="native-console-ds-arm" type="button" class="native-console-button native-console-primary" disabled>Arm script</button>
@@ -873,7 +875,7 @@
             </details>
             <button id="native-console-close" type="button" class="icon-button" aria-label="Close console panel" title="Close panel (⌘ / Ctrl + J)">×</button>
           </header>
-          <div id="native-console-filter-row" class="native-console-filter-row" hidden><input id="native-console-filter" type="search" aria-label="Filter console" placeholder="Find in retained output" maxlength="256" /><select id="native-console-level" aria-label="Console message level"><option value="all">All levels</option><option value="error">Errors</option><option value="warning">Warnings</option><option value="info">Info</option><option value="debug">Debug</option></select><button id="native-console-filter-close" type="button" class="native-console-button" aria-label="Close console filter">×</button></div>
+          <div id="native-console-filter-row" class="native-console-filter-row" hidden><input id="native-console-filter" type="search" aria-label="Filter console" placeholder="Find in retained output" /><select id="native-console-level" aria-label="Console message level"><option value="all">All levels</option><option value="error">Errors</option><option value="warning">Warnings</option><option value="info">Info</option><option value="debug">Debug</option></select><button id="native-console-filter-close" type="button" class="native-console-button" aria-label="Close console filter">×</button></div>
           <div id="native-console-notice" class="native-console-notice" role="status" aria-live="polite" hidden></div>
           <div class="native-console-scroll" id="native-console-scroll" tabindex="0" aria-label="Console transcript">
             <div id="native-console-output" class="native-console-output" role="log" aria-live="polite" aria-label="Console results"></div>
@@ -882,7 +884,7 @@
           </div>
           <div class="native-console-transcript-footer"><span id="native-console-output-count">0 entries</span><button id="native-console-latest" type="button" class="native-console-button" hidden>Latest output ↓</button><span class="native-console-private">Ephemeral · disposable profile</span></div>
           <form id="native-console-form" class="native-console-input">
-            <div class="native-console-composer-line"><span class="native-console-prompt" aria-hidden="true">&gt;</span><div class="native-console-editor"><pre id="native-console-highlight" aria-hidden="true"></pre><textarea id="native-console-source" aria-label="JavaScript command" rows="1" maxlength="8192" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" aria-describedby="native-console-input-help native-console-composer-status" disabled></textarea></div><button id="native-console-run" type="submit" class="native-console-button native-console-primary" disabled>Run</button></div>
+            <div class="native-console-composer-line"><span class="native-console-prompt" aria-hidden="true">&gt;</span><div class="native-console-editor"><pre id="native-console-highlight" aria-hidden="true"></pre><textarea id="native-console-source" aria-label="JavaScript command" rows="1" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" aria-describedby="native-console-input-help native-console-composer-status" disabled></textarea></div><button id="native-console-run" type="submit" class="native-console-button native-console-primary" disabled>Run</button><button id="native-console-interrupt" type="button" class="native-console-button" aria-describedby="native-console-composer-status" hidden>Stop</button></div>
             <div class="native-console-composer-footer"><span id="native-console-composer-status" role="status">Select a document to run commands</span><span id="native-console-input-help"><kbd>Enter</kbd> runs · <kbd>Shift</kbd> + <kbd>Enter</kbd> adds a line<span class="native-console-extended-help"> · <kbd>Ctrl</kbd> + <kbd>Space</kbd> suggests · <kbd>↑</kbd><kbd>↓</kbd> history</span></span></div>
           </form>
         </section>

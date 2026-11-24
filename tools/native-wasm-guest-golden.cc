@@ -106,8 +106,11 @@ int main(int argc, char** argv) {
   } else if (mode == "memory-overflow") {
     sample.memory_base = std::numeric_limits<std::uint64_t>::max();
     valid_sample = false;
+  } else if (mode == "last-sample") {
+    // The last index the widest recipe budget can claim.
+    sample.sample_index = reb::kWasmGuestSampleIndexLimit - 1;
   } else if (mode == "sample-limit") {
-    sample.sample_index = 256;
+    sample.sample_index = reb::kWasmGuestSampleIndexLimit;
     valid_sample = false;
   } else if (mode == "digest") {
     sample.recipe_sha256.fill(std::byte{0});

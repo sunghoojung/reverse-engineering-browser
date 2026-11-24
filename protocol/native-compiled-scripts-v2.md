@@ -129,13 +129,20 @@ is how much the browser has not yet copied out:
 
 | Bound | Value | Why |
 | --- | --- | --- |
-| Renderer artifact credit | 256 MiB | Sources and Wasm modules sent to the browser that it still holds |
+| Renderer artifact credit | 256 MiB | Sources, Wasm modules, runtime buffers and Canvas images sent to the browser that it still holds |
 | Remembered scripts per thread | 4,096 | Direct-mapped: a collision repeats a record, never loses one |
 | Remembered digests per thread | 4,096 | Same; a collision stores the bytes again and the store dedupes them |
 
 A compiling thread cannot wait for the browser, so each source the renderer
-sends is charged to a credit shared by its compiled script sources and Wasm
-modules (`kNativeRendererArtifactCreditBytes`). The browser streams a source
+sends is charged to a credit shared by everything it sends as an artifact
+(`kNativeRendererArtifactCreditBytes`): compiled script and stack script
+sources, Wasm modules and the modules Wasm observations and guest captures
+carry, runtime buffers with their allocating script's source, and Canvas
+images. Each names its own backlog: a stack script's identity sets
+`source_backlog` ([native network v3](native-network-v3.md)), an observation
+fills its sequence slot with `native_wasm_module_backlog`, and a runtime buffer
+or Canvas image records `runtime_typed_array_backlog` or
+`canvas_data_url_backlog`. The browser streams a source
 over 64 KiB from the renderer's buffer through its 32 MiB in-flight pool, and
 gives the credit back when it no longer holds that buffer: after the whole copy
 is queued, after the last stream frame is queued, or when the content is

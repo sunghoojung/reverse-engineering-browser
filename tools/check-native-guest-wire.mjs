@@ -27,15 +27,15 @@ const links = JSON.parse(fs.readFileSync(path+'.host-links.json','utf8'));
 if(row.interpretation === 'verified-dataflow') assert.equal(links.workspaces[0].links[0].guest_position.instruction_pointer,1);
 else assert.equal(links.workspaces[0].links[0].guest_position,null,'explicit adapter does not prove guest semantics');
 assert(model.isVmHostLinksDocument(links,doc),'shipped UI preserves verified versus explicit-adapter host semantics');
-for (const [key,value] of Object.entries({monotonic_time_ns:'01',instruction_pointer:4,instruction_pointer_units:'instruction-index',raw_pc_bits:257,instance_id:'0',sample_index:256,memory_length:65537,pc_adjustment:'9223372036854775808',module_byte_offset:7,adapter_sha256:'bad',opcode_width:3,interpretation:'unknown'})) {
+for (const [key,value] of Object.entries({monotonic_time_ns:'01',instruction_pointer:4,instruction_pointer_units:'instruction-index',raw_pc_bits:257,instance_id:'0',sample_index:2147483647,memory_length:65537,pc_adjustment:'9223372036854775808',module_byte_offset:7,adapter_sha256:'bad',opcode_width:3,interpretation:'unknown'})) {
  const bad=structuredClone(doc); bad.workspaces[0].native_guest_samples[0][key]=value;
  assert.equal(model.isVmOpcodeWorkspaceDocument(bad),false,key);
 }
 const invalidInvocation=['reserved','parent-dispatch-order','parent-dispatch-orphan','legacy-reserved','site-limit','legacy-site'];
-const wireModes=['default','wide-identities','version','size','reserved','pc-range','snapshot-limit','memory-overflow','sample-limit','digest','signed-adjustment','parent','truncated','big-endian','legacy-invocation','parent-dispatch','site',...invalidInvocation.slice(1)];
+const wireModes=['default','wide-identities','version','size','reserved','pc-range','snapshot-limit','memory-overflow','last-sample','sample-limit','digest','signed-adjustment','parent','truncated','big-endian','legacy-invocation','parent-dispatch','site',...invalidInvocation.slice(1)];
 for(const mode of wireModes){
  const events=execFileSync(exe,['--case',mode],{encoding:'utf8'}).trim().split('\n').map(JSON.parse);
- const expected=[!invalidInvocation.includes(mode),['default','wide-identities','signed-adjustment','legacy-invocation','parent-dispatch','site',...invalidInvocation].includes(mode)];
+ const expected=[!invalidInvocation.includes(mode),['default','wide-identities','last-sample','signed-adjustment','legacy-invocation','parent-dispatch','site',...invalidInvocation].includes(mode)];
  events.forEach((event,index)=>assert.equal(model.isBrokerEvent(event),expected[index],mode+' '+index));
  const python="import importlib.util,json,sys\ns=importlib.util.spec_from_file_location('validator',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\nfor event in json.load(sys.stdin):\n try:m.validate_event(event,1);print('true')\n except ValueError:print('false')";
  const verdict=execFileSync('python3',['-c',python,new URL('tools/validate-evidence-store.py',root).pathname],{input:JSON.stringify(events),encoding:'utf8'}).trim().split('\n').map(v=>v==='true');

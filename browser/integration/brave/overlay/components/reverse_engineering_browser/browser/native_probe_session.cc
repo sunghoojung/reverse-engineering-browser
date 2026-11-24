@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -11,9 +11,11 @@
 
 #include "base/command_line.h"
 #include "base/files/file_util.h"
+#include "base/functional/bind.h"
 #include "base/no_destructor.h"
 #include "base/process/process_handle.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/task/thread_pool.h"
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
@@ -37,7 +39,13 @@ bool ReadNativeWasmSampleBudget(const base::CommandLine& command_line,
                                 const std::uint64_t category_mask,
                                 NativeWasmSampleBudgetPolicy& policy) {
   policy = {};
-  const bool present = command_line.HasSwitch("reb-wasm-samples-per-function") ||
+  // Every record removes the pacing, so it takes no per-key count either.
+  policy.every_record = command_line.HasSwitch("reb-wasm-every-record");
+  // Paced by default: one hot function keeps at most this many full samples
+  // per window, so the rest of the page still gets the window's budget.
+  policy.samples_per_function = policy.every_record ? 0 : kNativeWasmDefaultSamplesPerFunction;
+  const bool present = policy.every_record ||
+                       command_line.HasSwitch("reb-wasm-samples-per-function") ||
                        command_line.HasSwitch("reb-wasm-samples-per-indirect-site") ||
                        command_line.HasSwitch("reb-wasm-function-allow") ||
                        command_line.HasSwitch("reb-wasm-function-deny") ||
@@ -196,28 +204,23 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
     }
     js_dispatch_startup_sites_json_ = std::move(json);
   }
-  js_invocation_sites_.clear();
+  js_invocation_sites_.reset();
   js_invocation_digests_ = false;
+  std::optional<std::vector<NativeJsInvocationSite>> invocation_sites;
   if (command_line->HasSwitch("reb-js-invocation-sites")) {
-    // Same lifetime rule as dispatch sites: armed entries cannot be
-    // retargeted, so a changed or invalid file refuses the session.
+    // Records name sites by slot and renderers keep their slots, so a file
+    // that renumbers a slot this browser has sent, or is invalid, refuses the
+    // session. Its armed flags and appended slots may change.
     const auto path = command_line->GetSwitchValuePath("reb-js-invocation-sites");
     std::string json;
-    if (path.empty() ||
-        !base::ReadFileToStringWithMaxSize(path, &json, kNativeJsInvocationSitesFileLimit) ||
-        (!js_invocation_startup_sites_json_.empty() && js_invocation_startup_sites_json_ != json) ||
-        (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kVm)) == 0) {
+    if (path.empty() || !base::ReadFileToString(path, &json) ||
+        (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kVm)) == 0 ||
+        !(invocation_sites = ParseNativeJsInvocationSiteList(json)) ||
+        !KeepsJsInvocationSlots(*invocation_sites)) {
       guest_adapter_json_.clear();
       js_dispatch_sites_.clear();
       return false;
     }
-    js_invocation_sites_ = ParseNativeJsInvocationSites(json);
-    if (js_invocation_sites_.empty()) {
-      guest_adapter_json_.clear();
-      js_dispatch_sites_.clear();
-      return false;
-    }
-    js_invocation_startup_sites_json_ = std::move(json);
     // Digests are a sensitive capture path; the launcher passes this switch
     // only with a visible sensitive-capture label.
     js_invocation_digests_ = command_line->HasSwitch("reb-js-invocation-digests");
@@ -226,9 +229,12 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
   if (!ReadNativeWasmSampleBudget(*command_line, category_mask, budget)) {
     guest_adapter_json_.clear();
     js_dispatch_sites_.clear();
-    js_invocation_sites_.clear();
     js_invocation_digests_ = false;
     return false;
+  }
+  if (invocation_sites) {
+    AdoptJsInvocationSlots(*invocation_sites);
+    js_invocation_sites_ = EncodeNativeJsInvocationSites(*invocation_sites);
   }
   wasm_sample_budget_ = budget;
   category_mask_.store(category_mask, std::memory_order_relaxed);
@@ -268,10 +274,57 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
   return true;
 }
 
+bool NativeProbeSession::KeepsJsInvocationSlots(
+    const std::vector<NativeJsInvocationSite>& sites) const noexcept {
+  const std::size_t kept = std::min(sites.size(), js_invocation_slots_.size());
+  for (std::size_t slot = 0; slot < kept; ++slot) {
+    if (!IsSameNativeJsInvocationSite(sites[slot], js_invocation_slots_[slot]))
+      return false;
+  }
+  return true;
+}
+
+void NativeProbeSession::AdoptJsInvocationSlots(
+    const std::vector<NativeJsInvocationSite>& sites) noexcept {
+  for (std::size_t slot = js_invocation_slots_.size(); slot < sites.size(); ++slot)
+    js_invocation_slots_.push_back(sites[slot]);
+}
+
+void NativeProbeSession::UpdateJsInvocationSites(const std::string& json) noexcept {
+  if (!IsActive() || !js_invocation_sites_)
+    return;
+  if (!js_invocation_parser_) {
+    js_invocation_parser_ =
+        base::ThreadPool::CreateSequencedTaskRunner({base::TaskPriority::USER_VISIBLE});
+  }
+  js_invocation_parser_->PostTaskAndReplyWithResult(
+      FROM_HERE,
+      base::BindOnce(
+          [](const std::string& revision) { return ParseNativeJsInvocationSiteList(revision); },
+          json),
+      base::BindOnce(&NativeProbeSession::ApplyJsInvocationSites, base::Unretained(this),
+                     session_id()));
+}
+
+void NativeProbeSession::ApplyJsInvocationSites(
+    const std::uint64_t session_id,
+    const std::optional<std::vector<NativeJsInvocationSite>> sites) noexcept {
+  // NoDestructor: the session outlives every reply.
+  if (!IsActive() || !js_invocation_sites_ || session_id != this->session_id())
+    return;
+  if (!sites || !KeepsJsInvocationSlots(*sites)) {
+    EmitNamedGap(NativeProbeCategory::kVm, "native_js_invocation_sites_revision_refused");
+    return;
+  }
+  AdoptJsInvocationSlots(*sites);
+  js_invocation_sites_ = EncodeNativeJsInvocationSites(*sites);
+  for (NativeProbeHost* const host : hosts_)
+    host->UpdateJsInvocationSites(*js_invocation_sites_);
+}
+
 void NativeProbeSession::ResetWasmSampleBudgets() noexcept {
   if (!IsActive())
     return;
-  NativeArtifactCaptureSink::Get().ResetWasmSampleBudgets();
   for (NativeProbeHost* const host : hosts_)
     host->ResetWasmSampleBudgets();
 }
@@ -279,7 +332,7 @@ void NativeProbeSession::ResetWasmSampleBudgets() noexcept {
 void NativeProbeSession::StopSession() noexcept {
   guest_adapter_json_.clear();
   js_dispatch_sites_.clear();
-  js_invocation_sites_.clear();
+  js_invocation_sites_.reset();
   js_invocation_digests_ = false;
   wasm_sample_budget_ = {};
   // Hosts drain records their renderers already queued, and the artifact sink
@@ -398,6 +451,12 @@ void NativeProbeSession::Emit(const NativeProbeEvent& event) const noexcept {
       now < expires_at_monotonic_ns_.load(std::memory_order_relaxed)) {
     downstream(event);
   }
+}
+
+void NativeProbeSession::SetDebuggerWatchScope(mojom::NativeWatchScopePtr scope) {
+  debugger_watch_scope_ = std::move(scope);
+  for (NativeProbeHost* const host : hosts_)
+    host->SendDebuggerWatchScope();
 }
 
 void NativeProbeSession::AddHost(NativeProbeHost& host) {

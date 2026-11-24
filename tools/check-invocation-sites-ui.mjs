@@ -15,7 +15,7 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
 const module = await read('apps/research-ui/invocation_sites.js');
 
 function load(context = {}) {
-  return runInNewContext(`${module}\n;({INVOCATION_SITE_LIMIT, invocationSiteByteOffset, invocationSiteHeader, createInvocationSitesPanel})`,
+  return runInNewContext(`${module}\n;({invocationSiteByteOffset, invocationSiteHeader, createInvocationSitesPanel})`,
     {TextEncoder, ...context});
 }
 
@@ -46,7 +46,7 @@ const site = (label, extra = {}) => ({site: {anchor_offset: label.length, artifa
   shape: 'function-entry', source_length: 99, source_sha256: 'b'.repeat(64)}, label, source_url: 'https://example.test/glue.js', session_id: '11',
   retained: {state: 'not_retained', matching_artifact_id: null, other_version_artifact_id: null}, ...extra});
 const set = (sites, session = {state: 'not_armed', count: 0, digests: false, sites: []}) =>
-  ({format: 'reb-js-invocation-site-set-v1', limit: 8, count: sites.length, sites, next_capture: 'x', session});
+  ({format: 'reb-js-invocation-site-set-v1', limit: 48806446, count: sites.length, sites, next_capture: 'x', session});
 
 {
   const {invocationSiteHeader} = load();
@@ -119,7 +119,7 @@ const resolution = extra => ({format: 'reb-js-invocation-site-resolution-v1', st
   await view.ui.refresh();
   assert.equal(view.chip.hidden, true, 'No chip without saved or armed sites');
   assert.match(view.text(), /not the open page/);
-  assert.match(view.text(), /Saved for the next capture \(0 of 8\)/);
+  assert.match(view.text(), /Saved for the next capture \(0\)/);
   // Keyboard: Enter in the name field resolves the name.
   view.ui.input.value = 'o.dup';
   const enter = view.fire(view.ui.input, 'keydown', {key: 'Enter'});
@@ -172,6 +172,66 @@ const resolution = extra => ({format: 'reb-js-invocation-site-resolution-v1', st
 }
 
 {
+  // A capture that follows the saved set says so: saving and removing apply
+  // to it at once, a disarmed slot is not listed as tracked, and a site saved
+  // after every slot was used waits for the next capture.
+  const live = (armed, extra = {}) => ({state: 'armed', live: true, count: armed.filter(slot => slot.armed).length, digests: false,
+    revision: 1, revision_error: null, sites: armed, ...extra});
+  const {invocationSiteHeader} = load();
+  assert.equal(invocationSiteHeader(set([], live([]))), null, 'An empty following capture with nothing saved shows no chip');
+  const following = invocationSiteHeader(set([site('a', {armed_in_capture: true})],
+    live([{label: 'a', armed: true}, {label: 'gone', armed: false}])));
+  assert.equal(following.text, 'Tracking 1 function');
+  assert.match(following.title, /calls to a\. Functions you save or remove apply to this capture at once\./);
+  assert.doesNotMatch(following.title, /gone/, 'A disarmed slot is not tracked');
+  const waiting = invocationSiteHeader(set([site('a', {armed_in_capture: true}), site('late', {armed_in_capture: false})],
+    live([{label: 'a', armed: true}])));
+  assert.equal(waiting.text, 'Tracking 1 function · 1 waiting');
+  assert.equal(waiting.kind, 'warning');
+  assert.match(waiting.title, /used all 48,806,446 of its site slots/);
+  assert.match(invocationSiteHeader({...set([site('late', {armed_in_capture: false})], live([{label: 'a', armed: true}])), limit: undefined}).title,
+    /used all of its site slots/, 'A set without a limit names none');
+
+  let current = set([], live([]));
+  const view = panel({responses: (path, body) => {
+    if (!body) return {status: 200, body: current};
+    if (body.action === 'add') {
+      current = set([site('window.hsw', {armed_in_capture: true})], live([{label: 'window.hsw', armed: true}]));
+      return {status: 200, body: {ok: true, added: true, set: current, resolution: resolution({status: 'resolved', reason: null, label: 'window.hsw',
+        function: candidate(1, 20), candidates: [], candidate_count: 0, message: 'Resolved.'})}};
+    }
+    if (body.action === 'remove') {
+      current = set([], live([{label: 'window.hsw', armed: false}], {revision: 2}));
+      return {status: 200, body: {ok: true, removed: true, set: current}};
+    }
+    throw new Error('unexpected');
+  }});
+  await view.ui.refresh();
+  assert.match(view.text(), /This capture tracks a saved function at once/);
+  assert.doesNotMatch(view.text(), /not the open page/);
+  assert.match(view.text(), /This capture tracks no functions yet\./);
+  assert.match(view.text(), /Saved functions \(0\)/);
+  assert.match(view.track.title, /in this capture/);
+  view.ui.input.value = 'window.hsw';
+  view.ui.trackName();
+  await settle(); await settle();
+  assert.match(view.text(), /Saved window\.hsw \(line 1, column 5\)\. This capture tracks a saved function at once/);
+  assert.match(view.text(), /This capture tracks window\.hsw\./);
+  assert.equal(view.chip.textContent, 'Tracking 1 function');
+  const remove = view.container.all.find(element => element.getAttribute?.('aria-label')?.startsWith('Remove '));
+  view.fire(remove, 'click');
+  await settle(); await settle();
+  assert.match(view.text(), /Removed window\.hsw\. This capture stops tracking it; a call already running still settles\./);
+  assert.match(view.text(), /This capture tracks no functions yet\./, 'The disarmed slot is not reported as tracked');
+  assert.equal(view.chip.hidden, true);
+  // A table the backend could not publish is said, and the capture keeps the last one.
+  current = set([site('b', {armed_in_capture: false})], live([], {revision_error: 'This capture could not follow the saved functions: disk full'}));
+  await view.ui.refresh();
+  assert.match(view.text(), /could not follow the saved functions: disk full/);
+  console.log('PASS invocation site pane, following capture: saved and removed functions apply at once, disarmed slots are not tracked, waiting sites and publish failures are said');
+}
+
+{
   // A failed refresh keeps the last understandable set and says so.
   let fail = false;
   const view = panel({responses: path => fail ? new Error('Connection refused') : {status: 200, body: set([site('kept')])}});
@@ -182,12 +242,12 @@ const resolution = extra => ({format: 'reb-js-invocation-site-resolution-v1', st
   assert.match(view.text(), /Connection refused\. The list below is from the last successful read\./);
   // Errors from the server are shown as given, such as a full set.
   fail = false;
-  const full = panel({responses: (path, body) => body ? {status: 409, body: {error: 'The saved set already tracks 8 functions, the most one capture can arm. Remove one first.'}} : {status: 200, body: set([])}});
+  const full = panel({responses: (path, body) => body ? {status: 409, body: {error: 'The saved set already tracks 48806446 functions, the most one browser shared memory region carries to a renderer. Remove one first.'}} : {status: 200, body: set([])}});
   await full.ui.refresh();
   full.ui.input.value = 'hsw';
   full.ui.trackName();
   await settle(); await settle();
-  assert.match(full.text(), /already tracks 8 functions/);
+  assert.match(full.text(), /already tracks 48806446 functions/);
   // A non-artifact source and a non-original view say why the action is off.
   const derived = panel({responses: () => ({status: 200, body: set([])}), positionProblem: () => 'Switch to the original source view to track a function at a position.'});
   await derived.ui.refresh();

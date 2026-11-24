@@ -579,13 +579,14 @@ index 3c3bcbaacada8ee140bc1f40d8966feddd85be69..4bb86a13765869efebd16a95d89a1a38
      DirectHandle<TrustedByteArray> source_position_table =
 diff --git a/src/interpreter/reb-js-dispatch.cc b/src/interpreter/reb-js-dispatch.cc
 new file mode 100644
-index 0000000000000000000000000000000000000000..67190c01f7c6b6bf3db102600f487f9cf82c7dd1
+index 0000000000000000000000000000000000000000..80ad406435023b02284af825e6dc54351ccaab18
 --- /dev/null
 +++ b/src/interpreter/reb-js-dispatch.cc
-@@ -0,0 +1,442 @@
-+// Copyright 2026 the V8 project authors. All rights reserved.
-+// Use of this source code is governed by a BSD-style license that can be
-+// found in the LICENSE file.
+@@ -0,0 +1,443 @@
++// Copyright 2026 The Reverse Engineering Browser Authors
++// This Source Code Form is subject to the terms of the Mozilla Public
++// License, v. 2.0. If a copy of the MPL was not distributed with this file,
++// You can obtain one at https://mozilla.org/MPL/2.0/.
 +
 +#include "src/interpreter/reb-js-dispatch.h"
 +
@@ -1027,13 +1028,14 @@ index 0000000000000000000000000000000000000000..67190c01f7c6b6bf3db102600f487f9c
 +}  // namespace v8::internal::interpreter
 diff --git a/src/interpreter/reb-js-dispatch.h b/src/interpreter/reb-js-dispatch.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..2c86a9cc2e0146889246eb75ed840c9cee5e5621
+index 0000000000000000000000000000000000000000..1bea92ca81e333b78dc30e49e7e8ea2c9b5c923a
 --- /dev/null
 +++ b/src/interpreter/reb-js-dispatch.h
-@@ -0,0 +1,129 @@
-+// Copyright 2026 the V8 project authors. All rights reserved.
-+// Use of this source code is governed by a BSD-style license that can be
-+// found in the LICENSE file.
+@@ -0,0 +1,130 @@
++// Copyright 2026 The Reverse Engineering Browser Authors
++// This Source Code Form is subject to the terms of the Mozilla Public
++// License, v. 2.0. If a copy of the MPL was not distributed with this file,
++// You can obtain one at https://mozilla.org/MPL/2.0/.
 +
 +#ifndef V8_INTERPRETER_REB_JS_DISPATCH_H_
 +#define V8_INTERPRETER_REB_JS_DISPATCH_H_

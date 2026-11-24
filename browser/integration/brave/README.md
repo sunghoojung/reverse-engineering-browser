@@ -176,6 +176,24 @@ empty stack.
 - `patches/init/` contains brave-core edits that bootstrap applies before
   Brave's initialization; see [above](#pre-initialization-patches).
 
+Every overlay file and every file a patch creates starts with the project
+header, not the header of the upstream tree it lands in:
+
+```cpp
+// Copyright 2026 The Reverse Engineering Browser Authors
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this file,
+// You can obtain one at https://mozilla.org/MPL/2.0/.
+```
+
+The holder is the group listed in [`AUTHORS`](../../../AUTHORS). An upstream
+header would credit Brave, Chromium or V8 authors with project code, and the
+Chromium and V8 headers would put it under their BSD terms. Code adapted from
+upstream keeps its upstream notice below the project header. Files a patch only
+edits keep their upstream header. `make lint` runs
+`tools/check-project-headers.py`, which refuses a missing or upstream header;
+`--fix` rewrites one and rebases the later patches in its stack.
+
 Keep V8 edits in `patches/v8/`, relative to the independent V8 checkout.
 The synchronization script rejects destinations belonging to a nested Git
 checkout before changing any stack. Each checkout must hold an ordered prefix

@@ -27,7 +27,7 @@
     "omitted_site_count": {
       "type": "integer",
       "minimum": 0,
-      "description": "Always 0 since VM detector 1.12.0, which lists every classified site. Earlier producers listed the 256 strongest and counted the rest here."
+      "description": "Always 0 since VM detector 1.13.0, which lists every classified site. Earlier producers listed the 256 strongest and counted the rest here."
     },
     "role_counts": {
       "type": "object",

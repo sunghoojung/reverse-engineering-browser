@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -10,6 +10,7 @@
 
 #include "base/functional/bind.h"
 #include "base/task/sequenced_task_runner.h"
+#include "brave/components/reverse_engineering_browser/common/native_console_document_start.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
 #include "third_party/blink/public/platform/platform.h"
 
@@ -42,7 +43,7 @@ void NativeConsoleExecution::Begin(v8::Isolate* isolate, std::uint64_t stop_id) 
 
 void NativeConsoleExecution::Stop(std::uint64_t stop_id) {
   base::AutoLock lock(lock_);
-  if (!isolate_ || stop_id == 0 || stop_id != stop_id_ || stopped_)
+  if (!isolate_ || !NativeConsoleStopNames(stop_id, stop_id_) || stopped_)
     return;
   stopped_ = true;
   isolate_->TerminateExecution();

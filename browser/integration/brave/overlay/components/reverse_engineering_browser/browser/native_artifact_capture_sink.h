@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -337,14 +337,18 @@ class NativeArtifactCaptureSink final {
   std::vector<GuestGroup> guest_groups_;
   std::map<GuestEventKey, GuestInvocation> guest_invocations_;
   std::map<GuestEventKey, GuestDispatch> guest_dispatches_;
-  // Bounded by three artifacts per sample.
+  // The module and adapter of each binding, and the snapshot of each
+  // unsettled dispatch; a settled dispatch's snapshot verdict is erased.
   std::map<std::uint64_t, GuestReceipt> guest_receipts_;
-  std::size_t guest_routed_host_count_ = 0, guest_held_host_count_ = 0, guest_capture_count_ = 0;
+  // Keys of the invocations and dispatches a receipt can still settle. Each
+  // drain visits only these, so its cost follows the work in flight, not
+  // every sample a configuration has taken. Settled dispatches stay in
+  // guest_dispatches_ so a late host can still name its parent.
+  std::set<GuestEventKey> guest_unpublished_invocations_, guest_unsettled_dispatches_;
   std::set<GuestEventKey> guest_host_identities_;
   // One marker per reason for losses with no renderer slot to fill: a host
   // published without its parent, or a host record without a sequence.
-  bool guest_host_malformed_gap_emitted_ = false, guest_host_parent_lost_gap_emitted_ = false,
-       guest_host_parent_omitted_gap_emitted_ = false;
+  bool guest_host_malformed_gap_emitted_ = false, guest_host_parent_lost_gap_emitted_ = false;
 
   NativeArtifactCaptureSink();
   ~NativeArtifactCaptureSink();

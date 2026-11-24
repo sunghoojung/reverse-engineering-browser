@@ -188,7 +188,8 @@ A full window is evidence too: the capture saw more than it kept. A session
 start can keep N samples of one function per window, exclude functions, or
 admit only modules whose SHA-256 is listed (`wasm_samples_per_function`,
 `wasm_samples_per_indirect_site`, `wasm_function_allow`,
-`wasm_function_deny`, `wasm_module_allowlist`).
+`wasm_function_deny`, `wasm_module_allowlist`), or keep every record the
+filters admit with no window at all (`wasm_every_record`).
 `session_action` `reset_wasm_sample_budgets` opens a new window at once
 without a new session, with a new overflow ring. It publishes each stream's
 pending omitted count first. The browser applies that reset on its

@@ -565,7 +565,7 @@ The optional `dispatch_inventory` is the same static inventory exposed in the
 VM detector's `frontend`. It counts all decoded `br_table` and `call_indirect`
 sites, including those outside loops, and lists every one of them, ranked.
 `site_count` is the complete decoded count and `omitted_site_count` is always
-0. VM detector producers before 1.12.0 retained at most 256 ranked metadata
+0. VM detector producers before 1.13.0 retained at most 256 ranked metadata
 records, counted the unlisted ones in `omitted_site_count` and added
 `dispatch-inventory-limit` to coverage omissions. `arm_count` is the number of
 explicit `br_table` targets, excluding the default, and is null for

@@ -1,5 +1,5 @@
 //! Static site ranking, not an interpreter or guest-ISA classifier. Every
-//! decoded site is ranked and listed; VM detector producers before 1.12.0
+//! decoded site is ranked and listed; VM detector producers before 1.13.0
 //! kept the 256 best ranked and counted the rest in `omitted_site_count`.
 use super::Instruction;
 use serde_json::{Value, json};

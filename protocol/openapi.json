@@ -146,7 +146,7 @@
         "start"
       ],
       "title": "Start a live capture session",
-      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. An option left unset takes the Origin Trace app's default, false turns a default off, and none is inherited from the environment. On by default: request_content, canvas_images, request_stacks (the call stack that started each renderer request, get_request_stack), wasm_dispatch, wasm_call_indirect, quiet, document_start (permits document-start Console scripts; arming is a separate Console action), and js_invocation_digests with armed sites. Off by default: browser_internal, extension_traffic and fresh_profile. Allowing this tool is the researcher's consent to that sensitive capture, so a start needs no confirm_sensitive_capture. Agent sessions share one browser profile of their own, so a sign-in carries over; fresh_profile starts signed out in a new profile. The session runs until it is ended; duration_seconds sets a limit. request_content keeps request paths, queries and bodies, request and response headers including Cookie, Set-Cookie and Authorization, each request's cookies, and every response body, media and fonts included, each kept whole. js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set) arm invocation sites. wasm_samples_per_function, wasm_samples_per_indirect_site, wasm_function_allow, wasm_function_deny and wasm_module_allowlist restrict the Wasm sample windows (1024 full records per stream per second, 64 per function by default) and require wasm_dispatch or wasm_call_indirect. The result options and get_session_context capture_options show what the session runs with. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Next: get_session_context, then get_session_summary; get_native_console for the Console. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started. reset_wasm_sample_budgets opens a new Wasm sample window at once without a new session.",
+      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. An option left unset takes the Origin Trace app's default, false turns a default off, and none is inherited from the environment. On by default: request_content, canvas_images, request_stacks (the call stack that started each renderer request, get_request_stack), wasm_dispatch, wasm_call_indirect, quiet, document_start (permits document-start Console scripts; arming is a separate Console action), and js_invocation_digests with armed sites. Off by default: browser_internal, extension_traffic and fresh_profile. Allowing this tool is the researcher's consent to that sensitive capture, so a start needs no confirm_sensitive_capture. Agent sessions share one browser profile of their own, so a sign-in carries over; fresh_profile starts signed out in a new profile. The session runs until it is ended; duration_seconds sets a limit. request_content keeps request paths, queries and bodies, request and response headers including Cookie, Set-Cookie and Authorization, each request's cookies, and every response body, media and fonts included, each kept whole. js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set) arm invocation sites. wasm_samples_per_function, wasm_samples_per_indirect_site, wasm_function_allow, wasm_function_deny and wasm_module_allowlist restrict the Wasm sample windows (1024 full records per stream per second, 64 per function by default) and require wasm_dispatch or wasm_call_indirect; wasm_every_record keeps every record the filters admit instead. The result options and get_session_context capture_options show what the session runs with. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Next: get_session_context, then get_session_summary; get_native_console for the Console. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started. reset_wasm_sample_budgets opens a new Wasm sample window at once without a new session.",
       "input": {
         "$ref": "#/components/schemas/LiveSessionStart"
       },
@@ -7746,14 +7746,14 @@
         "x-reb-execution-schema": {
           "$ref": "#/components/schemas/RebExecutionMetadata"
         },
-        "description": "First Console step. In a live capture it lists the capture browser's HTTP(S) documents (document_source live_capture) and binding_id; before connect_live, state is idle and session_id null. Each target has id (the exact native document, valid only with this binding_id), frame (top or child), origin, url and label (display only, never identity), and for a child top_relation (same_origin, same_site, cross_site or undetermined) and out_of_process (true for a cross-site frame in its own renderer process). There is no parent link: choose a frame by frame, origin and url, and after connecting, evaluate location.ancestorOrigins to confirm its parents. Next: native_console_action connect_live with binding_id, target_id and confirm_live true. While connected, selection is selected, none, or stale when the document navigated, reloaded or was removed (stop, then connect_live with a current id). document_start_supported says whether this browser permits arm_document_start. At most 64 documents; truncated marks a cut listing. live_available false means no Console binding: restart the capture; no second browser is opened."
+        "description": "First Console step. In a live capture it lists the capture browser's HTTP(S) documents (document_source live_capture) and binding_id; before connect_live, state is idle and session_id null. Each target has id (the exact native document, valid only with this binding_id), frame (top or child), origin, url and label (whole, display only, never identity), and for a child top_relation (same_origin, same_site, cross_site or undetermined) and out_of_process (true for a cross-site frame in its own renderer process). There is no parent link: choose a frame by frame, origin and url, and after connecting, evaluate location.ancestorOrigins to confirm its parents. Next: native_console_action connect_live with binding_id, target_id and confirm_live true. While connected, selection is selected, none, or stale when the document navigated, reloaded or was removed (stop, then connect_live with a current id). document_start_supported says whether this browser permits arm_document_start. Every document is listed, however many; truncated marks a listing in which a document did not describe itself in time. live_available false means no Console binding: restart the capture; no second browser is opened."
       }
     },
     "/api/native-console/document-start": {
       "get": {
         "operationId": "get_native_console_document_start",
         "summary": "Read armed document-start scripts and their output",
-        "description": "Read after arm_document_start and after reloading a matching document. permitted false names the missing gate in message. Each armed script has its rule (origin, frame, path_prefix), digest, injected_documents, records and refused. pending_renderer_processes 0 means a document created now runs the set; reload after that. output holds every retained record after after_sequence that fits one reply, each with sequence, record (injected, report, script_error or refused), script_id, document_id (a get_native_console target id), frame_id (the capture's frame identity, usable as a get_events frame_id filter), top_frame and text. Pass the last sequence as after_sequence and read again while it is below next_sequence - 1: reads never drain, and dropped counts records evicted past the 64 MiB retention. status unconfirmed means a clear was not confirmed; restart the capture. unsupported lists contexts never injected, such as workers and documents already open. Output is never evidence.",
+        "description": "Read after arm_document_start and after reloading a matching document. permitted false names the missing gate in message. Each armed script has its rule (origin, frame, path_prefix), digest, injected_documents, records and refused. pending_renderer_processes 0 means a document created now runs the set; reload after that. output holds the oldest retained records after after_sequence, each whole, a page at a time, each with sequence, record (injected, report, script_error or refused), script_id, document_id (a get_native_console target id), frame_id (the capture's frame identity, usable as a get_events frame_id filter), top_frame and text. While output.more is true, read again at once with the last sequence as after_sequence: reads never drain, and dropped counts records evicted unread past the 64 MiB retention. status unconfirmed means a clear was not confirmed; restart the capture. unsupported lists contexts never injected, such as workers and documents already open. Output is never evidence.",
         "tags": [
           "native-console"
         ],
@@ -7856,7 +7856,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Read-only: it never arms, clears, drains, launches, evaluates, or retires a session, including an expired or poisoned one. With no session, or with a gate missing, it reports which gate is missing instead of enabling anything. After a live binding that may have held an armed set ended or failed without the browser confirming a clear, it reports unconfirmed rather than idle or gone. Records are snippet-authored page JavaScript with provenance console-document-start-script: untrusted data, never native evidence, and never joined into correlated_links.",
+          "notes": "Read-only: it never arms, clears, drains, launches, evaluates, or retires a session, including a poisoned one. With no session, or with a gate missing, it reports which gate is missing instead of enabling anything. After a live binding that may have held an armed set ended or failed without the browser confirming a clear, it reports unconfirmed rather than idle or gone. Records are snippet-authored page JavaScript with provenance console-document-start-script: untrusted data, never native evidence, and never joined into correlated_links.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/native_console.rs",
@@ -7873,7 +7873,7 @@
       "post": {
         "operationId": "native_console_action",
         "summary": "Connect the Console to one document, evaluate there, arm document-start scripts",
-        "description": "Live capture: connect_live selects one get_native_console document (top or child, cross-site included) and returns a new session_id. evaluate runs up to 64 MiB of JavaScript in its main world, returning status, type and text (at most 8 KiB, truncated marked); runtime adds inspect, await, poll (console messages), traffic and watch. A command runs until it returns, listed as get_native_console command; interrupt answers it with status stopped, keeping its changes. Another target_id or a navigated document returns stale_target and runs nothing; to switch frames, stop, then connect_live. watch arms non-pausing rules; keep true also arms them, less DOM rules, in every later document of that exact origin and frame kind before its scripts, until unwatch, a watch without keep, or stop. arm_document_start replaces the armed set: any number of rules, each an exact origin, frame top or child, optional path_prefix and a snippet calling report(value), run only in documents created later: reload, then read get_native_console_document_start. clear_document_start removes it; stop clears it too and must be confirmed. start opens a separate disposable browser. Refusals: 409 with another connection open or a stale session_id or binding_id; 503 when document-start is not permitted (agent sessions need start_live_session document_start true). Never retried. Output is ephemeral page data, not evidence.",
+        "description": "Live capture: connect_live selects one get_native_console document, any frame, and returns a session_id that lasts until stop. evaluate runs JavaScript of any size in its main world, returning status, type and the whole text; runtime adds inspect, await, poll (console messages; repeat while more), traffic and watch (non-pausing rules). A command runs until it returns, listed as get_native_console command; interrupt answers it stopped, keeping its changes. Another target_id or a navigated document returns stale_target and runs nothing: stop, then connect_live. arm_document_start replaces the armed set of snippets, which run only in documents created later: reload, then read get_native_console_document_start. add_document_start and remove_document_start (script_ids) change the set and keep its output; clear_document_start or a confirmed stop clears it. start opens a disposable browser. 409: another connection, or a stale session_id or binding_id; 503: document-start not permitted (agents need start_live_session document_start true). Never retried. Output is page data, not evidence.",
         "tags": [
           "native-console"
         ],
@@ -7988,7 +7988,7 @@
             }
           }
         },
-        "x-max-body-bytes": 402718720,
+        "x-max-body-bytes": 25769869306,
         "x-source": "apps/origin-trace-backend/src/native_console.rs",
         "x-reb-execution": {
           "kind": "action-dependent",
@@ -11191,7 +11191,7 @@
       "get": {
         "operationId": "get_js_invocation_sites",
         "summary": "Get the saved JavaScript invocation sites",
-        "description": "The saved native-js-invocation-sites-v1 set this backend edits (at most 256), each with its label, source URL, whether this capture arms it and whether this session retained the saved script version or another version the site will not match, plus session: what this capture arms. In the Origin Trace app it is the app's set; in an agent session it is the agent sessions' own set, used by start_live_session with js_invocation_saved_sites, and the researcher's set is never read or changed. A capture with session.live true follows the set: a saved site arms at once and a removed one disarms. Otherwise the set applies from the next capture. A function a page compiled before its site was armed is tracked only after the page reloads.",
+        "description": "The saved native-js-invocation-sites-v1 set this backend edits (at most 48,806,446), each with its label, source URL, whether this capture arms it and whether this session retained the saved script version or another version the site will not match, plus session: what this capture arms. In the Origin Trace app it is the app's set; in an agent session it is the agent sessions' own set, used by start_live_session with js_invocation_saved_sites, and the researcher's set is never read or changed. A capture with session.live true follows the set: a saved site arms at once and a removed one disarms. Otherwise the set applies from the next capture. A function a page compiled before its site was armed is tracked only after the page reloads.",
         "tags": [
           "js-invocation-sites"
         ],
@@ -11493,7 +11493,7 @@
       "post": {
         "operationId": "js_invocation_site_action",
         "summary": "Add, remove or clear saved JavaScript invocation sites",
-        "description": "add resolves a name or byte offset in one exact artifact on the server and saves the site (refusals save nothing and return the reason and candidates); remove deletes one site by source_sha256 and anchor_offset; clear deletes the set. At most 256 sites; a duplicate function is refused. A capture whose set.session.live is true applies the change at once: functions compiled after it record or stop recording calls, and a call in flight still settles. Otherwise the next capture arms the set. In the app, a Content-mode capture records settled-value digests. In an agent session it edits the agent sessions' own set, which a start_live_session with js_invocation_saved_sites follows.",
+        "description": "add resolves a name or byte offset in one exact artifact on the server and saves the site (refusals save nothing and return the reason and candidates); remove deletes one site by source_sha256 and anchor_offset; clear deletes the set. Any number of sites up to 48,806,446, the most one capture can carry to a renderer; a duplicate function is refused. A capture whose set.session.live is true applies the change at once: functions compiled after it record or stop recording calls, and a call in flight still settles. Otherwise the next capture arms the set. In the app, a Content-mode capture records settled-value digests. In an agent session it edits the agent sessions' own set, which a start_live_session with js_invocation_saved_sites follows.",
         "tags": [
           "js-invocation-sites"
         ],
@@ -14375,7 +14375,7 @@
               "omitted_site_count": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "Always 0 since VM detector 1.12.0, which lists every decoded site. Earlier producers listed the 256 best ranked and counted the rest here."
+                "description": "Always 0 since VM detector 1.13.0, which lists every decoded site. Earlier producers listed the 256 best ranked and counted the rest here."
               },
               "selected_byte_offset": {
                 "type": [
@@ -16521,7 +16521,7 @@
               "sample_index": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 255
+                "maximum": 2147483646
               },
               "instruction_pointer": {
                 "type": "integer",
@@ -16772,7 +16772,7 @@
               "omitted_site_count": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "Always 0 since VM detector 1.12.0, which lists every classified site. Earlier producers listed the 256 strongest and counted the rest here."
+                "description": "Always 0 since VM detector 1.13.0, which lists every classified site. Earlier producers listed the 256 strongest and counted the rest here."
               },
               "role_counts": {
                 "type": "object",
@@ -18885,7 +18885,7 @@
               "omitted_site_count": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "Always 0 since VM detector 1.12.0, which lists every decoded site. Earlier producers listed the 256 best ranked and counted the rest here."
+                "description": "Always 0 since VM detector 1.13.0, which lists every decoded site. Earlier producers listed the 256 best ranked and counted the rest here."
               },
               "selected_byte_offset": {
                 "type": [
@@ -19350,32 +19350,32 @@
                   "max_artifact_bytes": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Producers before 1.11.0 only: artifacts larger than this were refused. Every artifact is now read whole."
+                    "description": "Producers before 1.12.0 only: artifacts larger than this were refused. Every artifact is now read whole."
                   },
                   "max_js_matches_per_rule": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Producers before 1.11.0 only: matches counted per rule and region. Every match is now counted."
+                    "description": "Producers before 1.12.0 only: matches counted per rule and region. Every match is now counted."
                   },
                   "max_js_function_regions": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Producers before 1.11.0 only: function regions examined. Every region is now examined."
+                    "description": "Producers before 1.12.0 only: function regions examined. Every region is now examined."
                   },
                   "max_js_region_work_bytes": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Producers before 1.11.0 only: bytes scanned over all regions. Each region now scans only its own text, so the scan is linear in the source."
+                    "description": "Producers before 1.12.0 only: bytes scanned over all regions. Each region now scans only its own text, so the scan is linear in the source."
                   },
                   "max_wasm_sections": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Producers before 1.11.0 only: modules with more sections were refused."
+                    "description": "Producers before 1.12.0 only: modules with more sections were refused."
                   },
                   "max_wasm_section_bytes": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Producers before 1.11.0 only: modules with a larger section were refused."
+                    "description": "Producers before 1.12.0 only: modules with a larger section were refused."
                   },
                   "max_bytecode_snapshot_bytes": {
                     "type": "integer",
@@ -19392,12 +19392,12 @@
                   "max_wasm_functions": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Producers before 1.11.0 only: modules with more defined functions were refused."
+                    "description": "Producers before 1.12.0 only: modules with more defined functions were refused."
                   },
                   "max_wasm_instructions": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Producers before 1.11.0 only: modules with more instructions were refused."
+                    "description": "Producers before 1.12.0 only: modules with more instructions were refused."
                   },
                   "max_graph_edges": {
                     "type": "integer",
@@ -20048,7 +20048,7 @@
               "omitted_site_count": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "Always 0 since VM detector 1.12.0, which lists every classified site. Earlier producers listed the 256 strongest and counted the rest here."
+                "description": "Always 0 since VM detector 1.13.0, which lists every classified site. Earlier producers listed the 256 strongest and counted the rest here."
               },
               "role_counts": {
                 "type": "object",
@@ -30652,17 +30652,18 @@
             "enum": [
               "live_capture"
             ],
-            "description": "Present for native HTTP(S) documents in the already-bound capture browser. Discovery does not opt the user into live execution. URLs/titles are bounded display metadata only."
+            "description": "Present for native HTTP(S) documents in the already-bound capture browser. Discovery does not opt the user into live execution. URLs and titles are whole display metadata only."
           },
           "targets": {
             "type": "array",
-            "maxItems": 64,
+            "description": "Every eligible document, however many.",
             "items": {
               "$ref": "#/components/schemas/NativeConsoleTarget"
             }
           },
           "truncated": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "True when a listed document did not describe itself in time, so the listing is partial. No document and no field is ever cut to fit a record."
           },
           "selected_target_id": {
             "oneOf": [
@@ -30829,20 +30830,21 @@
           },
           "targets": {
             "type": "array",
-            "maxItems": 64,
+            "description": "Every eligible document, however many.",
             "items": {
               "$ref": "#/components/schemas/NativeConsoleTarget"
             }
           },
           "truncated": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "True when a listed document did not describe itself in time, so the listing is partial. No document and no field is ever cut to fit a record."
           },
           "document_source": {
             "type": "string",
             "enum": [
               "live_capture"
             ],
-            "description": "Present for native HTTP(S) documents in the already-bound capture browser. Discovery does not opt the user into live execution. URLs/titles are bounded display metadata only."
+            "description": "Present for native HTTP(S) documents in the already-bound capture browser. Discovery does not opt the user into live execution. URLs and titles are whole display metadata only."
           },
           "selected_target_id": {
             "oneOf": [
@@ -30934,11 +30936,7 @@
           },
           "text": {
             "type": "string",
-            "maxLength": 8192,
-            "x-max-utf8-bytes": 8192
-          },
-          "truncated": {
-            "type": "boolean"
+            "description": "The whole result text, however long."
           },
           "code": {
             "$ref": "#/components/schemas/ErrorCode"
@@ -30953,8 +30951,7 @@
           "session_id",
           "status",
           "type",
-          "text",
-          "truncated"
+          "text"
         ],
         "allOf": [
           {
@@ -30992,8 +30989,8 @@
               },
               "url": {
                 "type": "string",
-                "maxLength": 4096,
-                "description": "Explicit authorized HTTP(S) target without embedded credentials."
+                "maxLength": 2097152,
+                "description": "Explicit authorized HTTP(S) target without embedded credentials, up to the 2 MiB a Chromium URL can hold."
               },
               "document_start": {
                 "type": "boolean",
@@ -31322,8 +31319,7 @@
               "source": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 67108864,
-                "x-max-utf8-bytes": 67108864
+                "x-max-utf8-bytes": 4294967295
               }
             },
             "required": [
@@ -31503,14 +31499,13 @@
               "scripts": {
                 "type": "array",
                 "minItems": 1,
-                "description": "Replaces the whole armed set atomically. A refusal leaves the previous set and its output exactly as they were. Any number of scripts of any size, as long as the command fits one 64 MiB Console payload as JSON.",
+                "description": "Replaces the whole armed set atomically. A refusal leaves the previous set and its output exactly as they were. Any number of scripts of any size in one Console record of up to 4 GiB as JSON; add_document_start grows a set past that.",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
                   "properties": {
                     "origin": {
                       "type": "string",
-                      "maxLength": 256,
                       "description": "One exact http(s) origin spelled as url::Origin::Serialize writes it: lowercase, with no path, credentials, wildcard, host suffix, trailing slash or default port, an IPv6 host as its canonical bracketed literal, and a numeric host as four decimal octets. Any other spelling is refused, because no document's origin could equal it."
                     },
                     "frame": {
@@ -31523,13 +31518,11 @@
                     },
                     "path_prefix": {
                       "type": "string",
-                      "maxLength": 256,
                       "description": "Optional literal committed-path prefix starting with /. No query or fragment. Absent matches every path in that origin."
                     },
                     "source": {
                       "type": "string",
-                      "x-max-utf8-bytes": 67108864,
-                      "description": "The snippet. It runs in the page main world with the page's full authority until it returns, and receives a report(value) function. Clearing or replacing the set, or ending the session, stops it. Log argument kinds, lengths, counts and digests, never raw strings, tokens, cookies, credentials or bodies."
+                      "description": "The snippet. It runs in the page main world with the page's full authority until it returns, and receives a report(value) function. Removing it, clearing or replacing the set, or ending the session stops it. Log argument kinds, lengths, counts and digests, never raw strings, tokens, cookies, credentials or bodies."
                     }
                   },
                   "required": [
@@ -31564,7 +31557,7 @@
                   "effects": [
                     "data-discard"
                   ],
-                  "when": "Replacing the armed set increments its generation, which discards the previous generation's bounded output and makes report functions a page retained inert."
+                  "when": "Replacing the armed set discards the previous set's output and makes report functions a page retained from it inert."
                 },
                 {
                   "effects": [
@@ -31606,7 +31599,7 @@
                   "when": {}
                 }
               ],
-              "notes": "Declares the authorization boundary: one exact origin, exactly one frame kind, an optional literal path prefix. There is no pattern, wildcard, URL guessing, or retroactive injection into documents that are already open. Snippet output is bounded page JavaScript, never evidence.",
+              "notes": "Declares the authorization boundary: one exact origin, exactly one frame kind, an optional literal path prefix. There is no pattern, wildcard, URL guessing, or retroactive injection into documents that are already open. Snippet output is page JavaScript, never evidence.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/native_console.rs",
@@ -31615,6 +31608,205 @@
                 {
                   "path": "apps/origin-trace-backend/src/native_console.rs",
                   "symbol": "validate_document_start"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "add_document_start",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$",
+                "description": "Canonical nonzero uint64 decimal identifier."
+              },
+              "scripts": {
+                "type": "array",
+                "minItems": 1,
+                "description": "Arms these scripts beside the ones already armed, which keep their ids, their output and their running injections. A refusal leaves the set and its output exactly as they were. Any number of scripts of any size in one Console record of up to 4 GiB as JSON; send several adds for more.",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "origin": {
+                      "type": "string",
+                      "description": "One exact http(s) origin spelled as url::Origin::Serialize writes it: lowercase, with no path, credentials, wildcard, host suffix, trailing slash or default port, an IPv6 host as its canonical bracketed literal, and a numeric host as four decimal octets. Any other spelling is refused, because no document's origin could equal it."
+                    },
+                    "frame": {
+                      "type": "string",
+                      "enum": [
+                        "top",
+                        "child"
+                      ],
+                      "description": "Exactly one frame kind. Request both as two rules so the armed set always states which frames it reaches."
+                    },
+                    "path_prefix": {
+                      "type": "string",
+                      "description": "Optional literal committed-path prefix starting with /. No query or fragment. Absent matches every path in that origin."
+                    },
+                    "source": {
+                      "type": "string",
+                      "description": "The snippet. It runs in the page main world with the page's full authority until it returns, and receives a report(value) function. Removing it, clearing or replacing the set, or ending the session stops it. Log argument kinds, lengths, counts and digests, never raw strings, tokens, cookies, credentials or bodies."
+                    }
+                  },
+                  "required": [
+                    "origin",
+                    "frame",
+                    "source"
+                  ]
+                }
+              },
+              "confirm_document_start": {
+                "type": "boolean",
+                "const": true,
+                "description": "Confirm that armed snippets run automatically in every new matching document, before that document's own scripts."
+              }
+            },
+            "required": [
+              "action",
+              "session_id",
+              "scripts",
+              "confirm_document_start"
+            ],
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "code-execution",
+                "disposable-target-mutation"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "live-target-mutation"
+                  ],
+                  "when": "The session is an explicitly authorized live capture binding, so matching documents are real captured pages rather than a disposable browser's."
+                }
+              ],
+              "uncertainties": [
+                "A native transport timeout leaves it unknown whether the browser added the scripts. Read the state before adding again; nothing is retried automatically.",
+                "An armed snippet's effects depend on the supplied source. It runs in the page main world of every new matching document with that page's full authority, and work it schedules can outlive its injection."
+              ],
+              "prerequisites": [
+                {
+                  "id": "local-request",
+                  "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+                },
+                {
+                  "id": "bounded-json-object",
+                  "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+                },
+                {
+                  "id": "native-action-idle",
+                  "condition": "No other native console action may hold the session lock."
+                },
+                {
+                  "id": "native-session-current",
+                  "condition": "session_id must equal the current native console session."
+                },
+                {
+                  "id": "native-document-start-permitted",
+                  "condition": "The browser must advertise document-start support on its target listing, which requires the rebuilt overlay and the browser-session switch."
+                }
+              ],
+              "confirmations": [
+                {
+                  "field": "confirm_document_start",
+                  "value": true,
+                  "when": {}
+                }
+              ],
+              "notes": "Each added script declares its own authorization boundary, as for arm_document_start. Scripts already armed are untouched. Snippet output is page JavaScript, never evidence.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_console.rs",
+                  "symbol": "NativeConsole::action"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/native_console.rs",
+                  "symbol": "validate_document_start"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "remove_document_start",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$",
+                "description": "Canonical nonzero uint64 decimal identifier."
+              },
+              "script_ids": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "description": "Armed scripts to remove, by the script_id get_native_console_document_start lists. Every id must be armed, or nothing is removed.",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]{0,19}$",
+                  "description": "Canonical nonzero uint64 decimal identifier."
+                }
+              }
+            },
+            "required": [
+              "action",
+              "session_id",
+              "script_ids"
+            ],
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [
+                "A native transport timeout leaves it unknown whether the browser removed the scripts. Read the state before relying on it; nothing is retried automatically."
+              ],
+              "prerequisites": [
+                {
+                  "id": "local-request",
+                  "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+                },
+                {
+                  "id": "bounded-json-object",
+                  "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+                },
+                {
+                  "id": "native-action-idle",
+                  "condition": "No other native console action may hold the session lock."
+                },
+                {
+                  "id": "native-session-current",
+                  "condition": "session_id must equal the current native console session."
+                },
+                {
+                  "id": "native-document-start-permitted",
+                  "condition": "The browser must advertise document-start support on its target listing, which requires the rebuilt overlay and the browser-session switch."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Removes the named scripts and stops their running injections. The other armed scripts, their ids and every retained record, the removed scripts' included, stay. New documents stop running the removed snippets, and a report function a page retained from one becomes an inert no-op. Work a snippet already scheduled in a page is not rolled back.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_console.rs",
+                  "symbol": "NativeConsole::action"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/native_console.rs",
+                  "symbol": "validate_script_ids"
                 }
               ]
             }
@@ -33945,7 +34137,7 @@
               "source": {
                 "type": "string",
                 "minLength": 1,
-                "x-max-utf8-bytes": 67108864
+                "x-max-utf8-bytes": 4294967295
               }
             },
             "required": [
@@ -33970,7 +34162,7 @@
               "offset": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 65536
+                "maximum": 9007199254740991
               }
             },
             "required": [
@@ -33991,15 +34183,12 @@
               },
               "path": {
                 "type": "array",
-                "maxItems": 8,
                 "items": {
-                  "type": "string",
-                  "x-max-utf8-bytes": 128
+                  "type": "string"
                 }
               },
               "prefix": {
-                "type": "string",
-                "x-max-utf8-bytes": 128
+                "type": "string"
               }
             },
             "required": [
@@ -34189,11 +34378,7 @@
             ]
           },
           "text": {
-            "type": "string",
-            "x-max-utf8-bytes": 2048
-          },
-          "truncated": {
-            "type": "boolean"
+            "type": "string"
           },
           "handle": {
             "type": "string",
@@ -34205,8 +34390,7 @@
         },
         "required": [
           "type",
-          "text",
-          "truncated"
+          "text"
         ]
       },
       "NativeConsoleLocation": {
@@ -34214,8 +34398,7 @@
         "additionalProperties": false,
         "properties": {
           "url": {
-            "type": "string",
-            "x-max-utf8-bytes": 2048
+            "type": "string"
           },
           "line": {
             "type": "integer",
@@ -34226,8 +34409,7 @@
             "minimum": 1
           },
           "function": {
-            "type": "string",
-            "x-max-utf8-bytes": 2048
+            "type": "string"
           }
         },
         "required": [
@@ -34240,8 +34422,7 @@
         "additionalProperties": false,
         "properties": {
           "name": {
-            "type": "string",
-            "x-max-utf8-bytes": 2048
+            "type": "string"
           },
           "accessor": {
             "type": "boolean"
@@ -34260,16 +34441,13 @@
         "additionalProperties": false,
         "properties": {
           "text": {
-            "type": "string",
-            "x-max-utf8-bytes": 2048
+            "type": "string"
           },
           "url": {
-            "type": "string",
-            "x-max-utf8-bytes": 512
+            "type": "string"
           },
           "stack": {
-            "type": "string",
-            "x-max-utf8-bytes": 2048
+            "type": "string"
           },
           "line": {
             "type": "integer",
@@ -34285,9 +34463,6 @@
           },
           "time": {
             "type": "number"
-          },
-          "truncated": {
-            "type": "boolean"
           }
         },
         "required": [
@@ -34296,8 +34471,7 @@
           "stack",
           "line",
           "level",
-          "time",
-          "truncated"
+          "time"
         ]
       },
       "NativeConsoleActivity": {
@@ -34320,12 +34494,10 @@
             "pattern": "^(0|[1-9][0-9]{0,19})$"
           },
           "origin": {
-            "type": "string",
-            "x-max-utf8-bytes": 256
+            "type": "string"
           },
           "method": {
-            "type": "string",
-            "x-max-utf8-bytes": 16
+            "type": "string"
           },
           "status": {
             "type": "integer"
@@ -34389,15 +34561,13 @@
                 ]
               },
               "text": {
-                "type": "string",
-                "x-max-utf8-bytes": 8192
+                "type": "string"
               },
               "value": {
                 "$ref": "#/components/schemas/NativeConsoleValue"
               },
               "properties": {
                 "type": "array",
-                "maxItems": 32,
                 "items": {
                   "$ref": "#/components/schemas/NativeConsoleProperty"
                 }
@@ -34405,53 +34575,51 @@
               "offset": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 65536
+                "maximum": 9007199254740991
               },
               "more": {
-                "type": "boolean"
-              },
-              "truncated": {
-                "type": "boolean"
+                "type": "boolean",
+                "description": "inspect: another inspect at offset reads the next properties. poll and traffic: more records were waiting than one page carries, so poll again at once."
               },
               "location": {
                 "$ref": "#/components/schemas/NativeConsoleLocation"
               },
               "stack": {
                 "type": "array",
-                "maxItems": 16,
                 "items": {
                   "$ref": "#/components/schemas/NativeConsoleLocation"
                 }
               },
               "messages": {
                 "type": "array",
-                "maxItems": 32,
                 "items": {
                   "$ref": "#/components/schemas/NativeConsoleMessage"
-                }
+                },
+                "description": "The oldest waiting console messages, each whole, a page at a time."
               },
               "dropped": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 2147483647
+                "maximum": 2147483647,
+                "description": "Saturating count of records evicted unread past the 64 MiB a document or the browser keeps for an owner that is not polling."
               },
               "events": {
+                "description": "traffic: the selected document's oldest resource completions that fit one 64 KiB reply. The browser keeps every event until it is read; more is true while some remain, and dropped counts only events of documents a listing can no longer name.",
                 "type": "array",
-                "maxItems": 64,
                 "items": {
                   "$ref": "#/components/schemas/NativeConsoleActivity"
-                }
+                },
+                "description": "The oldest waiting resource completions of this document, a page at a time."
               },
               "items": {
                 "type": "array",
-                "maxItems": 24,
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
                   "properties": {
                     "name": {
                       "type": "string",
-                      "pattern": "^[A-Za-z_$][\\w$]{0,127}$"
+                      "pattern": "^[A-Za-z_$][\\w$]*$"
                     },
                     "kind": {
                       "enum": [
@@ -34460,8 +34628,7 @@
                       ]
                     },
                     "signature": {
-                      "type": "string",
-                      "maxLength": 128
+                      "type": "string"
                     }
                   },
                   "required": [
@@ -34485,8 +34652,7 @@
                     ],
                     "properties": {
                       "origin": {
-                        "type": "string",
-                        "x-max-utf8-bytes": 256
+                        "type": "string"
                       },
                       "frame": {
                         "enum": [
@@ -35237,7 +35403,7 @@
                   "count": {
                     "type": "integer",
                     "minimum": 0,
-                    "maximum": 256,
+                    "maximum": 48806446,
                     "description": "Sites armed now."
                   },
                   "digests": {
@@ -35260,7 +35426,7 @@
                   "module_allowlist",
                   "reset"
                 ],
-                "description": "Version 1 of the session's Wasm sampling, as the launcher passed it to Brave: set by the start options wasm_dispatch, wasm_call_indirect and the wasm_samples_* and wasm_function_* options, or the launcher's REB_NATIVE_WASM_* variables. Each renderer keeps at most records_per_window full records per stream in each window_ms window, and samples_per_function of one function; the next window records again. Null when neither stream records or the backend is not live. Not required: a backend from before this object omits it.",
+                "description": "Version 1 of the session's Wasm sampling, as the launcher passed it to Brave: set by the start options wasm_dispatch, wasm_call_indirect and the wasm_samples_* and wasm_function_* options, or the launcher's REB_NATIVE_WASM_* variables. Each renderer keeps at most records_per_window full records per stream in each window_ms window, and samples_per_function of one function; the next window records again. With every_record, set by wasm_every_record, every record the filters admit is kept: there is no window budget or allowance, and records_per_window is null. Null when neither stream records or the backend is not live. Not required: a backend from before this object omits it.",
                 "properties": {
                   "version": { "const": 1 },
                   "streams": {
@@ -35271,7 +35437,14 @@
                     "items": { "type": "string", "enum": ["br_table", "call_indirect"] }
                   },
                   "window_ms": { "const": 1000 },
-                  "records_per_window": { "const": 1024 },
+                  "every_record": {
+                    "type": "boolean",
+                    "description": "The session keeps every record the filters admit: no per-window budget in the renderer, no browser ceiling, and no per-function or per-site allowance. Absent from a backend before v0.6.0, which means false."
+                  },
+                  "records_per_window": {
+                    "enum": [1024, null],
+                    "description": "Full records of one stream per renderer per window; null with every_record."
+                  },
                   "samples_per_function": {
                     "type": ["integer", "null"],
                     "minimum": 1,
@@ -42425,13 +42598,13 @@
             "description": "Whether this browser session permits arming at all. False means a gate is missing, not that the set is empty."
           },
           "contract_version": {
-            "const": 3,
+            "const": 4,
             "type": "integer"
           },
           "generation": {
             "type": "string",
             "pattern": "^(0|[1-9][0-9]{0,19})$",
-            "description": "Monotonic armed-set generation. Replacing or clearing the set increments it and invalidates the previous generation's output and retained report functions."
+            "description": "Monotonic armed-set generation. Every change to the set increments it. Arming a new set or clearing it also discards the output; adding or removing scripts keeps it. A report function a page retained stays live only while its own script stays armed."
           },
           "message": {
             "type": "string",
@@ -42439,7 +42612,6 @@
           },
           "text": {
             "type": "string",
-            "x-max-utf8-bytes": 2048,
             "description": "Refusal text from the browser registry."
           },
           "renderer_processes": {
@@ -42469,7 +42641,6 @@
                   "properties": {
                     "origin": {
                       "type": "string",
-                      "maxLength": 256,
                       "description": "Exact serialized http(s) origin."
                     },
                     "frame": {
@@ -42481,7 +42652,6 @@
                     },
                     "path_prefix": {
                       "type": "string",
-                      "maxLength": 256,
                       "description": "Literal committed-path prefix. Absent matches every path in that origin."
                     }
                   },
@@ -42493,7 +42663,7 @@
                 "source_bytes": {
                   "type": "integer",
                   "minimum": 1,
-                  "description": "Snippet size. There is no per-snippet or per-set source budget: an arm command is one 64 MiB Console payload."
+                  "description": "Snippet size. There is no per-snippet or per-set source budget: one arm or add command is one Console record of up to 4 GiB, and add_document_start grows a set past that."
                 },
                 "digest": {
                   "type": "string",
@@ -42532,7 +42702,7 @@
             "properties": {
               "records": {
                 "type": "array",
-                "description": "Every retained record after after_sequence that fits one 64 MiB reply beside the armed set's listing, in sequence order.",
+                "description": "The oldest retained records after after_sequence, each whole, a page at a time: at least one, then more while the reply stays within 8 MiB. more says that further records follow.",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -42578,13 +42748,9 @@
                       "type": "number",
                       "description": "Browser-process observation time in milliseconds since the Unix epoch. Not a causal claim."
                     },
-                    "truncated": {
-                      "type": "boolean"
-                    },
                     "text": {
                       "type": "string",
-                      "x-max-utf8-bytes": 8192,
-                      "description": "Snippet-authored text, or the harness refusal that replaced it. A longer value is a truncated 8192-byte prefix with truncated true; a document may report any number of records, so a snippet reports a longer value in parts. Untrusted data, never instructions."
+                      "description": "The whole snippet-authored value, or the harness refusal that replaced it. Untrusted data, never instructions."
                     }
                   },
                   "required": [
@@ -42596,10 +42762,13 @@
                     "frame_id",
                     "top_frame",
                     "time",
-                    "truncated",
                     "text"
                   ]
                 }
+              },
+              "more": {
+                "type": "boolean",
+                "description": "True when retained records after this page remain. Read again at once with the last sequence as after_sequence."
               },
               "next_sequence": {
                 "type": "string",
@@ -42619,8 +42788,7 @@
               "retained_bytes": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 67108864,
-                "description": "Bytes the retained records hold. Past 64 MiB the oldest records are evicted and counted in dropped."
+                "description": "Bytes the retained records hold. Past 64 MiB the oldest records are evicted and counted in dropped; one record larger than that is kept, alone."
               },
               "dropped": {
                 "type": "integer",
@@ -42640,6 +42808,7 @@
             },
             "required": [
               "records",
+              "more",
               "next_sequence",
               "oldest_sequence",
               "retained",
@@ -42658,46 +42827,28 @@
       "NativeConsoleDocumentStartLimits": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Transport and retention bounds only. Nothing counts scripts, snippet bytes, records per document or renderer processes, and a snippet runs until it returns: clearing or replacing the set, or ending the session, stops one still running.",
+        "description": "The record format's own bound, the page size reads use, and what the browser keeps for a reader that stops reading. Nothing counts scripts, snippet, rule or report bytes, records per document, renderer processes or execution time: a snippet runs until it returns, and removing it, clearing or replacing the set, or ending the session stops it.",
         "properties": {
-          "command_bytes": {
+          "record_bytes": {
             "type": "integer",
             "minimum": 1,
-            "description": "One arm command as UTF-8 JSON, every script included: the Console payload bound."
+            "description": "One arm or add command as UTF-8 JSON, every script included: the 32-bit length a Console record names. add_document_start grows a set past it."
           },
-          "rule_bytes": {
+          "page_bytes": {
             "type": "integer",
             "minimum": 1,
-            "description": "An origin or a path prefix. Rule fields are identities, not content."
-          },
-          "report_bytes": {
-            "type": "integer",
-            "minimum": 1,
-            "description": "One record's text. A longer report value is a truncated prefix."
+            "description": "A read carries at least one record, then more while it stays within this, and says more. It is a page size: nothing is refused or dropped because of it."
           },
           "retained_bytes": {
             "type": "integer",
             "minimum": 1,
-            "description": "Output the browser keeps; past it the oldest records are evicted and counted."
-          },
-          "reply_bytes": {
-            "type": "integer",
-            "minimum": 1,
-            "description": "One document-start reply: the armed set's listing plus every record after the cursor that fits."
-          },
-          "listing_bytes": {
-            "type": "integer",
-            "minimum": 1,
-            "description": "The most of a reply the armed set's listing may take, so the rest always carries output. A larger set is refused at arming."
+            "description": "Output the browser keeps for a reader that is not reading; past it the oldest records are evicted and counted in dropped."
           }
         },
         "required": [
-          "command_bytes",
-          "rule_bytes",
-          "report_bytes",
-          "retained_bytes",
-          "reply_bytes",
-          "listing_bytes"
+          "record_bytes",
+          "page_bytes",
+          "retained_bytes"
         ]
       },
       "NativeConsoleDocumentStart": {
@@ -42705,7 +42856,7 @@
         "additionalProperties": false,
         "properties": {
           "contract_version": {
-            "const": 3,
+            "const": 4,
             "type": "integer"
           },
           "available": {
@@ -42763,7 +42914,7 @@
         "description": "A refused arm leaves the previous set and its output exactly as they were.",
         "properties": {
           "contract_version": {
-            "const": 3,
+            "const": 4,
             "type": "integer"
           },
           "state": {
@@ -44792,6 +44943,11 @@
             },
             "description": "SHA-256 digests of Wasm modules to admit. A module whose digest is not listed does not advance either sample index. Requires wasm_dispatch or wasm_call_indirect."
           },
+          "wasm_every_record": {
+            "type": "boolean",
+            "default": false,
+            "description": "Keep every Wasm record the filters admit, in place of the one-second pacing: no per-window budget in the renderer, no browser ceiling, and no per-function or per-site allowance, so it takes neither wasm_samples_per_function nor wasm_samples_per_indirect_site. The function and module filters still apply. Requires wasm_dispatch or wasm_call_indirect."
+          },
           "guest_adapter": {
             "type": "string",
             "minLength": 2,
@@ -44869,7 +45025,7 @@
             "type": "string",
             "minLength": 2,
             "maxLength": 4096,
-            "description": "Absolute path of a native-js-invocation-sites-v1 file (1 to 256 sites) to arm, from resolve_js_invocation_site entries. Armed from a private copy for the whole session. Needs category bit 512 and a Brave with invocation capture; a Brave without it refuses the start. Not with js_invocation_saved_sites."
+            "description": "Absolute path of a native-js-invocation-sites-v1 file (at least one site, no size limit) to arm, from resolve_js_invocation_site entries. Armed from a private copy for the whole session. Needs category bit 512 and a Brave with invocation capture; a Brave without it refuses the start. Not with js_invocation_saved_sites."
           },
           "js_invocation_saved_sites": {
             "type": "boolean",
@@ -45230,16 +45386,16 @@
             "const": "reb-js-invocation-site-set-v1"
           },
           "limit": {
-            "const": 256
+            "const": 48806446
           },
           "count": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 256
+            "maximum": 48806446
           },
           "sites": {
             "type": "array",
-            "maxItems": 256,
+            "maxItems": 48806446,
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -45257,7 +45413,7 @@
                 },
                 "armed_in_capture": {
                   "type": "boolean",
-                  "description": "This capture arms the site now. False for a site saved after a capture that does not follow the set started, or saved once all 256 of a following capture's slots were used; the next capture arms it."
+                  "description": "This capture arms the site now. False for a site saved after a capture that does not follow the set started, or saved once all 48,806,446 of a following capture's slots were used; the next capture arms it."
                 },
                 "label": {
                   "type": "string",
@@ -45354,7 +45510,7 @@
               "count": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 256,
+                "maximum": 48806446,
                 "description": "Sites armed now."
               },
               "revision": {
@@ -45375,7 +45531,7 @@
               },
               "sites": {
                 "type": "array",
-                "maxItems": 256,
+                "maxItems": 48806446,
                 "description": "The capture's slot table in order: entry n is site_slot n of this session's js_invocation records, and its source_sha256 and anchor_offset equal theirs. A slot keeps its site for the capture; armed false means the site was removed from the saved set, so its functions record no new calls. label comes from the saved set, or Unlabeled function.",
                 "items": {
                   "type": "object",
@@ -45543,7 +45699,7 @@
                 },
                 {
                   "id": "set-capacity",
-                  "condition": "The saved set holds at most 256 sites and refuses a duplicate source_sha256 and anchor_offset."
+                  "condition": "The saved set holds up to 48,806,446 sites and refuses a duplicate source_sha256 and anchor_offset."
                 }
               ],
               "confirmations": [],
@@ -45672,19 +45828,15 @@
             "description": "Canonical nonzero uint64 decimal identifier."
           },
           "origin": {
-            "type": "string",
-            "maxLength": 256
-          },
-          "truncated": {
-            "type": "boolean"
+            "type": "string"
           },
           "label": {
             "type": "string",
-            "x-max-utf8-bytes": 128
+            "description": "The whole title or frame name. Display only, never identity."
           },
           "url": {
             "type": "string",
-            "x-max-utf8-bytes": 512
+            "description": "The whole committed URL. Display only, never identity."
           },
           "main_frame": {
             "type": "boolean",
@@ -45719,7 +45871,6 @@
         "required": [
           "id",
           "origin",
-          "truncated",
           "label",
           "url",
           "main_frame",

@@ -2439,13 +2439,15 @@ sets only bit 3, or bit 2 before version 3. A digest is present unless bit 2
 or 3.
 
 Version 3 hashes a source of any length; versions 1 and 2 hash one of at most
-16 MiB. The backend reads the source a digest matches whole, so a frame
-anywhere in a retained source resolves. The renderer charges a source to its
-256 MiB [artifact credit](native-compiled-scripts-v2.md) before it sends the
-identity, so bit 1 means the source follows. The first `source_backlog` in a
+16 MiB. The renderer charges a source to its 256 MiB
+[artifact credit](native-compiled-scripts-v2.md) before it sends the identity,
+so bit 1 means the source follows. The first `source_backlog` in a
 configuration also records an `artifact_capture_failed` event with reason
 `stack_script_source_backlog`, so the session's failure counts name it, and
-the frame reports `source_backlog`.
+the frame reports `source_backlog`. The backend reads the source a digest
+matches whole, so a frame anywhere in a retained source resolves; only a
+version 1 or 2 record of a source longer than 16 MiB leaves its frames without
+a digest to join.
 
 JavaScript sources are retained only in content capture
 (`--reb-capture-request-content`), so a Metadata only session keeps frames,

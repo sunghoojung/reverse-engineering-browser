@@ -17,6 +17,10 @@ struct LiveSessionOptions: Equatable {
   // Wasm br_table and call_indirect sampling. It forces Liftoff-only
   // compilation, so a researcher timing a Wasm-heavy page can turn it off.
   var wasmDispatch = true
+  // Every br_table, call_indirect and execution record the Wasm filters
+  // admit, with no per-second window or per-function count
+  // (protocol/native-wasm-dispatch-v1.md). It needs Wasm dispatch.
+  var wasmEveryRecord = false
   var ignoreDebuggerStatements = true
   // Content-mode capture: a Metadata session records neither.
   var canvasImages = true
@@ -42,6 +46,7 @@ struct LiveSessionOptions: Equatable {
     ("request_stacks", \.requestStacks, "REB_NATIVE_REQUEST_STACKS"),
     ("promise_stacks", \.promiseStacks, "REB_NATIVE_PROMISE_STACKS"),
     ("wasm_dispatch", \.wasmDispatch, "REB_NATIVE_WASM_DISPATCH"),
+    ("wasm_every_record", \.wasmEveryRecord, "REB_NATIVE_WASM_EVERY_RECORD"),
     ("ignore_debugger_statements", \.ignoreDebuggerStatements, "REB_NATIVE_QUIET_MODE"),
     ("canvas_images", \.canvasImages, "REB_CAPTURE_CANVAS_IMAGES"),
     ("invocation_digests", \.invocationDigests, "REB_NATIVE_JS_INVOCATION_DIGESTS"),
@@ -125,18 +130,28 @@ struct LiveSessionOptions: Equatable {
     let stacks = requestStacks && allows(1280)
     // Wasm dispatch needs VM (512) and Artifact (1024).
     let wasm = wasmDispatch && allows(1536)
-    return [
+    let everyRecord = wasm && wasmEveryRecord
+    var switches = [
       "REB_FRESH_PROFILE": on(freshProfile),
       "REB_NATIVE_REQUEST_STACKS": on(stacks),
       "REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED": "1",
       "REB_NATIVE_PROMISE_STACKS": on(stacks && promiseStacks),
       "REB_NATIVE_WASM_DISPATCH": on(wasm),
       "REB_NATIVE_WASM_CALL_INDIRECT": on(wasm),
+      "REB_NATIVE_WASM_EVERY_RECORD": on(everyRecord),
       "REB_NATIVE_QUIET_MODE": on(ignoreDebuggerStatements),
       "REB_CONSOLE_DOCUMENT_START": on(documentStart),
       "REB_CAPTURE_BROWSER_INTERNAL": on(browserInternal),
       "REB_CAPTURE_EXTENSION_TRAFFIC": on(extensionTraffic),
     ]
+    // Every record takes no per-function or per-site count, which the
+    // launcher refuses together with it, so the panel's choice clears any
+    // inherited one.
+    if everyRecord {
+      switches["REB_NATIVE_WASM_SAMPLES_PER_FUNCTION"] = ""
+      switches["REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE"] = ""
+    }
+    return switches
   }
 
   // Where the launcher keeps the persistent research profiles for app

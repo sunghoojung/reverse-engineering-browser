@@ -59,7 +59,7 @@ was seen on. A session reloads the same scripts in navigation after
 navigation, so the pass reads, verifies and analyzes each content (kind,
 SHA-256, content path and size) once and names the result for every artifact
 that shares it. An artifact with an opcode workspace is analyzed on its own,
-because the workspace joins that artifact's samples under its own work budget.
+because the workspace joins that artifact's samples under its own work meter.
 The pass keeps the 1,024 most recent contents for reuse; an older one is
 analyzed again if it reappears. Each result is spooled in canonical form to an
 unnamed private file in the artifact store as it is produced. Memory then holds
@@ -273,7 +273,7 @@ a syntactic loop. A region whose table re-enters itself this way can
 therefore rise from `candidate` to `likely-vm` when recovery finds handlers.
 Version 2 documents remain valid.
 
-Producer `1.11.0` analyzes an artifact of any size. It reads every byte,
+Producer `1.12.0` analyzes an artifact of any size. It reads every byte,
 scores every function region and counts every rule match, so
 `matches_truncated` is always false. A Wasm module is no longer refused for
 its section, function or instruction count. The scan stays linear: each
@@ -283,7 +283,7 @@ its parent. The removed `max_artifact_bytes`, `max_js_*` and `max_wasm_*`
 limits are absent from its profile, so its profile digest differs; earlier
 documents that carry them remain valid.
 
-Producer `1.12.0` lists every site of an artifact's dispatch classification,
+Producer `1.13.0` lists every site of an artifact's dispatch classification,
 in byte order, and every decoded site of a Wasm module's dispatch inventory,
 ranked. Earlier producers listed the 256 strongest or best ranked and counted
 the rest in `omitted_site_count`, which a Wasm inventory also reported as a

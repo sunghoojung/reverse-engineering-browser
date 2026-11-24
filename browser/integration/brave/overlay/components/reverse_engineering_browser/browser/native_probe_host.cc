@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -203,6 +203,46 @@ void NativeProbeHost::BindWasmModule(const std::uint64_t token,
     wasm_modules_.erase(wasm_modules_.begin());
 }
 
+void NativeProbeHost::CaptureWasmRecords(const std::uint64_t capture_epoch,
+                                         std::vector<mojom::NativeWasmRecordPtr> records) {
+  for (auto& record : records) {
+    switch (record->which()) {
+      case mojom::NativeWasmRecord::Tag::kDispatch: {
+        auto& r = *record->get_dispatch();
+        CaptureWasmDispatch(capture_epoch, r.session_id, r.sequence_number, r.monotonic_time_ns,
+                            r.process_id, r.thread_id, r.frame_id, r.execution_context_id,
+                            r.document_token_high, r.document_token_low, r.function_index,
+                            r.module_byte_offset, r.selector, r.table_count, r.caller_observed,
+                            r.caller_kind, r.caller_function_index, r.sample_index,
+                            r.js_invocation_state, r.js_invocation_id, r.source_url, r.module_token,
+                            std::move(r.content), r.credit_bytes);
+        break;
+      }
+      case mojom::NativeWasmRecord::Tag::kIndirect: {
+        auto& r = *record->get_indirect();
+        CaptureWasmIndirect(capture_epoch, r.session_id, r.sequence_number, r.monotonic_time_ns,
+                            r.process_id, r.thread_id, r.frame_id, r.execution_context_id,
+                            r.document_token_high, r.document_token_low, r.function_index,
+                            r.module_byte_offset, r.table_index, r.slot, r.callee_function_index,
+                            r.resolution, r.sample_index, r.js_invocation_state, r.js_invocation_id,
+                            r.source_url, r.module_token, std::move(r.content), r.credit_bytes);
+        break;
+      }
+      case mojom::NativeWasmRecord::Tag::kExecution: {
+        auto& r = *record->get_execution();
+        CaptureWasmExecution(capture_epoch, r.session_id, r.sequence_number, r.monotonic_time_ns,
+                             r.process_id, r.thread_id, r.frame_id, r.execution_context_id,
+                             r.document_token_high, r.document_token_low, r.invocation_id,
+                             r.function_index, r.module_byte_offset, r.related_sample_index, r.kind,
+                             r.reason, r.bounds, r.known, r.related_stream, r.js_invocation_state,
+                             r.js_invocation_id, r.source_url, r.module_token, std::move(r.content),
+                             r.credit_bytes);
+        break;
+      }
+    }
+  }
+}
+
 void NativeProbeHost::CaptureWasmDispatch(const std::uint64_t capture_epoch,
                                           const std::uint64_t session_id,
                                           const std::uint64_t sequence_number,
@@ -313,7 +353,8 @@ void NativeProbeHost::CaptureWasmDispatch(const std::uint64_t capture_epoch,
     return;
   }
   AdvanceWasmWindow(now);
-  if (wasm_capture_count_ >= kWasmBrowserWindowLimit) {
+  // Every record has no renderer window, so it has no ceiling here either.
+  if (!policy.every_record && wasm_capture_count_ >= kWasmBrowserWindowLimit) {
     refuse("native_wasm_dispatch_browser_budget_incomplete");
     return;
   }
@@ -436,7 +477,7 @@ void NativeProbeHost::CaptureWasmIndirect(const std::uint64_t capture_epoch,
     return;
   }
   AdvanceWasmWindow(now);
-  if (wasm_indirect_capture_count_ >= kWasmBrowserWindowLimit) {
+  if (!policy.every_record && wasm_indirect_capture_count_ >= kWasmBrowserWindowLimit) {
     refuse("native_wasm_indirect_browser_budget_incomplete");
     return;
   }
@@ -522,7 +563,8 @@ void NativeProbeHost::CaptureWasmExecution(const std::uint64_t capture_epoch,
     return;
   }
   AdvanceWasmWindow(now);
-  if (wasm_execution_capture_count_ >= kWasmBrowserWindowLimit) {
+  if (!session_->wasm_sample_budget().every_record &&
+      wasm_execution_capture_count_ >= kWasmBrowserWindowLimit) {
     refuse("native_wasm_execution_browser_budget_incomplete");
     return;
   }
@@ -605,10 +647,8 @@ void NativeProbeHost::CaptureNativeGuest(const std::uint64_t capture_epoch,
     if (carries_module && own_identity)
       SendNativeGuestModuleStatus(capture_epoch, h.sequence_number, false);
   };
-  if (guest_capture_count_ >= kNativeGuestSampleLimit) {
-    refuse("native_guest_browser_sample_budget");
-    return;
-  }
+  // Counted before any check, so a renderer cannot spend past the recipe's
+  // budget with refused captures either.
   ++guest_capture_count_;
   const auto now =
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
@@ -648,10 +688,19 @@ void NativeProbeHost::CaptureNativeGuest(const std::uint64_t capture_epoch,
   // Private copies defeat shared BigBuffer mutation between hashing and transfer.
   const std::vector<std::uint8_t> module_copy(wasm_module.begin(), wasm_module.end());
   const std::vector<std::uint8_t> bytecode_copy(bytecode.begin(), bytecode.end());
-  const auto adapter = ParseNativeWasmGuestAdapter(adapter_json);
+  // adapter_json equals the session's recipe, so it is parsed once per
+  // capture configuration rather than once per sample.
+  if (!guest_adapter_ || guest_adapter_->json != adapter_json)
+    guest_adapter_ = ParseNativeWasmGuestAdapter(adapter_json);
+  const auto& adapter = guest_adapter_;
   if (!adapter ||
       (!module_copy.empty() && NativeGuestDigest(module_copy) != adapter->module_sha256)) {
     refuse("native_guest_module_mismatch");
+    return;
+  }
+  // The recipe's own budget is the only one: no browser ceiling below it.
+  if (guest_capture_count_ > adapter->sample_limit) {
+    refuse("native_guest_browser_sample_budget");
     return;
   }
   const auto field = [&](std::size_t offset, std::size_t width) {
@@ -662,7 +711,7 @@ void NativeProbeHost::CaptureNativeGuest(const std::uint64_t capture_epoch,
     return value;
   };
   // The dispatch must be at the configured site its invocation marker names.
-  // All sites count against the one browser sample budget above.
+  // All sites count against the one sample budget above.
   std::uint32_t site_index = 0;
   const auto* site = FindNativeGuestSite(*adapter, static_cast<std::uint32_t>(field(4, 4)),
                                          static_cast<std::uint32_t>(field(8, 4)), &site_index);
@@ -670,9 +719,8 @@ void NativeProbeHost::CaptureNativeGuest(const std::uint64_t capture_epoch,
   for (std::size_t n = 0; n < 4; ++n)
     marker_site |= std::to_integer<std::uint64_t>(capture.invocation.inline_payload[80 + n])
                    << (n * 8U);
-  if (!site || marker_site != site_index || guest_capture_count_ > adapter->sample_limit ||
-      field(20, 4) >= adapter->sample_limit || field(76, 4) != site->pc_local_index ||
-      field(88, 4) != site->memory_index ||
+  if (!site || marker_site != site_index || field(20, 4) >= adapter->sample_limit ||
+      field(76, 4) != site->pc_local_index || field(88, 4) != site->memory_index ||
       field(80, 8) != static_cast<std::uint64_t>(site->pc_adjustment) ||
       bytecode_copy.size() < site->opcode_width ||
       field(40, 8) > bytecode_copy.size() - site->opcode_width) {
@@ -962,11 +1010,15 @@ void NativeProbeHost::Configure(const std::uint64_t session_id,
   // Before the configuration, so this renderer's first armed document already
   // has the scope (protocol/native-debugger-observation-v1.md).
   SendDebuggerWatchScope();
-  client_->Configure(session_id, category_mask, expires_at_monotonic_ns, capture_canvas_images,
-                     std::move(renderer_region), wasm_capture_epoch_,
-                     session_->guest_adapter_json(), session_->js_dispatch_sites(),
-                     session_->js_invocation_sites(), session_->js_invocation_digests(),
-                     capture_request_content, session_->capture_browser_internal());
+  client_->Configure(
+      session_id, category_mask, expires_at_monotonic_ns, capture_canvas_images,
+      std::move(renderer_region), wasm_capture_epoch_, session_->guest_adapter_json(),
+      session_->js_dispatch_sites(),
+      session_->js_invocation_sites()
+          ? std::make_optional<mojo_base::BigBuffer>(base::span(*session_->js_invocation_sites()))
+          : std::nullopt,
+      session_->js_invocation_digests(), capture_request_content,
+      session_->capture_browser_internal());
 }
 
 void NativeProbeHost::Disable() {
@@ -987,6 +1039,7 @@ void NativeProbeHost::Disable() {
   wasm_window_started_ns_ = 0;
   wasm_modules_.clear();
   guest_capture_count_ = 0;
+  guest_adapter_.reset();
   guest_host_malformed_gap_emitted_ = false;
   if (client_.is_bound()) {
     client_->Disable();
@@ -1009,9 +1062,9 @@ void NativeProbeHost::ResetWasmSampleBudgets() {
     client_->ResetWasmSampleBudgets();
 }
 
-void NativeProbeHost::UpdateJsInvocationSites(const std::vector<std::uint8_t>& records) {
+void NativeProbeHost::UpdateJsInvocationSites(const base::span<const std::uint8_t> records) {
   if (client_.is_bound() && queue_)
-    client_->UpdateJsInvocationSites(records);
+    client_->UpdateJsInvocationSites(mojo_base::BigBuffer(records));
 }
 
 void NativeProbeHost::SendDebuggerWatchScope() {

@@ -315,8 +315,13 @@ const middle = complete('"雪"; document.querySelectorAll("main")', 19);
 assert.equal(middle.start, 14);
 assert.equal(middle.end, 30);
 assert.ok(middle.items.some(item => item.name === "querySelector"));
-assert.equal(complete("a".repeat(8193), 8193), null);
-assert.ok(complete("", 0, true).items.length <= 24);
+// Neither the source's length, a chain's length nor the number of matches
+// limits a suggestion.
+const afterLong = "a".repeat(1 << 20) + "; document.que";
+assert.deepEqual(Array.from(suggestions(afterLong)), ["querySelector", "querySelectorAll"]);
+assert.ok(suggestions("document.body" + ".parentElement".repeat(10000) + ".que").includes("querySelector"));
+const everyGlobal = complete("", 0, true).items.map(item => item.name);
+assert.ok(everyGlobal.length > 24 && new Set(everyGlobal).size === everyGlobal.length && everyGlobal.includes("window") && everyGlobal.includes("document"));
 assert.equal(complete("document.", -1), null);
 const completionQuery = runInNewContext(
   (await readFile(join(root, "apps/research-ui/source_syntax.js"), "utf8")) +
@@ -325,10 +330,12 @@ const completionQuery = runInNewContext(
 );
 assert.deepEqual(Array.from(completionQuery("customPageObject.method", 23).path), ["customPageObject"]);
 for (const text of ['"customPageObject.', "// obj.", "/* obj.", "/obj.", "const pattern = /obj.", "obj[pageGetter()].", "obj.method()."]) assert.equal(completionQuery(text, text.length), null, text);
-assert.equal(completionQuery("a".repeat(8193), 8193), null);
+assert.equal(completionQuery("a".repeat(1 << 20), 1 << 20).prefix.length, 1 << 20);
 assert.equal(completionQuery("window.", -1), null);
-assert.equal(completionQuery("a".repeat(129) + ".", 130), null);
-console.log("PASS bounded local console completions, lexical exclusions, property chains and UTF-16 replacement");
+assert.equal(completionQuery("a".repeat(129) + ".", 130).path[0].length, 129);
+const deep = Array.from({length: 10000}, (_, index) => `p${index}`).join(".") + ".x";
+assert.equal(completionQuery(deep, deep.length).path.length, 10000);
+console.log("PASS local console completions of any source, chain or name length, lexical exclusions, property chains and UTF-16 replacement");
 const ui = runInNewContext(
   (await readFile(join(root, "apps/research-ui/evidence_models.js"), "utf8")) +
     ";({isBrokerEvent,isWasmInspection})",

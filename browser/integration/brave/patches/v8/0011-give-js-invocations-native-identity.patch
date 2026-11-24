@@ -504,13 +504,14 @@ index 4bb86a13765869efebd16a95d89a1a387cc3627f..1482532bb65d888133ac9348a82fa0a2
    if (compilation_info()->SourcePositionRecordingMode() ==
 diff --git a/src/interpreter/reb-js-invocation.cc b/src/interpreter/reb-js-invocation.cc
 new file mode 100644
-index 0000000000000000000000000000000000000000..51e35ae598a67940c03d8e6784b9b30b58d494fa
+index 0000000000000000000000000000000000000000..8221f22b025b9b754b9fc7f170001a415233d32b
 --- /dev/null
 +++ b/src/interpreter/reb-js-invocation.cc
-@@ -0,0 +1,745 @@
-+// Copyright 2026 the V8 project authors. All rights reserved.
-+// Use of this source code is governed by a BSD-style license that can be
-+// found in the LICENSE file.
+@@ -0,0 +1,746 @@
++// Copyright 2026 The Reverse Engineering Browser Authors
++// This Source Code Form is subject to the terms of the Mozilla Public
++// License, v. 2.0. If a copy of the MPL was not distributed with this file,
++// You can obtain one at https://mozilla.org/MPL/2.0/.
 +
 +#include "src/interpreter/reb-js-invocation.h"
 +
@@ -1255,13 +1256,14 @@ index 0000000000000000000000000000000000000000..51e35ae598a67940c03d8e6784b9b30b
 +}  // namespace v8::internal::interpreter
 diff --git a/src/interpreter/reb-js-invocation.h b/src/interpreter/reb-js-invocation.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..d457bb30a49b2ee7bc10e268fa68db9004852c33
+index 0000000000000000000000000000000000000000..81c4aa2018e5e4cfaff0eac7eabab1b722a9dec3
 --- /dev/null
 +++ b/src/interpreter/reb-js-invocation.h
-@@ -0,0 +1,152 @@
-+// Copyright 2026 the V8 project authors. All rights reserved.
-+// Use of this source code is governed by a BSD-style license that can be
-+// found in the LICENSE file.
+@@ -0,0 +1,153 @@
++// Copyright 2026 The Reverse Engineering Browser Authors
++// This Source Code Form is subject to the terms of the Mozilla Public
++// License, v. 2.0. If a copy of the MPL was not distributed with this file,
++// You can obtain one at https://mozilla.org/MPL/2.0/.
 +
 +#ifndef V8_INTERPRETER_REB_JS_INVOCATION_H_
 +#define V8_INTERPRETER_REB_JS_INVOCATION_H_

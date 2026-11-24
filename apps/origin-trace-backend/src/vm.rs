@@ -97,7 +97,7 @@ static ANTI: LazyLock<Vec<(&str, u64, Regex)>> = LazyLock::new(|| {
 ].into_iter().map(|(id,weight,p)|(id,weight,Regex::new(p).expect("Anti-bot rule"))).collect()
 });
 pub(crate) fn current_producer() -> Value {
-    json!({"id":"origin-trace-vm-detector","version":"1.12.0"})
+    json!({"id":"origin-trace-vm-detector","version":"1.13.0"})
 }
 
 // The catalog and generated documents share this exact profile projection.
@@ -425,7 +425,7 @@ fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
                 let (a, b) = span(a, b);
                 let mut o = observation(id, a, b, detail);
                 o["match_count"] = json!(count);
-                // Every match is counted since producer 1.11.0.
+                // Every match is counted since producer 1.12.0.
                 o["matches_truncated"] = json!(false);
                 observations.push(o);
             }
@@ -1457,7 +1457,7 @@ fn build_documents(root: &Path, event_store: &Path) -> Result<Documents> {
         }
         // Bytes are read, verified and analyzed once per content. A content
         // with an opcode workspace is analyzed for each artifact, as the
-        // workspace joins that artifact's own samples under its own budget.
+        // workspace joins that artifact's own samples under its own meter.
         let key = [
             &artifact["kind"],
             &artifact["sha256"],
@@ -1496,7 +1496,7 @@ fn build_documents(root: &Path, event_store: &Path) -> Result<Documents> {
                         }
                         Ok((mut content, roles)) => {
                             // Without a workspace the classification work is
-                            // all done, so its budget is the content's alone.
+                            // all done, so its meter is the content's alone.
                             if roles.is_some_and(|roles| roles.meter.exhausted()) {
                                 work_limited(&mut content.frontend["dispatch_classification"]);
                             }
@@ -1899,7 +1899,7 @@ mod profile_tests {
     #[test]
     fn handler_recovery_requirement_has_distinct_profile_and_accepts_older_profiles() {
         let current = current_profile();
-        assert_eq!(current_producer()["version"], "1.12.0");
+        assert_eq!(current_producer()["version"], "1.13.0");
         assert_eq!(current["javascript_likely_vm_requires_handlers"], true);
         let mut historical = current.clone();
         historical
@@ -1907,8 +1907,8 @@ mod profile_tests {
             .unwrap()
             .remove("javascript_likely_vm_requires_handlers");
         // The pinned digest is the version 2 profile that preceded both,
-        // which still had the record, graph and input limits producer 1.11.0
-        // removed.
+        // which still had the record and graph limits producer 1.11.0 removed
+        // and the input limits producer 1.12.0 removed.
         historical["javascript_scoring_version"] = json!(2);
         let limits = historical["limits"].as_object_mut().unwrap();
         for (name, value) in [

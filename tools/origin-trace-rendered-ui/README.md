@@ -90,6 +90,36 @@ what is retained and not be clipped. The Console header chip must read
 `Doc-start: permitted` in full, stay inside the header, overlap no other header
 control, and leave arming disabled. Nothing connects, arms or runs.
 
+`test45ConsoleTranscriptKeepsEveryEntry` connects the Console to a live
+capture document that the test's own page `fetch` stands in for. That document
+logs twelve thousand messages, every 97th of them two lines tall, in pages of
+a thousand, and then one message of 1 MiB. At both window sizes, the
+transcript must follow its end, with the 1 MiB message drawn whole. Every
+line of that message must stay inside its wrap width: the line count, the last
+line's box and the widest line must match a monospace wrap of the message, and
+a failure prints them. Fewer than
+250 rows may be in the document at the end, a quarter of the way down, and
+through forty scroll steps there and back, and those rows must be consecutive
+messages that cover the viewport with no gap. PageDown must scroll the focused
+transcript through WebKit's own scroll animation, which the layout never
+interrupts, with a step in each of at least three frames. Home is then
+pressed while a second PageDown still moves. The page reports PageDown's
+first step in a script message, and the test presses Home from that report
+with no script call between them, so Home goes down before PageDown's next
+frame however slow the runner is. A try counts when Home followed fewer steps
+than a lone PageDown took, the last of them within a frame. One that does not
+count is made again, up to five times, and the test fails if none counts.
+Home must reach the first entry, handled by the transcript, and stay there
+300 ms later, past the step WebKit's keyboard scroll takes after the
+transcript's write. End, Command-Up and Command-Down must reach the last line
+of the 1 MiB message, the first entry and the last line again, each handled by
+the transcript. A timed-out wait prints each scroll, `scrollend`, key, layout
+write and changed frame that led to it, and for each key the steps before it,
+the frames since the last of them and the writes after it. Search
+must find `rendered message 4242` among rows that are not drawn and draw only
+that match, and Escape must restore every entry. Screenshots
+`console-transcript-{end,middle,start,search}-*` show each state.
+
 `test18TrackCallsFromSources` opens a synthetic glue script (artifact 330) in
 Sources at both window sizes. **Track calls** at the default position must
 refuse top-level code; `o.dup`, typed with native keys and Return, must be

@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -39,10 +39,11 @@ class NativeConsoleExecution final {
   NativeConsoleExecution& operator=(const NativeConsoleExecution&) = delete;
 
   // Renderer main thread. `stop_id` is a command's request id, or an
-  // injection's generation with kNativeConsoleDocumentStartStopBit set; it is
+  // injection's script id with kNativeConsoleDocumentStartStopBit set; it is
   // ignored for a nested execution. Every Begin is paired with one Finish.
   void Begin(v8::Isolate* isolate, std::uint64_t stop_id);
-  // Any thread. Terminates the outermost execution only when it is `stop_id`.
+  // Any thread. Terminates the outermost execution only when `stop_id` names
+  // it (NativeConsoleStopNames).
   void Stop(std::uint64_t stop_id);
   // Renderer main thread. How the execution ended. The outermost Finish after
   // kStopped cancels termination for the next task; a nested one leaves it, so

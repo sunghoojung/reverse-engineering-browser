@@ -1,5 +1,5 @@
 diff --git a/include/v8-native-stack.h b/include/v8-native-stack.h
-index 6eac611..9f29470 100644
+index 887b9d8..81e2c65 100644
 --- a/include/v8-native-stack.h
 +++ b/include/v8-native-stack.h
 @@ -46,6 +46,8 @@ struct NativeStackCapture {

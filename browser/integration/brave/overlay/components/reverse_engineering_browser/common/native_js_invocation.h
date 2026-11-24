@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -9,22 +9,27 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <span>
+#include <tuple>
 #include <type_traits>
+#include <vector>
 #include "native_probe_event.h"
 namespace reb {
 // Native JavaScript invocation identity, see
 // protocol/native-js-invocation-v1.md. The renderer copies no argument,
 // receiver, return or exception content: values keep only a kind, integer and
 // boolean low bits, a length and, under sensitive capture, a digest.
-// Every call of an armed site is recorded; there is no call count. The site
-// table is bounded by the records' u8 site slot.
-inline constexpr std::size_t kNativeJsInvocationSiteLimit = 256;
+// Every call of every armed site is recorded; there is no call or site
+// count. Records name a site by its u32 slot.
 inline constexpr std::size_t kNativeJsInvocationArgumentLimit = 8;
 inline constexpr std::size_t kNativeJsInvocationSiteRecordSize = 44;
-// Holds 256 sites in their longest JSON form (about 340 bytes each).
-inline constexpr std::size_t kNativeJsInvocationSitesFileLimit = 128 * 1024;
+// The only bound on a site table. Each renderer receives the whole table as
+// one BigBuffer, whose shared memory region Chromium maps only up to INT_MAX
+// bytes: 48,806,446 sites, well inside the records' u32 slot.
+inline constexpr std::size_t kNativeJsInvocationSiteListLimit =
+    static_cast<std::size_t>(std::numeric_limits<int>::max()) / kNativeJsInvocationSiteRecordSize;
 // Payload version 2 replaces version 1's sample indexes, which counted into
 // the removed per-configuration budgets, with u32 ordinals.
 inline constexpr std::uint16_t kNativeJsInvocationPayloadVersion = 2;
@@ -184,7 +189,8 @@ template <std::size_t N>
 struct NativeJsInvocationStartPayload final {
   std::uint16_t protocol_version = kNativeJsInvocationPayloadVersion;
   std::uint16_t payload_size = 128;
-  std::uint8_t site_slot = 0;
+  // Version 1's one-byte site slot; always zero here.
+  std::uint8_t v1_site_slot = 0;
   std::uint8_t flags = 0;
   std::uint16_t argument_count = 0;
   std::uint32_t script_id = 0;
@@ -201,7 +207,9 @@ struct NativeJsInvocationStartPayload final {
   // Stable 64-bit digest of Blink's DocumentToken: the document (navigation)
   // the call ran in.
   std::uint64_t document_id = 0;
-  std::array<std::byte, 16> reserved{};
+  // The armed site's slot in the configuration's site table.
+  std::uint32_t site_slot = 0;
+  std::array<std::byte, 12> reserved{};
 };
 static_assert(sizeof(NativeJsInvocationStartPayload) == 128);
 static_assert(std::is_standard_layout_v<NativeJsInvocationStartPayload>);
@@ -214,16 +222,18 @@ static_assert(offsetof(NativeJsInvocationStartPayload, argument_kinds) == 32);
 static_assert(offsetof(NativeJsInvocationStartPayload, argument_low32) == 40);
 static_assert(offsetof(NativeJsInvocationStartPayload, source_sha256) == 72);
 static_assert(offsetof(NativeJsInvocationStartPayload, document_id) == 104);
-static_assert(offsetof(NativeJsInvocationStartPayload, reserved) == 112);
+static_assert(offsetof(NativeJsInvocationStartPayload, site_slot) == 112);
+static_assert(offsetof(NativeJsInvocationStartPayload, reserved) == 116);
 
 [[nodiscard]] constexpr bool IsValidNativeJsInvocationStartPayload(
     const NativeJsInvocationStartPayload& value) noexcept {
   using native_js_invocation_detail::ValidKind;
   using native_js_invocation_detail::ValidLowBits;
   if (value.protocol_version != kNativeJsInvocationPayloadVersion || value.payload_size != 128 ||
-      (value.flags & ~kNativeJsInvocationStartFlagMask) != 0 || value.script_id == 0 ||
-      value.source_length == 0 || value.anchor_offset >= value.source_length ||
-      value.invocation_id == 0 || value.document_id == 0)
+      value.v1_site_slot != 0 || (value.flags & ~kNativeJsInvocationStartFlagMask) != 0 ||
+      value.script_id == 0 || value.source_length == 0 ||
+      value.anchor_offset >= value.source_length || value.invocation_id == 0 ||
+      value.document_id == 0)
     return false;
   if (value.parent_invocation_id != 0 && (value.parent_invocation_id >= value.invocation_id ||
                                           (value.flags & kNativeJsInvocationParentUnknown) != 0))
@@ -249,7 +259,7 @@ static_assert(offsetof(NativeJsInvocationStartPayload, reserved) == 112);
   std::array<std::byte, 128> out{};
   Put(out, 0, value.protocol_version, 2);
   Put(out, 2, value.payload_size, 2);
-  Put(out, 4, value.site_slot, 1);
+  Put(out, 4, value.v1_site_slot, 1);
   Put(out, 5, value.flags, 1);
   Put(out, 6, value.argument_count, 2);
   Put(out, 8, value.script_id, 4);
@@ -265,14 +275,16 @@ static_assert(offsetof(NativeJsInvocationStartPayload, reserved) == 112);
   for (std::size_t i = 0; i < value.source_sha256.size(); ++i)
     out[72 + i] = static_cast<std::byte>(value.source_sha256[i]);
   Put(out, 104, value.document_id, 8);
-  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 112);
+  Put(out, 112, value.site_slot, 4);
+  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 116);
   return out;
 }
 
 struct NativeJsInvocationSettlePayload final {
   std::uint16_t protocol_version = kNativeJsInvocationPayloadVersion;
   std::uint16_t payload_size = 128;
-  std::uint8_t site_slot = 0;
+  // Version 1's one-byte site slot; always zero here.
+  std::uint8_t v1_site_slot = 0;
   std::uint8_t outcome = 0;
   std::uint8_t via = 0;
   std::uint8_t value_kind = 0;
@@ -286,7 +298,8 @@ struct NativeJsInvocationSettlePayload final {
   std::uint64_t rolling_hash = 0;
   std::array<std::uint8_t, 32> value_sha256{};
   std::uint64_t document_id = 0;
-  std::array<std::byte, 56> reserved{};
+  std::uint32_t site_slot = 0;
+  std::array<std::byte, 52> reserved{};
 };
 static_assert(sizeof(NativeJsInvocationSettlePayload) == 128);
 static_assert(std::is_standard_layout_v<NativeJsInvocationSettlePayload>);
@@ -298,7 +311,8 @@ static_assert(offsetof(NativeJsInvocationSettlePayload, digest_byte_length) == 2
 static_assert(offsetof(NativeJsInvocationSettlePayload, rolling_hash) == 24);
 static_assert(offsetof(NativeJsInvocationSettlePayload, value_sha256) == 32);
 static_assert(offsetof(NativeJsInvocationSettlePayload, document_id) == 64);
-static_assert(offsetof(NativeJsInvocationSettlePayload, reserved) == 72);
+static_assert(offsetof(NativeJsInvocationSettlePayload, site_slot) == 72);
+static_assert(offsetof(NativeJsInvocationSettlePayload, reserved) == 76);
 
 [[nodiscard]] constexpr bool IsValidNativeJsInvocationSettlePayload(
     const NativeJsInvocationSettlePayload& value) noexcept {
@@ -314,8 +328,8 @@ static_assert(offsetof(NativeJsInvocationSettlePayload, reserved) == 72);
   const auto via = static_cast<Via>(value.via);
   if (value.protocol_version != kNativeJsInvocationPayloadVersion || value.payload_size != 128 ||
       (!fulfilled && !rejected) || !native_js_invocation_detail::ValidKind(value.value_kind) ||
-      value.invocation_id == 0 || value.document_id == 0 || value.reserved0 != 0 ||
-      (value.flags & ~kNativeJsInvocationLossyUtf8) != 0)
+      value.v1_site_slot != 0 || value.invocation_id == 0 || value.document_id == 0 ||
+      value.reserved0 != 0 || (value.flags & ~kNativeJsInvocationLossyUtf8) != 0)
     return false;
   if (via == Via::kSyncReturn  ? !fulfilled
       : via == Via::kSyncThrow ? !rejected
@@ -366,7 +380,7 @@ static_assert(offsetof(NativeJsInvocationSettlePayload, reserved) == 72);
   std::array<std::byte, 128> out{};
   Put(out, 0, value.protocol_version, 2);
   Put(out, 2, value.payload_size, 2);
-  Put(out, 4, value.site_slot, 1);
+  Put(out, 4, value.v1_site_slot, 1);
   Put(out, 5, value.outcome, 1);
   Put(out, 6, value.via, 1);
   Put(out, 7, value.value_kind, 1);
@@ -381,7 +395,8 @@ static_assert(offsetof(NativeJsInvocationSettlePayload, reserved) == 72);
   for (std::size_t i = 0; i < value.value_sha256.size(); ++i)
     out[32 + i] = static_cast<std::byte>(value.value_sha256[i]);
   Put(out, 64, value.document_id, 8);
-  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 72);
+  Put(out, 72, value.site_slot, 4);
+  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 76);
   return out;
 }
 
@@ -463,16 +478,34 @@ EncodeNativeJsInvocationSite(const NativeJsInvocationSite& site) noexcept {
   return out;
 }
 
-// Decodes 1 to 256 records into out and returns the count, or nullopt when any
-// record is malformed or a (source_sha256, anchor_offset) key repeats. A
-// session that tracks functions but has armed none yet sends no records.
-[[nodiscard]] inline std::optional<std::size_t> DecodeNativeJsInvocationSites(
-    std::span<const std::uint8_t> bytes,
-    std::span<NativeJsInvocationSite, kNativeJsInvocationSiteLimit> out) noexcept {
+// Whether a (source_sha256, anchor_offset) key repeats. Sorts pointers, so a
+// table of any size is checked in O(n log n).
+[[nodiscard]] inline bool HasRepeatedNativeJsInvocationSite(
+    std::span<const NativeJsInvocationSite> sites) {
+  std::vector<const NativeJsInvocationSite*> order;
+  order.reserve(sites.size());
+  for (const auto& site : sites)
+    order.push_back(&site);
+  const auto key = [](const NativeJsInvocationSite* site) {
+    return std::tie(site->source_sha256, site->anchor_offset);
+  };
+  std::sort(order.begin(), order.end(), [&](auto* a, auto* b) { return key(a) < key(b); });
+  return std::adjacent_find(order.begin(), order.end(),
+                            [&](auto* a, auto* b) { return key(a) == key(b); }) != order.end();
+}
+
+// Decodes every record by slot, or nullopt when any record is malformed, a
+// (source_sha256, anchor_offset) key repeats, or the table passes
+// kNativeJsInvocationSiteListLimit. A session that tracks functions but has
+// armed none yet sends no records.
+[[nodiscard]] inline std::optional<std::vector<NativeJsInvocationSite>>
+DecodeNativeJsInvocationSites(std::span<const std::uint8_t> bytes) {
   if (bytes.size() % kNativeJsInvocationSiteRecordSize != 0 ||
-      bytes.size() / kNativeJsInvocationSiteRecordSize > kNativeJsInvocationSiteLimit)
+      bytes.size() / kNativeJsInvocationSiteRecordSize > kNativeJsInvocationSiteListLimit)
     return std::nullopt;
   const std::size_t count = bytes.size() / kNativeJsInvocationSiteRecordSize;
+  std::vector<NativeJsInvocationSite> sites;
+  sites.reserve(count);
   for (std::size_t n = 0; n < count; ++n) {
     const auto record =
         bytes.subspan(n * kNativeJsInvocationSiteRecordSize, kNativeJsInvocationSiteRecordSize);
@@ -487,13 +520,11 @@ EncodeNativeJsInvocationSite(const NativeJsInvocationSite& site) noexcept {
         !IsValidNativeJsInvocationSite(site))
       return std::nullopt;
     site.armed = record[41] == 0;
-    for (std::size_t previous = 0; previous < n; ++previous)
-      if (out[previous].source_sha256 == site.source_sha256 &&
-          out[previous].anchor_offset == site.anchor_offset)
-        return std::nullopt;
-    out[n] = site;
+    sites.push_back(site);
   }
-  return count;
+  if (HasRepeatedNativeJsInvocationSite(sites))
+    return std::nullopt;
+  return sites;
 }
 }  // namespace reb
 #endif

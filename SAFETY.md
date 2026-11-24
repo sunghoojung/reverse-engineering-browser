@@ -361,11 +361,12 @@ it.
   browser without an explicit mode change. The console
   cannot set breakpoints, step, or inspect paused frames; those
   belong to the pausing debugger commands above, never to a console command. Expressions and
-  primitive results may contain sensitive values; they stay in bounded,
-  ephemeral panel memory and are not automatically captured, redacted, logged,
+  primitive results may contain sensitive values; they stay in ephemeral
+  panel memory and are not automatically captured, redacted, logged,
   exported, or added to evidence. Clear output before sharing the interface.
   Commands require an explicit document selection and are never automatically
-  retried. See [Native Console v2](protocol/native-console-v2.md) for these limits.
+  retried. See [Native Console v2](protocol/native-console-v2.md) and
+  [v4](protocol/native-console-v4.md) for these limits.
 
 - Document-start Console scripts are a separate, separately armed experiment and
   a deliberate exception to the explicit-document rule above, not a loophole in
@@ -389,9 +390,9 @@ it.
   MCP `start_live_session`) receive it only when the start request names it
   (`document_start: true`), never inherited. An agent arms a rule only through
   the same live Console connection to a selected document and the same
-  confirmed action. Clearing the set, disconnecting, ending the session, or session expiry
-  removes the scripts and their output; when the browser cannot confirm a removal,
-  the Console reports it unconfirmed instead of idle. Snippet output is bounded, ephemeral
+  confirmed action. Clearing the set, disconnecting or ending the session
+  removes the scripts and their output, and removing one script stops it; when the browser cannot confirm a removal,
+  the Console reports it unconfirmed instead of idle. Snippet output is ephemeral
   page-JavaScript observation with provenance `console-document-start-script`: it
   is never native evidence, never correlated, and never exported automatically. A
   snippet runs in the page main world, so log only argument kinds, lengths,

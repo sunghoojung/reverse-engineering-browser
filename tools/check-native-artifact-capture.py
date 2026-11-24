@@ -345,9 +345,20 @@ def check_receiver_socket(receiver: str) -> None:
                 time.sleep(0.01)
 
             def connect() -> socket.socket:
-                connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                connection.settimeout(10)
-                connection.connect(str(socket_path))
+                # The socket file appears at bind, before listen, and the
+                # receiver's backlog is one connection, so a refusal before
+                # the deadline means "not yet", not failure.
+                until = time.monotonic() + 10
+                while True:
+                    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    connection.settimeout(10)
+                    try:
+                        connection.connect(str(socket_path))
+                        break
+                    except ConnectionRefusedError:
+                        connection.close()
+                        assert child.poll() is None and time.monotonic() < until, "receiver listen"
+                        time.sleep(0.01)
                 connection.sendall(
                     struct.pack("<IHHQ32s16s", HELLO_MAGIC, 1, 64, 7, TEST_TOKEN, bytes(16))
                 )

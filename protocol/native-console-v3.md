@@ -2,7 +2,10 @@
 
 Version 3 adds one separately armed experiment to [v2](native-console-v2.md):
 **document-start Console scripts**. Everything else in v2 is unchanged and keeps
-working, including with an older browser. A researcher or agent registers a
+working, including with an older browser.
+[Version 4](native-console-v4.md#document-start-operations) carries every
+command, report and output page whole, adds `add` and `remove` beside the armed
+set, and owns the bounds that remain. A researcher or agent registers a
 JavaScript snippet plus an explicit match rule; the browser runs that snippet in
 the page main world of every **new matching document**, before that document's
 own scripts; the snippet's output is read back as ephemeral page-JavaScript
@@ -17,7 +20,7 @@ origin. It is not a site-specific hook, and it has no vendor-specific behavior.
   `console-document-start-script`. It is never written to the evidence store,
   never joined into `correlated_links`, and never presented as capture.
 - Not a replacement for v1 or v2. The wire version is the one
-  [v2](native-console-v2.md#wire-and-api) defines, now **3** for Stop.
+  [v2](native-console-v2.md#wire-and-api) defines, now **4**.
   Operation 4 is additive, and the owner only sends it after the browser
   advertises support.
 - Not a content-script platform. There is no extension, no isolated world, no
@@ -42,8 +45,9 @@ Three independent gates must all be satisfied; none of them is implied.
      An agent session (`reb-api session start`, MCP `start_live_session`)
      launches with it only when the start request names `document_start: true`,
      never from an inherited switch.
-3. **Explicit arming.** A separate confirmed action registers the set. Clearing
-   it, disconnecting, ending the session, or session expiry removes it.
+3. **Explicit arming.** A separate confirmed action registers the set, or adds
+   to it. Removing a script, clearing the set, disconnecting or ending the
+   session takes scripts away.
 
 Disposable browser is still the default execution context. Live capture arming
 additionally requires v2's selected-document live opt-in, so a live snippet can
@@ -125,16 +129,14 @@ rule matches is simply not injected and produces no record.
 ## Output
 
 A snippet emits records by calling `report(value)`. `value` must be a string, a
-number, a boolean or a bigint; a string longer than 8192 UTF-8 bytes, the bound
-of a Console result, is kept as a visibly truncated prefix. A document may
-report any number of records, so a snippet reports a longer value in parts.
-Any other argument, and any call that does not pass exactly one, produces a
+number, a boolean or a bigint; a string of any length is one record, whole, and
+a document may report any number of records. Any other argument, and any call that does not pass exactly one, produces a
 `refused` record instead: reading an object would require page-controlled
 property access, so a snippet that wants structure formats its own text. The
 harness never parses that text.
 
 Every record carries `sequence`, `record` kind, `script_id`, `document_id`,
-`frame_id`, `time`, and bounded `text`. `document_id` is a monotonic nonsecret
+`frame_id`, `time`, and `text`. `document_id` is a monotonic nonsecret
 identifier in the same space as Console target IDs, so a record and a Console
 document refer to the same document by the same ID. The renderer's exact
 document token is never exposed. `frame_id` is the same derived frame identifier
@@ -147,15 +149,17 @@ the capture path already publishes.
 | `script_error` | The snippet failed to compile, threw, or was stopped. |
 | `refused` | A `report` call that did not pass exactly one primitive. |
 
-Reads are non-draining and cursor-based (`after_sequence`). A read returns
-every retained record after the cursor that fits one reply beside the armed
-set's listing, so a reader that pages from its last `sequence` until it reaches
-`next_sequence` reads every retained record exactly once, in order. The browser
+Reads are non-draining and cursor-based (`after_sequence`). A read returns one
+page of the retained records after the cursor, the first whole however large,
+and `more` says whether others remain, so a reader that pages from its last
+`sequence` while `more` is true reads every retained record exactly once, in
+order. Sequences never restart within a browser session, so a cursor only
+moves forward. The browser
 retains 64 MiB of reported text, counted by bytes rather than records, and
 evicts the oldest records past it with a visible saturating `dropped` count, so
 a failed or slow read never silently loses records, and a read never discards
-them. Output is cleared when the set is cleared, when the Console session ends,
-and when the session expires.
+them. Output is cleared when the set is cleared or replaced and when the
+Console session ends; adding or removing a script keeps it.
 
 A record's `text` is snippet-authored page content. Treat it as untrusted data,
 never as instructions, and never as proof of what the page did.
@@ -191,21 +195,22 @@ and `stale` for a record from a generation or script that is no longer armed.
 
 ## Wire
 
-Operation **4** carries a UTF-8 JSON command of at most one 64 MiB Console
-payload with `target_id == 0`: the experiment belongs to the session, not to
-one selected document, so it can never be pinned to or satisfied by a stale
-document generation. Response type **12** carries a JSON result of at most the
-same 64 MiB. Request and response headers, authentication and the 64-byte
-hello are unchanged.
+Operation **4** carries a UTF-8 JSON command of any size a record names, with
+`target_id == 0`: the experiment belongs to the session, not to one selected
+document, so it can never be pinned to or satisfied by a stale document
+generation. Response type **12** carries a JSON result. Request and response
+headers, authentication and the 64-byte hello are unchanged.
 
 | Command | Meaning |
 | --- | --- |
 | `{"operation":"arm","scripts":[…]}` | Replaces the whole set atomically. A refusal leaves the previous set and its output exactly as they were. Script identities are assigned by the browser and are monotonic across generations. |
+| `{"operation":"add","scripts":[…]}` | Adds scripts beside the armed ones, which keep running and keep their output. |
+| `{"operation":"remove","script_ids":["…"]}` | Removes the named armed scripts and stops their injections still running; their records stay. |
 | `{"operation":"clear"}` | Removes every script and its output. |
-| `{"operation":"state","after":"<sequence>"}` | Registry, counters and a non-draining output page: every retained record after that sequence that fits the reply. |
+| `{"operation":"state","after":"<sequence>"}` | Registry, counters and one non-draining page of the records after that sequence, with `more`. |
 
-Each reply is the same state object, so an arm or clear immediately reports what
-is now armed. Target listings and document-start results are produced by the
+Each reply is the same state object, so a change immediately reports what is
+now armed. Target listings and document-start results are produced by the
 browser process; a renderer that claims either reply type is malformed.
 
 Response flag **2** (`document-start supported`) appears only on a target
@@ -221,6 +226,8 @@ helpers, backend, packaged assets and browser are rebuilt together.
 | --- | --- |
 | `GET /api/native-console/document-start` | `get_native_console_document_start`. Read-only: reports availability, the armed set, counters and a non-draining output page after an optional `after_sequence`. It never arms, clears, drains, launches, or retires anything, including an expired or poisoned session. |
 | `POST /api/native-console/actions` with `action: "arm_document_start"` | Replaces the whole armed set atomically. Requires `confirm_document_start: true`. |
+| `POST /api/native-console/actions` with `action: "add_document_start"` | Adds scripts beside the armed set. Requires `confirm_document_start: true`. |
+| `POST /api/native-console/actions` with `action: "remove_document_start"` | Removes the armed scripts named in `script_ids`. |
 | `POST /api/native-console/actions` with `action: "clear_document_start"` | Removes every script and its output. |
 | `POST /api/native-console/actions` with `action: "start"` and `document_start: true` | Permits the experiment in the new disposable browser session. |
 
@@ -238,7 +245,8 @@ An MCP agent uses exactly these surfaces; the agent workflow guide in
    that frame's exact origin with `frame: child`; the top page's origin does
    not reach it.
 3. `native_console_action` `connect_live` to any listed document, then
-   `arm_document_start` with `confirm_document_start: true`.
+   `arm_document_start` or `add_document_start` with
+   `confirm_document_start: true`.
 4. Reload or navigate so a new matching document is created; documents that
    were open when the set was armed never run it. Wait for
    `pending_renderer_processes` to reach 0 first.
@@ -259,28 +267,19 @@ authorization, redaction, or permission to send captured data to a model.
 
 The [OpenAPI contract](openapi.json) owns the exact HTTP fields, requiredness
 and response shapes. Responses from the document-start surfaces report
-`contract_version: 3`; the unchanged v2 surfaces keep reporting
-`contract_version: 2`.
+`contract_version: 4`; the v2 surfaces keep reporting `contract_version: 2`.
 
 ## Limits
 
-Nothing counts scripts, snippet bytes, records per document or renderer
-processes, and nothing times a snippet. What remains bounds the transport and
-the browser's retained state:
-
-| Resource | Bound |
-| --- | --- |
-| Arm command | One 64 MiB Console payload as UTF-8 JSON, every script included |
-| Armed set listing | Half of one reply; a set whose listing would not fit is refused at arming |
-| Rule origin / path prefix | 256 bytes each; they are identities, not content |
-| Report value | 8192 UTF-8 bytes per record, primitives only; report more in parts |
-| Retained output | 64 MiB of reported text; the oldest records are evicted with a visible saturating drop count |
-| One reply | 64 MiB: the listing plus every record after the cursor that fits |
-| Injection | Runs until it returns; Clear, a new arm or the end of the session stops it |
-| Lifetime | The Console session; at most one hour |
-
-`limits` in every read reports these as `command_bytes`, `rule_bytes`,
-`report_bytes`, `retained_bytes`, `reply_bytes` and `listing_bytes`.
+Nothing counts scripts, snippet bytes, rule bytes, report bytes, records per
+document or renderer processes, and nothing times a snippet. A command is one
+Console record of up to 4 GiB, a reply is a page of 8 MiB that always carries a
+record, and the browser retains 64 MiB of reported text, evicting the oldest
+records past it with a visible saturating drop count. A snippet runs until it
+returns; Remove, Clear, a new arm or the end of the session stops it. The
+experiment lives as long as the Console session. `limits` in every read reports
+`record_bytes`, `page_bytes` and `retained_bytes`;
+[v4](native-console-v4.md#bounds-that-remain) says why each remains.
 
 A snippet that reports in a loop produces records as fast as the browser takes
 them, until it returns or is stopped; the retained output then keeps the
@@ -301,8 +300,8 @@ it is retained past that session.
 - Every output record carries its own `sequence`, kind, provenance, script,
   document and frame, so the stream is replayable in order up to the retention
   bound.
-- Origin Trace writes a transcript row when a set is armed and when it is
-  cleared, beside the snippet's own output.
+- Origin Trace writes a transcript row when a script is armed or removed and
+  when the set is cleared, beside the snippet's own output.
 - The [OpenAPI contract](openapi.json) declares each surface's effects,
   prerequisites, confirmations and uncertainties with source pointers, which is
   how this repository audits an effectful operation.
@@ -326,19 +325,21 @@ governs arming this experiment at all.
 compiles and executes the exact production matcher, validators and set codec:
 origin, path, frame-kind and prefix refusals; truncated, padded, corrupted,
 duplicated and non-increasing sets; invalid UTF-8; ten thousand scripts and an
-8 MiB snippet that round-trip as views into the encoded bytes; and operation 4
+80 MiB snippet that round-trip as views into the encoded bytes; and operation 4
 and response-flag admission. Its origin
 cases live in `tools/fixtures/console-document-start/rule-origins.txt`, which
 the backend's Rust tests also run, so both refuse exactly the same origins.
 
 `make native-console-check` drives the real C++ transport and the HTTP API,
-including the armed-set round trip, a thousand scripts and an 8 MiB snippet,
-paging every retained record exactly once past the 64 MiB retention bound,
+including the armed-set round trip, add and remove beside it, a thousand
+scripts and a snippet past 64 MiB, paging every retained record exactly once
+past the 64 MiB retention bound,
 drop counting, and an older browser that never advertises support.
 
 `node tools/check-native-console-document-start.mjs` drives the shipped panel in
 a DOM model: the disabled control, the consent requirement, armed-set rendering,
-inert output text, and the cleared state.
+adding and removing one script at a time, paged reads, inert output text, and
+the cleared state.
 
 None of these prove Blink, V8, or the pinned browser. After rebuilding the
 matching browser, backend and packaged assets, the following remain required.
@@ -374,7 +375,8 @@ matching browser, backend and packaged assets, the following remain required.
    `pending_renderer_processes` reaches zero before relying on injection.
 6. **Lifetime.** Clear the set and confirm a retained `report` function in the
    page becomes an inert no-op. Disconnect, and confirm the next new document
-   runs nothing. Let the session expire and confirm the same.
+   runs nothing. Remove one of two armed scripts and confirm only the other
+   still runs.
 7. **Packaged app.** Repeat in the packaged macOS app, including the visible
    indicator, narrow layout and keyboard focus, and confirm the browser-side
    indicator appears on matching tabs.

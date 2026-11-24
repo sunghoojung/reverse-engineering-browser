@@ -126,7 +126,7 @@ void CheckAdapterSiteShape() {
   adapter.sites[1].function_index = 9;  // Out of order.
   assert(!reb::IsValidNativeGuestAdapterShape(adapter));
   adapter.sites[1].function_index = 11;
-  adapter.sample_limit = reb::kNativeGuestSampleLimit + 1;  // Over the shared budget.
+  adapter.sample_limit = 0;  // A budget that admits nothing.
   assert(!reb::IsValidNativeGuestAdapterShape(adapter));
   std::puts("PASS adapter sites are 1 to 8 distinct ordered dispatchers under one sample limit");
 }

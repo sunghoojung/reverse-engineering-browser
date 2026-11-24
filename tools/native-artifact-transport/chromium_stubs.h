@@ -165,6 +165,9 @@ inline bool ReadFileToStringWithMaxSize(const FilePath& path,
   *contents = std::move(text);
   return true;
 }
+inline bool ReadFileToString(const FilePath& path, std::string* contents) {
+  return ReadFileToStringWithMaxSize(path, contents, std::string::npos);
+}
 
 inline bool StringToUint64(std::string_view text, std::uint64_t* value) {
   const auto parsed = std::from_chars(text.data(), text.data() + text.size(), *value);

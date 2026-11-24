@@ -3050,7 +3050,7 @@ mod tests {
 
     #[test]
     fn wasm_inventory_ranks_and_lists_every_site() {
-        // Producers before 1.12.0 listed 256 of these 300 sites, counted 44
+        // Producers before 1.13.0 listed 256 of these 300 sites, counted 44
         // as omitted and marked the coverage incomplete.
         let body = ranked_dispatch_body(8, true);
         let bytes = wasm_module(&vec![body.as_slice(); 300], None);
@@ -4609,7 +4609,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         let (_, analysis, document) = analyze(&source, &[]);
         let classification = &analysis["results"][0]["frontend"]["dispatch_classification"];
         assert_eq!(classification["site_count"], 301);
-        // Producers before 1.12.0 listed 256 of them.
+        // Producers before 1.13.0 listed 256 of them.
         assert_eq!(classification["sites"].as_array().unwrap().len(), 301);
         assert_eq!(classification["omitted_site_count"], 0);
         assert_eq!(classification["role_counts"]["interpreter-candidate"], 1);

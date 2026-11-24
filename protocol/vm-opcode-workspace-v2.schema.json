@@ -150,7 +150,7 @@
         "omitted_site_count": {
           "type": "integer",
           "minimum": 0,
-          "description": "Always 0 since VM detector 1.12.0, which lists every decoded site. Earlier producers listed the 256 best ranked and counted the rest here."
+          "description": "Always 0 since VM detector 1.13.0, which lists every decoded site. Earlier producers listed the 256 best ranked and counted the rest here."
         },
         "selected_byte_offset": {
           "type": [
@@ -2356,7 +2356,7 @@
         "sample_index": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 255
+          "maximum": 2147483646
         },
         "instruction_pointer": {
           "type": "integer",
@@ -2607,7 +2607,7 @@
         "omitted_site_count": {
           "type": "integer",
           "minimum": 0,
-          "description": "Always 0 since VM detector 1.12.0, which lists every classified site. Earlier producers listed the 256 strongest and counted the rest here."
+          "description": "Always 0 since VM detector 1.13.0, which lists every classified site. Earlier producers listed the 256 strongest and counted the rest here."
         },
         "role_counts": {
           "type": "object",

@@ -262,7 +262,7 @@ change needs its own ranking version.
 
 The object lists every classified site, in byte order, and `site_count`,
 `role_counts` and `kind_counts` cover them all. `omitted_site_count` is always
-0. Producers before VM detector 1.12.0 listed at most 256 sites, interpreter
+0. Producers before VM detector 1.13.0 listed at most 256 sites, interpreter
 candidates and multiplexers before other sites and stronger sites first within
 a role, and counted the classified sites they did not list there.
 
@@ -271,7 +271,7 @@ a role, and counted the classified sites they did not list there.
 Every site of an artifact of any size is classified. Each selector query has
 a fixed step budget, so a site's work is constant and classification stays
 linear in the sites found; there is no per-artifact work, memory or site
-budget. Producers before VM detector 1.11.0 stopped at one billion work units,
+budget. Producers before VM detector 1.12.0 stopped at one billion work units,
 128 MiB of retained index and trace memory, 4096 JavaScript sites, an 8 MiB
 JavaScript source and one million symbolic nodes per Wasm function.
 

@@ -65,7 +65,15 @@ void CheckWireParity() {
   const auto cs = [](const CS& v) { return reb::EncodeJsInvocationStartPayload(v); };
   CheckField(&OS::protocol_version, &CS::protocol_version, 0x0102, os, cs, "start version");
   CheckField(&OS::payload_size, &CS::payload_size, 0x0304, os, cs, "start size");
-  CheckField(&OS::site_slot, &CS::site_slot, 0x05, os, cs, "start slot");
+  CheckField(&OS::v1_site_slot, &CS::v1_site_slot, 0x05, os, cs, "start version 1 slot");
+  CheckField(&OS::site_slot, &CS::site_slot, 0xfffffffe, os, cs, "start slot");
+  {
+    CS core;
+    core.site_slot = 0x01020304;
+    const auto bytes = reb::EncodeJsInvocationStartPayload(core);
+    Check(bytes[112] == std::byte{4} && bytes[115] == std::byte{1} && bytes[4] == std::byte{0},
+          "start slot offset");
+  }
   CheckField(&OS::flags, &CS::flags, 0x06, os, cs, "start flags");
   CheckField(&OS::argument_count, &CS::argument_count, 0x0708, os, cs, "argument_count");
   CheckField(&OS::script_id, &CS::script_id, 0x090a0b0c, os, cs, "script_id");
@@ -101,7 +109,15 @@ void CheckWireParity() {
   using CT = reb::JsInvocationSettlePayload;
   const auto ot = [](const OT& v) { return reb::EncodeNativeJsInvocationSettlePayload(v); };
   const auto ct = [](const CT& v) { return reb::EncodeJsInvocationSettlePayload(v); };
-  CheckField(&OT::site_slot, &CT::site_slot, 0x05, ot, ct, "settle slot");
+  CheckField(&OT::v1_site_slot, &CT::v1_site_slot, 0x05, ot, ct, "settle version 1 slot");
+  CheckField(&OT::site_slot, &CT::site_slot, 0xfffffffe, ot, ct, "settle slot");
+  {
+    CT core;
+    core.site_slot = 0x01020304;
+    const auto bytes = reb::EncodeJsInvocationSettlePayload(core);
+    Check(bytes[72] == std::byte{4} && bytes[75] == std::byte{1} && bytes[4] == std::byte{0},
+          "settle slot offset");
+  }
   CheckField(&OT::outcome, &CT::outcome, 0x06, ot, ct, "outcome");
   CheckField(&OT::via, &CT::via, 0x07, ot, ct, "via");
   CheckField(&OT::value_kind, &CT::value_kind, 0x08, ot, ct, "value_kind");
@@ -255,17 +271,20 @@ void CheckStartRules() {
           "flag without truncation");
   rejects([](auto& p) { p.document_id = 0; }, "zero document");
   rejects([](auto& p) { p.reserved[3] = std::byte{1}; }, "nonzero start reserved");
-  // Every slot and ordinal fits version 2.
+  // Every u32 slot and ordinal fits version 2, whose version 1 slot byte
+  // stays zero.
   auto wide = StartPayload();
-  wide.site_slot = 255;
+  wide.site_slot = 0xffffffffU;
   wide.site_ordinal = 0xffffffffU;
   Check(reb::IsValidEvent(Start(wide)), "last slot and ordinal");
-  // Version 1 evidence from earlier builds keeps its bounds: 8 slots, and
-  // packed indexes below 64 per site and 256 per configuration.
+  rejects([](auto& p) { p.v1_site_slot = 1; }, "version 2 start with a version 1 slot");
+  // Version 1 evidence from earlier builds keeps its bounds: 8 slots in its
+  // byte, and packed indexes below 64 per site and 256 per configuration.
   const auto v1 = [](std::uint8_t slot, std::uint32_t site_sample, std::uint32_t sample) {
     auto p = StartPayload();
     p.protocol_version = 1;
-    p.site_slot = slot;
+    p.site_slot = 0;
+    p.v1_site_slot = slot;
     p.site_ordinal = site_sample | (sample << 16U);
     return reb::IsValidEvent(Start(p));
   };
@@ -273,6 +292,12 @@ void CheckStartRules() {
   Check(!v1(8, 0, 0), "version 1 slot beyond its site limit");
   Check(!v1(0, 64, 0), "version 1 site sample index past its budget");
   Check(!v1(0, 0, 256), "version 1 sample index past its budget");
+  rejects(
+      [](auto& p) {
+        p.protocol_version = 1;
+        p.site_slot = 1;
+      },
+      "version 1 start with a version 2 slot");
   auto integer = StartPayload();
   integer.argument_count = 9;
   integer.flags = reb::kJsInvocationArgumentsTruncated;
@@ -305,14 +330,18 @@ void CheckSettleRules() {
   rejects(
       [](auto& p) {
         p.protocol_version = 1;
-        p.site_slot = 8;
+        p.site_slot = 0;
+        p.v1_site_slot = 8;
       },
       "version 1 settle slot beyond its site limit");
+  rejects([](auto& p) { p.protocol_version = 1; }, "version 1 settle with a version 2 slot");
+  rejects([](auto& p) { p.v1_site_slot = 1; }, "version 2 settle with a version 1 slot");
   auto last = SettlePayload();
-  last.site_slot = 255;
+  last.site_slot = 0xffffffffU;
   Check(reb::IsValidEvent(Settle(last)), "settle in the last slot");
   last.protocol_version = 1;
-  last.site_slot = 7;
+  last.site_slot = 0;
+  last.v1_site_slot = 7;
   Check(reb::IsValidEvent(Settle(last)), "version 1 settle stays readable");
   rejects([](auto& p) { p.via = 2; }, "fulfilled by a throw");
   rejects([](auto& p) { p.via = 4; }, "unknown via");

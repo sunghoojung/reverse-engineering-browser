@@ -306,7 +306,7 @@ const inventory = {ranking_version: 1, site_count: 3, br_table_count: 2, call_in
 const inventoryDocument = structuredClone(fixture);
 inventoryDocument.workspaces[0].dispatch_inventory = inventory;
 assert(validateModule(inventoryDocument));
-// Every site is listed since VM detector 1.12.0; documents listed at most 256 before.
+// Every site is listed since VM detector 1.13.0; documents listed at most 256 before.
 const everySite = structuredClone(inventoryDocument);
 everySite.workspaces[0].dispatch_inventory = {...inventory, site_count: 300, br_table_count: 300, call_indirect_count: 0,
   candidates: Array.from({length: 300}, (_, index) => ({...site(45 + index * 600, 200, index), function_body_offset: 40 + index * 600}))};
@@ -398,7 +398,7 @@ shapedWorkspace.handler_tables = [...tables, {kind: 'element', evidence_class: '
     {segment_index: 1, placement: 'relative', offset: null, global_index: 0, entry_count: 2}]}];
 const shapedDocument = {...inventoryDocument, workspaces: [shapedWorkspace]};
 assert(validateModule(shapedDocument), 'classified workspace with element segments');
-// Every classified site is listed since VM detector 1.12.0, which listed 256 before.
+// Every classified site is listed since VM detector 1.13.0, which listed 256 before.
 const everyClassified = structuredClone(shapedDocument);
 everyClassified.workspaces[0].dispatch_classification = {...classification, site_count: 304,
   role_counts: {...classification.role_counts, other: 301},

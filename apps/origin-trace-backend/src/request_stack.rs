@@ -2489,8 +2489,8 @@ pub(crate) mod tests {
         assert_eq!(frames.0.len(), 1);
     }
 
-    /// A source past 16 MiB, from a version 3 identity that digests a source
-    /// of any length, resolves a frame beyond 16 MiB from the whole source.
+    /// A version 3 identity digests a source past 16 MiB, so a frame beyond
+    /// 16 MiB resolves from the whole source.
     #[test]
     fn a_hashed_source_of_any_size_resolves_its_frames() {
         let root = tempfile::tempdir().unwrap();
@@ -2505,7 +2505,7 @@ pub(crate) mod tests {
         let at = source.find("fetch").unwrap() as u32;
         let start = source.find("() {").unwrap() as u32;
         let mut identity = identity_bytes(1, 0x02, 7, (0, 0), 99, source.as_bytes());
-        // Version 3 with the document scope: versions 1 and 2 never digest past 16 MiB.
+        // Version 3, on the document thread.
         identity[0] = 3;
         identity[72] = 1;
         let mut document = json!({"requests": [{"initiator_frame": {"session_id": "9",

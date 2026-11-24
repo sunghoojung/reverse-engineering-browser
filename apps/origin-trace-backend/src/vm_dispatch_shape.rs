@@ -278,7 +278,7 @@ pub(crate) fn bounded_expression(text: &str) -> String {
 }
 
 /// The versioned classification object. Every classified site is listed, in
-/// byte order. VM detector producers before 1.12.0 listed the 256 strongest
+/// byte order. VM detector producers before 1.13.0 listed the 256 strongest
 /// and counted the rest in `omitted_site_count`, which is now always 0.
 pub(crate) fn document(artifact_id: &Value, mut sites: Vec<Site>, omissions: Vec<Value>) -> Value {
     let mut role_counts = BTreeMap::<&str, usize>::new();

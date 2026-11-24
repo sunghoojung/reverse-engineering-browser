@@ -55,8 +55,10 @@ readers, is not clipped text;
 
 Only those native events give the page user activation, as a researcher's
 input does. The harness runs its own JavaScript without a user gesture,
-through WebKit's `withUserGesture:` script calls (SPI in macOS 15.4 and later,
-which Xcode 26 requires). WebKit's public `callAsyncJavaScript` and
+through WebKit's `_evaluateJavaScript:…withUserGesture:` (SPI since macOS 15).
+That call evaluates a classic script, so an async harness script is started by
+one evaluation and its result read by later ones, and a document that replaced
+the one it ran in ends it. WebKit's public `callAsyncJavaScript` and
 `evaluateJavaScript` run a script as a user gesture and consume the page's
 transient activation when that gesture ends, after any timer or fetch the
 script started. A harness script that ended between a native press and its

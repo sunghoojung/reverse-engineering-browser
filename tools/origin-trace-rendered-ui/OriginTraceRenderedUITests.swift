@@ -18,6 +18,10 @@ final class Harness {
     guard let window = NSApp.windows.first(where: { $0.contentView is WKWebView }),
       let webView = window.contentView as? WKWebView
     else { throw HarnessError("The packaged app did not create its WKWebView window") }
+    // Said here, rather than as a wait that times out on every script.
+    guard webView.responds(to: Harness.evaluateWithoutGesture) else {
+      throw HarnessError("This WebKit has no \(NSStringFromSelector(Harness.evaluateWithoutGesture)), so harness scripts would run as user gestures")
+    }
     self.window = window
     self.webView = webView
     output = URL(fileURLWithPath: try Harness.required(environment, "REB_RENDERED_UI_OUTPUT"), isDirectory: true)
@@ -123,34 +127,49 @@ final class Harness {
   // native press and its click, it takes the click's activation, and WebKit
   // refuses what the click does, such as a clipboard write. Harness scripts
   // run without a user gesture instead, so only native input activates the
-  // page, as for a researcher. Both calls are WebKit SPI, in macOS 15.4 and
-  // later, which every Mac that runs Xcode 26 has.
+  // page, as for a researcher. The WebKit call that can (SPI since macOS 15)
+  // evaluates a classic script. macOS 26 has no such call for an async
+  // function, so script() starts one and reads its result with later
+  // evaluations.
   private typealias ScriptReply = @convention(block) (AnyObject?, NSError?) -> Void
-  private typealias CallWithoutGesture = @convention(c)
-    (WKWebView, Selector, NSString, NSDictionary, WKFrameInfo?, WKContentWorld, Bool, @escaping ScriptReply) -> Void
   private typealias EvaluateWithoutGesture = @convention(c)
     (WKWebView, Selector, NSString, NSURL?, WKFrameInfo?, WKContentWorld, Bool, @escaping ScriptReply) -> Void
+  private static let evaluateWithoutGesture =
+    NSSelectorFromString("_evaluateJavaScript:withSourceURL:inFrame:inContentWorld:withUserGesture:completionHandler:")
 
-  // Runs `body` as an async function in the page.
-  func script(_ body: String) async throws -> Any? {
-    let selector = NSSelectorFromString("_callAsyncJavaScript:arguments:inFrame:inContentWorld:withUserGesture:completionHandler:")
-    guard webView.responds(to: selector) else { throw HarnessError("This WebKit cannot run a harness script without a user gesture") }
-    let run = unsafeBitCast(webView.method(for: selector), to: CallWithoutGesture.self)
+  // Evaluates `source` as a classic script in the page.
+  func evaluate(_ source: String) async throws -> Any? {
+    let selector = Harness.evaluateWithoutGesture
+    let run = unsafeBitCast(webView.method(for: selector), to: EvaluateWithoutGesture.self)
     return try await withCheckedThrowingContinuation { continuation in
-      run(webView, selector, body as NSString, [:] as NSDictionary, nil, .page, false) { value, error in
+      run(webView, selector, source as NSString, nil, nil, .page, false) { value, error in
         if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: value) }
       }
     }
   }
 
-  // Evaluates `source` as a classic script in the page.
-  func evaluate(_ source: String) async throws -> Any? {
-    let selector = NSSelectorFromString("_evaluateJavaScript:withSourceURL:inFrame:inContentWorld:withUserGesture:completionHandler:")
-    guard webView.responds(to: selector) else { throw HarnessError("This WebKit cannot evaluate a harness script without a user gesture") }
-    let run = unsafeBitCast(webView.method(for: selector), to: EvaluateWithoutGesture.self)
-    return try await withCheckedThrowingContinuation { continuation in
-      run(webView, selector, source as NSString, nil, nil, .page, false) { value, error in
-        if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: value) }
+  // Runs `body` as an async function in the page. Its settled result waits in
+  // a page map for the next read, every 4 ms. A document that replaced the
+  // one it ran in has no entry, which ends the call.
+  func script(_ body: String) async throws -> Any? {
+    let id = UUID().uuidString
+    _ = try await evaluate("""
+      (window.__rebHarnessScripts ??= new Map()).set('\(id)', [0, null]);
+      (async () => {
+      \(body)
+      })().then(value => __rebHarnessScripts.set('\(id)', [1, value === undefined ? null : value]),
+        error => __rebHarnessScripts.set('\(id)', [2, `${error}\\n${error?.stack ?? ''}`]));
+      true
+      """)
+    let read = "(() => { const entry = window.__rebHarnessScripts?.get('\(id)') ?? [3, null]; " +
+      "if (entry[0] !== 0) window.__rebHarnessScripts?.delete('\(id)'); return entry; })()"
+    while true {
+      let entry = try await evaluate(read) as? [Any] ?? []
+      switch entry.first as? Int {
+      case 0: try await Task.sleep(for: .milliseconds(4))
+      case 1: return entry[1] is NSNull ? nil : entry[1]
+      case 2: throw HarnessError("A harness script threw \(entry[1])")
+      default: throw HarnessError("The document changed before a harness script finished")
       }
     }
   }

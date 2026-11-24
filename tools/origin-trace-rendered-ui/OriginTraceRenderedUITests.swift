@@ -2204,15 +2204,36 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertLayout(ui, "#captured-export-dialog", "\(size.name) Traffic export")
       try await ui.screenshot("traffic-har-export-\(size.name)")
       _ = try await ui.value("(() => { const field = document.querySelector('[data-export-destination]'); field.value = 'copy'; field.dispatchEvent(new Event('change')); return true; })()")
+      // Test-only trace of the copy as WebKit runs it: the click and the
+      // user activation at it and at the clipboard write, the HAR read, and
+      // how the write ended, in ms of the page's clock.
+      _ = try await ui.value("""
+        (() => { const trace = window.__rebCopyTrace = [], at = () => Math.round(performance.now());
+          const active = () => navigator.userActivation?.isActive ?? null;
+          document.querySelector('[data-export-submit]').addEventListener('click', event =>
+            trace.push(['click', at(), {late: Math.round(performance.now() - event.timeStamp), trusted: event.isTrusted, active: active()}]), {capture: true, once: true});
+          const write = navigator.clipboard.write.bind(navigator.clipboard);
+          navigator.clipboard.write = items => { trace.push(['write', at(), {active: active()}]);
+            return write(items).then(value => { trace.push(['written', at()]); return value; },
+              error => { trace.push(['refused', at(), String(error?.name)]); throw error; }); };
+          const read = window.fetch;
+          window.fetch = (input, init) => { if (!String(input).includes('/api/requests/har')) return read(input, init);
+            trace.push(['har', at()]);
+            return read(input, init).then(response => { trace.push(['answered', at(), response.status]); return response; },
+              error => { trace.push(['har failed', at(), String(error)]); throw error; }); };
+          return true; })()
+        """)
       pasteboard.clearContents()
       let cleared = pasteboard.changeCount
       try await ui.click("[data-export-submit]")
       do {
         try await ui.waitUntil("document.querySelector('[data-export-status]').textContent.includes('Copied locally')", "the HAR was not copied")
+        print("RENDERED_UI_COPY_TRACE \(size.name) copied \((try? await ui.value("JSON.stringify(window.__rebCopyTrace)")) ?? "unavailable")")
       } catch {
         // WebKit refuses a write when the pasteboard changes while its text
         // is read, and says only NotAllowedError; this says whether it did.
-        throw HarnessError("\(error) [pasteboard changes since it was cleared: \(pasteboard.changeCount - cleared), types: \(pasteboard.types?.map(\.rawValue) ?? [])]")
+        let trace = (try? await ui.value("JSON.stringify(window.__rebCopyTrace)")) ?? "unavailable"
+        throw HarnessError("\(error) [pasteboard changes since it was cleared: \(pasteboard.changeCount - cleared), types: \(pasteboard.types?.map(\.rawValue) ?? []), copy trace: \(trace)]")
       }
       let har = try JSONSerialization.jsonObject(with: Data((pasteboard.string(forType: .string) ?? "").utf8)) as? [String: Any]
       let log = har?["log"] as? [String: Any]

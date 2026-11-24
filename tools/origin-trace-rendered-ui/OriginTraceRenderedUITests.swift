@@ -234,6 +234,20 @@ final class Harness {
     try await settle()
   }
 
+  // Moves the pointer to the window's top-left corner, clear of every
+  // control. WebKit replays the last pointer position after a relayout, so a
+  // pointer left over a chip would show its hover tooltip in a screenshot.
+  func park() async throws {
+    try await activate()
+    let location = NSPoint(x: 2, y: webView.isFlipped ? 2 : webView.bounds.height - 2)
+    guard let event = NSEvent.mouseEvent(
+      with: .mouseMoved, location: webView.convert(location, to: nil), modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+      windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0)
+    else { throw HarnessError("Could not create a mouse event") }
+    window.sendEvent(event)
+    try await settle()
+  }
+
   // A native secondary click: WebKit turns it into the page's contextmenu event.
   func rightClick(_ selector: String, containing text: String? = nil) async throws {
     try await activate()
@@ -1338,20 +1352,73 @@ final class OriginTraceRenderedUITests: XCTestCase {
   }
 
   // A live Wasm page exhausted two 16-observation budgets. Those named vm gaps
-  // are sampling limits: the footer counts no queue drops, Traffic and
-  // Fingerprinting keep their coverage, and VM Lab names both reasons as text.
+  // are sampling limits: the status bar's gap chip counts them as sampling
+  // budgets, not queue drops, Traffic and Fingerprinting keep their coverage,
+  // and VM Lab's chip opens both reasons with their raw tokens.
   @MainActor
   func test14NamedBudgetGapsStayInVmScope() async throws {
     let expected = try Expectations.load()
+    let budgets = "\(expected.namedGapReasons.count) sampling budgets (vm)"
+    // The fixture also holds one network gap (service_worker_end_lost), so
+    // the status bar shows one mixed total and a row per class.
+    let total = "\(expected.namedGapReasons.count + 1) gaps"
     for size in windowSizes {
       let ui = try await prepare(size)
       try await show(ui, "traffic")
-      let footer = try await ui.value("document.querySelector('#gap-status').textContent") as? String ?? ""
-      XCTAssertTrue(footer.contains("· \(expected.namedGapReasons.count) sampling budgets reached (vm)"), "\(size.name): footer names the vm budgets: \(footer)")
-      XCTAssertFalse(footer.contains("queue drop"), "\(size.name): budgets are not queue drops: \(footer)")
+      let footer = try await ui.value("document.querySelector('#gap-status .ev-chip')?.textContent ?? ''") as? String ?? ""
+      XCTAssertEqual(footer, total, "\(size.name): the status bar counts the vm budgets with the network loss, not queue drops")
+      // Every chip label shows whole, and the count keeps its space before "requests".
+      let bar = try await ui.json("""
+        ({summary: document.querySelector('#request-summary').innerText,
+          clipped: [...document.querySelectorAll('.statusbar .ev-chip-text')].filter(text => text.scrollWidth > text.clientWidth).map(text => text.textContent)})
+        """)
+      XCTAssertEqual(bar["clipped"] as? [String], [], "\(size.name): status bar chip labels are not cut off: \(bar)")
+      XCTAssertNotNil((bar["summary"] as? String)?.range(of: #"^[0-9,]+ requests?\b"#, options: .regularExpression),
+        "\(size.name): the request count reads as words: \(bar)")
+      try await assertLayout(ui, ".statusbar", "\(size.name) status bar")
+      try await ui.screenshot("status-bar-\(size.name)")
+      // The gap chip opens from the keyboard, Tab enters its panel, and
+      // Escape closes it and returns to the chip.
+      let chip = "#gap-status .ev-chip"
+      _ = try await ui.value("(document.querySelector('\(chip)').focus(), true)")
+      try await ui.key(36, "\r")
+      try await ui.waitUntil("document.querySelector('\(chip)').getAttribute('aria-expanded') === 'true'", "\(size.name): Enter did not open the gap chip")
+      let breakdown = try await ui.value("document.querySelector('#gap-status .ev-panel').textContent") as? String ?? ""
+      for reason in expected.namedGapReasons {
+        XCTAssertTrue(breakdown.contains(reason), "\(size.name): the gap breakdown names \(reason): \(breakdown)")
+      }
+      XCTAssertFalse(breakdown.contains("Queue drops"), "\(size.name): \(breakdown)")
+      let rows = try await ui.value("""
+        [...document.querySelectorAll('#gap-status .ev-panel-line')].map(line => line.textContent).join(' | ')
+        """) as? String ?? ""
+      XCTAssertEqual(rows, "Reported lost · network1 | Sampling budgets · vm\(expected.namedGapReasons.count)",
+        "\(size.name): one row per class, loss before limits")
+      try await assertFullyVisible(ui, "#gap-status .ev-panel", "\(size.name) status gap breakdown")
+      try await assertInert(ui, "\(size.name) status gap breakdown")
+      try await ui.park()
+      try await ui.waitUntil("document.querySelector('.ev-tip')?.hidden ?? true", "\(size.name): a hover tooltip stayed over the gap breakdown")
+      try await ui.screenshot("status-gap-breakdown-\(size.name)")
+      try await lightScreenshot(ui, "status-gap-breakdown", size.name, scope: "#gap-status .ev-panel")
+      try await ui.tab()
+      let inside = try await ui.value("document.querySelector('#gap-status .ev-panel').contains(document.activeElement)") as? Bool
+      XCTAssertEqual(inside, true, "\(size.name): Tab moves from the chip into its panel")
+      // Tab lands on a reason chip, whose focus tooltip takes the first
+      // Escape; the second closes the panel and returns to the chip.
+      try await ui.key(53, "\u{1b}")
+      let layered = try await ui.json("({tip: document.querySelector('.ev-tip')?.hidden ?? true, expanded: document.querySelector('\(chip)').getAttribute('aria-expanded')})")
+      XCTAssertEqual(layered["tip"] as? Bool, true, "\(size.name): the first Escape hides the reason tooltip: \(layered)")
+      XCTAssertEqual(layered["expanded"] as? String, "true", "\(size.name): the first Escape leaves the panel open: \(layered)")
+      try await ui.key(53, "\u{1b}")
+      let closed = try await ui.json("({expanded: document.querySelector('\(chip)').getAttribute('aria-expanded'), focused: document.activeElement === document.querySelector('\(chip)')})")
+      XCTAssertEqual(closed["expanded"] as? String, "false", "\(size.name): Escape closes the gap breakdown: \(closed)")
+      XCTAssertEqual(closed["focused"] as? Bool, true, "\(size.name): Escape returns focus to the chip: \(closed)")
       let traffic = try await ui.value("(notice => notice.hidden ? '' : notice.textContent)(document.querySelector('#network-notice'))") as? String ?? ""
-      XCTAssertFalse(traffic.contains("dropped"), "\(size.name): Traffic reports no queue loss: \(traffic)")
+      XCTAssertFalse(traffic.contains("queue"), "\(size.name): Traffic reports no queue loss: \(traffic)")
       XCTAssertFalse(traffic.contains("native_"), "\(size.name): vm reasons stay out of Traffic: \(traffic)")
+      // The network loss makes Traffic's line a loss line; its dot and wash say so.
+      let trafficLine = try await ui.json("(notice => ({lead: notice.querySelector('.ev-notice-lead')?.textContent, tone: notice.dataset.tone}))(document.querySelector('#network-notice'))")
+      XCTAssertEqual(trafficLine["lead"] as? String, "Incomplete capture", "\(size.name): \(trafficLine)")
+      XCTAssertEqual(trafficLine["tone"] as? String, "loss", "\(size.name): \(trafficLine)")
 
       try await show(ui, "signals")
       let signal = try await ui.json("({kind: document.querySelector('#signal-notice').dataset.kind, text: document.querySelector('#signal-notice').textContent})")
@@ -1360,18 +1427,46 @@ final class OriginTraceRenderedUITests: XCTestCase {
 
       try await show(ui, "vm")
       try await ui.waitUntil("!document.querySelector('#vm-notice').hidden", "VM capture limits did not render")
-      let vm = try await ui.json("({kind: document.querySelector('#vm-notice').dataset.kind, text: document.querySelector('#vm-notice').textContent})")
-      let text = vm["text"] as? String ?? ""
+      let vm = try await ui.json("""
+        ({kind: document.querySelector('#vm-notice').dataset.kind, tone: document.querySelector('#vm-notice').dataset.tone,
+          lead: document.querySelector('#vm-notice .ev-notice-lead')?.textContent,
+          chips: [...document.querySelectorAll('#vm-notice .ev-notice-chips .ev-chip')].map(chip => chip.textContent)})
+        """)
       XCTAssertEqual(vm["kind"] as? String, "gap", "\(size.name): budgets mark VM coverage incomplete: \(vm)")
-      XCTAssertTrue(text.contains("Sampling budget reached"), "\(size.name): \(text)")
-      XCTAssertFalse(text.contains("queue"), "\(size.name): \(text)")
-      for reason in expected.namedGapReasons {
-        XCTAssertTrue(text.contains(reason), "\(size.name): VM Lab names \(reason): \(text)")
-      }
+      XCTAssertEqual(vm["lead"] as? String, "Capture limits", "\(size.name): budgets are limits, not loss: \(vm)")
+      XCTAssertEqual(vm["tone"] as? String, "limit", "\(size.name): \(vm)")
+      XCTAssertEqual(vm["chips"] as? [String], [budgets], "\(size.name): one chip per class: \(vm)")
       try await assertFullyVisible(ui, "#vm-notice", "\(size.name) VM capture limits")
+      // Never a fixed-height scroll box: the notice grows with its chips, so no line is cut off.
+      let box = try await ui.json("""
+        (notice => { const style = getComputedStyle(notice), rect = notice.getBoundingClientRect();
+          const chips = notice.querySelector('.ev-notice-chips').getBoundingClientRect();
+          return {maxHeight: style.maxHeight, overflow: style.overflowY, scrolls: notice.scrollHeight > notice.clientHeight + 1,
+            inside: chips.top >= rect.top - 0.5 && chips.bottom <= rect.bottom + 0.5}; })(document.querySelector('#vm-notice'))
+        """)
+      XCTAssertEqual(box["maxHeight"] as? String, "none", "\(size.name): the VM notice has no height cap: \(box)")
+      XCTAssertEqual(box["overflow"] as? String, "visible", "\(size.name): the VM notice is not a scroll box: \(box)")
+      XCTAssertEqual(box["scrolls"] as? Bool, false, "\(size.name): nothing in the VM notice scrolls out of view: \(box)")
+      XCTAssertEqual(box["inside"] as? Bool, true, "\(size.name): the chip row sits inside the VM notice: \(box)")
       try await assertInert(ui, "\(size.name) VM capture limits")
       try await assertLayout(ui, "#screen-vm", "\(size.name) VM capture limits")
       try await ui.screenshot("vm-capture-limits-\(size.name)")
+      try await ui.click("#vm-notice .ev-notice-chips .ev-chip")
+      try await ui.waitUntil("document.querySelector('#vm-notice .ev-chip').getAttribute('aria-expanded') === 'true'", "\(size.name): the VM budget chip did not open")
+      let reasons = try await ui.value("[...document.querySelectorAll('#vm-notice .ev-panel .ev-reason')].map(reason => reason.dataset.reason).join(' ')") as? String ?? ""
+      for reason in expected.namedGapReasons {
+        XCTAssertTrue(reasons.contains(reason), "\(size.name): VM Lab names \(reason) as a reason chip: \(reasons)")
+      }
+      try await assertFullyVisible(ui, "#vm-notice .ev-panel", "\(size.name) VM budget breakdown")
+      try await ui.screenshot("vm-capture-limits-open-\(size.name)")
+      try await ui.key(53, "\u{1b}")
+      // Dismissed, the line stays hidden across polls; the status bar keeps the count.
+      try await ui.click("#vm-notice .ev-notice-dismiss")
+      try await ui.waitUntil("document.querySelector('#vm-notice').hidden", "\(size.name): the VM notice was not dismissed")
+      try await Task.sleep(nanoseconds: 2_500_000_000)
+      let dismissed = try await ui.json("({hidden: document.querySelector('#vm-notice').hidden, footer: document.querySelector('#gap-status .ev-chip')?.textContent})")
+      XCTAssertEqual(dismissed["hidden"] as? Bool, true, "\(size.name): a dismissed notice stays dismissed: \(dismissed)")
+      XCTAssertEqual(dismissed["footer"] as? String, total, "\(size.name): \(dismissed)")
     }
   }
 
@@ -3278,13 +3373,20 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("state.connection === 'unresponsive'", timeout: 20, "\(size.name): a hung backend was never reported")
       let hung = try await ui.json(
         """
-        ({footer: document.querySelector('#broker-status').textContent, updated: document.querySelector('#updated-status').textContent,
+        ({footer: document.querySelector('#broker-status .ev-chip-text').textContent,
           badge: document.querySelector('#signal-session-badge').textContent, notice: document.querySelector('#signal-notice').textContent,
           stop: document.querySelector('#signal-stop-capture').disabled, clear: document.querySelector('#signal-clear-events').disabled,
           requests: state.requests.length})
         """)
-      XCTAssertEqual(hung["footer"] as? String, "broker not responding", "\(size.name): \(hung)")
-      XCTAssertEqual(hung["updated"] as? String, "last valid evidence retained", "\(size.name): \(hung)")
+      XCTAssertEqual(hung["footer"] as? String, "Not responding", "\(size.name): \(hung)")
+      // The connection chip's facts name the timeout and the retained evidence.
+      try await ui.click("#broker-status .ev-chip")
+      let facts = try await ui.value("[...document.querySelectorAll('#broker-status .ev-panel dt, #broker-status .ev-panel dd')].map(item => item.textContent).join('|')") as? String ?? ""
+      XCTAssertTrue(facts.contains("Backend|did not answer within 10 seconds"), "\(size.name): \(facts)")
+      XCTAssertTrue(facts.contains("Evidence|last valid evidence retained"), "\(size.name): \(facts)")
+      try await assertFullyVisible(ui, "#broker-status .ev-panel", "\(size.name) connection facts")
+      try await ui.screenshot("status-connection-unresponsive-\(size.name)")
+      try await ui.key(53, "\u{1b}")
       XCTAssertNotEqual(hung["badge"] as? String, "Probes stopped", "\(size.name): an unknown capture state outranks the stale stop: \(hung)")
       XCTAssertTrue((hung["notice"] as? String ?? "").contains("did not answer within 10 seconds"), "\(size.name): \(hung)")
       XCTAssertEqual(hung["stop"] as? Bool, true, "\(size.name): \(hung)")
@@ -3300,7 +3402,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.screenshot("event-poll-unresponsive-traffic-\(size.name)")
 
       _ = try await ui.value("(__rebPollShim.hang = false, true)")
-      try await ui.waitUntil("state.connection === 'broker-offline' && document.querySelector('#broker-status').textContent === 'broker unavailable'",
+      try await ui.waitUntil("state.connection === 'broker-offline' && document.querySelector('#broker-status .ev-chip-text').textContent === 'Offline'",
         timeout: 20, "\(size.name): the poll did not recover")
     }
   }

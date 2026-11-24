@@ -1231,7 +1231,7 @@ const pivotElements = {signalRequestProfile: new TrafficFixtureNode(), signalDet
 const signalTab = new TrafficFixtureNode("button");
 let pivotScreen;
 let pivotInspectorOpen = false;
-const signalPivots = runInNewContext(appSection("      function renderSignalRequestProfile()", "      function signalTabKey(") +
+const signalPivots = runInNewContext((await readFile(join(root, "apps/research-ui/evidence_chips.js"), "utf8")) + "\n" + appSection("      function renderSignalRequestProfile()", "      function signalTabKey(") +
   ";({renderSignalRequestProfile,renderFingerprintDetail})", {
   state: pivotState, elements: pivotElements, document: {...trafficDocument, querySelector: () => signalTab},
   textElement: (tag, className, text) => {const node = new TrafficFixtureNode(tag); node.className = className; node.textContent = text; return node;},
@@ -2784,7 +2784,7 @@ function observationFixtureContext() {
   const artifacts = [{protocol_version:1,session_id:'7',artifact_id:'9',navigation_id:'101',frame_id:'301',parent_artifact_id:'0',creator_event_id:'95',execution_context_id:'23',capture_origin:'network_response',kind:'javascript',url:'https://fixture.invalid/assets/collector.js',mime_type:'text/javascript',byte_size:observationSourceBytes.length,sha256:observationSourceHash,sensitive:false}];
   return {events,artifacts,request:{id:'evidence-investigation-request',origin:'live',method:'POST',path:'telemetry.fixture.invalid',hostOnly:true,events:events.filter(event=>event.category==='network')},eventsLimited:false};
 }
-const observationCode = (await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8')) + '\n' + packageSource;
+const observationCode = (await readFile(join(root,'apps/research-ui/evidence_chips.js'),'utf8')) + '\n' + (await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8')) + '\n' + packageSource;
 const observationUI = runInNewContext(observationCode + ';({evidenceObservationModel,evidenceRequestKey,evidenceArtifactReference,isBrokerResponse,isArtifactResponse})', {TextDecoder, Uint8Array});
 const nativeNetworkProjection = runInNewContext(observationCode + ';({requestsFromEvents,evidenceObservationOutcome,evidenceObservationLabel,evidencePayload})', {TextDecoder, Uint8Array});
 for (const disposition of ['proxy_destroyed', 'redirect_handoff']) {
@@ -2811,6 +2811,20 @@ assert.equal(observationModel.missingParents,1); assert.equal(observationModel.q
 assert.equal(observationModel.namedMarkers,0);
 const namedObservationModel = observationUI.evidenceObservationModel({...observationContext, events:[...observationContext.events, observationEvent(107,'vm','gap','native_wasm_dispatch_budget_incomplete')]});
 assert.equal(namedObservationModel.queueMarkers,1,'a named vm budget is not a queue-drop marker'); assert.equal(namedObservationModel.namedMarkers,1);
+assert.equal(observationModel.refusalRecords,0);
+{
+  // protocol/broker-refusal-v1.md: reason 5 (reserved) in the refused record's place.
+  const refused = observationEvent(108,'canvas','broker_refusal','',{resource_type:0});
+  const payload = Buffer.alloc(128);
+  payload.writeUInt16LE(1,0); payload.writeUInt16LE(128,2); payload.writeUInt16LE(5,4); payload.writeUInt16LE(1,6);
+  payload.writeUInt16LE(3,8); payload.writeUInt16LE(144,10); payload.writeUInt16LE(1,12); payload.writeUInt16LE(1,14);
+  payload.writeBigUInt64LE(1n,24); payload.writeBigUInt64LE(108n,32); payload.writeBigUInt64LE(BigInt(refused.monotonic_time_ns),40);
+  payload.writeUInt32LE(42,48); payload.writeUInt32LE(44,52);
+  Object.assign(refused,{payload:payload.toString('hex'),payload_size:128});
+  const refusalModel = observationUI.evidenceObservationModel({...observationContext, events:[...observationContext.events, refused, refused]});
+  assert.equal(refusalModel.refusalRecords,1,'a refusal record stays a row and is counted once');
+  assert(refusalModel.rows.some(row=>row.key==='7:42:108'));
+}
 assert.equal(observationModel.rows.find(row=>row.key==='7:42:102').outcome,'Outcome not recorded');
 assert.equal(observationModel.rows.find(row=>row.key==='7:42:104').artifact.status,'missing');
 assert.equal(observationModel.linkedArtifacts,1);
@@ -2868,7 +2882,7 @@ function observationPanelFixture(narrow = false, options = {}) {
   let comparisonFetch=options.fetcher || (async()=>Response.json(comparisonResult));
   nodes['evidence-package-mode'].append(nodes['evidence-package-panel'],nodes['evidence-comparison-section']);
   nodes['evidence-comparison-section'].append(nodes['evidence-comparison-close'],nodes['evidence-comparison-unavailable'],nodes['evidence-comparison-panel']);
-  const create=runInNewContext(observationCode+'\n'+comparisonSource+';createEvidenceWorkspace',{document,TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,setInterval,clearInterval,fetch:(...args)=>comparisonFetch(...args),location:{protocol:options.protocol||'http:'},window:{matchMedia:()=>({matches:narrow})}});
+  const create=runInNewContext(observationCode+'\n'+comparisonSource+';createEvidenceWorkspace',{document,Node:ObservationNode,TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,setInterval,clearInterval,fetch:(...args)=>comparisonFetch(...args),location:{protocol:options.protocol||'http:'},window:{matchMedia:()=>({matches:narrow})}});
   const panel=create({getContext:()=>context,packagePanel:{sync(){},setVisible(value){packageVisible=value;if(!value)packageCancels++;}},onTrace(){},onRequest(){},onSource(){sourceCalls++;return true;},canOpenSource:()=>true,
     ...(options.rangeFetch?{fetcher:(...args)=>options.rangeFetch(...args)}:{})});
   panel.setVisible(true);

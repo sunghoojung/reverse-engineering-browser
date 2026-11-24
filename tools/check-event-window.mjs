@@ -1,15 +1,22 @@
+// Event-window admission and the gap counts the status bar and the Traffic
+// notice show, through the production models, app.js notice and the chips
+// module in a LinkeDOM document (no layout or focus; make rendered-ui-check
+// covers the packaged window).
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
+import {createRequire} from 'node:module';
 import {runInNewContext} from 'node:vm';
 
+const {parseHTML} = createRequire(new URL('ui-startup-deps/', import.meta.url))('linkedom');
 const models = await readFile(new URL('../apps/research-ui/evidence_models.js', import.meta.url), 'utf8');
 const app = await readFile(new URL('../apps/research-ui/app.js', import.meta.url), 'utf8');
+const chipsSource = await readFile(new URL('../apps/research-ui/evidence_chips.js', import.meta.url), 'utf8');
 const traffic = await readFile(new URL('../apps/research-ui/traffic_view.js', import.meta.url), 'utf8');
 const trafficStart = traffic.indexOf('function trafficRequestFailed(');
 const trafficEnd = traffic.indexOf('function renderTrafficRows(', trafficStart);
 assert(trafficStart >= 0 && trafficEnd > trafficStart);
 const failedNoticeHelpers = traffic.slice(trafficStart, trafficEnd);
-const start = app.indexOf('      function renderNetworkNotice()');
+const start = app.indexOf('      function setNetworkNotice(');
 const end = app.indexOf('      function textElement(', start);
 assert(start >= 0 && end > start, 'Traffic notice helpers must stay extractable');
 const state = {
@@ -21,20 +28,36 @@ const state = {
   sequenceGaps: 280n,
   queueDrops: 280n,
   eventCountScope: 'store',
-  requests: []
+  requests: [],
+  trafficFlags: {}
 };
-let notice;
-const elements = {networkNotice: {hidden: true, dataset: {}}};
+const {window} = parseHTML('<!doctype html><html><body><div id="network-notice" hidden></div><input id="filter"></body></html>');
+const {document} = window;
+const elements = {networkNotice: document.getElementById('network-notice'), requestFilter: document.getElementById('filter')};
+let evidenceShown = 0;
+const context = {state, TextEncoder, TextDecoder, elements, document, window, navigator: {}, setTimeout, clearTimeout,
+  showCaptureGapsInEvidence() { evidenceShown += 1; }};
+runInNewContext(chipsSource, context);
 const api = runInNewContext(
-  `${failedNoticeHelpers}\n${models}\n${app.slice(start, end)};({isBrokerResponse,isBrokerEvent,decodePayload,acceptEventWindow,captureWideTotal,countSequenceGaps,countReportedQueueDrops,requestsFromEvents,shownSequenceGaps,shownQueueDrops,shownNamedGaps,namedGapsFromEvents,namedGapsIn,namedGapNotice,eventGapLabel,fingerprintCoverageNotice,renderNetworkNotice,fingerprintSignalCategories,vmGapCategories,decodeBrokerRefusal,brokerRefusalsFromEvents,shownBrokerRefusals,fingerprintEventsFromEvents})`,
-  {
-    state,
-    TextEncoder,
-    TextDecoder,
-    elements,
-    setNetworkNotice(kind, text) { notice = {kind, text}; }
-  }
+  `${failedNoticeHelpers}\n${models}\n${app.slice(start, end)};({isBrokerResponse,isBrokerEvent,decodePayload,acceptEventWindow,captureWideTotal,countSequenceGaps,countReportedQueueDrops,requestsFromEvents,shownSequenceGaps,shownQueueDrops,shownNamedGaps,namedGapsFromEvents,namedGapsIn,captureGapClasses,captureGapClassChip,captureGapStatusChip,eventCountScopeLabel,eventCountScopeTitle,fingerprintCoverageNotice,renderNetworkNotice,fingerprintSignalCategories,vmGapCategories,networkGapCategories,decodeBrokerRefusal,brokerRefusalsFromEvents,shownBrokerRefusals,fingerprintEventsFromEvents})`,
+  context
 );
+const chips = context.RebEvidenceChips;
+// Counts use the reader's locale grouping; expectations are built the same way.
+const n = value => new Intl.NumberFormat().format(value);
+// What the Traffic notice line shows: its lead and each chip's text.
+const notice = () => {
+  const line = elements.networkNotice;
+  const lead = line.querySelector('.ev-notice-lead');
+  return {hidden: line.hidden, kind: line.dataset.kind, lead: lead && !lead.hidden ? lead.textContent : '',
+    chips: [...line.querySelectorAll('.ev-notice-chips .ev-chip')].map(chip => chip.textContent),
+    names: [...line.querySelectorAll('.ev-notice-chips .ev-chip')].map(chip => chip.getAttribute('aria-label')),
+    text: line.hidden ? '' : line.textContent};
+};
+// The status bar's chip over every class the summaries count.
+const statusChip = () => api.captureGapStatusChip(api.captureGapClasses({sequenceGaps: api.shownSequenceGaps(),
+  queueDrops: api.shownQueueDrops(), malformedLines: state.eventMalformedLines ?? 0, namedGaps: api.shownNamedGaps(),
+  brokerRefusals: api.shownBrokerRefusals()}));
 
 const canvas = sequence => ({
   protocol_version: 3,
@@ -52,15 +75,54 @@ assert.equal(api.countSequenceGaps(state.events), 0n);
 assert.equal(api.countReportedQueueDrops(state.events), 0n);
 assert.equal(api.captureWideTotal('280'), 280n);
 assert.equal(api.captureWideTotal(280), null);
-assert.equal(
-  api.eventGapLabel(api.shownSequenceGaps(), api.shownQueueDrops()),
-  '280 sequence-gap IDs (the stored capture) · 280 reported queue drops (may overlap)'
-);
+{
+  const chip = statusChip();
+  assert.equal(chip.text, '560 gaps');
+  assert.equal(chip.name, '560 gaps in the stored capture');
+  assert.equal(chip.tone, 'loss');
+  assert.equal(chip.breakdown.scope, 'stored capture');
+  assert.deepEqual(Array.from(chip.breakdown.rows, row => [row.label, row.count]), [['Sequence gaps', 280n], ['Queue drops', 280n]]);
+  assert.equal(chip.breakdown.note, 'Counts can overlap: a queue drop can also leave a sequence gap.');
+}
 api.renderNetworkNotice();
-assert.equal(notice.kind, 'gap');
-assert.match(notice.text, /Traffic shows requests from the newest 5,000 evidence events until the request index answers/);
-assert.match(notice.text, /280 sequence-gap IDs were observed in the stored capture/);
-assert.match(notice.text, /The queue reports 280 dropped events; counts may overlap sequence gaps/);
+assert.deepEqual(notice(), {hidden: false, kind: 'gap', lead: 'Incomplete capture',
+  chips: ['280 sequence gaps', '280 queue drops', `newest ${n(5000)} events`],
+  names: ['280 sequence gaps in the stored capture', '280 queue drops in the stored capture', `Rows come from the newest ${n(5000)} events`],
+  text: notice().text});
+assert.match(notice().text, /Show in Evidence$/);
+elements.networkNotice.querySelector('.ev-notice-action[data-action="evidence"]').click();
+assert.equal(evidenceShown, 1, 'Show in Evidence opens the coverage panel');
+// Opening a chip shows its scope, meaning and nothing in place of the counts.
+{
+  const sequence = elements.networkNotice.querySelector('.ev-chip[data-key="sequence"]');
+  assert.equal(sequence.getAttribute('aria-expanded'), 'false');
+  sequence.click();
+  assert.equal(sequence.getAttribute('aria-expanded'), 'true');
+  const panel = document.getElementById(sequence.getAttribute('aria-controls'));
+  assert.match(panel.textContent, /^Sequence gapsstored captureSequence IDs absent between the first and last record of a process/);
+  sequence.click();
+  assert.equal(sequence.getAttribute('aria-expanded'), 'false');
+}
+// Dismissing the line hides it for this session until a class it did not
+// hold appears; the status bar chip keeps every count meanwhile.
+elements.networkNotice.querySelector('.ev-notice-dismiss').click();
+assert.equal(notice().hidden, true);
+api.renderNetworkNotice();
+assert.equal(notice().hidden, true, 'A dismissed line stays dismissed across polls');
+assert.equal(statusChip().text, '560 gaps');
+state.eventMalformedLines = 2;
+api.renderNetworkNotice();
+assert.deepEqual(notice().chips, ['280 sequence gaps', '280 queue drops', '2 unreadable lines', `newest ${n(5000)} events`], 'A new class brings the line back');
+state.eventMalformedLines = 0;
+api.renderNetworkNotice();
+assert.equal(notice().hidden, false);
+// Every count reads in the locale grouping, never as raw digits.
+state.sequenceGaps = 75511n;
+api.renderNetworkNotice();
+assert.equal(notice().chips[0], `${n(75511)} sequence gaps`);
+assert.equal(statusChip().text, `${n(75791)} gaps`);
+if (new Intl.NumberFormat().resolvedOptions().locale.startsWith('en')) assert.equal(notice().chips[0], '75,511 sequence gaps');
+state.sequenceGaps = 280n;
 assert.equal(
   api.fingerprintCoverageNotice(true, false, 500, 280n, 280n),
   'Fingerprint activity is visible with partial coverage: the event window is capped; 280 sequence-gap IDs were observed in the stored capture; 280 queue drops were reported in the stored capture (may overlap sequence gaps).'
@@ -68,7 +130,7 @@ assert.equal(
 
 state.sequenceGaps = null;
 state.queueDrops = null;
-assert.equal(api.eventGapLabel(api.shownSequenceGaps(), api.shownQueueDrops()), '0 sequence-gap IDs (the stored capture)');
+assert.equal(statusChip(), null, 'No gap is no chip');
 state.sequenceGaps = 280n;
 state.queueDrops = 280n;
 
@@ -143,11 +205,20 @@ const bounded = {...response, sequence_gaps: '280', event_window: coverage, netw
 assert.equal(api.isBrokerResponse(bounded), true);
 api.acceptEventWindow(bounded);
 api.renderNetworkNotice();
-assert.match(notice.text, /Only the newest 64 MiB/);
-assert.match(notice.text, /280 sequence-gap IDs were observed in the scanned tail/);
-assert.match(notice.text, /network event window is capped/);
-assert.doesNotMatch(notice.text, /separate newest-network window/);
-assert.match(api.eventGapLabel(api.shownSequenceGaps(), api.shownQueueDrops()), /the scanned tail/);
+assert.deepEqual(notice().chips, ['280 sequence gaps', '280 queue drops', `newest ${n(5000)} events`, 'newest 64 MiB']);
+assert.deepEqual(notice().names.slice(0, 2), ['280 sequence gaps in the scanned tail', '280 queue drops in the scanned tail']);
+{
+  const limit = elements.networkNotice.querySelector('.ev-chip[data-key="window"]');
+  limit.click();
+  assert.match(document.getElementById(limit.getAttribute('aria-controls')).textContent, /so older lifecycle records can be missing/);
+  limit.click();
+  const scan = elements.networkNotice.querySelector('.ev-chip[data-key="scan"]');
+  scan.click();
+  assert.match(document.getElementById(scan.getAttribute('aria-controls')).textContent, /only the newest 64 MiB is scanned/);
+  scan.click();
+}
+assert.equal(statusChip().name, '560 gaps in the scanned tail');
+assert.equal(statusChip().breakdown.scope, 'newest 64 MiB');
 for (const invalid of [
   {...bounded, network_events: [gap]},
   {...bounded, event_window: {...coverage, scope: 'store'}},
@@ -162,17 +233,18 @@ const indexedStore = {...bounded, event_window: {...coverage, scope: 'store', sc
   scan_end: '450000000', next_before: '449000000'}};
 assert.equal(api.isBrokerResponse(indexedStore), true);
 api.acceptEventWindow(indexedStore);
-assert.match(api.eventGapLabel(api.shownSequenceGaps(), api.shownQueueDrops()), /^280 sequence-gap IDs \(the stored capture\)/);
+assert.equal(statusChip().name, '560 gaps in the stored capture');
 assert.equal(api.isBrokerResponse({...indexedStore, event_window: {...indexedStore.event_window, next_before: null}}), true);
 api.acceptEventWindow({count: 0, events: []});
 assert.equal(state.sequenceGaps, null, 'legacy/missing summaries must not preserve old totals');
 assert.equal(state.queueDrops, null);
 assert.equal(state.eventCountScope, 'rendered_window');
 assert.equal(state.networkEventsAvailable, false);
-assert.match(api.eventGapLabel(0n, 0n), /visible event window/);
+assert.equal(api.eventCountScopeLabel(), 'the visible event window');
+assert.equal(api.eventCountScopeTitle(), 'visible events');
 console.log('PASS production scoped summary admission, independent network bounds and legacy refresh reset');
 
-const refreshStart = app.indexOf('      async function refresh()');
+const refreshStart = app.indexOf('      // Evidence times are relative to the store');
 const refreshEnd = app.indexOf('      function useStandalonePreview()', refreshStart);
 assert(refreshStart >= 0 && refreshEnd > refreshStart);
 Object.assign(state, {refreshing: false, eventEtag: null, signalKnownKeys: null, signalNewKeys: new Set(),
@@ -222,11 +294,12 @@ console.log('PASS actual refresh keeps Traffic outcomes through a general canvas
 Object.assign(state, {sequenceGaps: 18446744073709551615n, queueDrops: 18446744073709551615n,
   sequenceGapsSaturated: true, queueDropsSaturated: true, eventCountScope: 'bounded_tail'});
 api.renderNetworkNotice();
-assert.match(notice.text, /at least 18446744073709551615 sequence-gap IDs/);
-assert.match(notice.text, /reports at least 18446744073709551615 dropped events/);
+const most = n(18446744073709551615n);
+assert.deepEqual(notice().chips.slice(0, 2), [`≥${most} sequence gaps`, `≥${most} queue drops`]);
+assert.equal(statusChip().text, `≥${n(36893488147419103230n)} gaps`, 'A saturated class makes the total a lower bound');
 const saturated = api.fingerprintCoverageNotice(false, false, 500, state.sequenceGaps, state.queueDrops, 'the scanned tail');
-assert.match(saturated, /at least 18446744073709551615 sequence-gap IDs/);
-assert.match(saturated, /at least 18446744073709551615 queue drops/);
+assert.match(saturated, new RegExp(`at least ${most} sequence-gap IDs`));
+assert.match(saturated, new RegExp(`at least ${most} queue drops`));
 console.log('PASS primary Traffic and fingerprint notices disclose saturated totals as lower bounds');
 
 for (const invalid of ['2\n', '2\r', '2 ', ' 2', '+2', '02', '-2', '18446744073709551616']) {
@@ -259,18 +332,24 @@ assert.equal(api.isBrokerResponse(liveResponse), true);
 Object.assign(state, {events: liveBudgets, requests: [], eventsLimited: false});
 api.acceptEventWindow(liveResponse);
 assert.equal(api.shownQueueDrops(), 0n, 'named budget markers are not queue drops');
-assert.equal(api.eventGapLabel(api.shownSequenceGaps(), api.shownQueueDrops(), api.shownNamedGaps()),
-  '0 sequence-gap IDs (the stored capture) · 2 sampling budgets reached (vm)');
-notice = null;
+{
+  const chip = statusChip();
+  assert.equal(chip.text, '2 sampling budgets (vm)', 'A single class keeps its own noun');
+  assert.equal(chip.tone, 'limit', 'A sampling budget is a limit, not a loss');
+  assert.deepEqual(Array.from(chip.breakdown.reasons, entry => [entry.token, entry.count]),
+    [['native_wasm_dispatch_budget_incomplete', 1n], ['native_wasm_indirect_budget_incomplete', 1n]]);
+}
 elements.networkNotice.hidden = false;
 api.renderNetworkNotice();
-assert.equal(notice, null, 'Traffic has no network loss to report');
-assert.equal(elements.networkNotice.hidden, true);
+assert.equal(notice().hidden, true, 'Traffic has no network loss to report');
+assert.equal(elements.networkNotice.children.length, 0);
 assert.equal(api.namedGapsIn(api.shownNamedGaps(), api.fingerprintSignalCategories).length, 0, 'a vm budget leaves Fingerprinting complete');
-const vmNotice = api.namedGapNotice(api.namedGapsIn(api.shownNamedGaps(), api.vmGapCategories), 'the stored capture');
-assert.equal(vmNotice, 'Sampling budget reached in the stored capture for Wasm br_table dispatch (native_wasm_dispatch_budget_incomplete); ' +
-  'Wasm call_indirect dispatch (native_wasm_indirect_budget_incomplete). Retained observations are exact; later ones were not sampled. ' +
-  'Wasm sampling is paced per second: executions past a full window or function allowance keep a compact identity in an overflow record, up to the ring, and identities past the ring are a count on that record, not another full observation. The next second samples again.');
+// The VM notice is one chip per class; each reason chip names its raw token
+// and its one-line meaning from the glossary the models define.
+assert.deepEqual(Array.from(api.captureGapClasses({namedGaps: api.namedGapsIn(api.shownNamedGaps(), api.vmGapCategories)}), entry => api.captureGapClassChip(entry).text),
+  ['2 sampling budgets (vm)']);
+assert.deepEqual({...chips.reason('native_wasm_dispatch_budget_incomplete')}, {label: 'Wasm br_table dispatch budget', kind: 'limit',
+  meaning: 'This second\'s sampling window filled: retained samples are exact, later executions keep only a compact overflow identity (past its ring, a count), and the next second samples again.'});
 const overflowBytes = Buffer.alloc(32);
 overflowBytes.writeUInt16LE(1, 0);
 overflowBytes.writeUInt16LE(32, 2);
@@ -293,40 +372,50 @@ assert.equal(api.isBrokerEvent({...overflowEvent, artifact_id: '1'}), false);
 assert.equal(api.isBrokerEvent({...overflowEvent, parent_event_id: '4'}), false);
 overflowBytes[4] = 9;
 assert.equal(api.isBrokerEvent({...overflowEvent, payload: overflowBytes.toString('hex')}), false);
-const jsBudget = api.namedGapNotice([{category: 'vm', reason: 'native_js_dispatch_budget_incomplete', count: 1n}], 'the stored capture');
-assert.equal(jsBudget, 'Sampling budget reached in the stored capture for JavaScript dispatch (native_js_dispatch_budget_incomplete). Retained observations are exact; later ones were not sampled.');
+assert.deepEqual({...chips.reason('native_js_dispatch_budget_incomplete')}, {label: 'JavaScript dispatch budget', kind: 'limit',
+  meaning: 'The sampling budget filled: retained observations are exact and later ones were not sampled.'});
 const controlledBudgets = [
   budgetGap(3, 'native_wasm_dispatch_function_budget_incomplete'),
   budgetGap(4, 'native_wasm_indirect_site_budget_incomplete'),
   budgetGap(5, 'native_wasm_dispatch_filtered')
 ];
-assert.equal(api.namedGapNotice(api.namedGapsFromEvents(controlledBudgets), 'the stored capture'),
-  'Sample policy excluded observations in the stored capture: Wasm br_table (native_wasm_dispatch_filtered). Those executions were not sampled and did not consume a sample slot. ' +
-  'Sampling budget reached in the stored capture for Wasm br_table per function (native_wasm_dispatch_function_budget_incomplete); ' +
-  'Wasm call_indirect per call site (native_wasm_indirect_site_budget_incomplete). Retained observations are exact; later ones were not sampled. ' +
-  'Wasm sampling is paced per second: executions past a full window or function allowance keep a compact identity in an overflow record, up to the ring, and identities past the ring are a count on that record, not another full observation. The next second samples again.');
+{
+  const classes = api.captureGapClasses({namedGaps: api.namedGapsFromEvents(controlledBudgets)});
+  assert.deepEqual(Array.from(classes, entry => [entry.key, api.captureGapClassChip(entry).text]),
+    [['budget:vm', '2 sampling budgets (vm)'], ['policy:vm', '1 policy exclusion (vm)']]);
+  const chip = api.captureGapStatusChip(classes);
+  assert.equal(chip.text, '3 gaps');
+  assert.equal(chip.tone, 'limit', 'Budgets and policy exclusions alone are limits');
+  assert.deepEqual(Array.from(chip.breakdown.rows, row => row.label), ['Sampling budgets · vm', 'Sample policy · vm']);
+  assert.equal(chip.breakdown.note, '');
+}
+assert.deepEqual({...chips.reason('native_wasm_dispatch_filtered')}, {label: 'Wasm br_table excluded', kind: 'policy',
+  meaning: 'The sample policy excluded these executions: none was sampled or took a sample slot.'});
 // A capture from an earlier build names a browser per-function cap. It is
 // still a sampling budget, but no overflow identity follows it.
-assert.equal(api.namedGapNotice([{category: 'vm', reason: 'native_wasm_dispatch_browser_function_budget_incomplete', count: 1n}], 'the stored capture'),
-  'Sampling budget reached in the stored capture for Wasm br_table per function (browser) (native_wasm_dispatch_browser_function_budget_incomplete). Retained observations are exact; later ones were not sampled.');
-assert.equal(api.eventGapLabel(0n, 0n, api.namedGapsFromEvents(controlledBudgets)),
-  '0 sequence-gap IDs (the stored capture) · 2 sampling budgets reached (vm) · 1 sample policy exclusion (vm)');
+assert.deepEqual({...chips.reason('native_wasm_dispatch_browser_function_budget_incomplete')}, {label: 'Wasm br_table per function (browser) budget',
+  kind: 'limit', meaning: 'The sampling budget filled: retained observations are exact and later ones were not sampled.'});
 console.log('PASS named vm sampling budgets are scoped capture limits, not queue drops or Traffic/Fingerprinting loss');
 
 // Numeric gap payloads remain queue drops beside named markers in the same total.
 api.acceptEventWindow({...liveResponse, queue_drops: '7', named_gaps: [...liveResponse.named_gaps,
   {category: 'vm', reason: 'native_wasm_dispatch_transport_unavailable', count: '2'}]});
 assert.equal(api.shownQueueDrops(), 3n);
-assert.equal(api.eventGapLabel(0n, api.shownQueueDrops(), api.shownNamedGaps()),
-  '0 sequence-gap IDs (the stored capture) · 3 reported queue drops (may overlap) · 2 sampling budgets reached (vm) · 2 reported capture losses (vm)');
+{
+  const chip = statusChip();
+  assert.equal(chip.text, '7 gaps');
+  assert.equal(chip.tone, 'loss');
+  assert.deepEqual(Array.from(chip.breakdown.rows, row => [row.label, row.count]),
+    [['Queue drops', 3n], ['Reported lost · vm', 2n], ['Sampling budgets · vm', 2n]]);
+  assert.equal(chip.breakdown.note, '', 'No sequence gap, so nothing overlaps');
+  assert.deepEqual(Array.from(chip.breakdown.rows[1].reasons, entry => [entry.token, entry.count]), [['native_wasm_dispatch_transport_unavailable', 2n]]);
+}
 api.renderNetworkNotice();
-assert.equal(notice.text, 'The queue reports 3 dropped events; no sequence jump is visible in the stored capture.');
-assert.match(api.namedGapNotice(api.shownNamedGaps(), 'the stored capture'),
-  /^Capture reported lost vm evidence in the stored capture: native_wasm_dispatch_transport_unavailable ×2\. Sampling budget reached/);
+assert.deepEqual([notice().lead, notice().chips], ['Incomplete capture', ['3 queue drops']]);
 // Saturated totals stay lower bounds after the named weight is removed.
 api.acceptEventWindow({...liveResponse, queue_drops: '18446744073709551615', queue_drops_saturated: true});
 api.renderNetworkNotice();
-assert.match(notice.text, /reports at least 18446744073709551613 dropped events/);
+assert.deepEqual(notice().chips, [`≥${n(18446744073709551613n)} queue drops`]);
 console.log('PASS numeric queue drops, named losses and saturation stay separate and visible');
 
 // A response without named_gaps still separates the named markers it can see.
@@ -350,7 +439,14 @@ Object.assign(state, {events: [], namedGaps: [{category: 'network', reason: 'nat
   {category: 'canvas', reason: 'native_canvas_example_unavailable', count: 1n},
   {category: 'vm', reason: 'native_js_dispatch_budget_incomplete', count: 1n}], queueDrops: 3n, queueDropsSaturated: false});
 api.renderNetworkNotice();
-assert.equal(notice.text, 'Capture reported lost network evidence in the stored capture: native_network_example_unavailable.');
+assert.deepEqual([notice().lead, notice().chips], ['Incomplete capture', ['1 lost (network)']]);
+{
+  const lost = elements.networkNotice.querySelector('.ev-chip[data-key="lost:network"]');
+  lost.click();
+  const panel = document.getElementById(lost.getAttribute('aria-controls'));
+  assert.match(panel.textContent, /native_network_example_unavailable/, 'The raw reason token stays readable');
+  lost.click();
+}
 const canvasOnly = api.namedGapsIn(api.shownNamedGaps(), api.fingerprintSignalCategories);
 assert.equal(api.fingerprintCoverageNotice(false, false, 500, 0n, api.shownQueueDrops(), 'the stored capture', canvasOnly),
   'Fingerprint activity is visible with partial coverage: capture reported lost evidence in the stored capture: canvas native_canvas_example_unavailable.');
@@ -434,14 +530,53 @@ for (const broker_refusals of [
 Object.assign(state, {events: [placed, own], requests: []});
 api.acceptEventWindow(refusedResponse);
 assert.equal(api.shownBrokerRefusals().map(entry => `${entry.reason}:${entry.count}`).join(), 'reserved:2,protocol_version:1');
-assert.equal(api.eventGapLabel(0n, 0n, [], api.shownBrokerRefusals()),
-  '0 sequence-gap IDs (the stored capture) · 3 records refused by the broker (reserved, protocol_version)');
+// The status bar's gap chip counts them as a loss of their category, and
+// its panel lists each reason as a chip with its own meaning.
+{
+  const chip = statusChip();
+  assert.equal(chip.text, '3 refused records (canvas)');
+  assert.equal(chip.name, '3 refused records (canvas) in the stored capture');
+  assert.equal(chip.tone, 'loss');
+  assert.equal(chip.breakdown.title, 'Refused by the broker · canvas');
+  assert.equal(chip.breakdown.reasons.map(entry => `${entry.token}:${entry.count}:${entry.label}`).join(),
+    'reserved:2:Reserved bytes,protocol_version:1:Protocol version');
+  const bar = document.createElement('div');
+  document.body.append(bar);
+  chips.renderChips(bar, [chip]);
+  const button = bar.querySelector('.ev-chip[data-key="gaps"]');
+  assert.equal(button.dataset.tone, 'loss');
+  button.click();
+  const reasons = [...document.getElementById(button.getAttribute('aria-controls')).querySelectorAll('.ev-reason')];
+  assert.equal(reasons.map(reason => `${reason.dataset.reason}:${reason.dataset.kind}:${reason.querySelector('.ev-reason-label').textContent}`).join(),
+    'reserved:loss:Reserved bytes,protocol_version:loss:Protocol version');
+  assert.equal(document.getElementById(reasons[0].getAttribute('aria-describedby')).textContent,
+    'A reserved header field or record byte was not zero. Click to copy reserved.');
+  assert.equal(chips.reason('reserved').meaning, '', 'a refusal reason adds no glossary entry another reason could inherit');
+  bar.remove();
+}
+// With another class the chip totals both, a row each.
+state.sequenceGaps = 1n;
+{
+  const chip = statusChip();
+  assert.equal(chip.text, '4 gaps');
+  assert.deepEqual(Array.from(chip.breakdown.rows, row => `${row.label}:${row.count}:${row.tone}`),
+    ['Sequence gaps:1:loss', 'Refused by the broker · canvas:3:loss']);
+}
+state.sequenceGaps = 0n;
+// The Traffic and VM notices show only the refusals of their categories.
+state.brokerRefusals = [{category: 'canvas', reason: 'reserved', count: 2n}, {category: 'network', reason: 'network_class', count: 1n},
+  {category: 'wasm', reason: 'typed_payload', count: 4n}];
+assert.equal(Array.from(api.captureGapClasses({brokerRefusals: api.namedGapsIn(api.shownBrokerRefusals(), api.vmGapCategories)}),
+  entry => api.captureGapClassChip(entry).text).join(), '4 refused records (wasm)');
+api.renderNetworkNotice();
+assert(notice().chips.includes('1 refused record (network)'), notice().chips.join());
+assert(!notice().chips.some(text => /canvas|wasm/.test(text)), notice().chips.join());
+assert.equal(statusChip().text, '7 gaps', 'the status bar counts every category');
 api.acceptEventWindow({...refusedResponse, broker_refusals: undefined});
 assert.equal(api.shownBrokerRefusals().map(entry => `${entry.category}:${entry.reason}:${entry.count}`).join(),
   'canvas:reserved:1,canvas:protocol_version:1', 'without the field the visible refusals are counted');
-assert.equal(api.eventGapLabel(0n, 0n, [], []), '0 sequence-gap IDs (the stored capture)', 'no refusal, no clause');
-assert.equal(api.eventGapLabel(0n, 0n, [], [{category: 'canvas', reason: 'type', count: 1n}]),
-  '0 sequence-gap IDs (the stored capture) · 1 record refused by the broker (type)');
+api.acceptEventWindow({...refusedResponse, broker_refusals: []});
+assert.equal(statusChip(), null, 'no refusal, no chip');
 assert.equal(api.fingerprintEventsFromEvents([placed, canvas(9)]).map(event => event.type).join(), 'api_call',
   'a refused canvas record is no canvas signal');
-console.log('PASS broker refusals decode strictly, are counted and stay out of Signals');
+console.log('PASS broker refusals decode strictly, are counted as a loss in the status bar and notices, and stay out of Signals');

@@ -389,68 +389,101 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       function setNetworkNotice(kind, message) {
-        if (elements.networkNotice.dataset.kind !== kind) elements.networkNotice.dataset.kind = kind;
-        if (elements.networkNotice.textContent !== message) elements.networkNotice.textContent = message;
-        elements.networkNotice.hidden = false;
+        const notice = elements.networkNotice;
+        if (notice.dataset.kind !== kind) notice.dataset.kind = kind;
+        if (notice.firstElementChild || notice.textContent !== message) notice.textContent = message;
+        notice.hidden = false;
+      }
+
+      // A capture notice the researcher dismissed stays hidden for this
+      // session until a class of gap it did not hold appears; the status
+      // bar's gap chip keeps every count meanwhile.
+      const dismissedCaptureNotices = new Map();
+      const captureNoticeSession = () => `${state.sessionMode}:${state.events[0]?.session_id ?? ''}`;
+      function captureNoticeDismissed(id, keys) {
+        const dismissed = dismissedCaptureNotices.get(id);
+        if (!dismissed) return false;
+        if (dismissed.session !== captureNoticeSession() || !keys.length || keys.some(key => !dismissed.keys.has(key))) {
+          dismissedCaptureNotices.delete(id);
+          return false;
+        }
+        return true;
+      }
+      function dismissCaptureNotice(id, keys, element, focusTarget) {
+        dismissedCaptureNotices.set(id, {session: captureNoticeSession(), keys: new Set(keys)});
+        const focused = element.contains(document.activeElement);
+        element.hidden = true;
+        if (focused) focusTarget?.focus({preventScroll: true});
+      }
+
+      // One chip per gap class, each opening its scope, meaning and reasons.
+      // A gap line's dot and wash take the tone of its worst class, as the status bar's gap chip does.
+      function captureNoticeTone(classes) {
+        return classes.some(gapClass => gapClass.tone === 'loss') ? 'loss' : 'limit';
+      }
+
+      function captureNoticeSpec(classes, limits = [], extra = []) {
+        const loss = classes.some(gapClass => gapClass.tone === 'loss');
+        return {lead: loss ? 'Incomplete capture' : classes.length || limits.length ? 'Capture limits' : '',
+          chips: [...classes.map(gapClass => captureGapClassChip(gapClass)), ...limits, ...extra],
+          actions: classes.length ? [{key: 'evidence', label: 'Show in Evidence', run: showCaptureGapsInEvidence}] : []};
       }
 
       // Both refresh paths project the same status so neither can erase the other's gaps.
       // Summaries describe the scanned store/tail, independently of either rendered window.
-      // A healthy capture leaves this line hidden. Window, target-mode, and
-      // Network.enable explanations stay in the README; only gaps and failures show here.
+      // A healthy capture leaves this line hidden. Loading, disconnected and
+      // malformed states keep a sentence of their own kind; gaps, limits and
+      // failed requests are one line of chips.
       function renderNetworkNotice() {
-        const gapCount = shownSequenceGaps();
-        const reportedDrops = shownQueueDrops();
-        const messages = [];
-        let kind = 'empty';
-        if (state.eventFailureKind === 'malformed') {
-          kind = 'malformed';
-          messages.push('The broker returned malformed event data.');
-        } else if (state.broker === 'unavailable') {
-          kind = 'disconnected';
-          messages.push(state.connection === 'unresponsive'
-            ? 'The local evidence broker did not answer within 10 seconds.'
-            : 'The local evidence broker is disconnected.');
+        const notice = elements.networkNotice;
+        if (state.eventFailureKind === 'malformed') return setNetworkNotice('malformed', 'The broker returned malformed event data.');
+        if (state.broker === 'unavailable') {
+          return setNetworkNotice('disconnected', state.connection === 'unresponsive'
+            ? 'The local evidence broker did not answer within 10 seconds.' : 'The local evidence broker is disconnected.');
         }
+        const chips = globalThis.RebEvidenceChips;
+        if (!chips) { notice.hidden = true; return; }
+        const classes = captureGapClasses({sequenceGaps: shownSequenceGaps(), queueDrops: shownQueueDrops(),
+          malformedLines: state.eventMalformedLines ?? 0, namedGaps: namedGapsIn(shownNamedGaps(), networkGapCategories),
+          brokerRefusals: namedGapsIn(shownBrokerRefusals(), networkGapCategories)});
         // The request index lists the whole session, so window caps do not limit Traffic rows.
         const indexed = state.trafficIndex?.answer?.() ?? null;
-        if (state.eventsLimited && !indexed) {
-          if (kind === 'empty') kind = 'gap';
-          messages.push('Traffic shows requests from the newest 5,000 evidence events until the request index answers. Older events remain on disk, and Evidence reads them with Earlier and Oldest.');
+        const scope = eventCountScopeTitle();
+        const limits = [];
+        if ((state.eventsLimited || state.networkEventsLimited) && !indexed) {
+          const window = chips.formatCount(5000);
+          limits.push({key: 'window', tone: 'limit', text: `newest ${window} events`, name: `Rows come from the newest ${window} events`,
+            breakdown: {title: 'Event window', scope, detail: `Until the request index answers, rows come from the newest ${window} evidence events${state.networkEventsLimited ? ', so older lifecycle records can be missing' : ''}. Evidence reads older ones with Earlier and Oldest.`}});
         }
-        if (state.networkEventsLimited && !indexed) messages.push('The network event window is capped; older request lifecycle evidence may be incomplete.');
         if (state.eventCountScope === 'bounded_tail') {
-          if (kind === 'empty') kind = 'gap';
           // The event index counts the whole store once it catches up (scope store).
-          messages.push(indexed ? 'Gap and drop counts cover only the newest 64 MiB of stored evidence until the event index catches up; the request list covers the whole session.'
-            : 'Only the newest 64 MiB of stored evidence is scanned until the event index catches up; counts and both windows exclude the older prefix.');
+          limits.push({key: 'scan', tone: 'limit', text: 'newest 64 MiB', name: 'Counts cover the newest 64 MiB of stored evidence',
+            breakdown: {title: 'Scanned evidence', scope, detail: indexed
+              ? 'Until the event index catches up, gap and drop counts cover only the newest 64 MiB; the request list covers the whole session.'
+              : 'Until the event index catches up, only the newest 64 MiB is scanned; counts and both windows leave out the older records.'}});
         }
-        if (gapCount > 0n) {
-          if (kind === 'empty') kind = 'gap';
-          messages.push(`${state.sequenceGapsSaturated ? 'at least ' : ''}${gapCount} sequence-gap IDs were observed in ${eventCountScopeLabel()}; late arrivals may overlap. Native evidence may be incomplete.`);
+        const failed = indexed ? indexed.document.failed : trafficFailedRequestCount(state.requests);
+        const extra = failed > 0 ? [{key: 'failed', tone: 'neutral', count: failed, noun: ['failed', 'failed'],
+          name: `${chips.formatCount(failed)} failed ${failed === 1 ? 'request' : 'requests'}: show only failed requests`,
+          pressed: Boolean(state.trafficFlags?.failed), run: toggleFailedRequests}] : [];
+        const keys = [...classes, ...limits].map(item => item.key);
+        if ((!keys.length && !extra.length) || captureNoticeDismissed('traffic', keys)) {
+          notice.hidden = true;
+          if (notice.firstChild) notice.replaceChildren();
+          return;
         }
-        if (reportedDrops > 0n) {
-          if (kind === 'empty') kind = 'gap';
-          messages.push(`The queue reports ${state.queueDropsSaturated ? 'at least ' : ''}${reportedDrops} dropped ${reportedDrops === 1n ? 'event' : 'events'}${gapCount > 0n ? '; counts may overlap sequence gaps' : `; no sequence jump is visible in ${eventCountScopeLabel()}`}.`);
-        }
-        if (state.eventMalformedLines > 0) {
-          if (kind === 'empty') kind = 'gap';
-          messages.push(`${state.eventMalformedLines} unreadable ${state.eventMalformedLines === 1 ? 'line was' : 'lines were'} skipped in ${eventCountScopeLabel()}.`);
-        }
-        const networkLimits = namedGapNotice(namedGapsIn(shownNamedGaps(), networkGapCategories), eventCountScopeLabel());
-        if (networkLimits) {
-          if (kind === 'empty') kind = 'gap';
-          messages.push(networkLimits);
-        }
+        notice.dataset.kind = keys.length ? 'gap' : 'empty';
+        notice.dataset.tone = captureNoticeTone(classes);
+        chips.renderNotice(notice, {...captureNoticeSpec(classes, limits, extra),
+          dismiss: keys.length ? {name: 'Dismiss this notice; the status bar keeps the gap count',
+            run: () => dismissCaptureNotice('traffic', keys, notice, elements.requestFilter)} : null});
+        notice.hidden = false;
+      }
 
-        const failedNotice = indexed ? indexed.document.failed > 0 ? `Failed requests: ${indexed.document.failed}.` : ''
-          : trafficFailedRequestNotice(state.requests);
-        if (failedNotice) messages.push(failedNotice);
-        if (messages.length) setNetworkNotice(kind, messages.join(' '));
-        else {
-          elements.networkNotice.hidden = true;
-          if (elements.networkNotice.textContent) elements.networkNotice.textContent = '';
-        }
+      // The failed chip is the Failed filter, pressed or not.
+      function toggleFailedRequests() {
+        document.querySelector('.request-flag[data-flag="failed"]')?.click();
+        renderNetworkNotice();
       }
 
       function textElement(tag, className, value) {
@@ -473,6 +506,18 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         elements.vmNotice.dataset.kind = kind;
         elements.vmNotice.textContent = message;
         elements.vmNotice.hidden = false;
+      }
+
+      // The VM notice's gap line: its sentence, if any, then one chip per class.
+      function setVmChipNotice(kind, text, classes, dismissible = false) {
+        const notice = elements.vmNotice;
+        notice.dataset.kind = kind;
+        notice.dataset.tone = captureNoticeTone(classes);
+        const keys = classes.map(gapClass => gapClass.key);
+        globalThis.RebEvidenceChips?.renderNotice(notice, {...captureNoticeSpec(classes), text,
+          dismiss: dismissible && keys.length ? {name: 'Dismiss this notice; the status bar keeps the gap count',
+            run: () => { dismissCaptureNotice('vm', keys, notice, elements.vmList); renderVmLab(); }} : null});
+        notice.hidden = false;
       }
 
       function requestOriginLabel(origin) {
@@ -599,8 +644,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         return label.charAt(0).toUpperCase() + label.slice(1);
       }
 
-      function formatSignalOffset(nanoseconds) {
-        return nanoseconds < 1000000n ? `+${nanoseconds} ns` : formatMilliseconds(nanoseconds, '+');
+      function signalEventTime(event) {
+        const element = RebEvidenceChips.timeElement(integerText(event, 'monotonic_time_ns'));
+        element.classList.add('signal-event-time');
+        return element;
       }
 
       function matchingSignalProfileFamily(event) {
@@ -1215,7 +1262,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           ['tab', tabId],
           ['category', event.category],
           ['operation', event.type],
-          ['monotonic time', `${integerText(event, 'monotonic_time_ns')} ns`],
+          ['time', RebEvidenceChips.formatEvidenceTime(integerText(event, 'monotonic_time_ns')).text],
+          ['monotonic (ns)', integerText(event, 'monotonic_time_ns')],
           ['navigation', integerText(event, 'navigation_id')],
           ['frame', integerText(event, 'frame_id')],
           ['thread', String(event.thread_id)],
@@ -1475,7 +1523,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           primary.append(
             textElement('span', 'signal-category-badge', fingerprintSignalLabels.get(event.category) ?? event.category),
             textElement('span', 'signal-event-operation', decodePayload(event) || signalTypeLabel(event.type)),
-            textElement('span', 'signal-event-time', formatSignalOffset(integerValue(event, 'monotonic_time_ns') - firstTime))
+            signalEventTime(event)
           );
           if (row.dataset.new === 'true') primary.append(textElement('span', 'signal-new-badge', 'New'));
           const meta = document.createElement('span');
@@ -1642,51 +1690,61 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         elements.capture.classList.toggle('idle', (idle || ended) && !offline && !artifactOffline);
         elements.capture.querySelector('span:last-child').textContent = captureLabel;
         elements.capture.setAttribute('aria-label', `${modeLabel}: ${captureLabel}`);
-        elements.broker.classList.toggle('offline', offline);
-        elements.broker.classList.toggle('idle', !offline && (connecting || idle || preview));
-        elements.broker.textContent = connecting ? 'connecting to evidence'
-          : offline ? state.connection === 'unresponsive' ? 'broker not responding' : 'broker unavailable'
-            : live ? 'broker connected' : idle ? 'no capture session'
-              : preview ? 'standalone preview' : 'demo evidence loaded';
-        elements.sampleStatus.textContent = live
-          ? offline
-            ? state.requests.length ? 'last requests retained' : state.events.length ? 'last live evidence retained' : 'no live evidence'
-            : artifactOffline ? 'artifact capture offline'
-            : 'sample rows hidden'
-          : idle || preview ? 'no bundled evidence' : 'developer evidence';
-        if (!state.lastUpdatedLabel) {
-          elements.updated.textContent = connecting ? 'waiting for evidence'
-            : offline ? state.events.length ? 'last valid evidence retained' : 'no live evidence'
-              : artifactOffline ? 'artifact capture unavailable'
-              : live ? 'waiting for live evidence' : idle || preview ? 'start a live capture' : 'deterministic evidence loaded';
-        } else {
-          elements.updated.textContent = state.lastUpdatedLabel;
-        }
+        renderStatusBar({live, idle, preview, connecting, ended, brokerOffline, artifactOffline});
         document.title = live ? 'Origin Trace - Live Session'
           : idle ? 'Origin Trace' : preview ? 'Origin Trace - Preview' : 'Origin Trace - Demo Evidence';
       }
 
-      // Splits the status bar's gap label into one span per clause, so each
-      // carries its own state: recorded loss reads as a failure, a sampling
-      // limit as a caution and a zero count as meta. The text is unchanged;
-      // a clause count that disagrees with the label leaves it plain.
-      function markGapClauses(gapCount, reportedDrops, namedGaps = [], brokerRefusals = []) {
-        const node = elements.gaps;
-        if (typeof node.replaceChildren !== 'function' || typeof namedGapTotal !== 'function') return;
-        const named = (matching, kind) => namedGapTotal(matching) > 0n ? [kind] : [];
-        const kinds = [gapCount > 0n ? 'loss' : '', ...(reportedDrops > 0n ? ['loss'] : []),
-          ...named(namedGaps.filter(gap => samplingBudgetGapLabels.has(gap.reason)), 'limit'),
-          ...named(namedGaps.filter(gap => samplePolicyFilterGapLabels.has(gap.reason)), 'limit'),
-          ...named(namedGaps.filter(gap => !samplingBudgetGapLabels.has(gap.reason) && !samplePolicyFilterGapLabels.has(gap.reason)), 'loss'),
-          ...named(brokerRefusals, 'loss')];
-        const clauses = node.textContent.split(' · ');
-        if (clauses.length !== kinds.length) return;
-        node.replaceChildren(...clauses.map((clause, index) => {
-          const span = document.createElement('span');
-          span.textContent = index ? ` · ${clause}` : clause;
-          if (kinds[index]) span.dataset.kind = kinds[index];
-          return span;
-        }));
+      // The status bar, left to right: the connection, the request count, one
+      // gap chip (only when a count is not zero) and the local-only mark.
+      // Each long form, such as "broker connected" or the update time, is in
+      // the connection chip's panel rather than on the bar.
+      function renderStatusBar({live, idle, preview, connecting, ended, brokerOffline, artifactOffline}) {
+        const chips = globalThis.RebEvidenceChips;
+        if (!chips) return;
+        const failed = ['malformed', 'unresponsive', 'unreachable'].includes(state.connection);
+        const [label, tone] = failed
+          ? [state.connection === 'malformed' ? 'Malformed' : state.connection === 'unresponsive' ? 'Not responding' : 'Offline', 'loss']
+          : connecting ? ['Connecting…', 'neutral']
+            : ended ? ['Ended', 'neutral']
+              : live ? brokerOffline ? ['Offline', 'loss'] : artifactOffline ? ['Degraded', 'limit']
+                : state.captureStopped ? ['Stopped', 'neutral'] : ['Live', 'ok']
+                : idle ? [state.events.length ? 'Stored' : 'Idle', 'neutral']
+                  : [preview ? 'Preview' : 'Demo', 'neutral'];
+        const backend = state.connection === 'malformed' ? 'returned malformed event data'
+          : state.connection === 'unresponsive' ? 'did not answer within 10 seconds'
+            : state.connection === 'unreachable' ? 'unreachable' : connecting ? 'connecting' : 'answering';
+        const session = ended ? 'Ended live session, opened for review'
+          : live ? state.captureStopped ? 'Live session, capture stopped' : 'Live session'
+            : idle ? state.events.length ? 'Stored capture, no live session' : 'No session'
+              : preview ? 'Standalone preview, no backend' : 'Deterministic developer evidence';
+        const rows = [['Session', session], ['Backend', backend]];
+        if (live && !failed && !connecting) rows.push(['Broker', brokerOffline ? state.connection === 'unresponsive' ? 'not responding' : 'unavailable' : 'connected']);
+        if (live && state.artifactReceiverConfigured) rows.push(['Artifacts', artifactOffline ? 'receiver offline; new scripts and Wasm are not stored' : 'receiver connected']);
+        if (failed || brokerOffline) rows.push(['Evidence', state.requests.length || state.events.length ? 'last valid evidence retained' : 'none read']);
+        if (state.lastUpdatedLabel?.startsWith('updated ')) rows.push(['Updated', state.lastUpdatedLabel.slice('updated '.length)]);
+        chips.renderChips(elements.broker, [{key: 'connection', text: label, tone, dot: true, variant: 'ghost', prefer: 'above',
+          name: `Connection: ${label}`, facts: {title: 'Connection', rows}}]);
+        elements.broker.dataset.state = tone;
+        renderStatusGaps();
+      }
+
+      // The gap chip covers the summaries' scope (the whole stored capture
+      // once the event index has caught up). Zero gaps draws nothing; any
+      // non-zero count shows, and a saturated one reads ≥.
+      function renderStatusGaps() {
+        const chips = globalThis.RebEvidenceChips;
+        if (!chips || typeof captureGapClasses !== 'function') return;
+        const classes = state.sessionMode === 'preview' ? [] : captureGapClasses({sequenceGaps: shownSequenceGaps(), queueDrops: shownQueueDrops(),
+          malformedLines: state.eventMalformedLines ?? 0, namedGaps: shownNamedGaps(), brokerRefusals: shownBrokerRefusals()});
+        chips.renderChips(elements.gaps, [captureGapStatusChip(classes, [{key: 'evidence', label: 'Show in Evidence', run: showCaptureGapsInEvidence}])]);
+        elements.gaps.hidden = classes.length === 0;
+      }
+
+      // Evidence's Coverage & gaps panel, over every record in view.
+      function showCaptureGapsInEvidence() {
+        showScreen('evidence');
+        evidenceWorkspace.showCoverage?.();
       }
 
       function resetRequestSelection() {
@@ -1718,17 +1776,18 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           elements.requestCountLabel.textContent = 'requests read yet';
           return;
         }
-        elements.requestCount.textContent = visibleCount.toLocaleString('en-US');
+        const count = value => globalThis.RebEvidenceChips?.formatCount(value) ?? String(value);
+        elements.requestCount.textContent = count(visibleCount);
         if (scope === 'session') {
           elements.requestCountLabel.textContent = visibleCount === loadedCount ? loadedCount === 1 ? 'request' : 'requests'
-            : `of ${loadedCount.toLocaleString('en-US')} ${loadedCount === 1 ? 'request' : 'requests'}`;
+            : `of ${count(loadedCount)} ${loadedCount === 1 ? 'request' : 'requests'}`;
           return;
         }
         const loadedLabel = loadedCount === 1 ? 'request loaded' : 'requests loaded';
         const suffix = state.eventsLimited ? ' · event window capped' : '';
         elements.requestCountLabel.textContent = visibleCount === loadedCount
           ? `${loadedLabel}${suffix}`
-          : `of ${loadedCount} ${loadedCount === 1 ? 'request' : 'requests'} loaded${suffix}`;
+          : `of ${count(loadedCount)} ${loadedCount === 1 ? 'request' : 'requests'} loaded${suffix}`;
       }
 
       function vmField(label, value) {
@@ -3139,6 +3198,16 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         renderVmWasmSampling();
       }
 
+      // A finding row's provenance line: its evidence time, source process and
+      // thread, or the analyzed artifact.
+      function vmRowMeta(finding) {
+        if (finding.analysis) return textElement('span', 'vm-row-meta', `Code analysis · artifact ${finding.sourceArtifactId}`);
+        const time = RebEvidenceChips.formatEvidenceTime(finding.monotonicTimeNs);
+        const meta = textElement('span', 'vm-row-meta', `${time.text} · source p${finding.processId}:t${finding.threadId} · category vm`);
+        meta.title = time.title;
+        return meta;
+      }
+
       let renderedVmFindings = null;
       let renderedVmWorkspace = null;
       function vmSessionSourceRefreshKey() { const finding=(state.vmFindings??[]).find(item=>item.findingId===state.selectedVmFindingId); const artifact=vmSourceArtifactForFinding(state.artifacts??[],finding,state.vmAnalysisSelection); const sessionId=artifact?.session_id??''; return [sessionId,(state.artifacts??[]).filter(item=>String(item.session_id)===String(sessionId)).map(item=>item.artifact_id).join(',')]; }
@@ -3156,7 +3225,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         renderVmSessionStatus();
         renderVmWasmSampling();
         const gapCount = shownSequenceGaps();
-        const vmLimits = namedGapNotice(namedGapsIn(shownNamedGaps(), vmGapCategories), eventCountScopeLabel());
+        const vmRefusals = namedGapsIn(shownBrokerRefusals(), vmGapCategories);
+        const vmNamed = captureGapClasses({namedGaps: namedGapsIn(shownNamedGaps(), vmGapCategories), brokerRefusals: vmRefusals});
+        const vmClasses = captureGapClasses({sequenceGaps: gapCount, namedGaps: namedGapsIn(shownNamedGaps(), vmGapCategories),
+          brokerRefusals: vmRefusals});
         const failures = state.vmAnalysisStatus === 'ready' ? vmAnalysisFailureNotice(state.vmAnalysisDocument) : '';
         const withFailures = message => failures ? `${message} ${failures}` : message;
         if (state.broker === 'connecting') {
@@ -3176,13 +3248,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           const plain = omitted > 0 ? ` ${omitted.toLocaleString('en-US')} analyzed ${omitted === 1 ? 'artifact shows' : 'artifacts show'} no VM structure.` : '';
           const failed = failures ? ` ${failures}` : '';
           const empty = state.vmAnalysisSelection ? `No VM candidates are linked to this exact captured response body.${plain}${failed} Unlinked, legacy and session-wide findings are not shown.` : `No VM findings yet.${plain}${failed} The lab waits for observed or explicitly inferred evidence.`;
-          setVmNotice(vmLimits || failures ? 'gap' : 'empty', vmLimits ? `${empty} ${vmLimits}` : empty);
-        } else if (gapCount > 0n || vmLimits || failures) {
-          setVmNotice('gap', [
-            gapCount > 0n ? `${gapCount} event ${gapCount === 1n ? 'gap may' : 'gaps may'} make VM coverage incomplete (observed sequence jumps in ${eventCountScopeLabel()}).` : '',
-            vmLimits,
-            failures
-          ].filter(Boolean).join(' '));
+          if (vmNamed.length) setVmChipNotice('gap', empty, vmNamed);
+          else setVmNotice(failures ? 'gap' : 'empty', empty);
+        } else if (vmClasses.length && !captureNoticeDismissed('vm', vmClasses.map(gapClass => gapClass.key))) {
+          setVmChipNotice('gap', failures, vmClasses, true);
+        } else if (failures) {
+          setVmNotice('gap', failures);
         } else if (state.vmAnalysisSelection) {
           const selection = state.vmAnalysisSelection;
           setVmNotice('ready', `Exact captured response body · request ${selection.request_id} · session ${selection.root_event.session_id} · process ${selection.root_event.process_id} · root ${selection.root_event.sequence_number}. This link does not establish execution or guest semantics.`);
@@ -3216,7 +3287,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           row.append(
             textElement('span', 'vm-row-title', finding.analysis ? 'VM patterns in source' : finding.label),
             textElement('span', 'vm-kind', finding.analysis ? 'Code analysis' : finding.kind),
-            textElement('span', 'vm-row-meta', finding.analysis ? `Code analysis · artifact ${finding.sourceArtifactId}` : `t ${finding.monotonicTimeNs} ns · source p${finding.processId}:t${finding.threadId} · category vm`),
+            vmRowMeta(finding),
             textElement('span', 'vm-row-correlation', `operation ${finding.kind} · finding ${finding.findingId} · investigation ${finding.investigationId} · ${finding.hostRuntime} · ${finding.confidence}`)
           );
           row.addEventListener('click', () => {
@@ -3778,7 +3849,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           const end = Number(coverage.store_end);
           notes.push(`indexing ${end ? Math.floor(Number(coverage.indexed_end) * 100 / end) : 0}%`);
         }
-        if (coverage.malformed_records !== '0') notes.push(`${coverage.malformed_records} unreadable records`);
+        if (coverage.malformed_records !== '0') notes.push(`${globalThis.RebEvidenceChips?.formatCount(coverage.malformed_records) ?? coverage.malformed_records} unreadable records`);
         return notes.join(' · ');
       }
 
@@ -4920,9 +4991,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         const step = model.step;
         const facts = document.createElement('dl'); facts.className = 'trace-facts';
-        const identifierLabels = new Set(['Session', 'Process', 'Event', 'Frame', 'Request', 'Artifact']);
+        const identifierLabels = new Set(['Session', 'Process', 'Event', 'Frame', 'Request', 'Artifact', 'Monotonic (ns)']);
         const identifiers = document.createElement('dl'); identifiers.className = 'trace-facts';
         const traceFactValue = (label, value) => {
+          if (value instanceof Node) { const dd = document.createElement('dd'); dd.append(value); return dd; }
           if (!identifierLabels.has(label)) return textElement('dd', '', String(value));
           const dd = document.createElement('dd'); dd.className = 'trace-fact-id';
           const raw = String(value);
@@ -4944,7 +5016,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         [
           ['Relationship', step.relation.replaceAll('_', ' ')],
           ['Link type', traceLinkClass(step).detail],
-          ['Time (monotonic ns)', step.monotonic_time_ns],
+          ['Time', RebEvidenceChips.timeButton(step.monotonic_time_ns)],
+          ['Monotonic (ns)', step.monotonic_time_ns],
           ['Session', step.event.session_id], ['Process', step.event.process_id],
           ['Event', step.event.sequence_number], ['Frame', step.frame_id],
           ['Request', step.request_id], ['Artifact', step.artifact_id]
@@ -9665,6 +9738,64 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
       }
 
+      // Evidence times are relative to the store's first record, which the
+      // session summary reads over the whole store (first_time_ns). Until it
+      // answers, the earliest record read stands in. A cleared or replaced
+      // store starts again; a failed read is retried after 30 seconds.
+      let timeOriginRead = null;
+      function noteEvidenceTimeOrigin(networkEvents) {
+        const chips = globalThis.RebEvidenceChips;
+        if (!chips) return;
+        const records = [...state.events, ...(Array.isArray(networkEvents) ? networkEvents : [])];
+        const end = /^[0-9]{1,20}$/.test(state.eventStoreEnd ?? '') ? BigInt(state.eventStoreEnd) : null;
+        const key = `${state.sessionMode}:${records[0]?.session_id ?? ''}`;
+        const replaced = !timeOriginRead || timeOriginRead.key !== key || (end !== null && timeOriginRead.end !== null && end < timeOriginRead.end);
+        if (replaced) {
+          timeOriginRead = {key, end, at: 0, pending: false, done: false};
+          if (chips.timeOrigin()) { chips.setTimeOrigin(null); timeOriginChanged(); }
+        }
+        timeOriginRead.end = end;
+        if (!records.length) return;
+        let earliest = null;
+        for (const event of records) {
+          const time = event?.monotonic_time_ns;
+          if (typeof time !== 'string' || !/^[0-9]{1,20}$/.test(time)) continue;
+          const value = BigInt(time);
+          if (earliest === null || value < earliest) earliest = value;
+        }
+        const origin = chips.timeOrigin();
+        if (earliest !== null && origin?.basis !== 'store' && (!origin || earliest < origin.ns)) {
+          chips.setTimeOrigin(earliest, 'records');
+          if (origin) timeOriginChanged();
+        }
+        const read = timeOriginRead;
+        if (read.done || read.pending || Date.now() - read.at < 30000 || typeof fetch !== 'function') return;
+        read.pending = true;
+        read.at = Date.now();
+        fetch('/api/session/summary', {cache: 'no-store', signal: AbortSignal.timeout(30000)})
+          .then(response => response.ok ? response.json() : null)
+          .then(summary => {
+            const first = summary?.events?.first_time_ns;
+            if (timeOriginRead !== read || typeof first !== 'string' || !/^[0-9]{1,20}$/.test(first)) return;
+            read.done = true;
+            const before = chips.timeOrigin();
+            if (before?.basis === 'store' && before.ns === BigInt(first)) return;
+            chips.setTimeOrigin(first, 'store');
+            timeOriginChanged();
+          })
+          .catch(() => {})
+          .finally(() => { read.pending = false; });
+      }
+
+      // Redraws the views that show evidence times after the origin moved.
+      function timeOriginChanged() {
+        renderedVmFindings = null;
+        renderVmLab();
+        evidenceWorkspace.refreshTimes?.();
+        if (!document.querySelector('#screen-signals').hidden) renderFingerprintActivity();
+        if (!document.querySelector('#screen-backtrace').hidden) renderBacktrace();
+      }
+
       // The event poll alone decides the connection state, and it is bounded:
       // a backend that does not answer within 10 seconds is shown as not
       // responding (renderNetworkNotice names the same limit). The reads that
@@ -9721,6 +9852,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             if (!currentSignalKeys.has(key)) state.signalNewKeys.delete(key);
           }
           acceptEventWindow(body);
+          noteEvidenceTimeOrigin(body.network_events);
           const vmModel = vmFindingsFromEvents(state.events);
           state.eventVmFindings = vmModel.findings;
           state.vmFindings = vmVisibleFindings(state);
@@ -9743,11 +9875,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
               : state.sessionMode === 'demo' ? 'deterministic developer evidence loaded' : 'start a live capture'
             : (state.events.length > 0 ? 'last valid evidence retained' : 'no live evidence');
           renderShellStatus();
-          elements.gaps.textContent = eventGapLabel(shownSequenceGaps(), shownQueueDrops(), shownNamedGaps(),
-            shownBrokerRefusals());
-          if (typeof markGapClauses === 'function') {
-            markGapClauses(shownSequenceGaps(), shownQueueDrops(), shownNamedGaps(), shownBrokerRefusals());
-          }
           renderNetworkNotice();
           renderRequests();
           renderInspector();
@@ -9853,7 +9980,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         state.selectedField = null;
         state.lastUpdatedLabel = 'start a live capture';
         renderShellStatus();
-        elements.gaps.textContent = eventGapLabel(0n, 0n);
         setNetworkNotice('empty', 'No evidence is bundled. Start a live capture to populate the workspace.');
         renderRequests();
         renderEvidence();

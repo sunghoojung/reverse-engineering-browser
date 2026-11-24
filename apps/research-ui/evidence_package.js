@@ -473,9 +473,15 @@ function evidenceObservationOutcome(event) {
   if (event.type === 'artifact_capture_failed') return 'Capture failure recorded';
   return 'This observation does not establish completion';
 }
-function evidenceMonotonicLabel(value) {
-  const ns = BigInt(value);
-  return `${ns / 1000000n}.${String(ns % 1000000n / 1000n).padStart(3, '0')} ms`;
+// The selected request's first lifecycle record, the zero of "after request start".
+function evidenceRequestStart(request) {
+  let start = null;
+  for (const event of request?.events ?? []) {
+    if (!['request_initiated', 'request_started'].includes(event?.type) || typeof event.monotonic_time_ns !== 'string' || !/^[0-9]{1,20}$/.test(event.monotonic_time_ns)) continue;
+    const time = BigInt(event.monotonic_time_ns);
+    if (start === null || time < start) start = time;
+  }
+  return start;
 }
 function evidenceSequenceObservations(events) {
   const streams = new Map();
@@ -521,7 +527,7 @@ function evidenceObservationModel(context) {
   const artifacts = context.artifacts ?? [];
   const artifactIndex = evidenceArtifactIndex(artifacts), artifactReferences = new Map();
   const records = new Map(), sources = new Map(), duplicates = new Set();
-  let omitted = 0, queueMarkers = 0, namedMarkers = 0;
+  let omitted = 0, queueMarkers = 0, namedMarkers = 0, refusalRecords = 0;
   for (const event of window) {
     if (!isBrokerEvent(event) || ![2, 3].includes(event.protocol_version)) { omitted += 1; continue; }
     // A named reason is a capture limit in its own category, not a queue drop.
@@ -531,6 +537,8 @@ function evidenceObservationModel(context) {
     if (records.has(key)) { duplicates.add(key); continue; }
     sources.set(key, event);
     records.set(key, evidenceRecord(event));
+    // A record in place of one the broker refused stays a row, and is counted.
+    if (event.type === 'broker_refusal') refusalRecords += 1;
   }
   // Sequence observations describe the range in view, not records joined from elsewhere.
   const inView = [...records.values()];
@@ -578,7 +586,7 @@ function evidenceObservationModel(context) {
   rows = rows.map(row => row.group === 'request' ? requestRows.shift() : row);
   const related = rows.filter(row => row.group !== 'unlinked');
   return {request: request ? {id: request.id, origin: request.origin, method: request.method, path: String(request.path ?? '').slice(0, 2048), hostOnly: request.hostOnly} : null,
-    requestKey: evidenceRequestKey(request), rows, related, omitted, queueMarkers, namedMarkers, sources,
+    requestKey: evidenceRequestKey(request), rows, related, omitted, queueMarkers, namedMarkers, refusalRecords, sources,
     missingParents: missing.size, duplicates: duplicates.size, parentLimit, parentCycle,
     limited: Boolean(context.eventsLimited || (context.events?.length ?? 0) > evidenceObservationLimit),
     sequence: evidenceSequenceObservations(inView),
@@ -710,7 +718,26 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
   }
   for (const [direction, item] of Object.entries(rangeButtons)) item.addEventListener('click', () => moveRange(direction));
   const message = (text, outside = false) => {selectionNotice = text; outsideFilterNotice = outside; renderNotice();};
-  const facts = entries => {const dl = node('dl', '', 'evidence-record-facts'); for (const [label, value] of entries) dl.append(node('dt', label), node('dd', value)); return dl;};
+  const facts = entries => {
+    const dl = node('dl', '', 'evidence-record-facts');
+    for (const [label, value] of entries) {
+      const dd = value instanceof Node ? node('dd') : node('dd', value);
+      if (value instanceof Node) dd.append(value);
+      dl.append(node('dt', label), dd);
+    }
+    return dl;
+  };
+  // When it was recorded: session-relative, and from the selected request's
+  // start for that request's own records. The exact ns is in Provenance.
+  const recordedTime = (event, row) => {
+    const time = node('span', '', 'evidence-recorded-time');
+    time.append(RebEvidenceChips.timeButton(event.monotonic_time_ns));
+    const start = row.group === 'request' ? evidenceRequestStart(model.request) : null;
+    if (start !== null && String(start) !== event.monotonic_time_ns) {
+      time.append(node('span', ' · ', 'evidence-time-separator'), RebEvidenceChips.timeButton(event.monotonic_time_ns, {relativeTo: {ns: start, label: 'request start'}}), node('span', ' after request start', 'evidence-time-relation'));
+    }
+    return time;
+  };
   const setPane = (value, focus = false) => {
     pane = value; layout.dataset.evidencePane = value;
     for (const tab of paneTabs) {const active = tab.dataset.evidencePane === value; tab.setAttribute('aria-selected', String(active)); tab.tabIndex = active ? 0 : -1;}
@@ -745,7 +772,7 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
     observation.append(node('p', marker ? 'An operation marker was seen. Arguments, returned values, exceptions and Promise settlement are not recorded by this marker.'
       : `Bounded ${row.payload.encoding} payload${event.payload_truncated ? ' · truncated at capture' : ''}. This is retained evidence, not reconstructed content.`, 'evidence-detail-hint'));
     if (marker && event.payload_truncated) observation.append(node('p', 'The operation payload was truncated at capture.', 'evidence-detail-hint'));
-    observation.append(facts([['Outcome', row.outcome], ['Recorded time', `${evidenceMonotonicLabel(event.monotonic_time_ns)} · monotonic`], ['Observer / placement', 'Unknown']]));
+    observation.append(facts([['Outcome', row.outcome], ['Recorded time', recordedTime(event, row)], ['Observer / placement', 'Unknown']]));
     const source = node('section', '', 'evidence-detail-section'); source.append(node('h3', 'Referenced artifact'));
     if (row.artifact.artifact) {
       const artifact = row.artifact.artifact, card = node('div', '', 'evidence-artifact-card');
@@ -779,7 +806,7 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
     connection.append(actions);
     const provenance = node('details', '', 'evidence-provenance'); provenance.open = Boolean(open);
     const summary = node('summary', 'Provenance & exact identifiers'); summary.dataset.evidenceAction = 'provenance'; provenance.append(summary);
-    provenance.append(facts([['Native event', evidencePackageKeyText('event', evidencePackageKey('event', event))], ['Protocol', event.protocol_version], ['Monotonic time', `${event.monotonic_time_ns} ns`], ['Parent event', event.parent_event_id === '0' ? 'Not recorded' : event.parent_event_id], ['Request', event.request_id === '0' ? 'Not recorded' : event.request_id], ['Navigation / frame', `${event.navigation_id} / ${event.frame_id} (zero means unknown)`], ['Thread', event.thread_id], ['Tab', event.tab_id || 'Unknown'], ['Browser context', browserContextToken(event) || 'Unknown'], ['Artifact', event.artifact_id === '0' ? 'Not recorded' : `${event.session_id} / ${event.artifact_id}`], ['Artifact SHA-256', row.artifact.artifact?.sha256 || 'Unknown'], ['Producer / historical build', 'Unknown']]));
+    provenance.append(facts([['Native event', evidencePackageKeyText('event', evidencePackageKey('event', event))], ['Protocol', event.protocol_version], ['Monotonic (ns)', event.monotonic_time_ns], ['Parent event', event.parent_event_id === '0' ? 'Not recorded' : event.parent_event_id], ['Request', event.request_id === '0' ? 'Not recorded' : event.request_id], ['Navigation / frame', `${event.navigation_id} / ${event.frame_id} (zero means unknown)`], ['Thread', event.thread_id], ['Tab', event.tab_id || 'Unknown'], ['Browser context', browserContextToken(event) || 'Unknown'], ['Artifact', event.artifact_id === '0' ? 'Not recorded' : `${event.session_id} / ${event.artifact_id}`], ['Artifact SHA-256', row.artifact.artifact?.sha256 || 'Unknown'], ['Producer / historical build', 'Unknown']]));
     inspector.replaceChildren(head, observation, source, connection, provenance);
     if (focused) (inspector.querySelector(`[data-evidence-action="${focused}"]`) ?? inspector).focus({preventScroll: true});
     inspector.scrollTop = top;
@@ -815,7 +842,7 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
           const element = node('button', '', 'evidence-observation'); element.type = 'button'; element.dataset.evidenceKey = row.key; element.dataset.relationship = row.group;
           element.dataset.category = row.event.category;
           element.setAttribute('aria-current', String(row.key === selectedKey));
-          const line = node('span', '', 'evidence-observation-meta'); line.append(node('span', row.event.category.replaceAll('_', ' ')), node('time', evidenceMonotonicLabel(row.event.monotonic_time_ns)));
+          const line = node('span', '', 'evidence-observation-meta'); line.append(node('span', row.event.category.replaceAll('_', ' ')), RebEvidenceChips.timeElement(row.event.monotonic_time_ns));
           element.append(line, node('strong', row.title, titleClass(row)), node('span', row.duplicate ? 'Duplicate event identity · relationship unknown' : row.artifact.artifact?.url || (row.payload.text === row.title ? row.outcome : row.payload.text) || row.outcome, 'evidence-observation-preview'));
           element.addEventListener('click', () => {select(row.key); if (window.matchMedia('(max-width: 760px)').matches) setPane('detail', true);});
           element.addEventListener('keydown', event => {
@@ -867,8 +894,8 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
     find('evidence-count').textContent = `${model.rows.length.toLocaleString()} observations in view`;
     find('evidence-coverage-summary').textContent = `${model.missingParents} missing parent${model.missingParents === 1 ? '' : 's'} · coverage unknown`;
     // Coverage is always unknown; the warning color is kept for retained loss observations.
-    find('evidence-coverage-summary').dataset.kind = model.missingParents || model.queueMarkers || model.namedMarkers || model.sequence.holes !== '0' || model.duplicates ? 'gap' : 'unknown';
-    find('evidence-gap-details').textContent = `${model.limited ? 'These counts cover the records in view; Oldest, Earlier and Later read the rest of the stored session. ' : 'Every stored record is in view; complete capture is not established. '}${model.queueMarkers} native queue-drop markers; ${model.namedMarkers} named capture-limit markers (sampling budgets, sample-policy exclusions, or reported losses in their own category); ${model.sequence.holes} absent sequence IDs between retained stream endpoints (not proof of capture loss); ${model.sequence.arrivalDiscontinuities} forward-jump observations in arrival order; ${model.sequence.outOfOrderArrivals} later arrivals below a prior high-water ID; ${model.missingParents} missing or ambiguous parent references in view; ${model.duplicates} duplicate identities; ${model.omitted} unsupported or unaddressable records omitted.${model.parentLimit ? ' Parent lookup stopped at its 32-link bound.' : ''}${model.parentCycle ? ' A repeated parent identity stopped lookup.' : ''} Queue markers, sequence holes and missing references can overlap and are not added into a loss total.`;
+    find('evidence-coverage-summary').dataset.kind = model.missingParents || model.queueMarkers || model.namedMarkers || model.refusalRecords || model.sequence.holes !== '0' || model.duplicates ? 'gap' : 'unknown';
+    find('evidence-gap-details').textContent = `${model.limited ? 'These counts cover the records in view; Oldest, Earlier and Later read the rest of the stored session. ' : 'Every stored record is in view; complete capture is not established. '}${model.queueMarkers} native queue-drop markers; ${model.namedMarkers} named capture-limit markers (sampling budgets, sample-policy exclusions, or reported losses in their own category); ${model.refusalRecords} broker refusal records (each stands in for a record the broker refused at validation); ${model.sequence.holes} absent sequence IDs between retained stream endpoints (not proof of capture loss); ${model.sequence.arrivalDiscontinuities} forward-jump observations in arrival order; ${model.sequence.outOfOrderArrivals} later arrivals below a prior high-water ID; ${model.missingParents} missing or ambiguous parent references in view; ${model.duplicates} duplicate identities; ${model.omitted} unsupported or unaddressable records omitted.${model.parentLimit ? ' Parent lookup stopped at its 32-link bound.' : ''}${model.parentCycle ? ' A repeated parent identity stopped lookup.' : ''} Queue markers, refusals, sequence holes and missing references can overlap and are not added into a loss total.`;
     find('evidence-trace').disabled = model.request?.origin !== 'live' || !model.related.length;
     find('evidence-trace').title = 'Inspect the selected request’s recorded predecessor chain.';
     refreshNotice = context.error ? `Evidence refresh ${context.error === 'malformed' ? 'returned malformed records' : 'is unavailable'}. Retained observations remain visible.` : '';
@@ -904,6 +931,14 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
       if (!value) showComparison(false, false);
       packagePanel.setVisible(value && packages && !comparing); sync();
     }, showPackages, showComparison, disposeComparison,
+    // Redraws times after the session's time origin moved.
+    refreshTimes() { listSignature = ''; detailSignature = ''; if (visible && !packages) sync(); },
+    // Opens Coverage & gaps over the records in view, for the shell's gap chips.
+    showCoverage() {
+      if (packages) showPackages(false, false);
+      coverageDetails.open = true;
+      coverageDetails.querySelector('summary').focus({preventScroll: true});
+    },
     // Bounded view state only. Shared navigation may restore this without
     // retaining payloads, source text, reports or package bytes in history.
     selectedEvent: () => model?.rows.some(row => row.key === selectedKey && !row.duplicate) ? model.sources.get(selectedKey) ?? null : null,

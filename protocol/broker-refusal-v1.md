@@ -163,9 +163,10 @@ as `broker_refusal`:
 
 A record that fails the rules above decodes as `{"status": "invalid"}`.
 
-Origin Trace's status bar adds a clause after the gap counts, for example
-`3 records refused by the broker (reserved, type)`, marked as a loss. Signals
-does not list a refusal as a signal of its category.
+Origin Trace's status bar gap chip counts the refusals of each category as a
+loss class, for example `3 refused records (canvas)`. Its breakdown lists each
+reason with its meaning. The Traffic and VM notices show the refusals of their
+categories. Signals does not list a refusal as a signal of its category.
 
 ## Compatibility
 

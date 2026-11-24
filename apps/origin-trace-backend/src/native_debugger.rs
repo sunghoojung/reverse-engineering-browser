@@ -66,6 +66,7 @@ pub fn state(
         "observations_malformed": recent.malformed,
         "observations_query": recent.query,
         "observation_budget_gaps": threads.budget_gaps,
+        "time_origins": threads.time_origins,
     });
     // The peer owns every pausing field, so an unreadable peer cannot leave a
     // stale document, breakpoint or lease behind in this view.
@@ -94,7 +95,7 @@ mod tests {
         let path = store.path().join("events.jsonl");
         let record = |kind: &str, category: &str, sequence: u64, frame: &str, payload: &[u8]| {
             json!({"protocol_version":3,"category":category,"type":kind,"session_id":"1",
-                "sequence_number":sequence.to_string(),"monotonic_time_ns":"1","navigation_id":"0",
+                "sequence_number":sequence.to_string(),"monotonic_time_ns":(1000 + sequence).to_string(),"navigation_id":"0",
                 "frame_id":frame,"artifact_id":"0","request_id":"0","parent_event_id":"0","process_id":2,
                 "payload_encoding":"hex","payload":hex::encode(payload),"payload_size":payload.len(),
                 "loader_kind":18})
@@ -133,6 +134,16 @@ mod tests {
         assert_eq!(threads["coverage"]["scope"], "store", "{threads}");
         assert_eq!(threads["observed"][0]["frame_id"], "5", "{threads}");
         assert_eq!(threads["observed"][0]["last_sequence"], "1");
+        assert_eq!(
+            threads["observed"][0]["kinds"],
+            json!({"exception_observation": 1}),
+            "a frame counts its records per kind"
+        );
+        assert_eq!(
+            current["time_origins"],
+            json!([{"session_id": "1", "monotonic_time_ns": "1001"}]),
+            "the observed session's first record time"
+        );
         assert_eq!(threads["workers"][0]["kind"], "shared_worker");
         assert_eq!(threads["workers"][0]["context_id"], "88");
     }

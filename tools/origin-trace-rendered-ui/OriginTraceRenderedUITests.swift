@@ -952,6 +952,32 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
+  // Where the Traffic footer's counts are separate boxes, each, such as
+  // "98.0 kB transferred ·", stays on one line. The footer sits below the rows
+  // and inside the list, whatever its height.
+  @MainActor
+  private func assertFooterItemsWhole(_ ui: Harness, _ context: String) async throws {
+    let footer = try await ui.json("""
+      (() => { const status = document.querySelector('#request-window-status'), width = status.getBoundingClientRect().width;
+        const lines = item => { const range = document.createRange(); range.selectNodeContents(item);
+          return new Set([...range.getClientRects()].filter(rect => rect.width > 0).map(rect => Math.round(rect.top))).size; };
+        const counts = [...status.querySelectorAll('.request-window-count')], box = selector => document.querySelector(selector).getBoundingClientRect();
+        const rows = box('#request-rows'), bar = box('#screen-traffic .request-window'), pane = box('#screen-traffic .request-pane');
+        return {items: status.children.length, counts: counts.length, broken: counts.filter(item => lines(item) > 1).map(item => item.textContent),
+          lines: lines(status), text: status.textContent, display: getComputedStyle(status).display,
+          rowsBottom: rows.bottom, footerTop: bar.top, footerBottom: bar.bottom, paneBottom: pane.bottom}; })()
+      """)
+    print("RENDERED_UI_TRAFFIC_FOOTER \(context) \(footer)")
+    XCTAssertEqual(footer["counts"] as? Int, 3, "\(context): requests, transferred and resources are separate counts: \(footer)")
+    if footer["display"] as? String == "flex" {
+      XCTAssertEqual(footer["broken"] as? [String] ?? ["unreadable"], [], "\(context): a footer count broke across lines: \(footer)")
+    }
+    XCTAssertLessThanOrEqual(footer["rowsBottom"] as? Double ?? .infinity, (footer["footerTop"] as? Double ?? 0) + 1,
+      "\(context): the footer covers no row: \(footer)")
+    XCTAssertLessThanOrEqual(footer["footerBottom"] as? Double ?? .infinity, (footer["paneBottom"] as? Double ?? 0) + 1,
+      "\(context): the list cuts off its footer: \(footer)")
+  }
+
   // Columns fit the table, every cell with text has a tooltip, and Size, the
   // waterfall and the timing strip follow the fixture's recorded lengths and
   // timestamps. The strip and the column menu work from the keyboard.
@@ -983,6 +1009,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     XCTAssertEqual(table["untitled"] as? Int, 0, "\(context): truncated cells have tooltips")
     let footer = table["footer"] as? String ?? ""
     XCTAssertTrue(footer.contains(" transferred · ") && footer.contains(" resources"), "\(context): footer totals: \(footer)")
+    try await assertFooterItemsWhole(ui, context)
     XCTAssertEqual(table["bars"] as? Int, 120, "\(context): the timing strip has one bar per bucket")
     // syntheticTransferSize(3) in evidence-fixture.mjs.
     if visible.contains("size") {
@@ -1065,6 +1092,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertTrue(rowText.contains(expected.hostileUrlMarker), "\(size.name): hostile URL renders as literal text: \(rowText)")
       try await assertInert(ui, "\(size.name) traffic detail")
       try await assertLayout(ui, "#screen-traffic", "\(size.name) traffic detail")
+      try await assertFooterItemsWhole(ui, "\(size.name) traffic detail")
       try await ui.screenshot("traffic-detail-\(size.name)")
 
       // End and Home reach the ends of the whole list through unmounted rows; focus follows the selection.
@@ -2303,7 +2331,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
         """)
       XCTAssertTrue((state["marker"] as? String ?? "").contains("Service worker · installed from 1 tab"),
                     "\(size.name): the registrant link is marked on its row: \(state)")
-      XCTAssertTrue((state["footer"] as? String ?? "").contains("2 service worker requests no page caused not recorded"),
+      XCTAssertTrue((state["footer"] as? String ?? "").contains("2\u{00a0}service worker requests no page caused not recorded"),
                     "\(size.name): the footer names the counted no-page requests: \(state)")
       XCTAssertEqual(state["unresolvedHidden"] as? Bool, true, "\(size.name): the linked row is no capture error")
       try await assertLayout(ui, "#screen-traffic", "\(size.name) service worker registrant")

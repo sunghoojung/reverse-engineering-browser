@@ -25,7 +25,7 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000, extra =
   class Node {
     constructor(tag = 'div') {
       this.tagName = tag; this.children = []; this.dataset = {}; this.attributes = new Map(); this.style = {};
-      this.listeners = new Map(); this.className = ''; this.textContent = ''; this.tabIndex = -1;
+      this.listeners = new Map(); this.className = ''; this.text = ''; this.tabIndex = -1;
       this._scrollTop = 0; this.scrollLeft = 0; this.value = ''; this.hidden = false;
       this.classList = {
         contains: value => this.className.split(' ').includes(value),
@@ -34,6 +34,9 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000, extra =
         toggle: (value, enabled) => enabled ? this.classList.add(value) : this.classList.remove(value)
       };
     }
+    // As in the DOM: a node's text is its children's, and setting it replaces them.
+    get textContent() { return this.children.length ? this.children.map(child => child.textContent).join('') : this.text; }
+    set textContent(value) { for (const node of [...this.children]) node.remove(); this.text = String(value); }
     get scrollTop() { return this._scrollTop; }
     set scrollTop(value) { stats.scrollWrites++; this._scrollTop = value; }
     get offsetTop() { stats.geometryReads++; return (this.parent?.children.indexOf(this) ?? 0) * 24; }

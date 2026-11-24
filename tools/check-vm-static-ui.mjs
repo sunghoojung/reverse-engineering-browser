@@ -69,8 +69,11 @@ export async function checkVmStaticController() {
   for (const text of invalid) { await ui.importFile('definition', file(text)); assert.equal(ui.getReport(), report); assert.match(ui.notice.textContent, /Import refused/); }
   await ui.importFile('definition', file(fixture.definition, '<img src=x onerror=alert(1)>.json')); await ui.analyzeInputs(); ui.setTab('inputs');
   assert(ui.detail.textContent.includes('<img src=x onerror=alert(1)>.json')); assert(!descendants(root).some(element => element.tagName === 'img'));
-  let read = false; await ui.importFile('image', {size: 1048577, arrayBuffer: async () => { read = true; }}); assert.equal(read, false);
-  await ui.importFile('image', {size: 1, arrayBuffer: async () => new ArrayBuffer(1048577)}); assert.match(ui.notice.textContent, /bound/);
+  // No file size bound: a 2 MiB image of HALT bytes loads and decodes whole.
+  await ui.importFile('image', file({...fixture.image, bytes_hex: 'ff'.repeat(1048577)})); assert.match(ui.notice.textContent, /^Bytecode loaded/);
+  await ui.analyzeInputs(); assert.equal(ui.getReport().coverage.instruction_count, 1048577); assert.equal(ui.getReport().coverage.stop_reason, 'end');
+  await ui.importFile('image', {size: 0, arrayBuffer: async () => new ArrayBuffer(0)}); assert.match(ui.notice.textContent, /Import refused: Select a JSON file that is not empty/);
+  await ui.importFile('image', file(fixture.image)); await ui.analyzeInputs();
   await ui.importFile('image', {size: 1, arrayBuffer: async () => new Uint8Array([255]).buffer}); assert.match(ui.notice.textContent, /Import refused/);
   await ui.importFile('definition', file('\uFEFF' + JSON.stringify(fixture.definition))); assert.match(ui.notice.textContent, /Import refused/, 'BOM is not silently stripped before exact source hashing');
   const previous = ui.getReport(); await ui.importFile('image', null); assert.equal(ui.getReport(), previous, 'Cancel does not clear existing evidence');

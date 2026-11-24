@@ -171,7 +171,7 @@ does not list a refusal as a signal of its category.
 
 - A store written before this contract has no refusal records.
 - A reader from before it refuses type 53 as an unknown type.
-- The backend's event index layout is `reb-event-index-v1/5`, so an older
+- The backend's event index layout is `reb-event-index-v1/6`, so an older
   index is rebuilt.
 - Evidence Package v1 accepts `broker_refusal` with the `unknown` category,
   as it accepted earlier record types.

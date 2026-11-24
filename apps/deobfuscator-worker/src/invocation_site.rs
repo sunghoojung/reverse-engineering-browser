@@ -4,16 +4,14 @@
 //! tree of the whole source, so text inside a string, template or comment can
 //! never match. It reports byte offsets and syntax facts only; the caller computes
 //! the site key from the verified artifact bytes and decides what to refuse.
+use reb_js_lexer::invocation_site::{
+    Binding, Function, Index, Initializer, Kind, MAX_SEGMENTS, Query, Response, Unsupported,
+    parse_name, segment,
+};
 use serde::{Deserialize, Serialize};
 use tree_sitter::Node;
 
-pub(crate) const MAX_NAME_BYTES: usize = 256;
-pub(crate) const MAX_SEGMENTS: usize = 8;
-const MAX_CANDIDATES: usize = 32;
 const MAX_BINDING_BYTES: usize = 160;
-/// In a document's main world these three name the same global object, and
-/// invocation capture never arms a worker isolate, where `self` would differ.
-const GLOBAL_OBJECTS: [&str; 3] = ["window", "self", "globalThis"];
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,119 +24,22 @@ pub(crate) struct Request {
     pub(crate) byte_offset: Option<u32>,
 }
 
-#[derive(Debug, Serialize, PartialEq)]
-pub(crate) struct Candidate {
-    /// `function`, `arrow`, `method`, `getter`, `setter`, `generator` or
-    /// `constructor`.
-    pub(crate) kind: &'static str,
-    /// The `(` that opens the parameter list, which is V8's start position
-    /// for every kind V8 can arm at a `(`. Null for a bare-parameter arrow.
-    pub(crate) anchor_byte: Option<u32>,
-    pub(crate) start: u32,
-    pub(crate) end: u32,
-    /// The name this definition binds, as written, when it binds one.
-    pub(crate) binding: Option<String>,
-    /// Why V8 would not arm this function at `anchor_byte`, if it would not.
-    pub(crate) unsupported: Option<&'static str>,
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct IndexRequest {
+    operation: String,
+    source: String,
 }
 
+/// The whole index of one source, `reb-invocation-site-index-v1`, which a
+/// caller keeps to answer later queries over the same bytes itself.
 #[derive(Serialize)]
-pub(crate) struct Response {
+pub(crate) struct IndexResponse {
     schema: &'static str,
     ok: bool,
     error: Option<&'static str>,
     source_bytes: usize,
-    matches: Vec<Candidate>,
-    match_count: usize,
-    /// With no exact match: definitions whose name ends in the same segment.
-    related: Vec<Candidate>,
-    related_count: usize,
-    selected: Option<Candidate>,
-    /// Why a position names no function, when it does not.
-    reason: Option<&'static str>,
-}
-
-fn response(source: &str) -> Response {
-    Response {
-        schema: "reb-invocation-site-worker-v1",
-        ok: true,
-        error: None,
-        source_bytes: source.len(),
-        matches: Vec::new(),
-        match_count: 0,
-        related: Vec::new(),
-        related_count: 0,
-        selected: None,
-        reason: None,
-    }
-}
-
-pub(crate) fn invalid(message: &'static str, source_bytes: usize) -> Response {
-    Response {
-        ok: false,
-        error: Some(message),
-        source_bytes,
-        ..response("")
-    }
-}
-
-/// A requested name: an optional global-object prefix and 1 to 8 segments.
-struct Name {
-    global: bool,
-    segments: Vec<String>,
-}
-
-pub(crate) fn segment(value: &str) -> bool {
-    let mut chars = value.chars();
-    chars
-        .next()
-        .is_some_and(|first| first == '$' || first == '_' || first.is_alphabetic())
-        && chars.all(|c| c == '$' || c == '_' || c.is_alphanumeric())
-}
-
-fn parse_name(value: &str) -> Option<Name> {
-    if value.is_empty() || value.len() > MAX_NAME_BYTES {
-        return None;
-    }
-    let mut segments = value.split('.').map(str::to_owned).collect::<Vec<_>>();
-    if segments.len() > MAX_SEGMENTS || !segments.iter().all(|part| segment(part)) {
-        return None;
-    }
-    let global = segments.len() > 1 && GLOBAL_OBJECTS.contains(&segments[0].as_str());
-    if global {
-        segments.remove(0);
-    }
-    Some(Name { global, segments })
-}
-
-/// What one definition binds. `global` paths are rooted at the global object;
-/// the others at an identifier or, for an unbound object literal, nothing.
-struct Binding {
-    global: bool,
-    segments: Vec<String>,
-    text: String,
-}
-
-impl Binding {
-    fn new(segments: Vec<String>, text: String) -> Option<Self> {
-        if segments.is_empty() || segments.len() > MAX_SEGMENTS + 1 {
-            return None;
-        }
-        let global = segments.len() > 1 && GLOBAL_OBJECTS.contains(&segments[0].as_str());
-        let segments = if global {
-            segments[1..].to_vec()
-        } else {
-            segments
-        };
-        Some(Self {
-            global,
-            segments,
-            text,
-        })
-    }
-    fn matches(&self, name: &Name) -> bool {
-        self.segments == name.segments && (!name.global || self.global)
-    }
+    index: Option<Index>,
 }
 
 fn text<'a>(node: Node, source: &'a str) -> &'a str {
@@ -343,17 +244,23 @@ fn function_kind(kind: &str) -> bool {
     )
 }
 
-fn candidate(node: Node, source: &str) -> Candidate {
+fn function(node: Node, source: &str, program: &Program) -> Function {
     let anchor = node
         .child_by_field_name("parameters")
         .filter(|parameters| source.as_bytes().get(parameters.start_byte()) == Some(&b'('))
         .map(|parameters| parameters.start_byte() as u32);
     let (kind, unsupported) = match node.kind() {
-        "function_expression" | "function_declaration" => ("function", None),
-        "generator_function" | "generator_function_declaration" => ("generator", Some("generator")),
-        "arrow_function" if has_token(node, "async") => ("arrow", Some("async_arrow")),
-        "arrow_function" if anchor.is_none() => ("arrow", Some("arrow_bare_parameter")),
-        "arrow_function" => ("arrow", None),
+        "function_expression" | "function_declaration" => (Kind::Function, None),
+        "generator_function" | "generator_function_declaration" => {
+            (Kind::Generator, Some(Unsupported::Generator))
+        }
+        "arrow_function" if has_token(node, "async") => {
+            (Kind::Arrow, Some(Unsupported::AsyncArrow))
+        }
+        "arrow_function" if anchor.is_none() => {
+            (Kind::Arrow, Some(Unsupported::ArrowBareParameter))
+        }
+        "arrow_function" => (Kind::Arrow, None),
         _ => {
             let constructor = node.parent().is_some_and(|p| p.kind() == "class_body")
                 && !has_token(node, "static")
@@ -363,25 +270,26 @@ fn candidate(node: Node, source: &str) -> Candidate {
                     .as_deref()
                     == Some("constructor");
             if constructor {
-                ("constructor", Some("class_constructor"))
+                (Kind::Constructor, Some(Unsupported::ClassConstructor))
             } else if has_token(node, "*") {
-                ("generator", Some("generator"))
+                (Kind::Generator, Some(Unsupported::Generator))
             } else if has_token(node, "get") {
-                ("getter", None)
+                (Kind::Getter, None)
             } else if has_token(node, "set") {
-                ("setter", None)
+                (Kind::Setter, None)
             } else {
-                ("method", None)
+                (Kind::Method, None)
             }
         }
     };
-    Candidate {
+    Function {
         kind,
         anchor_byte: anchor,
         start: node.start_byte() as u32,
         end: node.end_byte() as u32,
-        binding: None,
-        unsupported: unsupported.or(anchor.is_none().then_some("no_parameter_list")),
+        definition_start: definition_start(node) as u32,
+        unsupported: unsupported.or(anchor.is_none().then_some(Unsupported::NoParameterList)),
+        bindings: definition_bindings(node, source, program),
     }
 }
 
@@ -429,13 +337,11 @@ fn definition_start(node: Node) -> usize {
     }
 }
 
-fn each_function<'t>(root: Node<'t>, mut visit: impl FnMut(Node<'t>)) {
+/// Every node of the tree in document order, without recursion.
+fn each_node<'t>(root: Node<'t>, mut visit: impl FnMut(Node<'t>)) {
     let mut cursor = root.walk();
     loop {
-        let node = cursor.node();
-        if function_kind(node.kind()) {
-            visit(node);
-        }
+        visit(cursor.node());
         if cursor.goto_first_child() {
             continue;
         }
@@ -447,12 +353,80 @@ fn each_function<'t>(root: Node<'t>, mut visit: impl FnMut(Node<'t>)) {
     }
 }
 
+/// The index of `source`: every function definition with the names it binds,
+/// and every class initializer, from one syntax tree of the whole source.
+pub(crate) fn index(source: &str) -> Result<Index, &'static str> {
+    let tree = crate::syntax_tree::parse(source)?;
+    let root = tree.root_node();
+    let program = Program {
+        module: {
+            let mut cursor = root.walk();
+            root.named_children(&mut cursor)
+                .any(|child| matches!(child.kind(), "import_statement" | "export_statement"))
+        },
+    };
+    let mut index = Index {
+        source_bytes: source.len(),
+        ..Index::default()
+    };
+    each_node(root, |node| {
+        if function_kind(node.kind()) {
+            index.functions.push(function(node, source, &program));
+        } else if node.kind() == "class_static_block" {
+            index.initializers.push(Initializer {
+                start: node.start_byte() as u32,
+                end: node.end_byte() as u32,
+                from: node.start_byte() as u32,
+            });
+        } else if node.kind() == "field_definition"
+            && let Some(value) = node.child_by_field_name("value")
+        {
+            index.initializers.push(Initializer {
+                start: node.start_byte() as u32,
+                end: node.end_byte() as u32,
+                from: value.start_byte() as u32,
+            });
+        }
+    });
+    Ok(index)
+}
+
+pub(crate) fn index_response(request: &IndexRequest) -> IndexResponse {
+    if request.operation != "invocation_site_index" {
+        return index_refused();
+    }
+    let source = request.source.as_str();
+    let (error, index) = match index(source) {
+        Ok(index) => (None, Some(index)),
+        Err(message) => (Some(message), None),
+    };
+    IndexResponse {
+        schema: "reb-invocation-site-index-v1",
+        ok: error.is_none(),
+        error,
+        source_bytes: source.len(),
+        index,
+    }
+}
+
+pub(crate) fn index_refused() -> IndexResponse {
+    IndexResponse {
+        schema: "reb-invocation-site-index-v1",
+        ok: false,
+        error: Some("invalid invocation site index request"),
+        source_bytes: 0,
+        index: None,
+    }
+}
+
+pub(crate) use reb_js_lexer::invocation_site::invalid;
+
 pub(crate) fn analyze(request: Request) -> Response {
     let source = request.source.as_str();
     if request.operation != "invocation_site" {
         return invalid("invalid invocation site request", source.len());
     }
-    let by_name = match (&request.name, request.byte_offset) {
+    let name = match (&request.name, request.byte_offset) {
         (Some(name), None) => match parse_name(name) {
             Some(name) => Some(name),
             None => {
@@ -470,98 +444,20 @@ pub(crate) fn analyze(request: Request) -> Response {
         }
         _ => return invalid("give exactly one of name and byte_offset", source.len()),
     };
-    let tree = match crate::syntax_tree::parse(source) {
-        Ok(tree) => tree,
+    let index = match index(source) {
+        Ok(index) => index,
         Err(message) => return invalid(message, source.len()),
     };
-    let root = tree.root_node();
-    let program = Program {
-        module: {
-            let mut cursor = root.walk();
-            root.named_children(&mut cursor)
-                .any(|child| matches!(child.kind(), "import_statement" | "export_statement"))
-        },
-    };
-    let mut result = response(source);
-    match by_name {
-        Some(name) => each_function(root, |node| {
-            let bindings = definition_bindings(node, source, &program);
-            let last = name.segments.last();
-            if let Some(binding) = bindings.iter().find(|binding| binding.matches(&name)) {
-                result.match_count += 1;
-                if result.matches.len() < MAX_CANDIDATES {
-                    result.matches.push(Candidate {
-                        binding: Some(binding.text.clone()),
-                        ..candidate(node, source)
-                    });
-                }
-            } else if let Some(binding) = bindings
-                .iter()
-                .find(|binding| binding.segments.last() == last)
-            {
-                result.related_count += 1;
-                if result.related.len() < MAX_CANDIDATES {
-                    result.related.push(Candidate {
-                        binding: Some(binding.text.clone()),
-                        ..candidate(node, source)
-                    });
-                }
-            }
-        }),
-        None => {
-            let offset = request.byte_offset.unwrap() as usize;
-            let mut best: Option<(usize, Node)> = None;
-            each_function(root, |node| {
-                let start = definition_start(node);
-                if start <= offset
-                    && offset < node.end_byte()
-                    && best.is_none_or(|(width, _)| node.end_byte() - start < width)
-                {
-                    best = Some((node.end_byte() - start, node));
-                }
-            });
-            // A class field initializer or static block between the position
-            // and its enclosing function is a function V8 synthesizes.
-            let mut node = root.descendant_for_byte_range(offset, offset + 1);
-            while let Some(current) = node {
-                // Everything above the selected definition also encloses it.
-                if best.is_some_and(|(_, function)| {
-                    current.start_byte() <= function.start_byte()
-                        && current.end_byte() >= function.end_byte()
-                }) {
-                    break;
-                }
-                if current.kind() == "class_static_block"
-                    || (current.kind() == "field_definition"
-                        && current
-                            .child_by_field_name("value")
-                            .is_some_and(|value| value.start_byte() <= offset))
-                {
-                    result.reason = Some("class_initializer");
-                    return result;
-                }
-                node = current.parent();
-            }
-            match best {
-                Some((_, function)) => {
-                    result.selected = Some(Candidate {
-                        binding: definition_bindings(function, source, &program)
-                            .into_iter()
-                            .next()
-                            .map(|binding| binding.text),
-                        ..candidate(function, source)
-                    })
-                }
-                None => result.reason = Some("no_function"),
-            }
-        }
+    match &name {
+        Some(name) => index.answer(Query::Name(name)),
+        None => index.answer(Query::Offset(request.byte_offset.unwrap())),
     }
-    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reb_js_lexer::invocation_site::{MAX_CANDIDATES, MAX_NAME_BYTES};
 
     fn named(source: &str, name: &str) -> Response {
         analyze(Request {
@@ -597,7 +493,7 @@ mod tests {
             Some(source.find("(aGh").unwrap() as u32)
         );
         assert_eq!(response.matches[0].binding.as_deref(), Some("window.hsw"));
-        assert_eq!(response.matches[0].kind, "function");
+        assert_eq!(response.matches[0].kind, Kind::Function);
         assert_eq!(response.matches[0].unsupported, None);
         // The bare name and the other global objects reach the same property.
         for name in ["hsw", "self.hsw", "globalThis.hsw"] {
@@ -675,24 +571,24 @@ mod tests {
         let source = "a=x=>x;b=async(y)=>y;c=function*(z){};d=async function(w){};\
                       class K{constructor(v){}get g(){return 1}static constructor(u){}}";
         let reason = |name: &str| named(source, name).matches[0].unsupported;
-        assert_eq!(reason("a"), Some("arrow_bare_parameter"));
+        assert_eq!(reason("a"), Some(Unsupported::ArrowBareParameter));
         assert_eq!(named(source, "a").matches[0].anchor_byte, None);
-        assert_eq!(reason("b"), Some("async_arrow"));
-        assert_eq!(reason("c"), Some("generator"));
+        assert_eq!(reason("b"), Some(Unsupported::AsyncArrow));
+        assert_eq!(reason("c"), Some(Unsupported::Generator));
         assert_eq!(reason("d"), None);
         let constructor = at(source, source.find("constructor(v").unwrap());
         assert_eq!(
             constructor.selected.unwrap().unsupported,
-            Some("class_constructor")
+            Some(Unsupported::ClassConstructor)
         );
         let getter = at(source, source.find("return 1").unwrap())
             .selected
             .unwrap();
-        assert_eq!((getter.kind, getter.unsupported), ("getter", None));
+        assert_eq!((getter.kind, getter.unsupported), (Kind::Getter, None));
         let fake = at(source, source.find("constructor(u").unwrap())
             .selected
             .unwrap();
-        assert_eq!((fake.kind, fake.unsupported), ("method", None));
+        assert_eq!((fake.kind, fake.unsupported), (Kind::Method, None));
     }
 
     #[test]
@@ -719,6 +615,35 @@ mod tests {
         );
         assert_eq!(at(source, 0).reason, Some("no_function"));
         assert_eq!(at(source, source.len() - 1).reason, Some("no_function"));
+    }
+
+    #[test]
+    fn an_index_answers_the_same_after_a_round_trip_through_json() {
+        let source = "function outer(){class C{x=compute();static{run()}y=function(q){}}}\
+                      window.hsw=function(aGh){return Mk().then(function(){return awb(aGh)})};";
+        let reply = serde_json::to_value(index_response(&IndexRequest {
+            operation: "invocation_site_index".into(),
+            source: source.into(),
+        }))
+        .unwrap();
+        assert_eq!(reply["schema"], "reb-invocation-site-index-v1");
+        let kept: Index = serde_json::from_value(reply["index"].clone()).unwrap();
+        assert_eq!(kept, index(source).unwrap());
+        for offset in [
+            0,
+            source.find("compute").unwrap(),
+            source.find("awb").unwrap(),
+        ] {
+            assert_eq!(
+                format!("{:?}", kept.answer(Query::Offset(offset as u32))),
+                format!("{:?}", at(source, offset))
+            );
+        }
+        let name = parse_name("window.hsw").unwrap();
+        assert_eq!(
+            format!("{:?}", kept.answer(Query::Name(&name))),
+            format!("{:?}", named(source, "window.hsw"))
+        );
     }
 
     #[test]

@@ -7,20 +7,6 @@ private func setLimit(_ resource: Int32, _ value: rlim_t) {
   _ = setrlimit(resource, &limit)
 }
 
-private func boundedText(_ value: Any, bytes: Int) -> String {
-  let text = String(describing: value)
-  if text.utf8.count <= bytes { return text }
-  var result = ""
-  var count = 0
-  for character in text {
-    let width = String(character).utf8.count
-    if count + width > bytes { break }
-    result.append(character)
-    count += width
-  }
-  return result
-}
-
 private func failure(
   input: [String: Any]?,
   outcome: String = "failed",
@@ -39,7 +25,7 @@ private func failure(
     "logs": [],
     "logs_truncated": false,
     "duration_ms": 0,
-    "error": boundedText(message, bytes: 512),
+    "error": String(describing: message),
   ]
 }
 

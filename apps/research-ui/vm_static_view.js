@@ -1,4 +1,4 @@
-/* Local, bounded declarative decoding. This view never evaluates imported code,
+/* Local declarative decoding. This view never evaluates imported code,
  * creates a live session, or treats a supplied definition as recovered truth. */
 function vmStaticOwnedExample() {
   const operand = (name, kind, width = 1, signed = false) => ({name, kind, width, signed});
@@ -23,7 +23,7 @@ function vmStaticOwnedExample() {
 function mountVmStatic(root, modelOrOptions = vmStatic, options = {}) {
   const model = modelOrOptions?.getObservedPath || modelOrOptions === undefined ? vmStatic : modelOrOptions;
   const hostOptions = modelOrOptions?.getObservedPath ? modelOrOptions : options;
-  const pageSize = 64, graphPageSize = 32, maximumFileBytes = 1048576;
+  const pageSize = 64, graphPageSize = 32;
   const node = (tag, text = '', className = '') => {
     const element = document.createElement(tag); element.textContent = text; element.className = className; return element;
   };
@@ -265,8 +265,8 @@ function mountVmStatic(root, modelOrOptions = vmStatic, options = {}) {
     if (!file) return;
     const owner = ++serials[kind]; pending[kind] = true; analysisSerial++; analyzing = false; update();
     try {
-      if (!Number.isSafeInteger(file.size) || file.size < 1 || file.size > maximumFileBytes) throw Error('Select a JSON file from 1 byte to 1 MiB');
-      const bytes = await file.arrayBuffer(); if (bytes.byteLength > maximumFileBytes || !bytes.byteLength) throw Error('File exceeds the 1 MiB bound or is empty');
+      if (!Number.isSafeInteger(file.size) || file.size < 1) throw Error('Select a JSON file that is not empty');
+      const bytes = await file.arrayBuffer(); if (!bytes.byteLength) throw Error('The file is empty');
       const text = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes);
       if (owner !== serials[kind]) return;
       (kind === 'definition' ? model.parseDefinition : model.parseImage)(text);
@@ -283,7 +283,7 @@ function mountVmStatic(root, modelOrOptions = vmStatic, options = {}) {
   }
   async function analyzeInputs() {
     if (!inputs.definition || !inputs.image || pending.definition || pending.image || analyzing) return;
-    const owner = ++analysisSerial, definition = inputs.definition, image = inputs.image; analyzing = true; notice.textContent = 'Computing hashes and bounded static analysis…'; update();
+    const owner = ++analysisSerial, definition = inputs.definition, image = inputs.image; analyzing = true; notice.textContent = 'Computing hashes and static analysis…'; update();
     try {
       const result = await model.analyze(definition.text, image.text);
       if (owner !== analysisSerial || definition !== inputs.definition || image !== inputs.image) return;

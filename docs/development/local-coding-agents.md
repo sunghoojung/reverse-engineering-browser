@@ -437,8 +437,9 @@ sharing scope.
 For inspection calls, use `--read-only`. It checks the embedded version-1
 execution policy and complete metadata shape before reading an endpoint file,
 request body or making the HTTP call. It permits only `kind: operation`, effects
-`[]` or `["analysis"]`, and empty `state_dependent_effects`, `uncertainties` and
-`confirmations`. Missing, unknown, malformed or multiplexed metadata is rejected.
+`[]` or `["analysis"]`, empty `state_dependent_effects`, `uncertainties` and
+`confirmations`, and no `state_dependent_confirmations`. Missing, unknown,
+malformed or multiplexed metadata is rejected.
 `read_only_eligible` in discovery uses the same eligibility rule.
 
 This is an accident-prevention aid based on static advisory metadata. It does

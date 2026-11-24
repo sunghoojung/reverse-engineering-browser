@@ -19,6 +19,7 @@ DOCS_FILES = {
     "AGENTS.md",
     "SAFETY.md",
     "CONTRIBUTING.md",
+    "AUTHORS",
 }
 DOCS_PREFIXES = (
     "docs/",

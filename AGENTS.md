@@ -99,6 +99,9 @@ Ownership rules:
   `browser/integration/brave/patches/`.
 - A browser change is incomplete until overlays and patches reproduce from the
   pinned revisions through the synchronization script.
+- Project-written browser files start with the project MPL 2.0 header for the
+  authors in `AUTHORS`, never a copied Brave, Chromium, or V8 header. The
+  [integration guide](browser/integration/brave/README.md) has the exact text.
 - Never edit generated files, generated checkouts, changelogs, or captured
   evidence unless the task explicitly targets that evidence.
 - Keep product and architecture documents under `docs/`. Keep operating

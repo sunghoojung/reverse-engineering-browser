@@ -140,10 +140,12 @@ ranking pack**, or a pack plus two opcode workspace documents and exact
 interpreter artifact IDs for **Compare builds**. It sends only an explicit
 request to the local Rust backend; files remain inert. The browser retains the
 original JSON text to avoid rounding u64 identities. Changes and Clear invalidate
-the previous report; Cancel ignores outstanding results. A bounded preview and
-explicit complete-report download (or a clearly labeled copy action in native
-live mode) preserve the report's limitations and original
-evidence. Downloads use normal browser file permissions. Review before sharing.
+the previous report. A request runs until it is done or Cancel stops it, and
+the status shows its elapsed seconds; Cancel ignores outstanding results. The
+whole report, each selected row and every limitation are shown, the text in
+the shared code view, which mounts only the rows near view, beside an explicit
+complete-report download (or a clearly labeled copy action in native live
+mode) that preserves the report's limitations and original evidence. Downloads use normal browser file permissions. Review before sharing.
 Stored-evidence native mode has no pack backend and shows an explicit unavailable
 message; use the live local backend/browser-development mode or the offline CLI.
 
@@ -155,9 +157,10 @@ objects; artifact IDs are canonical positive u64 strings. The implementation
 calls the exact offline `apply`/`compare` functions, preserving schema, digest,
 source-family and conservative comparison semantics. Unknown request fields,
 duplicate keys, noninteger numbers, nesting past 128 levels and malformed UTF-8
-are refused. The HTTP body admits up to 1 GiB, the API's per-request buffer,
-and receives the existing local-origin, content-length, JSON-media-type and
-body-deadline checks (5 s plus 1 s per 16 MiB declared). At most two package/pack
+are refused. The HTTP body has no size bound: it parses as it arrives, so it
+is held once, as its parsed value. It receives the existing local-origin,
+content-length and JSON-media-type checks, the media type before any byte is
+read, and a body deadline of 5 s plus 1 s per 16 MiB received. At most two package/pack
 requests are admitted before body ingestion; capacity errors require explicit
 retry. Pack analysis writes no files, launches no process and sends no outgoing
 network requests. Reports of any size are returned whole. The offline CLI

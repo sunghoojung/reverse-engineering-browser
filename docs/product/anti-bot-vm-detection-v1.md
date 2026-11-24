@@ -59,7 +59,7 @@ was seen on. A session reloads the same scripts in navigation after
 navigation, so the pass reads, verifies and analyzes each content (kind,
 SHA-256, content path and size) once and names the result for every artifact
 that shares it. An artifact with an opcode workspace is analyzed on its own,
-because the workspace joins that artifact's samples under its own work budget.
+because the workspace joins that artifact's samples under its own work meter.
 The pass keeps the 1,024 most recent contents for reuse; an older one is
 analyzed again if it reappears. Each result is spooled in canonical form to an
 unnamed private file in the artifact store as it is produced. Memory then holds
@@ -272,6 +272,16 @@ dispatch the table again, directly or through a named function of the region
 a syntactic loop. A region whose table re-enters itself this way can
 therefore rise from `candidate` to `likely-vm` when recovery finds handlers.
 Version 2 documents remain valid.
+
+Producer `1.12.0` analyzes an artifact of any size. It reads every byte,
+scores every function region and counts every rule match, so
+`matches_truncated` is always false. A Wasm module is no longer refused for
+its section, function or instruction count. The scan stays linear: each
+region is scored over its own text, with nested regions collapsed, and the
+calls a threaded cycle needs are collected once per region and merged into
+its parent. The removed `max_artifact_bytes`, `max_js_*` and `max_wasm_*`
+limits are absent from its profile, so its profile digest differs; earlier
+documents that carry them remain valid.
 
 The generic JavaScript signal families include:
 

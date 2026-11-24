@@ -4643,7 +4643,7 @@
             }
           },
           "408": {
-            "description": "The bounded request-body read deadline expired, or the native decoder was busy or timed out.",
+            "description": "The bounded request-body read deadline expired.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4962,7 +4962,7 @@
             }
           }
         },
-        "x-max-body-bytes": 1073741824,
+        "x-max-body-bytes": 9007199254740991,
         "x-reb-execution": {
           "kind": "action-dependent",
           "effects": null,
@@ -4983,7 +4983,7 @@
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/app.rs",
-              "symbol": "App::post"
+              "symbol": "App::analyst_action"
             }
           ]
         },
@@ -4996,7 +4996,7 @@
       "get": {
         "operationId": "get_wasm_functions",
         "summary": "List a captured WebAssembly module's functions",
-        "description": "Inert, bounded function list for a hash-verified core WASM artifact: each defined function's index, byte range and type index, without decoding an instruction. Names come from the name section, then exports, as escaped single-line text. The list is limited by a byte budget; a partial status and omissions name what was left out. Researcher names of this module's functions are listed separately in analyst_names as [index, name] pairs, beside the captured names.",
+        "description": "Inert function list for a hash-verified core WASM artifact: each defined function's index, byte range and type index, without decoding an instruction. Names come from the name section, then exports, as escaped single-line text. Every defined function is listed; a partial status and omissions say when the module's sections could not be read to the end. Researcher names of this module's functions are listed separately in analyst_names as [index, name] pairs, beside the captured names.",
         "tags": [
           "artifacts"
         ],
@@ -5129,7 +5129,7 @@
       "get": {
         "operationId": "get_wasm_function_graph",
         "summary": "Basic blocks for one WebAssembly function",
-        "description": "Declared static control flow for one defined function of a hash-verified core WASM artifact. Blocks and edges come from the same decoder as inspect_wasm; every edge carries a kind and an unresolved target stays labeled with a null destination. complete is always false: reachable here is not observed execution and the drawing is not a proof. Responses are bounded by the row text and structure byte budgets, and a partial status with omissions names what was cut. Never executes the module. The function's researcher name is analyst_name and its module's names are analyst_names, so a call row's target index resolves.",
+        "description": "Declared static control flow for one defined function of a hash-verified core WASM artifact. Blocks and edges come from the same decoder as inspect_wasm; every edge carries a kind and an unresolved target stays labeled with a null destination. complete is always false: reachable here is not observed execution and the drawing is not a proof. Every block, edge and row is returned, for a body up to the 7,654,321-byte limit web engines enforce, and the document streams once the function has decoded. Exception edges run from each instruction that may throw to the handlers that may catch it; a throw no clause certainly catches is also an unresolved edge. A partial status with omissions names a label that points past the frames. Never executes the module. The function's researcher name is analyst_name and its module's names are analyst_names, so a call row's target index resolves.",
         "tags": [
           "artifacts"
         ],
@@ -8056,7 +8056,7 @@
             }
           },
           "408": {
-            "description": "Request-body read or bounded validation permit-wait deadline expired.",
+            "description": "The request body stalled past its read deadline. Validation itself has no deadline.",
             "content": {
               "application/json": {
                 "schema": {
@@ -8075,6 +8075,16 @@
                 "schema": {
                   "type": "string",
                   "const": "nosniff"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and validation stopped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -8254,7 +8264,7 @@
             }
           },
           "408": {
-            "description": "Request-body, one-second total permit wait, or ten-second cooperative whole-export deadline expired. Filesystem reads may still block in the kernel; this is not a hard kill guarantee.",
+            "description": "The request body stalled past its read deadline. The export itself has no deadline.",
             "content": {
               "application/json": {
                 "schema": {
@@ -8273,6 +8283,16 @@
                 "schema": {
                   "type": "string",
                   "const": "nosniff"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and the export stopped between reads. Filesystem reads may still block in the kernel; this is not a hard kill guarantee.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -8450,7 +8470,7 @@
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/evidence_package.rs",
-              "symbol": "evidence_package::export_bytes_at"
+              "symbol": "evidence_package::export_bytes_cancellable"
             },
             {
               "path": "apps/origin-trace-backend/src/evidence.rs",
@@ -9661,7 +9681,7 @@
             }
           },
           "408": {
-            "description": "Body, admission or cooperative comparison deadline exceeded. No successful partial comparison is returned.",
+            "description": "The request body stalled past its read deadline. Comparison itself has no deadline.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9680,6 +9700,16 @@
                 "schema": {
                   "type": "string",
                   "const": "nosniff"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and the comparison stopped. No partial comparison is returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -10807,7 +10837,7 @@
         "x-reb-execution-schema": {
           "$ref": "#/components/schemas/RebExecutionMetadata"
         },
-        "x-max-body-bytes": 1073741824,
+        "x-max-body-bytes": 9007199254740991,
         "requestBody": {
           "required": true,
           "content": {
@@ -10949,7 +10979,7 @@
         "x-reb-execution-schema": {
           "$ref": "#/components/schemas/RebExecutionMetadata"
         },
-        "x-max-body-bytes": 1073741824,
+        "x-max-body-bytes": 9007199254740991,
         "requestBody": {
           "required": true,
           "content": {
@@ -11308,7 +11338,7 @@
             },
             {
               "path": "apps/origin-trace-backend/src/deobfuscation.rs",
-              "symbol": "Deobfuscator::invocation_site"
+              "symbol": "Deobfuscator::invocation_index"
             }
           ]
         },
@@ -19181,42 +19211,40 @@
                 "type": "object",
                 "additionalProperties": false,
                 "required": [
-                  "max_artifact_bytes",
-                  "max_js_matches_per_rule",
-                  "max_js_function_regions",
-                  "max_js_region_work_bytes",
-                  "max_wasm_sections",
-                  "max_wasm_section_bytes",
                   "max_bytecode_snapshot_bytes",
                   "max_manifest_line_bytes",
-                  "max_event_line_bytes",
-                  "max_wasm_functions",
-                  "max_wasm_instructions"
+                  "max_event_line_bytes"
                 ],
                 "properties": {
                   "max_artifact_bytes": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "description": "Producers before 1.12.0 only: artifacts larger than this were refused. Every artifact is now read whole."
                   },
                   "max_js_matches_per_rule": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "description": "Producers before 1.12.0 only: matches counted per rule and region. Every match is now counted."
                   },
                   "max_js_function_regions": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "description": "Producers before 1.12.0 only: function regions examined. Every region is now examined."
                   },
                   "max_js_region_work_bytes": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "description": "Producers before 1.12.0 only: bytes scanned over all regions. Each region now scans only its own text, so the scan is linear in the source."
                   },
                   "max_wasm_sections": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "description": "Producers before 1.12.0 only: modules with more sections were refused."
                   },
                   "max_wasm_section_bytes": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "description": "Producers before 1.12.0 only: modules with a larger section were refused."
                   },
                   "max_bytecode_snapshot_bytes": {
                     "type": "integer",
@@ -19232,11 +19260,13 @@
                   },
                   "max_wasm_functions": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "description": "Producers before 1.12.0 only: modules with more defined functions were refused."
                   },
                   "max_wasm_instructions": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "description": "Producers before 1.12.0 only: modules with more instructions were refused."
                   },
                   "max_graph_edges": {
                     "type": "integer",
@@ -22492,14 +22522,14 @@
                   "effects": [
                     "process-stop"
                   ],
-                  "when": "Worker completion, timeout, or a dropped request cleans up the owned process group (worker::run_cancel)."
+                  "when": "Worker completion or a dropped request cleans up the owned process group (worker::run_cancel)."
                 }
               ],
               "uncertainties": [],
               "prerequisites": [
                 {
                   "id": "decoder-available",
-                  "condition": "The decoder must be executable and its serialized worker must become available within two seconds."
+                  "condition": "The decoder must be executable. Operations run one at a time, so a request waits for the one before it."
                 }
               ],
               "confirmations": [],
@@ -22545,14 +22575,14 @@
                   "effects": [
                     "process-stop"
                   ],
-                  "when": "Worker completion, timeout, or a dropped request cleans up the owned process group (worker::run_cancel)."
+                  "when": "Worker completion or a dropped request cleans up the owned process group (worker::run_cancel)."
                 }
               ],
               "uncertainties": [],
               "prerequisites": [
                 {
                   "id": "decoder-available",
-                  "condition": "The decoder must be executable and its serialized worker must become available within two seconds."
+                  "condition": "The decoder must be executable. Operations run one at a time, so a request waits for the one before it."
                 }
               ],
               "confirmations": [],
@@ -22603,14 +22633,14 @@
                   "effects": [
                     "process-stop"
                   ],
-                  "when": "Worker completion, timeout, or a dropped request cleans up the owned process group (worker::run_cancel)."
+                  "when": "Worker completion or a dropped request cleans up the owned process group (worker::run_cancel)."
                 }
               ],
               "uncertainties": [],
               "prerequisites": [
                 {
                   "id": "decoder-available",
-                  "condition": "The decoder must be executable and its serialized worker must become available within two seconds."
+                  "condition": "The decoder must be executable. Operations run one at a time, so a request waits for the one before it."
                 }
               ],
               "confirmations": [],
@@ -22689,14 +22719,14 @@
                   "effects": [
                     "process-stop"
                   ],
-                  "when": "Worker completion, timeout, or a dropped request cleans up the owned process group (worker::run_cancel)."
+                  "when": "Worker completion or a dropped request cleans up the owned process group (worker::run_cancel)."
                 }
               ],
               "uncertainties": [],
               "prerequisites": [
                 {
                   "id": "decoder-available",
-                  "condition": "The decoder must be executable and its serialized worker must become available within two seconds."
+                  "condition": "The decoder must be executable. Operations run one at a time, so a request waits for the one before it."
                 }
               ],
               "confirmations": [
@@ -23762,7 +23792,7 @@
               },
               "confirmed_sensitive": {
                 "type": "boolean",
-                "description": "Must be true when the stored record of the selected artifact is sensitive. The host reads sensitivity from the manifest, not from the request."
+                "description": "The researcher's confirmation that a sensitive selected artifact's bytes may be included. The host reads sensitivity from the stored record at run time, not from the request; a sensitive artifact without it is refused with confirmation_required before any byte is read, and a non-sensitive one or none runs with false."
               }
             },
             "required": [
@@ -23803,10 +23833,6 @@
                 {
                   "id": "saved-analyst-script",
                   "condition": "library_generation, script_id, and source must match the current saved JavaScript analyst script."
-                },
-                {
-                  "id": "sensitive-selected-artifact",
-                  "condition": "confirmed_sensitive must be true when the stored record of evidence.selected_artifact is sensitive."
                 }
               ],
               "confirmations": [
@@ -23814,21 +23840,13 @@
                   "field": "confirmed",
                   "value": true,
                   "when": {}
-                },
+                }
+              ],
+              "state_dependent_confirmations": [
                 {
                   "field": "confirmed_sensitive",
                   "value": true,
-                  "when": {
-                    "type": "object",
-                    "required": ["evidence"],
-                    "properties": {
-                      "evidence": {
-                        "type": "object",
-                        "required": ["selected_artifact"],
-                        "properties": {"selected_artifact": {"type": "object"}}
-                      }
-                    }
-                  }
+                  "when": "The stored record of evidence.selected_artifact is sensitive, as its sensitive field in get_artifacts shows."
                 }
               ],
               "notes": "Executes an explicitly selected saved script in a disposable analyst helper, separate from the browser, over caller-supplied frozen evidence and the selected artifact's verified stored bytes. There is no execution deadline, CPU limit or input, result or log size limit.",
@@ -23840,6 +23858,10 @@
                 {
                   "path": "apps/origin-trace-backend/src/analyst.rs",
                   "symbol": "normalize"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/analyst.rs",
+                  "symbol": "Run::admit"
                 }
               ]
             },
@@ -23890,7 +23912,7 @@
             }
           }
         ],
-        "description": "Run IDs and script IDs must be positive. Run requires the current saved JavaScript script, matching source and workspace generation. selected_artifact.sensitive=true requires confirmed_sensitive=true. Cancellation is a separate concurrent request. Replacement enforces root id=1/name=Analyst Workspace, tree and cumulative size limits in src/workspace.rs."
+        "description": "Run IDs and script IDs must be positive. Run requires the current saved JavaScript script, matching source and workspace generation. A selected artifact whose stored record is sensitive requires confirmed_sensitive=true, checked at run time. Cancellation is a separate concurrent request. Replacement enforces root id=1/name=Analyst Workspace, tree and cumulative size limits in src/workspace.rs."
       },
       "AnalystRunResult": {
         "type": "object",
@@ -26391,7 +26413,7 @@
                     "string",
                     "null"
                   ],
-                  "maxLength": 512
+                  "description": "A table edge's cases, an exception edge's clause, or what an unresolved edge leaves for: a tail call, an exception that may escape, or a label past the decoded frames."
                 }
               ],
               "minItems": 4,
@@ -32584,7 +32606,8 @@
           "observations",
           "observations_malformed",
           "observations_query",
-          "observation_budget_gaps"
+          "observation_budget_gaps",
+          "time_origins"
         ],
         "properties": {
           "contract_version": {
@@ -32809,7 +32832,7 @@
               },
               "observed": {
                 "type": "array",
-                "description": "The native frame of every valid observation record of the store, from the event index, newest first: the exact identity a thread scope filters by. records counts that frame's records.",
+                "description": "The native frame of every valid observation record of the store, from the event index, newest first: the exact identity a thread scope filters by. records counts that frame's records, and kinds counts them per record type.",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -32818,7 +32841,8 @@
                     "process_id",
                     "frame_id",
                     "last_sequence",
-                    "records"
+                    "records",
+                    "kinds"
                   ],
                   "properties": {
                     "session_id": {
@@ -32841,6 +32865,37 @@
                     "records": {
                       "type": "integer",
                       "minimum": 1
+                    },
+                    "kinds": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "description": "That frame's records per record type; a type the frame never recorded is absent, and the counts add up to records.",
+                      "properties": {
+                        "request_watch_match": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "listener_dispatch": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "timer_observation": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "csp_violation": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "exception_observation": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "dom_mutation": {
+                          "type": "integer",
+                          "minimum": 1
+                        }
+                      }
                     }
                   }
                 }
@@ -33132,6 +33187,28 @@
                   "pattern": "^(0|[1-9][0-9]{0,19})$"
                 },
                 "sequence_number": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                }
+              }
+            }
+          },
+          "time_origins": {
+            "type": "array",
+            "description": "The first record time of each session an observed frame belongs to, from the event index; the sidebar shows observation times from their session's start. A store can hold sessions from different boots, whose monotonic clocks never compare.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "session_id",
+                "monotonic_time_ns"
+              ],
+              "properties": {
+                "session_id": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "monotonic_time_ns": {
                   "type": "string",
                   "pattern": "^(0|[1-9][0-9]{0,19})$"
                 }
@@ -34603,6 +34680,33 @@
               }
             }
           },
+          "state_dependent_confirmations": {
+            "type": "array",
+            "description": "Confirmations needed only when stored state that the request cannot show holds, such as a sensitive selected artifact. Absent means none. The host reads that state when the request arrives; when it holds and field is not true, the request is refused with confirmation_required and details.confirmation naming field, before anything is read or run. A client asks the researcher then, or earlier when it already knows the state holds, and never sets the field by default.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "field",
+                "value",
+                "when"
+              ],
+              "properties": {
+                "field": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]*$"
+                },
+                "value": {
+                  "const": true
+                },
+                "when": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "The stored state that makes the confirmation necessary."
+                }
+              }
+            }
+          },
           "notes": {
             "type": "string",
             "minLength": 1
@@ -35211,14 +35315,15 @@
           "idle_backend",
           "native_capture_unavailable",
           "debugger_unavailable",
-          "artifact_integrity"
+          "artifact_integrity",
+          "confirmation_required"
         ],
-        "description": "Stable bounded application reason. artifact_integrity means retained bytes no longer match the size or SHA-256 in their manifest record, so reading them again cannot help. invalid_request/state_conflict/protocol_error are coarse classifications; precise reasons are only supplied by migrated source paths. application_failed does not imply rollback or no side effects. A command-exchange timeout or lost/malformed reply uses command_outcome_unknown, not a confirmed-no-op claim. This can include interrupted queued or partial writes and does not prove a send completed."
+        "description": "Stable bounded application reason. artifact_integrity means retained bytes no longer match the size or SHA-256 in their manifest record, so reading them again cannot help. confirmation_required means the stored state behind the request, such as a sensitive selected artifact, needs the confirmation that details.confirmation names; nothing was read or run, and a retry needs the researcher's confirmation, never a default. invalid_request/state_conflict/protocol_error are coarse classifications; precise reasons are only supplied by migrated source paths. application_failed does not imply rollback or no side effects. A command-exchange timeout or lost/malformed reply uses command_outcome_unknown, not a confirmed-no-op claim. This can include interrupted queued or partial writes and does not prove a send completed."
       },
       "ErrorDetails": {
         "type": "object",
         "additionalProperties": false,
-        "maxProperties": 7,
+        "maxProperties": 8,
         "properties": {
           "phase": {
             "type": "string",
@@ -35242,6 +35347,13 @@
           },
           "current_generation": {
             "$ref": "#/components/schemas/SafeInteger"
+          },
+          "confirmation": {
+            "type": "string",
+            "enum": [
+              "confirmed_sensitive"
+            ],
+            "description": "With confirmation_required: the request field that must be true for what the request names in the current stored state."
           },
           "selection_reason": {
             "type": "string",
@@ -36236,9 +36348,9 @@
       },
       "EvidencePackageArtifactByteSize": {
         "type": "string",
-        "maxLength": 8,
-        "pattern": "^(?:0|[1-9][0-9]{0,6}|1[0-5][0-9]{6}|16[0-6][0-9]{5}|167[0-6][0-9]{4}|1677[0-6][0-9]{3}|16777[0-1][0-9]{2}|1677720[0-9]{1}|1677721[0-5]|16777216)$",
-        "description": "Original artifact byte count as canonical unsigned decimal, at most 16777216 bytes. Artifact bytes are omitted and are not reverified by this validator.",
+        "maxLength": 20,
+        "pattern": "^(?:0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]{1}|1844674407370955161[0-4]|18446744073709551615)$",
+        "description": "Original artifact byte count as canonical unsigned 64-bit decimal, of any size. Artifact bytes are omitted and are not reverified by this validator.",
         "not": {
           "pattern": "[^0-9]"
         }

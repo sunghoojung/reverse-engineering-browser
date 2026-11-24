@@ -46,7 +46,10 @@ the DOM and computed layout and scrolls targets into view. It skips a row its
 scroller shows by under 2 px, where hit testing snaps onto the next row, but
 still checks a control whose own box is that small. It clips a box only by
 the ancestors that contain it, as CSS paints it, so a popover fixed to the
-window is not judged cut by the short table it opens from;
+window is not judged cut by the short table it opens from, and a box stuck to
+a scroller's top (`position: sticky`) hides what scrolls under it as the
+scroller's edge does. Text in a box of a pixel or less, kept for assistive
+readers, is not clipped text;
 [`check-rendered-ui-probes.mjs`](../check-rendered-ui-probes.mjs), part of
 `make lint`, checks these against modelled boxes.
 
@@ -151,7 +154,12 @@ retained compiled script (artifact 360) whose listener, timer and
 throw sites the records name. One listener's event type is markup and must
 stay text. At both window sizes the sections must be Threads, Watch rules,
 Observations and Pausing, Pausing must state the availability the backend
-reports with no pausing control, only rows near the view may mount, Tab from
+reports with no pausing control, only rows near the view may mount, Threads
+must show at least six whole one-line rows with no row's identifiers cut,
+both lists must end on a whole
+row, every record must read its time as `+M:SS.mmm` and its identifiers as
+`P F #` (and `R`), the kind menu must name each kind's count, a scrolled pane
+must keep the section's title over its list, Tab from
 the focused Threads pane must reach the list with a visible indicator, frame
 200 must scope the Sources tree and Observations, a listener record must be
 marked selected as soon as it is clicked, its **Open onTap @ handlers.js:2:71**
@@ -164,8 +172,13 @@ request (5100) must open its own Traffic row on the Initiator tab both by its
 failing, and then answering a malformed document, the status must say so
 while the last rows stay, marked stale, until a good read clears it. The
 record and both stale states are also photographed in the light theme. Escape must return to the toggle, or to
-**More** while a docked sidebar has moved the toggle into that menu, and a
-closed sidebar must make no read for 4.5 seconds. `REB_RENDERED_UI_DEBUGGER_RECORDS` (8 to 20,000, default
+**More** while a docked sidebar has moved the toggle into that menu, and
+closing must abort the read under way and start none: the test holds each read
+as a loaded backend would, so the thread click's read is in flight at the
+close, and it must end aborted, with no read started in the next 4.5 seconds.
+A read under way at the close is not a new read: its resource entry lands only
+when it ends, after the close, which once failed a count of all entries under
+load. `REB_RENDERED_UI_DEBUGGER_RECORDS` (8 to 20,000, default
 120) sets how many records the fixture writes; they also count as
 Fingerprinting activity. `test6RemovedFeaturesAreAbsent`
 reads Sources with the sidebar open, leaving out only the paused-state words
@@ -244,11 +257,38 @@ while the summary steps aside for the graph. With **Linear** shown (pressed at
 narrow, where it starts hidden), no control may meet the graph and linear
 divider while the linear view sweeps one row height of scroll offsets, so a
 row's sliver cannot pass under it at whatever offset the display height leaves.
-Space on the footer's **Key** opens the whole edge key and Escape returns a
-visible focus ring to Key. A native pointer drag then takes the divider to the
+The module's functions are single blocks, so the footer must offer no **Key**
+and name no edge kind. A native pointer drag then takes the divider to the
 graph's minimum, where the Functions menu must open whole, and to the linear
 view's minimum, repeating the sweep at each, and Home on the divider forgets
 the drag.
+
+`test25bBlockGraphShapes` opens the measured
+[block graph shapes](../fixtures/wasm-block-graph/README.md) in Graph, cold at
+both sizes and at 1440 by 900: a 1,000-case switch ladder (341), a 256-arm
+interpreter loop (342), two nests of eight loops (343), the exception fixture (344)
+and a 19,459-block interpreter loop (345). Each must draw without an error state
+and without layout defects or clipped text, the exception function's key must
+name exception and unresolved edges, and the interpreter loop's must name table
+edges. Where the footer folds the key behind **Key**, Space on Key opens it
+whole and Escape returns a visible focus ring to Key, with no control on the
+graph and linear divider (Linear is shown for that check and hidden again where
+the window starts without it). Each shape is photographed at its opening
+zoom and fitted whole with `0`, where the graph's canvas must hold only its
+background under the overview cue and the minimap. It prints a `RENDERED_UI_GRAPH` line per shape
+and size: the time from the native click on Graph to the frame after the first
+drawing, which spans decode, transfer, layout and draw, and, while Shift+Arrow
+pans once a frame at each zoom (right, down, left and up in turn, so every
+frame draws a new view clear of a pan limit), the median, 95th percentile and
+slowest frame interval and the time each frame spends drawing the graph. Then
+Shift+Arrow pushes the fitted view far past the bottom right, where the canvas
+must still draw the graph, not only its background. A median interval
+fails over 50 ms, or over twice the slower median of the 25-block exceptions
+shape at that size where that is longer (a `RENDERED_UI_GRAPH_BOUND` line per
+size). A display without a GPU, as on a CI host, holds even that shape to
+30-50 ms a frame while its draw takes 1 ms, so the bound follows the machine.
+One long frame does not fail, because a hidden window or a sleeping display
+stops frames whatever the page does.
 
 `test35MissingFinalHeaders` opens a content-session request the HTTP cache
 answered, which has only a provisional request block that an older browser's
@@ -344,6 +384,15 @@ the stopped request: answering one raises an exception that ended the app. The
 next run, of a script that returns, must get its own `completed` answer, not
 409.
 
+`test21bDecoderQueueHasNoDeadline` opens the bundled `reb://` workspace and
+sends 160 gzip transforms of 768 KiB each to the packaged decoder at once. The
+decoder runs one at a time with no deadline, so every request must be answered
+with 200, however long the queue takes; with the old two-second wait most were
+refused as busy. It then sends 150 more, aborts them after 300 ms, and the next
+request must be answered within 1.5 s, since the abandoned ones would take
+seconds to drain if WebKit stopping them did not take them off the queue. It
+prints the times as a `decoder queue in the packaged app` line.
+
 `test22NewLiveSessionAsksAboutUnsavedWork` first opens the bundled workspace
 through **New Live Session…** and the start panel's **Continue Offline**, because the close guard
 trusts only a document the app loaded itself. When an earlier test left the
@@ -427,6 +476,13 @@ actual viewport's media query. Scrolling checks center the specific target and
 wait for it to settle before measuring it. Fixed chrome, the analysis pane at
 rest, and controls revealed by product navigation are checked without
 test-driven scrolling.
+
+Program Trees lists VM findings before the opcode workspace and its host links
+arrive, and each arrival rebuilds the finding's detail. A VM test that selects
+a finding and reads its Symbol Tree, handler listing or analysis panels first
+waits for `#vm-detail` and `#vm-symbol-list` to report `aria-busy="false"`, not
+only for the finding rows; reading after the rows alone raced that load and
+failed `test4VmNativeGuestRows` with a missing symbol row on a slow runner.
 
 To reproduce smaller CI displays locally, cap all requested heights without
 changing the display resolution. The `macos-latest` runner currently clamps

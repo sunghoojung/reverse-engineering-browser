@@ -486,6 +486,25 @@ async function checkCacheAndRaces(create) {
     await f.refreshVmAnalysis(invalid); assert.deepEqual(checkedState(f), before); assert.equal(f.calls.length, calls);
   }
 
+  // A same-selection poll of a separately read workspace revalidates without
+  // changing what is shown: the workspace stays ready while its request is in
+  // flight, so a render meanwhile neither flashes a notice nor rebuilds it.
+  const polled = create(), separate = analysisDocument(A);
+  delete separate.opcode_workspace;
+  polled.reply = url => url.includes('/opcodes') ? response(opcodeDocument(), 200, 'opcodes-a')
+    : url.includes('/host-links') ? response(null, 404) : response(separate);
+  await polled.refreshVmAnalysis(A);
+  assert.equal(polled.state.vmOpcodeWorkspaceStatus, 'ready');
+  let workspaceStatusInFlight = null;
+  polled.reply = url => {
+    if (url.includes('/opcodes')) workspaceStatusInFlight = polled.state.vmOpcodeWorkspaceStatus;
+    return url.includes('/host-links') ? response(null, 404) : response(null, 304);
+  };
+  await polled.refreshVmAnalysis(copy(A));
+  assert.equal(workspaceStatusInFlight, 'ready', 'a revalidating poll never shows the workspace as loading');
+  assert.equal(polled.calls.findLast(call => call.url.includes('/opcodes')).options.headers['If-None-Match'], 'opcodes-a');
+  assert.equal(polled.state.vmOpcodeWorkspaceStatus, 'ready');
+
   for (const detail of ['timeout', 'crash', 'spawn', 'protocol']) {
     const current = create();
     await current.refreshVmAnalysis(A);

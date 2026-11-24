@@ -94,6 +94,12 @@ wasm-identification-fixtures:
 wasm-diff-fixtures:
 	$(call ignored-rust-test,--lib,wasm_diff::tests::write_wasm_diff_fixtures,)
 
+# Rebuild the block graph's exception fixture after editing its .wat source.
+# make check fails while the checked-in module differs from its source.
+.PHONY: wasm-block-graph-fixtures
+wasm-block-graph-fixtures:
+	$(call ignored-rust-test,--lib,wasm_graph::tests::write_block_graph_fixtures,)
+
 # The actual C++ native Wasm encoders feed the Rust workspace builder, the
 # shipped viewer and the Python validator. The Rust tests also export the exact
 # evidence stores they built; make rendered-ui-check renders those stores
@@ -255,7 +261,7 @@ native-proxy-policy-check: $(NATIVE_PROXY_POLICY_TEST)
 
 lint: format-check shellcheck python-check javascript-check repository-check workflow-check
 	cargo fmt --check --manifest-path apps/origin-trace-backend/Cargo.toml
-	cargo clippy --locked --manifest-path apps/origin-trace-backend/Cargo.toml -- -D warnings
+	cargo clippy --locked --all-targets --manifest-path apps/origin-trace-backend/Cargo.toml -- -D warnings
 	cargo fmt --check --manifest-path apps/deobfuscator-worker/Cargo.toml
 	cargo clippy --locked --all-targets --manifest-path apps/deobfuscator-worker/Cargo.toml -- -D warnings
 	cargo fmt --check --manifest-path apps/js-lexer/Cargo.toml
@@ -310,6 +316,7 @@ python-check: vm-lab-check
 	python3 tools/check-integrated-brave-state-test.py
 	python3 tools/check-cookie-import-terminal.py
 	python3 tools/check-header-observer-patch.py
+	python3 tools/check-project-headers.py
 	python3 tools/check-live-acceptance-test.py
 	python3 tools/check-macos-deployment-target.py --self-test
 	python3 tools/ci-scope-test.py
@@ -381,6 +388,7 @@ javascript-check: capture-completeness-check $(UI_STARTUP_DEPS)
 	node tools/check-vm-static.mjs
 	node tools/check-vm-static-ui.mjs
 	node tools/check-block-graph-ui.mjs
+	node tools/check-flow-graph-layout.mjs
 	node tools/check-vm-contextual.mjs
 	node tools/check-vm-contextual-evidence.mjs
 	node tools/check-vm-contextual-ui.mjs

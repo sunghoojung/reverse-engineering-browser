@@ -129,9 +129,10 @@ The `imported_static` capability registry explicitly separates these commands
 from `offline` supplied-observation analysis and `owned` native-fixture controls.
 All static commands use zero network requests. They reject endpoint, timeout,
 plugin and action options and never discover a backend, refresh a run or retry.
-Each input file remains capped at 1 MiB; the model additionally caps bytecode at
-64 KiB, decoded instructions at 4096, opcode definitions at 256 and operands per
-instruction at eight. The normal 4 MiB stdout bound still applies atomically.
+Each input file this command reads remains capped at 1 MiB, and the normal
+4 MiB stdout bound still applies atomically. The model itself has no size limit:
+the Static VM view decodes a bytecode image of any size whole, with any number of
+opcode definitions and operands.
 
 An agent can validate a reviewed definition, decode reviewed bytes, inspect
 uncertain edges, select an exact instruction and compare a proposed definition

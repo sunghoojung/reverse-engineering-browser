@@ -53,8 +53,8 @@ its own evaluation allowance below; the rest of the source is still folded.
 Each request is exactly one operation. Untagged records are deobfuscation
 (`source`, optional `assume_intrinsics`) or, when they carry
 `function_at_byte`, the function lookup (`source`, `function_at_byte`,
-optional `candidate_end_byte`); `source_facts`, `invocation_site` and
-`request_field` are named by `operation`. Unknown operations and unknown fields
+optional `candidate_end_byte`); `source_facts`, `invocation_site`,
+`invocation_site_index` and `request_field` are named by `operation`. Unknown operations and unknown fields
 are refused with `error_kind: "invalid-request"`, and every other refusal names
 its kind too. See [the response contract](../../protocol/deobfuscation-v1.md).
 
@@ -67,8 +67,8 @@ a pass reaches costs memory. Real bundles nest 150 to 200 levels; a 196,608-deep
 sequence expression is parsed and analyzed. Both grammars must support the
 input syntax; malformed syntax is the only refusal.
 
-The `function_at_byte` and candidate queries and `invocation_site` read a
-Tree-sitter tree. Tree-sitter builds it on the heap and every walk uses a cursor
+The `function_at_byte` and candidate queries, `invocation_site` and
+`invocation_site_index` read a Tree-sitter tree. Tree-sitter builds it on the heap and every walk uses a cursor
 or parent links, so neither the parse nor a query recurses, and a tree with an
 error node is refused rather than queried.
 
@@ -173,6 +173,17 @@ with its parameter-list `(`, kind, binding text and any reason V8 would not
 arm it; for a position, the innermost enclosing definition or why there is
 none. The backend checks every offset against the verified artifact, computes
 the site key itself and decides what to refuse.
+
+The backend does not send that query. It sends `invocation_site_index` with
+the same text once per artifact SHA-256 and keeps the reply,
+`reb-invocation-site-index-v1`: every function definition in document order
+with its range, the head that binds it, its parameter-list `(`, kind, the
+names it binds and any reason V8 would not arm it, and every class field
+initializer and static block. Both answer a query from that index with the
+same code in `reb-js-lexer`, so the backend answers later queries over the
+same bytes without parsing them again: on a 9.1 MB bundle the first query
+takes 0.86 s and later ones 0.02 s by name and 0.07 s by position, where each
+took 0.54 to 0.77 s.
 
 Candidate experiments additionally submit `candidate_end_byte` with
 `function_at_byte`. The strict query admits a complete literal range in a

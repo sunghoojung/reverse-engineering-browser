@@ -3646,9 +3646,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (totalCount !== null) {
           items.push([`${visibleCount === null ? '' : `${visibleCount.toLocaleString('en-US')} / `}${totalCount.toLocaleString('en-US')} requests`, true]);
           if (totals?.sizes) items.push([`${bytes(totals.sizes.transferred)} transferred`, true], [`${bytes(totals.sizes.resources)} resources`, true]);
-          if (totals?.hiddenInternal) items.push([`${totals.hiddenInternal.toLocaleString('en-US')} browser-internal hidden`, true]);
+          if (totals?.hiddenInternal) items.push([`${totals.hiddenInternal.toLocaleString('en-US')}\u00a0browser-internal hidden`, true]);
         }
-        for (const item of globalThis.RebNetworkScope?.captureExclusionItems(state.captureExclusions) ?? []) items.push([item, false]);
+        // An item's leading number stays on the line of the word it counts.
+        for (const item of globalThis.RebNetworkScope?.captureExclusionItems(state.captureExclusions) ?? []) items.push([item.replace(' ', '\u00a0'), false]);
         if (outside) items.push(['Selection outside filter', false]);
         if (note) items.push([note, false]);
         if (totalCount === null && items.length) items[0][0] = items[0][0].replace(/^./, letter => letter.toUpperCase());

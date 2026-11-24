@@ -2311,7 +2311,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
         """)
       XCTAssertTrue((state["marker"] as? String ?? "").contains("Service worker · installed from 1 tab"),
                     "\(size.name): the registrant link is marked on its row: \(state)")
-      XCTAssertTrue((state["footer"] as? String ?? "").contains("2 service worker requests no page caused not recorded"),
+      XCTAssertTrue((state["footer"] as? String ?? "").contains("2\u{00a0}service worker requests no page caused not recorded"),
                     "\(size.name): the footer names the counted no-page requests: \(state)")
       XCTAssertEqual(state["unresolvedHidden"] as? Bool, true, "\(size.name): the linked row is no capture error")
       try await assertLayout(ui, "#screen-traffic", "\(size.name) service worker registrant")

@@ -20,8 +20,8 @@ permissions. The browser development server defaults to
 
 The library supports:
 
-- up to 32 folders with four hierarchy levels;
-- up to 64 files;
+- any number of folders, nested to any depth;
+- any number of files;
 - `analyst-script` JavaScript files and `scratchpad` JavaScript, JSON,
   Markdown, or plain-text files;
 - file content of any length;
@@ -100,26 +100,32 @@ reason. No runner state survives a run.
 
 ## Bounds
 
-| Resource | Limit |
-| --- | ---: |
-| Folders | 32 |
-| Files | 64 |
-| Folder depth | 4 |
-| Variables | 32 |
-| Variable value | 4 KiB |
-| Variable snapshot | 16 KiB |
-| Retained run records | 64 |
+The library, its folders, files, depth and file content, the private
+variables, the evidence snapshot, the selected artifact, execution time,
+heap, console entries, the result, the error and the run history have no
+limit. Library document `limits` is the empty object; a document an earlier
+host wrote with its limits still reads, and the next save records `{}`.
+Folder hierarchies are checked in linear time, so a cycle is refused at any
+depth. The only nesting bound is the serializer's 256 levels, which marks
+deeper values instead of overflowing the stack.
 
-File content, the library document, the evidence snapshot, the selected
-artifact, execution time, heap, console entries and the result have no limit.
-The loopback API buffers at most 1 GiB per request, which the library and
-evidence snapshot use and the selected artifact does not, since the host reads
-it from the store.
+Long lists show everything a page at a time: each folder of the tree lists
+200 entries before a **Show more** row, run history lists 200 runs before
+**Show more older runs**, and a result's log 200 entries before **Show more
+log entries**. The selected file and run are always shown. The result or
+error is shown whole in the shared code view, which mounts only the rows near
+view. Past eight levels a folder's indent stays put so its name keeps room;
+its `aria-level` still gives the depth.
+The loopback API parses a library or run request as it arrives, with no size
+bound. The evidence snapshot is held once, as its parsed value, and is encoded
+into the runner's input while the runner reads it. The selected artifact is
+never in the request: the host reads and verifies it from the store, and frees
+it once the runner has it.
 
 Each run exposes time, source file, operation, outcome, duration, generation,
 file, and run correlation identifiers. Cancellation, malformed runner output,
-unavailable runtime, values marked past the serializer's nesting depth,
-history eviction, and all included evidence counts are visible.
+unavailable runtime, values marked past the serializer's nesting depth, and
+all included evidence counts are visible.
 
 ## Performance boundary
 

@@ -1,4 +1,5 @@
 use crate::{
+    artifact_query::MANIFEST_RECORD_BYTES,
     error::{Code, Error, Result, check_cancelled},
     validation,
 };
@@ -111,7 +112,12 @@ pub fn canonical(value: &Value, bits: u32, nonzero: bool) -> bool {
     validation::canonical(value, bits, nonzero, "Identifier").is_ok()
 }
 pub fn artifacts(root: &Path, limit: usize) -> Result<Vec<Value>> {
-    let mut records = recent(&root.join("manifest.jsonl"), limit, 8192, "artifact")?;
+    let mut records = recent(
+        &root.join("manifest.jsonl"),
+        limit,
+        MANIFEST_RECORD_BYTES,
+        "artifact",
+    )?;
     let mut seen = BTreeSet::new();
     for artifact in &mut records {
         validate_artifact(artifact)?;
@@ -683,12 +689,15 @@ pub fn manifest_from(root: &Path, offset: u64) -> Result<(Vec<Value>, u64)> {
     let (mut records, mut at) = (Vec::new(), offset);
     loop {
         let mut bytes = Vec::new();
-        let size = reader.by_ref().take(8193).read_until(b'\n', &mut bytes)?;
+        let size = reader
+            .by_ref()
+            .take(MANIFEST_RECORD_BYTES as u64 + 1)
+            .read_until(b'\n', &mut bytes)?;
         if size == 0 || bytes.last() != Some(&b'\n') {
             // The end, or a line still being written: read it next time.
             break;
         }
-        if size > 8192 {
+        if size > MANIFEST_RECORD_BYTES {
             return Err(Error::new(
                 500,
                 "The artifact manifest contains an oversized record",
@@ -733,7 +742,10 @@ fn scan_manifest(
             ));
         }
         let mut bytes = Vec::new();
-        let size = reader.by_ref().take(8193).read_until(b'\n', &mut bytes)?;
+        let size = reader
+            .by_ref()
+            .take(MANIFEST_RECORD_BYTES as u64 + 1)
+            .read_until(b'\n', &mut bytes)?;
         scanned = scanned.saturating_add(size as u64);
         if size > 0 {
             records = records.saturating_add(1);
@@ -747,7 +759,7 @@ fn scan_manifest(
         if size == 0 {
             break;
         }
-        if size > 8192 {
+        if size > MANIFEST_RECORD_BYTES {
             return Err(Error::new(
                 500,
                 "The artifact manifest contains an oversized record",
@@ -787,21 +799,10 @@ pub(crate) mod frozen {
             unix::{ffi::OsStrExt, fs::MetadataExt},
         },
         path::{Path, PathBuf},
-        time::Instant,
+        sync::atomic::{AtomicBool, Ordering},
     };
 
     pub const GUARD_MARKER: &[u8] = b"REB_EVIDENCE_GUARD_V1\n";
-    pub const MAX_BLOB_BYTES: u64 = 16 * 1024 * 1024;
-    pub const MAX_VERIFIED_BYTES: u64 = 128 * 1024 * 1024;
-    pub fn verified_total(total: u64, next: u64) -> Result<u64> {
-        if next > MAX_BLOB_BYTES {
-            return Err(limit());
-        }
-        total
-            .checked_add(next)
-            .filter(|n| *n <= MAX_VERIFIED_BYTES)
-            .ok_or_else(limit)
-    }
     pub fn unavailable() -> Error {
         Error::new(
             503,
@@ -816,10 +817,10 @@ pub(crate) mod frozen {
         Error::new(413, "The evidence export exceeds a resource limit")
             .with_code(Code::ResourceLimit)
     }
-    pub fn check(deadline: Instant) -> Result<()> {
-        if Instant::now() >= deadline {
-            Err(Error::new(408, "The evidence export exceeded its deadline")
-                .with_code(Code::Timeout))
+    /// An export has no deadline; it stops only when its request goes away.
+    pub fn check(cancelled: &AtomicBool) -> Result<()> {
+        if cancelled.load(Ordering::Relaxed) {
+            Err(Error::cancelled("The evidence export"))
         } else {
             Ok(())
         }
@@ -1003,10 +1004,10 @@ pub(crate) mod frozen {
             maximum: u64,
             max_line: usize,
             max_records: usize,
-            deadline: Instant,
+            cancelled: &AtomicBool,
             mut accept: impl FnMut(&[u8]) -> Result<()>,
         ) -> Result<()> {
-            check(deadline)?;
+            check(cancelled)?;
             if self.stamp.size > maximum {
                 return Err(limit());
             }
@@ -1018,7 +1019,7 @@ pub(crate) mod frozen {
                 let mut reader = BufReader::with_capacity(64 * 1024, &mut self.file);
                 let mut line = Vec::with_capacity(max_line.min(8192));
                 loop {
-                    check(deadline)?;
+                    check(cancelled)?;
                     line.clear();
                     let count = reader
                         .by_ref()
@@ -1043,14 +1044,14 @@ pub(crate) mod frozen {
                     if records > max_records {
                         return Err(limit());
                     }
-                    check(deadline)?;
+                    check(cancelled)?;
                     accept(&line)?;
                 }
             }
             if total != self.stamp.size {
                 return Err(changed());
             }
-            check(deadline)?;
+            check(cancelled)?;
             // Stamp change time does not move for every same-size rewrite. A
             // second read catches bytes that no longer match what was consumed.
             self.file.seek(SeekFrom::Start(0)).map_err(|_| changed())?;
@@ -1058,7 +1059,7 @@ pub(crate) mod frozen {
             let mut buffer = [0u8; 64 * 1024];
             let mut seen = 0u64;
             loop {
-                check(deadline)?;
+                check(cancelled)?;
                 let count = self.file.read(&mut buffer).map_err(|_| unavailable())?;
                 if count == 0 {
                     break;
@@ -1072,19 +1073,18 @@ pub(crate) mod frozen {
             if seen != total || confirm.finalize() != observed.finalize() {
                 return Err(changed());
             }
-            check(deadline)?;
+            check(cancelled)?;
             self.verify()
         }
+        /// Hashes a blob of any size in 64 KiB blocks, stopping between
+        /// blocks once `cancelled` is set.
         pub fn hash(
             &mut self,
             expected: u64,
             expected_hash: &str,
-            deadline: Instant,
+            cancelled: &AtomicBool,
         ) -> Result<()> {
-            check(deadline)?;
-            if expected > MAX_BLOB_BYTES {
-                return Err(limit());
-            }
+            check(cancelled)?;
             if self.stamp.size != expected {
                 return Err(Error::protocol(
                     "The selected artifact byte count or hash is inconsistent",
@@ -1094,7 +1094,7 @@ pub(crate) mod frozen {
             let mut buffer = [0u8; 64 * 1024];
             let mut total = 0u64;
             loop {
-                check(deadline)?;
+                check(cancelled)?;
                 let count = self.file.read(&mut buffer).map_err(|_| unavailable())?;
                 if count == 0 {
                     break;
@@ -1106,7 +1106,7 @@ pub(crate) mod frozen {
                 hash.update(&buffer[..count]);
             }
             self.verify()?;
-            check(deadline)?;
+            check(cancelled)?;
             if total != expected || hex::encode(hash.finalize()) != expected_hash {
                 return Err(Error::protocol(
                     "The selected artifact byte count or hash is inconsistent",
@@ -1116,7 +1116,7 @@ pub(crate) mod frozen {
         }
     }
     /// The held flock coordinates updated REB writers only. Kernel filesystem
-    /// reads can still block; deadlines are cooperative, not a hard kill.
+    /// reads can still block; cancellation is cooperative, not a hard kill.
     pub struct Store {
         pub root: Directory,
         guard: PinnedFile,
@@ -1256,8 +1256,7 @@ mod frozen_tests {
             fd::AsRawFd,
             unix::fs::{PermissionsExt, symlink},
         },
-        sync::{Arc, Barrier},
-        time::{Duration, Instant},
+        sync::{Arc, Barrier, atomic::AtomicBool},
     };
 
     fn store() -> tempfile::TempDir {
@@ -1395,20 +1394,14 @@ mod frozen_tests {
                 finish_child.wait();
             });
             let mut first = true;
-            let read = file.lines(
-                1024,
-                128,
-                20,
-                Instant::now() + Duration::from_secs(5),
-                |_| {
-                    if first {
-                        first = false;
-                        ready.wait();
-                        finish.wait();
-                    }
-                    Ok(())
-                },
-            );
+            let read = file.lines(1024, 128, 20, &AtomicBool::new(false), |_| {
+                if first {
+                    first = false;
+                    ready.wait();
+                    finish.wait();
+                }
+                Ok(())
+            });
             child.join().unwrap();
             let result = read.and_then(|_| store.verify());
             assert_eq!(result.unwrap_err().status, 409, "{mutation}");
@@ -1425,29 +1418,23 @@ mod frozen_tests {
         let (store, basename) = Store::event(&path, false).unwrap();
         let mut file = store.root.file(&basename, false).unwrap();
         let mut lines = 0;
-        file.lines(
-            1024,
-            128,
-            20,
-            Instant::now() + Duration::from_secs(5),
-            |_| {
-                // As the backend's index timers do, mid-read.
-                if lines == 0 {
-                    fs::write(root.path().join("events.jsonl.events-v1"), b"index").unwrap();
-                    fs::write(root.path().join("events.jsonl.events-v1-wal"), b"").unwrap();
-                    fs::remove_file(root.path().join("events.jsonl.events-v1-wal")).unwrap();
-                }
-                lines += 1;
-                Ok(())
-            },
-        )
+        file.lines(1024, 128, 20, &AtomicBool::new(false), |_| {
+            // As the backend's index timers do, mid-read.
+            if lines == 0 {
+                fs::write(root.path().join("events.jsonl.events-v1"), b"index").unwrap();
+                fs::write(root.path().join("events.jsonl.events-v1-wal"), b"").unwrap();
+                fs::remove_file(root.path().join("events.jsonl.events-v1-wal")).unwrap();
+            }
+            lines += 1;
+            Ok(())
+        })
         .unwrap();
         assert_eq!(lines, 2);
         store.verify().unwrap();
         file.verify().unwrap();
     }
     #[test]
-    fn frozen_rows_hashes_and_deadlines_are_bounded() {
+    fn frozen_rows_hashes_and_cancellation_are_bounded() {
         use sha2::{Digest, Sha256};
         let root = store();
         let path = root.path().join("events.jsonl");
@@ -1459,51 +1446,43 @@ mod frozen_tests {
             (8, 4, 2, 200),
         ] {
             let mut file = store.root.file(&basename, false).unwrap();
-            let result = file.lines(
-                max,
-                line,
-                records,
-                Instant::now() + Duration::from_secs(5),
-                |_| Ok(()),
-            );
+            let result = file.lines(max, line, records, &AtomicBool::new(false), |_| Ok(()));
             assert_eq!(result.map(|_| 200).unwrap_or_else(|e| e.status), status);
         }
         let mut file = store.root.file(&basename, false).unwrap();
         assert_eq!(
-            file.lines(8, 4, 2, Instant::now(), |_| Ok(()))
+            file.lines(8, 4, 2, &AtomicBool::new(true), |_| Ok(()))
                 .unwrap_err()
                 .status,
-            408
+            499
         );
         let hash = hex::encode(Sha256::digest(b"one\ntwo\n"));
         let mut file = store.root.file(&basename, false).unwrap();
-        file.hash(8, &hash, Instant::now() + Duration::from_secs(5))
-            .unwrap();
+        file.hash(8, &hash, &AtomicBool::new(false)).unwrap();
         let mut file = store.root.file(&basename, false).unwrap();
         assert_eq!(
-            file.hash(7, &hash, Instant::now() + Duration::from_secs(5))
+            file.hash(7, &hash, &AtomicBool::new(false))
                 .unwrap_err()
                 .status,
             422
         );
         let mut file = store.root.file(&basename, false).unwrap();
         assert_eq!(
-            file.hash(8, &"0".repeat(64), Instant::now() + Duration::from_secs(5))
+            file.hash(8, &"0".repeat(64), &AtomicBool::new(false))
                 .unwrap_err()
                 .status,
             422
         );
-        let mut file = store.root.file(&basename, false).unwrap();
-        assert_eq!(
-            file.hash(
-                MAX_BLOB_BYTES + 1,
-                &hash,
-                Instant::now() + Duration::from_secs(5)
-            )
-            .unwrap_err()
-            .status,
-            413
-        );
+        // A blob past the 16 MiB that used to be refused hashes whole.
+        let large = vec![7u8; (16 << 20) + 1];
+        fs::write(root.path().join("large.bin"), &large).unwrap();
+        let mut file = store.root.file("large.bin", false).unwrap();
+        file.hash(
+            large.len() as u64,
+            &hex::encode(Sha256::digest(&large)),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
     }
 }
 

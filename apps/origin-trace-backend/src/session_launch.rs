@@ -38,6 +38,9 @@ pub struct StartOptions {
     pub wasm_function_deny: Vec<u32>,
     /// Lowercase SHA-256 digests. Empty admits every module.
     pub wasm_module_allowlist: Vec<String>,
+    /// Keep every Wasm record the filters admit: no per-window pacing, no
+    /// browser ceiling and no per-function or per-site allowance.
+    pub wasm_every_record: bool,
     /// Set when a budget field was present but not the documented shape.
     pub wasm_budget_malformed: bool,
     pub guest_adapter: Option<PathBuf>,
@@ -194,6 +197,7 @@ impl StartOptions {
             wasm_function_allow: indexes("wasm_function_allow", &mut wasm_budget_malformed),
             wasm_function_deny: indexes("wasm_function_deny", &mut wasm_budget_malformed),
             wasm_module_allowlist: digests("wasm_module_allowlist", &mut wasm_budget_malformed),
+            wasm_every_record: flag("wasm_every_record"),
             wasm_budget_malformed,
             guest_adapter: path("guest_adapter"),
             js_dispatch_sites: path("js_dispatch_sites"),
@@ -258,7 +262,14 @@ impl StartOptions {
         if self.wasm_budget_malformed {
             return Err("Wasm sample budget options must be integers, function indexes below 16777216, and 64-character hex module digests".into());
         }
-        let wasm_budget = self.wasm_samples_per_function.is_some()
+        if self.wasm_every_record
+            && (self.wasm_samples_per_function.is_some()
+                || self.wasm_samples_per_indirect_site.is_some())
+        {
+            return Err("wasm_every_record keeps every record, so it takes no wasm_samples_per_function or wasm_samples_per_indirect_site".into());
+        }
+        let wasm_budget = self.wasm_every_record
+            || self.wasm_samples_per_function.is_some()
             || self.wasm_samples_per_indirect_site.is_some()
             || !self.wasm_function_allow.is_empty()
             || !self.wasm_function_deny.is_empty()
@@ -396,6 +407,7 @@ impl StartOptions {
             "wasm_function_allow": self.wasm_function_allow,
             "wasm_function_deny": self.wasm_function_deny,
             "wasm_module_allowlist": self.wasm_module_allowlist,
+            "wasm_every_record": self.wasm_every_record,
             "quiet": self.quiet,
             "category_mask": self.category_mask.unwrap_or(4095),
             "localhost_only": self.localhost_only,
@@ -659,6 +671,7 @@ fn with_option_names(cause: &str) -> String {
         ("REB_NATIVE_WASM_FUNCTION_ALLOW", "wasm_function_allow"),
         ("REB_NATIVE_WASM_FUNCTION_DENY", "wasm_function_deny"),
         ("REB_NATIVE_WASM_MODULE_ALLOWLIST", "wasm_module_allowlist"),
+        ("REB_NATIVE_WASM_EVERY_RECORD", "wasm_every_record"),
         ("REB_NATIVE_QUIET_MODE", "quiet"),
         ("REB_CAPTURE_CANVAS_IMAGES", "canvas_images"),
         ("REB_CAPTURE_CATEGORY_MASK", "category_mask"),
@@ -755,7 +768,7 @@ fn invocation_sites(
         std::str::from_utf8(&bytes)
             .ok()
             .and_then(js_invocation_sites::parse_sites_file)
-            .ok_or("js_invocation_sites is not a native-js-invocation-sites-v1 file: canonical JSON naming 1 to 256 distinct function-entry sites in at most 128 KiB. resolve_js_invocation_site returns exact site entries.")?
+            .ok_or("js_invocation_sites is not a native-js-invocation-sites-v1 file: canonical JSON naming at least one distinct function-entry site. resolve_js_invocation_site returns exact site entries.")?
     } else {
         return Ok(None);
     };
@@ -953,6 +966,11 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         .env(
             "REB_NATIVE_WASM_CALL_INDIRECT",
             switch(options.wasm_call_indirect),
+        )
+        // Named or off, never inherited, like the allowances it replaces.
+        .env(
+            "REB_NATIVE_WASM_EVERY_RECORD",
+            switch(options.wasm_every_record),
         )
         .env("REB_NATIVE_QUIET_MODE", switch(options.quiet))
         .env("REB_CAPTURE_CANVAS_IMAGES", switch(options.canvas_images))
@@ -1224,6 +1242,14 @@ mod tests {
                 "from 1 to 1024",
             ),
             (
+                json!({"wasm_every_record":true,"wasm_dispatch":false,"wasm_call_indirect":false}),
+                "require wasm_dispatch",
+            ),
+            (
+                json!({"wasm_every_record":true,"wasm_samples_per_indirect_site":2,"wasm_call_indirect":true}),
+                "takes no wasm_samples_per_function or wasm_samples_per_indirect_site",
+            ),
+            (
                 json!({"wasm_function_allow":[1,1],"wasm_dispatch":true}),
                 "unique",
             ),
@@ -1369,6 +1395,16 @@ mod tests {
         assert_eq!(effective["wasm_samples_per_indirect_site"], 1);
         assert_eq!(effective["wasm_function_deny"], json!([4]));
         assert_eq!(effective["wasm_module_allowlist"][0], digest);
+        assert_eq!(effective["wasm_every_record"], false);
+        let every =
+            StartOptions::from_json(&json!({"wasm_dispatch": true, "wasm_every_record": true,
+            "wasm_function_deny": [4]}));
+        assert!(
+            every.validate().is_ok(),
+            "{}",
+            every.validate().unwrap_err()
+        );
+        assert_eq!(every.effective()["wasm_every_record"], true);
     }
 
     #[test]

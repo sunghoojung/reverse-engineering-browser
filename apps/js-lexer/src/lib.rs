@@ -14,6 +14,8 @@
 //! scripts). An unterminated literal is read as division. Oxc remains the
 //! parser; consumers that bound it must not trust these guesses alone.
 
+pub mod invocation_site;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     /// `//` up to its line terminator, or `/* */` (to the end if unterminated).

@@ -826,7 +826,7 @@ void RuntimeCheckpointQueue() {
   const auto generation = sink.RuntimeCaptureGeneration();
   auto bytes = std::make_shared<std::array<std::uint8_t, 32>>();
   std::weak_ptr<std::array<std::uint8_t, 32>> retained = bytes;
-  assert(pending.Push({generation, 100, bytes}, 32));
+  assert(pending.Push({generation, 100, bytes}));
   // Script A allocated the zero-filled array. Script B writes synchronously;
   // the queued native payload retains A and observes the later byte contents.
   for (std::size_t i = 0; i < bytes->size(); ++i)
@@ -838,8 +838,8 @@ void RuntimeCheckpointQueue() {
     assert((*item.bytes)[1] == (1 ^ 0x5a));
     ++copies;
   });
-  assert(copies == 1 && pending.size() == 0 && pending.bytes() == 0);
-  assert(pending.Push({generation, 100, bytes}, 32));
+  assert(copies == 1 && pending.size() == 0);
+  assert(pending.Push({generation, 100, bytes}));
   transport.Disable();
   pending.Drain([&](Snapshot item) {
     if (item.generation == sink.RuntimeCaptureGeneration())
@@ -848,7 +848,7 @@ void RuntimeCheckpointQueue() {
   assert(copies == 1);
   Configure(events, 98, 200);
   const auto expiring = sink.RuntimeCaptureGeneration();
-  assert(pending.Push({expiring, 100, bytes}, 32));
+  assert(pending.Push({expiring, 100, bytes}));
   base::test_now_ns = 200;
   pending.Drain([&](Snapshot item) {
     if (item.generation == sink.RuntimeCaptureGeneration())
@@ -857,14 +857,14 @@ void RuntimeCheckpointQueue() {
   base::test_now_ns = 100;
   assert(copies == 1);
   Configure(events, 99);
-  assert(pending.Push({generation, 100, bytes}, 32));
+  assert(pending.Push({generation, 100, bytes}));
   pending.Drain([&](Snapshot item) {
     if (item.generation == sink.RuntimeCaptureGeneration())
       ++copies;
   });
   assert(copies == 1);
   const auto current = sink.RuntimeCaptureGeneration();
-  assert(pending.Push({current, 100, bytes, true}, 32));
+  assert(pending.Push({current, 100, bytes, true}));
   pending.Drain([&](Snapshot item) {
     if (item.detached) {
       sink.RecordRuntimeBufferOmission(item.generation, 8, "runtime_buffer_checkpoint_invalid");
@@ -874,20 +874,17 @@ void RuntimeCheckpointQueue() {
   });
   assert(One(events).header.type == reb::NativeProbeType::kArtifactCaptureFailed && copies == 1);
   for (unsigned i = 0; i < 16; ++i)
-    assert(pending.Push({current, 100, bytes}, 32));
-  assert(!pending.Push({current, 100, bytes}, 32));
+    assert(pending.Push({current, 100, bytes}));
+  assert(!pending.Push({current, 100, bytes}));
   // No checkpoint before teardown: omit, release all retained owners, no copy.
   bytes.reset();
   pending.Drain([&](Snapshot item) {
     sink.RecordRuntimeBufferOmission(item.generation, 8, "runtime_buffer_checkpoint_unavailable");
   });
   assert(Drain(events) == 16 && retained.expired() && copies == 1);
-  assert(pending.Push({current, 100, {}}, pending.kMaxBytes));
-  assert(!pending.Push({current, 100, {}}, 1));
-  pending.Drain([](Snapshot) {});
   transport.Disable();
   std::cout << "PASS native checkpoint queue: later writes, allocator identity, disable/session, "
-               "detach, teardown and independent limits\n";
+               "detach, teardown and the sixteen-entry limit\n";
 }
 
 void DisabledExpiredAndMalformed() {
@@ -1384,8 +1381,14 @@ void NativeWasmRuntimeAdmission() {
   input.source_url = "";
   assert(!reb::IsValidNativeWasmDispatchInput(input));
   input.source_url = "https://owned.test/module.wasm";
-  std::vector<std::uint8_t> oversized(reb::kNativeArtifactMaxContentBytes + 1);
-  input.module_bytes = oversized;
+  // A module of any size, with its br_table past the first 16 MiB.
+  std::vector<std::uint8_t> large(16U * 1024U * 1024U + 16U);
+  std::copy(module.begin(), module.begin() + 8, large.begin());
+  std::copy(module.begin() + 8, module.end(), large.end() - 4);
+  input.module_bytes = large;
+  input.module_byte_offset = static_cast<std::uint32_t>(large.size() - 4);
+  assert(reb::IsValidNativeWasmDispatchInput(input));
+  input.module_byte_offset = 8;
   assert(!reb::IsValidNativeWasmDispatchInput(input));
   input.module_bytes = std::span(module).first(9);
   assert(!reb::IsValidNativeWasmDispatchInput(input));
@@ -1965,6 +1968,153 @@ void NativeWasmSampleBudgetControls() {
                "allowlist, deny-wins, window turnover and reset\n";
 }
 
+// Every record claims no window and keeps no per-function count: each
+// admitted execution is a full record with the next ordinal, past both the
+// 1024 a window and the 64 a function of the default policy, while the filters
+// still apply. Policy byte 11 carries it; earlier browsers required 0 there.
+void NativeWasmEveryRecord() {
+  reb::NativeWasmSampleBudgetPolicy policy;
+  policy.every_record = true;
+  assert(reb::IsValidNativeWasmSampleBudgetPolicy(policy));
+  auto bytes = reb::EncodeNativeWasmSampleBudgetPolicy(policy);
+  assert(bytes[11] == 1);
+  reb::NativeWasmSampleBudgetPolicy decoded;
+  assert(reb::DecodeNativeWasmSampleBudgetPolicy(bytes, decoded) && decoded.every_record &&
+         decoded.samples_per_function == 0);
+  bytes[11] = 2;
+  assert(!reb::DecodeNativeWasmSampleBudgetPolicy(bytes, decoded));
+  auto counted = policy;
+  counted.samples_per_function = 1;
+  assert(!reb::IsValidNativeWasmSampleBudgetPolicy(counted));
+  counted.samples_per_function = 0;
+  counted.samples_per_indirect_site = 1;
+  assert(!reb::IsValidNativeWasmSampleBudgetPolicy(counted));
+  assert(!reb::EncodeNativeWasmSampleBudgetPolicy(reb::NativeWasmSampleBudgetPolicy{})[11]);
+
+  const auto owned_queue = std::make_unique<NativeProbeQueue>();
+  NativeProbeQueue& queue = *owned_queue;
+  constexpr std::array<std::uint8_t, 16> module{0,    97, 115,  109, 1, 0,    0, 0,
+                                                0x0e, 2,  0x11, 0,   0, 0x11, 0, 0};
+  constexpr std::string_view url = "https://owned.test/module.wasm";
+  policy.function_deny_count = 1;
+  policy.function_deny[0] = 5;
+  sink.SetNativeWasmSampleBudgetPolicy(policy);
+  Configure(queue);
+  sink.SetNativeWasmDispatchEmitter(&CaptureBudgetDispatch);
+  sink.SetNativeWasmIndirectEmitter(&CaptureBudgetIndirect);
+  budget_dispatch_indexes.clear();
+  budget_indirect_indexes.clear();
+  reb::NativeWasmIndirectObservation indirect;
+  indirect.header.frame_id = 8;
+  indirect.execution_context_id = 7;
+  indirect.document_token_high = 9;
+  indirect.document_token_low = 10;
+  indirect.source_url = url;
+  indirect.table_index = 0;
+  indirect.resolution = reb::NativeWasmIndirectResolution::kOutOfBounds;
+  indirect.module_bytes = module;
+  indirect.module_byte_offset = 10;
+  indirect.function_index = 3;
+  constexpr std::uint32_t kRecords = 3 * reb::kNativeWasmDispatchSampleBudget;
+  for (std::uint32_t index = 0; index < kRecords; ++index) {
+    sink.RecordNativeWasmDispatch(7, 8, url, module, 0, 8, 0, 2, 9, 10);
+    sink.RecordNativeWasmIndirect(indirect);
+  }
+  // A second window of the thread's clock changes nothing.
+  base::test_now_ns += static_cast<std::int64_t>(reb::kNativeWasmSampleWindowNs);
+  sink.RecordNativeWasmDispatch(7, 8, url, module, 0, 8, 0, 2, 9, 10);
+  assert(budget_dispatch_indexes.size() == kRecords + 1 &&
+         budget_indirect_indexes.size() == kRecords);
+  for (std::uint32_t index = 0; index < kRecords; ++index)
+    assert(budget_dispatch_indexes[index] == index && budget_indirect_indexes[index] == index);
+  assert(budget_dispatch_indexes.back() == kRecords);
+  // Nothing was paced, so no budget gap or overflow identity was queued.
+  assert(Drain(queue) == 0);
+  // The filters still apply: a denied function takes no ordinal.
+  sink.RecordNativeWasmDispatch(7, 8, url, module, 5, 8, 0, 2, 9, 10);
+  assert(budget_dispatch_indexes.size() == kRecords + 1);
+  NativeProbeEvent filtered;
+  assert(queue.TryPop(filtered) && BudgetGap(filtered) == "native_wasm_dispatch_filtered");
+  sink.SetNativeWasmSampleBudgetPolicy({});
+  transport.Disable();
+  base::test_now_ns = 100;
+  std::cout << "PASS native Wasm every record: no window or per-function count on either stream, "
+               "unbroken ordinals, filters kept, and policy byte 11 round trips\n";
+}
+
+// The transport sends a thread's Wasm records in batches: a full one at once,
+// the rest when the task that recorded them ends, and all of them before any
+// other message of that thread, so each thread's messages keep their order.
+// A thread that exits sends what it holds.
+void NativeWasmRecordBatches() {
+  using Host = reb::mojom::NativeProbeHost;
+  const auto owned_queue = std::make_unique<NativeProbeQueue>();
+  NativeProbeQueue& queue = *owned_queue;
+  constexpr std::array<std::uint8_t, 16> module{0,    97, 115,  109, 1, 0,    0, 0,
+                                                0x0e, 2,  0x11, 0,   0, 0x11, 0, 0};
+  constexpr std::string_view url = "https://owned.test/module.wasm";
+  reb::NativeWasmSampleBudgetPolicy policy;
+  policy.every_record = true;
+  sink.SetNativeWasmSampleBudgetPolicy(policy);
+  transport.Configure(42, reb::kAllNativeProbeCategoryMask, kForever, false,
+                      {&queue, sizeof(queue)}, 7, {}, {}, {}, false, true);
+  const auto record = [&] { sink.RecordNativeWasmDispatch(7, 8, url, module, 0, 8, 0, 2, 9, 10); };
+  const auto sent = [] {
+    const std::lock_guard<std::mutex> hold(Host::sent_lock);
+    return Host::sent;
+  };
+  const auto sizes = [&] {
+    std::vector<std::size_t> found;
+    for (const auto& batch : sent())
+      found.push_back(batch.size());
+    return found;
+  };
+  {
+    const std::lock_guard<std::mutex> hold(Host::sent_lock);
+    Host::sent.clear();
+  }
+  base::test_posted_tasks.clear();
+  constexpr std::size_t kRecords = 2 * 512 + 76;
+  for (std::size_t index = 0; index < kRecords; ++index)
+    record();
+  assert((sizes() == std::vector<std::size_t>{512, 512}));
+  // One flush is posted for the whole task, not one per record.
+  assert(base::test_posted_tasks.size() == 1);
+  base::RunPostedTasks();
+  assert((sizes() == std::vector<std::size_t>{512, 512, 76}));
+  std::uint64_t previous = 0;
+  for (const auto& batch : sent()) {
+    for (const auto sequence : batch) {
+      assert(sequence > previous);
+      previous = sequence;
+    }
+  }
+  // Another message of the thread sends the batch before it.
+  record();
+  record();
+  std::array<std::uint8_t, 32> bytes{};
+  const std::string_view text = "function vm(){while(pc<n){switch(op){case 1:return;}}}";
+  const std::vector<std::uint8_t> source(text.begin(), text.end());
+  const reb::NativeRuntimeScript script{9, false, source};
+  sink.CaptureRuntimeTypedArray(7, 8, "fixture://owned/vm.js", bytes, script);
+  assert(One(queue).header.type == reb::NativeProbeType::kApiCall);
+  assert((sizes() == std::vector<std::size_t>{512, 512, 76, 2, 0}));
+  base::RunPostedTasks();
+  assert(sent().size() == 5);
+  // A thread with records still held sends them as it exits.
+  std::thread([&] {
+    for (int index = 0; index < 3; ++index)
+      record();
+  }).join();
+  assert((sizes() == std::vector<std::size_t>{512, 512, 76, 2, 0, 3}));
+  Drain(queue);
+  sink.SetNativeWasmSampleBudgetPolicy({});
+  transport.Disable();
+  base::test_posted_tasks.clear();
+  std::cout << "PASS native Wasm record batches: full batches at once, the rest when the task "
+               "ends, before any other message of the thread, and on thread exit\n";
+}
+
 std::string ScopeGapReason(const NativeProbeEvent& event) {
   assert(event.header.type == reb::NativeProbeType::kGap);
   assert(event.header.type != reb::NativeProbeType::kWasmDispatchObservation);
@@ -2375,7 +2525,7 @@ int main() {
   transport.Connect(mojo::PendingRemote<reb::mojom::NativeProbeHost>(&host));
   Run<&InactiveHooksAllocateNothing>();
   Run<&NativeGuestAdmission>();
-  Run<&NativeGuestModuleVerdictsAndHostBudget>();
+  Run<&NativeGuestModuleVerdictsAndHostRoutes>();
   Run<&NativeGuestParentDispatch>();
   Run<&NativeGuestTwoSiteNesting>();
   Run<&NativeGuestBindingReclaim>();
@@ -2384,6 +2534,8 @@ int main() {
   Run<&NativeWasmRuntimeAdmission>();
   Run<&NativeWasmIndirectAdmission>();
   Run<&NativeWasmSampleBudgetControls>();
+  Run<&NativeWasmEveryRecord>();
+  Run<&NativeWasmRecordBatches>();
   Run<&NativeWasmScopeGaps>();
   Run<&NativeWasmExecutionOutcomes>();
   Run<&NativeJsDispatchWire>();
@@ -2393,6 +2545,7 @@ int main() {
   Run<&NativeJsInvocationOpenStarts>();
   Run<&NativeJsInvocationHeldGaps>();
   Run<&NativeRequestStacks>();
+  Run<&NativeStackScriptSourceBacklog>();
   Run<&NativeTaskChainsAndNavigations>();
   Run<&NativeAsyncSegmentNotAdmitted>();
   Run<&NativeAsyncSegmentArtifactRefused>();

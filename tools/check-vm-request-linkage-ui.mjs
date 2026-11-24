@@ -400,10 +400,24 @@ async function checkWasmSamplingStrip(create) {
   assert.equal(policy(), 'Wasm sampling: br_table · up to 1,024 full records per stream each second · no per-function limit · 1 allowed function');
   await read({capture_options: {wasm_sampling: sampling({samples_per_function: 7, samples_per_indirect_site: null})}});
   assert.match(policy(), / · 7 per function · no per-call-site limit · /);
+  await read({capture_options: {wasm_sampling: sampling({every_record: false})}});
+  assert.match(policy(), / · up to 1,024 full records per stream each second · /, 'every_record false keeps the window');
+  // Every record: no window, no allowance, and no window to reset.
+  await read({capture_options: {wasm_sampling: sampling({every_record: true, records_per_window: null,
+    samples_per_indirect_site: null, function_deny_count: 0, module_allowlist: false})}});
+  assert.equal(policy(), 'Wasm sampling: br_table and call_indirect · every record, with no per-second or per-function limit · 2 allowed functions');
+  assert.equal(button.disabled, true, 'every record offers no reset');
+  assert.equal(status().dataset.kind, 'unavailable');
+  assert.match(status().textContent, /keeps every record, so there is no sample window to reset/);
+  const everyRecordCalls = f.calls.length;
+  await button.click();
+  assert.equal(f.calls.length, everyRecordCalls, 'every record posts no reset');
 
   for (const changes of [{version: 2}, {streams: []}, {streams: ['br_table', 'br_table']}, {streams: ['loop']},
     {samples_per_function: 0}, {samples_per_function: 1025}, {samples_per_indirect_site: '16'},
-    {function_allow_count: 33}, {module_allowlist: 'yes'}, {reset: undefined}, {window_ms: 0}]) {
+    {function_allow_count: 33}, {module_allowlist: 'yes'}, {reset: undefined}, {window_ms: 0},
+    {every_record: 'yes'}, {every_record: true}, {every_record: true, records_per_window: null},
+    {every_record: false, records_per_window: null}]) {
     await read({capture_options: {wasm_sampling: sampling(changes)}});
     assert.equal(strip.hidden, false, JSON.stringify(changes));
     assert.match(policy(), /malformed and are not shown/, JSON.stringify(changes));
@@ -471,6 +485,25 @@ async function checkCacheAndRaces(create) {
     const before = checkedState(f), calls = f.calls.length;
     await f.refreshVmAnalysis(invalid); assert.deepEqual(checkedState(f), before); assert.equal(f.calls.length, calls);
   }
+
+  // A same-selection poll of a separately read workspace revalidates without
+  // changing what is shown: the workspace stays ready while its request is in
+  // flight, so a render meanwhile neither flashes a notice nor rebuilds it.
+  const polled = create(), separate = analysisDocument(A);
+  delete separate.opcode_workspace;
+  polled.reply = url => url.includes('/opcodes') ? response(opcodeDocument(), 200, 'opcodes-a')
+    : url.includes('/host-links') ? response(null, 404) : response(separate);
+  await polled.refreshVmAnalysis(A);
+  assert.equal(polled.state.vmOpcodeWorkspaceStatus, 'ready');
+  let workspaceStatusInFlight = null;
+  polled.reply = url => {
+    if (url.includes('/opcodes')) workspaceStatusInFlight = polled.state.vmOpcodeWorkspaceStatus;
+    return url.includes('/host-links') ? response(null, 404) : response(null, 304);
+  };
+  await polled.refreshVmAnalysis(copy(A));
+  assert.equal(workspaceStatusInFlight, 'ready', 'a revalidating poll never shows the workspace as loading');
+  assert.equal(polled.calls.findLast(call => call.url.includes('/opcodes')).options.headers['If-None-Match'], 'opcodes-a');
+  assert.equal(polled.state.vmOpcodeWorkspaceStatus, 'ready');
 
   for (const detail of ['timeout', 'crash', 'spawn', 'protocol']) {
     const current = create();

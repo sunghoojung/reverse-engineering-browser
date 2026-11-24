@@ -19,6 +19,7 @@ inline constexpr std::uint16_t kRequestStackPayloadVersion = 1;
 inline constexpr std::uint16_t kRequestStackTaskPayloadVersion = 2;
 inline constexpr std::uint16_t kRequestStackScopePayloadVersion = 3;
 inline constexpr std::uint16_t kScriptIdentityScopeVersion = 2;
+inline constexpr std::uint16_t kScriptIdentityBacklogVersion = 3;
 inline constexpr std::uint16_t kAsyncTaskStackScopeVersion = 2;
 inline constexpr std::uint32_t kRequestStackSyncLimit = 1024;
 inline constexpr std::uint32_t kRequestStackAsyncLimit = 32;
@@ -37,7 +38,7 @@ inline constexpr std::size_t kStackArtifactMaxBytes =
     kStackArtifactScopeHeaderSize +
     kStackFrameSize * (kRequestStackSyncLimit + kRequestStackAsyncLimit) +
     kTaskSegmentSize * kTaskSegmentLimit;
-inline constexpr std::uint64_t kScriptIdentityMaxSourceBytes = 16ULL * 1024ULL * 1024ULL;
+inline constexpr std::uint64_t kScriptIdentityV2SourceLimit = 16ULL * 1024ULL * 1024ULL;
 
 enum class StackFrameKind : std::uint8_t {
   kJavaScript = 1,
@@ -107,6 +108,7 @@ inline constexpr std::uint8_t kScriptIdentitySourceQueued = 1U << 1U;
 inline constexpr std::uint8_t kScriptIdentitySourceTooLarge = 1U << 2U;
 inline constexpr std::uint8_t kScriptIdentitySourceUnavailable = 1U << 3U;
 inline constexpr std::uint8_t kScriptIdentityNotRetained = 1U << 4U;
+inline constexpr std::uint8_t kScriptIdentitySourceBacklog = 1U << 5U;
 
 struct StackFrame final {
   std::uint8_t kind = 0;
@@ -461,15 +463,20 @@ template <std::size_t N>
 [[nodiscard]] inline bool IsValidScriptIdentityPayload(const ScriptIdentityPayload& v) noexcept {
   using request_stack_detail::AllZero;
   constexpr std::uint8_t kRetention = kScriptIdentitySourceQueued | kScriptIdentitySourceTooLarge |
-                                      kScriptIdentitySourceUnavailable | kScriptIdentityNotRetained;
+                                      kScriptIdentitySourceUnavailable |
+                                      kScriptIdentityNotRetained | kScriptIdentitySourceBacklog;
   const std::uint8_t retention = v.flags & kRetention;
-  const bool scoped = v.protocol_version == kScriptIdentityScopeVersion;
+  // Version 3 digests a source of any length and adds source_backlog.
+  const bool any_length = v.protocol_version == kScriptIdentityBacklogVersion;
+  const bool scoped = v.protocol_version == kScriptIdentityScopeVersion || any_length;
   if ((v.protocol_version != kRequestStackPayloadVersion && !scoped) || v.payload_size != 128 ||
       v.reserved0 != 0 || v.reserved1 != 0 ||
       (scoped ? !IsValidStackScope(StackScopeOf(v.reserved2)) || !IsZeroAfterStackScope(v.reserved2)
               : !AllZero(v.reserved2)) ||
       v.script_id == 0 || v.execution_context_id == 0 ||
-      (v.flags & ~(kRetention | kScriptIdentityEval)) != 0 || std::popcount(retention) > 1) {
+      (v.flags & ~(kRetention | kScriptIdentityEval)) != 0 || std::popcount(retention) > 1 ||
+      (v.flags & (any_length ? kScriptIdentitySourceTooLarge : kScriptIdentitySourceBacklog)) !=
+          0) {
     return false;
   }
   if (v.kind == static_cast<std::uint8_t>(ScriptIdentityKind::kWasm) &&
@@ -487,9 +494,9 @@ template <std::size_t N>
     return v.source_length == 0 && AllZero(v.sha256);
   }
   if (retention == kScriptIdentitySourceTooLarge) {
-    return v.source_length > kScriptIdentityMaxSourceBytes && AllZero(v.sha256);
+    return v.source_length > kScriptIdentityV2SourceLimit && AllZero(v.sha256);
   }
-  return v.source_length != 0 && v.source_length <= kScriptIdentityMaxSourceBytes &&
+  return v.source_length != 0 && (any_length || v.source_length <= kScriptIdentityV2SourceLimit) &&
          !AllZero(v.sha256);
 }
 

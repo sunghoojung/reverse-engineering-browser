@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -167,8 +167,9 @@ static_assert(offsetof(NativeWasmGuestDispatchPayload, recipe_sha256) == 96);
 // invocation context at bytes 84..92 (protocol/native-js-invocation-v1.md).
 // Earlier versions reserved those bytes and still decode, with a zero parent
 // dispatch, site 0 and context not_observed.
+inline constexpr std::uint16_t kNativeWasmGuestInvocationVersion = 4;
 struct NativeWasmGuestInvocationPayload final {
-  std::uint16_t protocol_version = 4;
+  std::uint16_t protocol_version = kNativeWasmGuestInvocationVersion;
   std::uint16_t payload_size = 128;
   std::uint32_t function_index = 0;
   std::uint64_t instance_id = 0;

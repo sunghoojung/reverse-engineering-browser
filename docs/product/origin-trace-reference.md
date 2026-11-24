@@ -85,7 +85,7 @@ recording each body's length, type and SHA-256 (see
 [Native network v2](../../protocol/native-network-v2.md)).
 
 It also retains complete Canvas data URLs by default. The output is sensitive
-local evidence, limited to 2 MiB, and linked to the exact readback event. With
+local evidence, kept at any size, and linked to the exact readback event. With
 `REB_CAPTURE_CANVAS_IMAGES=0`, Canvas drawing and readback operation names
 remain visible but image bytes are not retained.
 
@@ -318,14 +318,14 @@ browser development server defaults to
 `--api-collection /path/to/api-collection-v1.json` to override either path. See
 [API Collection v1](./api-collection-v1.md).
 
-Local Analyst Workspace persists up to 64 reusable files in 32 folders with a
-four-level hierarchy. JavaScript analyst scripts run only after saving and
-explicit confirmation; JavaScript, JSON, Markdown, and plain-text scratchpads
-never execute. Each run receives a frozen, explicitly selected evidence
-snapshot and private variables through `WB.Node.Evidence` and `WB.Node.Utils`.
-It starts a fresh restricted helper process, caps execution at two seconds,
-supports cancellation, and retains only 64 bounded text results in ephemeral UI
-history. The development server defaults to
+Local Analyst Workspace persists reusable files in folders of any number and
+depth. JavaScript analyst scripts run only after saving and explicit
+confirmation; JavaScript, JSON, Markdown, and plain-text scratchpads never
+execute. Each run receives a frozen, explicitly selected evidence snapshot and
+private variables through `WB.Node.Evidence` and `WB.Node.Utils`. It starts a
+fresh restricted helper process, runs until the script settles or the
+researcher cancels it, and keeps every run's whole result, error and logs in
+ephemeral UI history. The development server defaults to
 `build/sessions/local-analyst-workspace-v1.json`; the native app defaults to
 `Application Support/Origin Trace/local-analyst-workspace-v1.json`. Pass
 `--local-analyst /path/to/local-analyst-workspace-v1.json` to override either

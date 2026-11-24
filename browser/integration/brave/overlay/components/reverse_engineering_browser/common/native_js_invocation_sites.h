@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -18,15 +18,16 @@ namespace reb {
 // (protocol/native-js-invocation-v1.md#site-file): exact compact canonical
 // JSON in one of two versions, each site's shape "function-entry" and each
 // (source_sha256, anchor_offset) unique. Version 1 is native-js-dispatch-sites-v1
-// with 1 to 256 sites, all armed. Version 2 is a slot table of 0 to 256 sites,
-// each with an `armed` boolean, so a revision can disarm a slot without
-// renumbering the others. Returns the sites by slot, or nullopt for any
-// refusal. Provenance fields are validated for format and not used for
-// matching.
+// with at least one site, all armed. Version 2 is a slot table that may be
+// empty, each site with an `armed` boolean, so a revision can disarm a slot
+// without renumbering the others. Either holds up to
+// kNativeJsInvocationSiteListLimit sites. Returns the sites by slot, or
+// nullopt for any refusal. Provenance fields are validated for format and not
+// used for matching.
 inline std::optional<std::vector<NativeJsInvocationSite>> ParseNativeJsInvocationSiteList(
     std::string_view json) {
   using namespace native_js_dispatch_sites_detail;
-  if (json.empty() || json.size() > kNativeJsInvocationSitesFileLimit)
+  if (json.empty())
     return std::nullopt;
   const auto parsed = base::JSONReader::Read(json, base::JSON_PARSE_RFC);
   if (!parsed || !parsed->is_dict())
@@ -40,9 +41,10 @@ inline std::optional<std::vector<NativeJsInvocationSite>> ParseNativeJsInvocatio
     return std::nullopt;
   const bool slot_table = version == 2;
   const auto* list = dict.FindList("sites");
-  if (!list || (!slot_table && list->empty()) || list->size() > kNativeJsInvocationSiteLimit)
+  if (!list || (!slot_table && list->empty()) || list->size() > kNativeJsInvocationSiteListLimit)
     return std::nullopt;
   std::vector<NativeJsInvocationSite> sites;
+  sites.reserve(list->size());
   for (const auto& entry : *list) {
     const auto* site_dict = entry.GetIfDict();
     if (!site_dict ||
@@ -66,12 +68,10 @@ inline std::optional<std::vector<NativeJsInvocationSite>> ParseNativeJsInvocatio
         !IsValidNativeJsInvocationSite(site))
       return std::nullopt;
     site.armed = *armed;
-    for (const auto& previous : sites)
-      if (previous.source_sha256 == site.source_sha256 &&
-          previous.anchor_offset == site.anchor_offset)
-        return std::nullopt;
     sites.push_back(site);
   }
+  if (HasRepeatedNativeJsInvocationSite(sites))
+    return std::nullopt;
   return sites;
 }
 

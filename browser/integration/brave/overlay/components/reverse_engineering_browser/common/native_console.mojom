@@ -1,10 +1,11 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 
 module reb.mojom;
 
+import "mojo/public/mojom/base/big_string.mojom";
 import "mojo/public/mojom/base/shared_memory.mojom";
 import "mojo/public/mojom/base/unguessable_token.mojom";
 
@@ -18,6 +19,8 @@ interface NativeConsoleControl {
 
 // Frame-associated ordering plus an exact document token prevents a console
 // request queued before navigation from executing in the replacement page.
+// Sources and results are BigStrings: anything large moves to shared memory,
+// so no command or value is cut to fit a Mojo message.
 interface NativeConsoleAgent {
   Describe() => (mojo_base.mojom.UnguessableToken? document);
   // Sent before any command, while the main thread is free to bind it.
@@ -25,11 +28,15 @@ interface NativeConsoleAgent {
   Runtime(mojo_base.mojom.UnguessableToken document,
           uint64 request_id,
           uint64 expires_at_monotonic_us,
-          string command) => (uint16 status, uint16 type, string text, bool truncated);
+          mojo_base.mojom.BigString command) => (uint16 status,
+                                                 uint16 type,
+                                                 mojo_base.mojom.BigString text);
   Evaluate(mojo_base.mojom.UnguessableToken document,
            uint64 request_id,
            uint64 expires_at_monotonic_us,
-           string source) => (uint16 status, uint16 type, string text, bool truncated);
+           mojo_base.mojom.BigString source) => (uint16 status,
+                                                 uint16 type,
+                                                 mojo_base.mojom.BigString text);
 };
 
 // Process-wide document-start script delivery for the separately armed
@@ -44,18 +51,18 @@ interface NativeConsoleScriptClient {
 };
 
 interface NativeConsoleScriptHost {
-  // `control` stops an injection of a replaced or cleared set that is still
-  // running, while it holds the renderer's main thread.
+  // `control` stops an injection of a removed, replaced or cleared script
+  // that is still running, while it holds the renderer's main thread.
   BindClient(pending_remote<NativeConsoleScriptClient> client,
              pending_remote<NativeConsoleControl> control);
-  // One page-JavaScript observation. The document token resolves this
-  // record to a nonsecret document ID among the sending process's own frames;
-  // it is never published and never grants console execution ownership.
-  Observed(uint64 generation,
-           uint64 script_id,
+  // One page-JavaScript observation, its text whole. The document token
+  // resolves this record to a nonsecret document ID among the sending
+  // process's own frames; it is never published and never grants console
+  // execution ownership. Script ids are never reused, so the id alone says
+  // whether the script is still armed.
+  Observed(uint64 script_id,
            uint64 frame_id,
            mojo_base.mojom.UnguessableToken document,
            uint32 record,
-           bool truncated,
-           string text);
+           mojo_base.mojom.BigString text);
 };

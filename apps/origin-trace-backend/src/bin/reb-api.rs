@@ -165,6 +165,10 @@ enum SessionCommand {
         /// SHA-256 module digests to admit. Other modules do not consume either budget.
         #[arg(long, value_delimiter = ',')]
         wasm_module_allowlist: Vec<String>,
+        /// Keep every Wasm record the filters admit: no per-second window, browser
+        /// ceiling or per-function or per-site allowance.
+        #[arg(long)]
+        wasm_every_record: bool,
         /// Absolute path of a native Wasm guest adapter recipe. Needs --wasm-dispatch.
         #[arg(long, value_name = "FILE")]
         guest_adapter: Option<PathBuf>,
@@ -478,6 +482,9 @@ fn read_only_eligible(spec: &Value, definition: &Value) -> bool {
         && ["state_dependent_effects", "uncertainties", "confirmations"]
             .iter()
             .all(|field| execution[field].as_array().is_some_and(Vec::is_empty))
+        && execution["state_dependent_confirmations"]
+            .as_array()
+            .is_none_or(Vec::is_empty)
 }
 
 fn discovery(spec: &Value, ops: &BTreeMap<String, Operation>) -> Value {
@@ -1448,6 +1455,7 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         wasm_function_allow,
         wasm_function_deny,
         wasm_module_allowlist,
+        wasm_every_record,
         guest_adapter,
         js_dispatch_sites,
         quiet,
@@ -1478,6 +1486,7 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         wasm_function_allow,
         wasm_function_deny,
         wasm_module_allowlist,
+        wasm_every_record,
         wasm_budget_malformed: false,
         guest_adapter,
         js_dispatch_sites,
@@ -1710,6 +1719,10 @@ mod tests {
             (
                 "confirmations",
                 json!([{"field":"confirmed","value":true,"when":{}}]),
+            ),
+            (
+                "state_dependent_confirmations",
+                json!([{"field":"confirmed","value":true,"when":"a stored record is sensitive"}]),
             ),
             ("new_guard", json!(true)),
         ] {

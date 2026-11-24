@@ -71,6 +71,14 @@ pub struct Options {
     pub session_wasm_function_deny_count: Option<u32>,
     #[arg(long, requires = "socket")]
     pub session_wasm_module_allowlist: bool,
+    /// Every record: no per-window pacing and no per-function or per-site
+    /// allowance, so it names neither.
+    #[arg(
+        long,
+        requires = "socket",
+        conflicts_with_all = ["session_wasm_samples_per_function", "session_wasm_samples_per_indirect_site"]
+    )]
+    pub session_wasm_every_record: bool,
     #[arg(long)]
     pub decoder: Option<PathBuf>,
     #[arg(long)]

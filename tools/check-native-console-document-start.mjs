@@ -19,6 +19,9 @@ export async function checkNativeConsoleDocumentStart(root) {
     }
     get isConnected() { return this === document.body || !!this.parentNode?.isConnected; }
     get firstElementChild() { return this.children[0]; }
+    get childNodes() { return this.children; }
+    get nodeType() { return this.tagName === 'text' ? 3 : 1; }
+    get data() { return this.textContent; }
     get textContent() { return this._text + this.children.map(child => child.textContent).join(''); }
     set textContent(text) { this.replaceChildren(); this._text = String(text); }
     set innerHTML(value) { throw new Error(`Captured output must be inserted as text, never markup: ${value}`); }
@@ -88,10 +91,11 @@ export async function checkNativeConsoleDocumentStart(root) {
   get('source').value = '';
 
   // Synthetic owner. It never compiles or runs a snippet; it records what the
-  // panel asked for and replays bounded records the browser would have sent.
+  // panel asked for and replays the records the browser would have sent, a
+  // page at a time.
   const calls = [];
   const reads = [];
-  let session = null, permitted = false, generation = 0, armed = [], output = [], nextSequence = 1;
+  let session = null, permitted = false, generation = 0, armed = [], output = [], nextSequence = 1, nextScript = 1;
   let readFails = false, malformed = false, armRefused = false, stopUnconfirmed = false, unconfirmed = false, pendingProcesses = 0;
   // A live capture's binding as /api/native-console lists it before any Console
   // connection: the browser's own report of its launch-time permission.
@@ -99,17 +103,19 @@ export async function checkNativeConsoleDocumentStart(root) {
   const record = (sequence, kind, text, script = '1') => ({
     sequence: String(sequence), record: kind, provenance: 'console-document-start-script',
     script_id: script, document_id: '7', frame_id: '99', top_frame: true,
-    time: 1700000000000, truncated: false, text,
+    time: 1700000000000, text,
   });
+  // Records per reply. The browser pages by bytes; a count keeps the fixture small.
+  const pageRecords = 128;
   const documentStartState = after => ({
     status: permitted ? 'ok' : 'unavailable', permitted, generation: String(generation),
     renderer_processes: permitted ? 1 : 0, pending_renderer_processes: armed.length ? pendingProcesses : 0,
     scripts: armed,
     message: permitted ? undefined : 'Start a new live session with Allow document-start Console scripts in Advanced options of New Live Session….',
     output: {
-      // Every retained record after the cursor: a page is bounded by the reply,
-      // not by a record count.
-      records: output.filter(entry => Number(entry.sequence) > Number(after)),
+      // The oldest retained records after the cursor, one page of them.
+      records: output.filter(entry => Number(entry.sequence) > Number(after)).slice(0, pageRecords),
+      more: output.filter(entry => Number(entry.sequence) > Number(after)).length > pageRecords,
       next_sequence: String(nextSequence), oldest_sequence: output[0]?.sequence || '0',
       retained: output.length, retained_bytes: output.reduce((sum, entry) => sum + 96 + entry.text.length, 0),
       dropped: 0, unattributed: 0, stale: 0,
@@ -126,10 +132,9 @@ export async function checkNativeConsoleDocumentStart(root) {
           message: 'The capture browser did not confirm that it cleared the armed document-start scripts. Restart the capture before relying on documents running nothing.'}
         : documentStartState(after);
       if (malformed) value.output.records = [{...record(nextSequence, 'report', 'x'), provenance: 'native-capture'}];
-      return {ok: true, status: 200, json: async () => ({contract_version: 3, available: true,
+      return {ok: true, status: 200, json: async () => ({contract_version: 4, available: true,
         state: session ? 'ready' : 'idle', session_id: session, document_start: value,
-        limits: {command_bytes: 67108864, rule_bytes: 256, report_bytes: 8192, retained_bytes: 67108864,
-          reply_bytes: 67108864, listing_bytes: 33554432},
+        limits: {record_bytes: 4294967295, page_bytes: 8388608, retained_bytes: 67108864},
         unsupported: [{context: 'service_worker', reason: 'The injector observes documents only.'},
           {context: 'already_open_document', reason: 'Reload a document that was open when the set was armed.'}]})};
     }
@@ -138,7 +143,7 @@ export async function checkNativeConsoleDocumentStart(root) {
         return {ok: true, status: 200, json: async () => ({contract_version: 2, state: 'idle', session_id: null,
           available: true, live_available: true, document_source: 'live_capture', binding_id: '5',
           targets: [{id: '21', origin: 'http://127.0.0.1:8080', label: 'top #21', url: 'http://127.0.0.1:8080/lab/',
-            main_frame: true, truncated: false}], truncated: false, selected_target_id: null,
+            main_frame: true}], truncated: false, selected_target_id: null,
           document_start_supported: liveSupported, message: 'live capture'})};
       }
       return {ok: true, status: 200, json: async () => ({contract_version: 2, state: session ? 'ready' : 'idle',
@@ -151,32 +156,42 @@ export async function checkNativeConsoleDocumentStart(root) {
       session = '42';
       return {ok: true, status: 200, json: async () => ({contract_version: 2, state: 'ready', session_id: session,
         targets: [{id: '11', origin: 'http://127.0.0.1:8080', label: 'top #11', url: 'http://127.0.0.1:8080/lab/',
-          main_frame: true, truncated: false}], truncated: false, document_start_supported: permitted})};
+          main_frame: true}], truncated: false, document_start_supported: permitted})};
     }
-    if (action.action === 'arm_document_start') {
+    // An add joins the armed set and keeps its output; ids are never reused.
+    if (action.action === 'add_document_start') {
       assert.equal(action.confirm_document_start, true, 'arming must carry explicit consent');
       if (armRefused) {
         const refusal = documentStartState('0');
         delete refusal.output;
-        return {ok: true, status: 200, json: async () => ({contract_version: 3, state: 'ready', session_id: session,
+        return {ok: true, status: 200, json: async () => ({contract_version: 4, state: 'ready', session_id: session,
           document_start: {...refusal, status: 'error', text: 'Synthetic browser refused this rule'},
           code: 'application_failed', details: {}})};
       }
       ++generation;
-      armed = action.scripts.map((script, index) => ({
-        script_id: String(index + 1), rule: {origin: script.origin, frame: script.frame,
-          ...(script.path_prefix ? {path_prefix: script.path_prefix} : {})},
-        source_bytes: script.source.length, digest: 'a1b2c3d4e5f60718',
-        records: 2, injected_documents: 1, refused: 0,
-      }));
-      output = [record(nextSequence++, 'injected', "Snippet ran before this document's own scripts"),
-                record(nextSequence++, 'report', '<img src=x onerror=alert(1)> kinds=string:12')];
-      return {ok: true, status: 200, json: async () => ({contract_version: 3, state: 'ready', session_id: session,
-        document_start: documentStartState('0')})};
+      const after = String(nextSequence - 1);
+      for (const script of action.scripts) {
+        const id = String(nextScript++);
+        armed.push({
+          script_id: id, rule: {origin: script.origin, frame: script.frame,
+            ...(script.path_prefix ? {path_prefix: script.path_prefix} : {})},
+          source_bytes: script.source.length, digest: 'a1b2c3d4e5f60718',
+          records: 2, injected_documents: 1, refused: 0,
+        });
+        output.push(record(nextSequence++, 'injected', "Snippet ran before this document's own scripts", id),
+                    record(nextSequence++, 'report', '<img src=x onerror=alert(1)> kinds=string:12', id));
+      }
+      return {ok: true, status: 200, json: async () => ({contract_version: 4, state: 'ready', session_id: session,
+        document_start: documentStartState(after)})};
+    }
+    if (action.action === 'remove_document_start') {
+      ++generation; armed = armed.filter(script => !action.script_ids.includes(script.script_id));
+      return {ok: true, status: 200, json: async () => ({contract_version: 4, state: 'ready', session_id: session,
+        document_start: documentStartState(String(nextSequence - 1))})};
     }
     if (action.action === 'clear_document_start') {
       ++generation; armed = []; output = [];
-      return {ok: true, status: 200, json: async () => ({contract_version: 3, state: 'ready', session_id: session,
+      return {ok: true, status: 200, json: async () => ({contract_version: 4, state: 'ready', session_id: session,
         document_start: documentStartState('0')})};
     }
     if (action.action === 'stop') {
@@ -268,7 +283,7 @@ export async function checkNativeConsoleDocumentStart(root) {
   assert.equal(ds('arm').disabled, false);
   await ds('arm').click(); await settle();
   const arm = calls.at(-1);
-  assert.equal(arm.action, 'arm_document_start');
+  assert.equal(arm.action, 'add_document_start');
   assert.equal(arm.confirm_document_start, true);
   assert.deepEqual(arm.scripts, [{origin: 'http://127.0.0.1:8080', frame: 'child', path_prefix: '/lab/',
     source: "report('kinds=string:12');"}]);
@@ -283,6 +298,7 @@ export async function checkNativeConsoleDocumentStart(root) {
   assert.match(ds('armed').textContent, /http:\/\/127\.0\.0\.1:8080/);
   assert.match(ds('armed').textContent, /child frame/);
   assert.match(ds('armed').textContent, /path \/lab\/\*/);
+  assert.equal(ds('armed').querySelector('button').getAttribute('aria-label'), 'Remove document-start script 1');
   assert.match(ds('counters').textContent, /every renderer holds this set/);
   assert.match(ds('rule-help').textContent, /Never reached: service worker, already open document/);
 
@@ -334,23 +350,48 @@ export async function checkNativeConsoleDocumentStart(root) {
   ds('consent').checked = true; await ds('consent').emit('change');
   await ds('arm').click(); await settle();
   assert.match(ds('notice').textContent, /Synthetic browser refused/);
-  assert.match(get('output').textContent, /previously armed set is unchanged/);
+  assert.match(get('output').textContent, /arming was refused. The armed set is unchanged/);
   assert.match(ds('armed').textContent, /http:\/\/127\.0\.0\.1:8080/, 'a refusal preserves the armed rule');
   assert.equal(rows().length, 2, 'a refusal must not re-render retained records');
   armRefused = false;
 
-  // A document has no record budget and a read no record count: a burst of
-  // reports, including one at the 8192-byte text bound, is accepted in one
-  // read. The transcript then keeps its own visible eviction count.
+  // There is no limit on the set: a second script joins the first, and each
+  // can be removed alone while every record either produced stays.
+  ds('origin').value = 'http://127.0.0.1:8081'; ds('frame').value = 'top'; ds('path').value = '';
+  ds('source').value = "report('second');";
+  await ds('source').emit('input');
+  ds('consent').checked = true; await ds('consent').emit('change');
+  await ds('arm').click(); await settle();
+  assert.deepEqual(calls.at(-1).scripts, [{origin: 'http://127.0.0.1:8081', frame: 'top', source: "report('second');"}]);
+  assert.match(ds('badge').textContent, /2 armed/);
+  assert.equal(ds('armed').children.length, 2);
+  assert.match(ds('armed').children[1].textContent, /#2 http:\/\/127\.0\.0\.1:8081 · top frame · any path/);
+  assert.equal(rows().length, 4, 'adding a script keeps the output of the first');
+  await ds('armed').children[1].querySelector('button').click(); await settle();
+  assert.deepEqual(calls.at(-1), {action: 'remove_document_start', session_id: '42', script_ids: ['2']});
+  assert.match(ds('badge').textContent, /1 armed/);
+  assert.equal(ds('armed').children.length, 1);
+  assert.match(ds('armed').textContent, /#1 http:\/\/127\.0\.0\.1:8080/, 'removing one script keeps the others');
+  assert.match(ds('notice').textContent, /Script #2 removed/);
+  assert.equal(rows().length, 4, 'a removed script keeps its records');
+
+  // A document has no record budget, a record no size bound and a read no
+  // record count: a burst of reports and a 1 MiB report arrive in pages that
+  // one refresh reads to the end, and the transcript keeps every one.
   for (let index = 0; index < 300; index += 1) output.push(record(nextSequence++, 'report', `burst=${index}`));
-  output.push(record(nextSequence++, 'report', 'x'.repeat(8192)));
+  output.push(record(nextSequence++, 'report', 'x'.repeat(1024 * 1024)));
+  const readsBefore = reads.length;
   await context.testConsole.documentStart.refresh(true); await settle();
-  assert.equal(rows().at(-1).querySelector('pre').textContent.length, 8192, 'the largest record renders whole');
+  assert.equal(reads.length - readsBefore, 3, 'one refresh reads every page of the backlog');
+  assert.equal(rows().at(-1).querySelector('pre').textContent.length, 1024 * 1024, 'a 1 MiB record renders whole');
   assert.match(rows().at(-2).textContent, /burst=299/);
-  assert.match(get('output-count').textContent, /older removed/, 'transcript eviction is visible');
+  assert.doesNotMatch(get('output-count').textContent, /removed/, 'nothing is evicted from the transcript');
+  get('filter').value = 'burst='; await get('filter').emit('input'); await settle();
+  assert.match(get('output-count').textContent, /^300 \/ \d+ entries$/, 'every record of the burst is kept and searchable');
+  get('filter').value = ''; await get('filter').emit('input'); await settle();
   await context.testConsole.documentStart.refresh(true); await settle();
   assert.equal(reads.at(-1), `/api/native-console/document-start?after_sequence=${nextSequence - 1}`,
-    'one read accepted the whole burst, so the next read starts after its last record');
+    'the refresh accepted the whole burst, so the next read starts after its last record');
 
   // The badge is a keyboard-reachable route into the experiment settings.
   await ds('badge').click();
@@ -371,8 +412,8 @@ export async function checkNativeConsoleDocumentStart(root) {
   await context.testConsole.documentStart.refresh(true); await settle();
   assert.equal(ds('badge').hidden, true);
   assert.equal(ds('arm').disabled, true);
-  // One accepted arm and one refused arm; a disconnected panel adds neither.
-  assert.equal(calls.filter(call => call.action === 'arm_document_start').length, 2);
+  // Two accepted adds and one refused; a disconnected panel adds nothing.
+  assert.equal(calls.filter(call => call.action === 'add_document_start').length, 3);
 
   // A Disconnect whose clear the browser never confirmed must not read as off:
   // the indicator stays visible and says the scripts may still run.
@@ -410,7 +451,7 @@ export async function checkNativeConsoleDocumentStart(root) {
   assert.ok(reports.every(entry => !String(entry).includes('authored-secret')),
     'the example snippet must never log a raw observed value');
 
-  console.log('PASS Console document-start panel: disabled control, launch-time permission, a live capture permission shown before connecting, explicit consent, exact rule, inert page-JavaScript output, non-draining cursor, preserved state on failure, a cleared set, an unconfirmed removal that never reads as off, and an example snippet that logs no observed value');
+  console.log('PASS Console document-start panel: disabled control, launch-time permission, a live capture permission shown before connecting, explicit consent, exact rule, a set built and pruned one script at a time, inert page-JavaScript output, a paged non-draining cursor, a 1 MiB record and a burst kept whole, preserved state on failure, a cleared set, an unconfirmed removal that never reads as off, and an example snippet that logs no observed value');
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {

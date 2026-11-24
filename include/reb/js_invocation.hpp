@@ -14,12 +14,11 @@ namespace reb {
 // function's V8 start position. See protocol/native-js-invocation-v1.md. No
 // argument, receiver, return or exception content is part of any record here.
 //
-// Payload version 2 records every call of up to 256 sites, each with a u32
-// ordinal. Version 1, written by earlier builds, armed at most 8 sites and
-// recorded at most 64 calls per site, 256 per configuration and 256 requests;
-// it stays readable.
+// Payload version 2 records every call of every armed site, each named by a
+// u32 slot and given a u32 ordinal. Version 1, written by earlier builds,
+// armed at most 8 sites in a one-byte slot and recorded at most 64 calls per
+// site, 256 per configuration and 256 requests; it stays readable.
 inline constexpr std::uint16_t kJsInvocationPayloadVersion = 2;
-inline constexpr std::size_t kJsInvocationSiteLimit = 256;
 inline constexpr std::size_t kJsInvocationV1SiteLimit = 8;
 inline constexpr std::size_t kJsInvocationV1SampleBudget = 256;
 inline constexpr std::size_t kJsInvocationV1SiteSampleBudget = 64;
@@ -142,10 +141,12 @@ inline bool ValidLowBits(std::uint8_t kind, std::uint32_t low32) noexcept {
     return low32 <= 1;
   return low32 == 0;
 }
-// A version 1 slot is below its 8-site limit; every version 2 slot fits.
-inline bool ValidSlot(std::uint16_t version, std::uint8_t slot) noexcept {
-  return version == kJsInvocationPayloadVersion ||
-         (version == 1 && slot < kJsInvocationV1SiteLimit);
+// Version 1 names its slot, below its 8-site limit, in the byte version 2
+// keeps zero; version 2 names it in a u32 that version 1 kept zero.
+inline bool ValidSlot(std::uint16_t version, std::uint8_t v1_slot, std::uint32_t slot) noexcept {
+  return version == kJsInvocationPayloadVersion
+             ? v1_slot == 0
+             : version == 1 && v1_slot < kJsInvocationV1SiteLimit && slot == 0;
 }
 }  // namespace js_invocation_detail
 
@@ -159,7 +160,8 @@ inline bool ValidSlot(std::uint16_t version, std::uint8_t slot) noexcept {
 struct JsInvocationStartPayload final {
   std::uint16_t protocol_version = kJsInvocationPayloadVersion;
   std::uint16_t payload_size = 128;
-  std::uint8_t site_slot = 0;
+  // Version 1's site slot. Zero in version 2.
+  std::uint8_t v1_site_slot = 0;
   std::uint8_t flags = 0;
   std::uint16_t argument_count = 0;
   std::uint32_t script_id = 0;
@@ -176,12 +178,15 @@ struct JsInvocationStartPayload final {
   std::array<std::uint32_t, kJsInvocationArgumentLimit> argument_low32{};
   std::array<std::byte, 32> source_sha256{};
   std::uint64_t document_id = 0;
-  std::array<std::byte, 16> reserved{};
+  // Version 2's site slot: the entry of the session's site table the call
+  // armed. Zero in version 1.
+  std::uint32_t site_slot = 0;
+  std::array<std::byte, 12> reserved{};
 };
 static_assert(sizeof(JsInvocationStartPayload) == 128);
 static_assert(std::is_standard_layout_v<JsInvocationStartPayload>);
 static_assert(std::is_trivially_copyable_v<JsInvocationStartPayload>);
-static_assert(offsetof(JsInvocationStartPayload, site_slot) == 4);
+static_assert(offsetof(JsInvocationStartPayload, v1_site_slot) == 4);
 static_assert(offsetof(JsInvocationStartPayload, flags) == 5);
 static_assert(offsetof(JsInvocationStartPayload, argument_count) == 6);
 static_assert(offsetof(JsInvocationStartPayload, script_id) == 8);
@@ -194,7 +199,8 @@ static_assert(offsetof(JsInvocationStartPayload, argument_kinds) == 32);
 static_assert(offsetof(JsInvocationStartPayload, argument_low32) == 40);
 static_assert(offsetof(JsInvocationStartPayload, source_sha256) == 72);
 static_assert(offsetof(JsInvocationStartPayload, document_id) == 104);
-static_assert(offsetof(JsInvocationStartPayload, reserved) == 112);
+static_assert(offsetof(JsInvocationStartPayload, site_slot) == 112);
+static_assert(offsetof(JsInvocationStartPayload, reserved) == 116);
 
 // Explicit little-endian encoding; no native structure padding is serialized.
 [[nodiscard]] inline std::array<std::byte, 128> EncodeJsInvocationStartPayload(
@@ -203,7 +209,7 @@ static_assert(offsetof(JsInvocationStartPayload, reserved) == 112);
   std::array<std::byte, 128> out{};
   Put(out, 0, value.protocol_version, 2);
   Put(out, 2, value.payload_size, 2);
-  Put(out, 4, value.site_slot, 1);
+  Put(out, 4, value.v1_site_slot, 1);
   Put(out, 5, value.flags, 1);
   Put(out, 6, value.argument_count, 2);
   Put(out, 8, value.script_id, 4);
@@ -218,7 +224,8 @@ static_assert(offsetof(JsInvocationStartPayload, reserved) == 112);
   }
   std::copy(value.source_sha256.begin(), value.source_sha256.end(), out.begin() + 72);
   Put(out, 104, value.document_id, 8);
-  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 112);
+  Put(out, 112, value.site_slot, 4);
+  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 116);
   return out;
 }
 
@@ -229,7 +236,7 @@ static_assert(offsetof(JsInvocationStartPayload, reserved) == 112);
     return false;
   value.protocol_version = static_cast<std::uint16_t>(Get(bytes, 0, 2));
   value.payload_size = static_cast<std::uint16_t>(Get(bytes, 2, 2));
-  value.site_slot = static_cast<std::uint8_t>(Get(bytes, 4, 1));
+  value.v1_site_slot = static_cast<std::uint8_t>(Get(bytes, 4, 1));
   value.flags = static_cast<std::uint8_t>(Get(bytes, 5, 1));
   value.argument_count = static_cast<std::uint16_t>(Get(bytes, 6, 2));
   value.script_id = static_cast<std::uint32_t>(Get(bytes, 8, 4));
@@ -244,13 +251,15 @@ static_assert(offsetof(JsInvocationStartPayload, reserved) == 112);
   }
   std::copy(bytes.begin() + 72, bytes.begin() + 104, value.source_sha256.begin());
   value.document_id = Get(bytes, 104, 8);
-  std::copy(bytes.begin() + 112, bytes.end(), value.reserved.begin());
+  value.site_slot = static_cast<std::uint32_t>(Get(bytes, 112, 4));
+  std::copy(bytes.begin() + 116, bytes.end(), value.reserved.begin());
   return true;
 }
 
 [[nodiscard]] inline bool IsValidJsInvocationStartPayload(
     const JsInvocationStartPayload& value) noexcept {
-  if (!js_invocation_detail::ValidSlot(value.protocol_version, value.site_slot) ||
+  if (!js_invocation_detail::ValidSlot(value.protocol_version, value.v1_site_slot,
+                                       value.site_slot) ||
       value.payload_size != 128 || (value.flags & ~kJsInvocationStartKnownFlags) != 0 ||
       value.script_id == 0 || value.source_length == 0 ||
       value.anchor_offset >= value.source_length || value.invocation_id == 0 ||
@@ -291,7 +300,8 @@ static_assert(offsetof(JsInvocationStartPayload, reserved) == 112);
 struct JsInvocationSettlePayload final {
   std::uint16_t protocol_version = kJsInvocationPayloadVersion;
   std::uint16_t payload_size = 128;
-  std::uint8_t site_slot = 0;
+  // Version 1's site slot. Zero in version 2.
+  std::uint8_t v1_site_slot = 0;
   std::uint8_t outcome = 0;
   std::uint8_t via = 0;
   std::uint8_t value_kind = 0;
@@ -305,12 +315,14 @@ struct JsInvocationSettlePayload final {
   std::uint64_t rolling_hash = 0;
   std::array<std::byte, 32> value_sha256{};
   std::uint64_t document_id = 0;
-  std::array<std::byte, 56> reserved{};
+  // Version 2's site slot, as in the start. Zero in version 1.
+  std::uint32_t site_slot = 0;
+  std::array<std::byte, 52> reserved{};
 };
 static_assert(sizeof(JsInvocationSettlePayload) == 128);
 static_assert(std::is_standard_layout_v<JsInvocationSettlePayload>);
 static_assert(std::is_trivially_copyable_v<JsInvocationSettlePayload>);
-static_assert(offsetof(JsInvocationSettlePayload, site_slot) == 4);
+static_assert(offsetof(JsInvocationSettlePayload, v1_site_slot) == 4);
 static_assert(offsetof(JsInvocationSettlePayload, outcome) == 5);
 static_assert(offsetof(JsInvocationSettlePayload, via) == 6);
 static_assert(offsetof(JsInvocationSettlePayload, value_kind) == 7);
@@ -324,7 +336,8 @@ static_assert(offsetof(JsInvocationSettlePayload, digest_byte_length) == 20);
 static_assert(offsetof(JsInvocationSettlePayload, rolling_hash) == 24);
 static_assert(offsetof(JsInvocationSettlePayload, value_sha256) == 32);
 static_assert(offsetof(JsInvocationSettlePayload, document_id) == 64);
-static_assert(offsetof(JsInvocationSettlePayload, reserved) == 72);
+static_assert(offsetof(JsInvocationSettlePayload, site_slot) == 72);
+static_assert(offsetof(JsInvocationSettlePayload, reserved) == 76);
 
 [[nodiscard]] inline std::array<std::byte, 128> EncodeJsInvocationSettlePayload(
     const JsInvocationSettlePayload& value) noexcept {
@@ -332,7 +345,7 @@ static_assert(offsetof(JsInvocationSettlePayload, reserved) == 72);
   std::array<std::byte, 128> out{};
   Put(out, 0, value.protocol_version, 2);
   Put(out, 2, value.payload_size, 2);
-  Put(out, 4, value.site_slot, 1);
+  Put(out, 4, value.v1_site_slot, 1);
   Put(out, 5, value.outcome, 1);
   Put(out, 6, value.via, 1);
   Put(out, 7, value.value_kind, 1);
@@ -346,7 +359,8 @@ static_assert(offsetof(JsInvocationSettlePayload, reserved) == 72);
   Put(out, 24, value.rolling_hash, 8);
   std::copy(value.value_sha256.begin(), value.value_sha256.end(), out.begin() + 32);
   Put(out, 64, value.document_id, 8);
-  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 72);
+  Put(out, 72, value.site_slot, 4);
+  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 76);
   return out;
 }
 
@@ -358,7 +372,7 @@ static_assert(offsetof(JsInvocationSettlePayload, reserved) == 72);
     return false;
   value.protocol_version = static_cast<std::uint16_t>(Get(bytes, 0, 2));
   value.payload_size = static_cast<std::uint16_t>(Get(bytes, 2, 2));
-  value.site_slot = static_cast<std::uint8_t>(Get(bytes, 4, 1));
+  value.v1_site_slot = static_cast<std::uint8_t>(Get(bytes, 4, 1));
   value.outcome = static_cast<std::uint8_t>(Get(bytes, 5, 1));
   value.via = static_cast<std::uint8_t>(Get(bytes, 6, 1));
   value.value_kind = static_cast<std::uint8_t>(Get(bytes, 7, 1));
@@ -372,7 +386,8 @@ static_assert(offsetof(JsInvocationSettlePayload, reserved) == 72);
   value.rolling_hash = Get(bytes, 24, 8);
   std::copy(bytes.begin() + 32, bytes.begin() + 64, value.value_sha256.begin());
   value.document_id = Get(bytes, 64, 8);
-  std::copy(bytes.begin() + 72, bytes.end(), value.reserved.begin());
+  value.site_slot = static_cast<std::uint32_t>(Get(bytes, 72, 4));
+  std::copy(bytes.begin() + 76, bytes.end(), value.reserved.begin());
   return true;
 }
 
@@ -386,7 +401,8 @@ static_assert(offsetof(JsInvocationSettlePayload, reserved) == 72);
       value.outcome == static_cast<std::uint8_t>(JsInvocationOutcome::kFulfilled);
   const bool rejected = value.outcome == static_cast<std::uint8_t>(JsInvocationOutcome::kRejected);
   const auto via = static_cast<JsInvocationSettleVia>(value.via);
-  if (!js_invocation_detail::ValidSlot(value.protocol_version, value.site_slot) ||
+  if (!js_invocation_detail::ValidSlot(value.protocol_version, value.v1_site_slot,
+                                       value.site_slot) ||
       value.payload_size != 128 || (!fulfilled && !rejected) ||
       !js_invocation_detail::ValidKind(value.value_kind) || value.invocation_id == 0 ||
       value.document_id == 0 || value.reserved0 != 0 ||
@@ -442,6 +458,12 @@ static_assert(offsetof(JsInvocationSettlePayload, reserved) == 72);
          event.header.frame_id != 0 && event.header.request_id == 0 &&
          DecodeJsInvocationSettlePayload(event.inline_payload, value) &&
          IsValidJsInvocationSettlePayload(value);
+}
+
+// The slot a start or settle names, in either payload version.
+template <class Payload>
+[[nodiscard]] constexpr std::uint32_t JsInvocationSiteSlot(const Payload& value) noexcept {
+  return value.protocol_version == 1 ? value.v1_site_slot : value.site_slot;
 }
 
 struct JsInvocationRequestPayload final {

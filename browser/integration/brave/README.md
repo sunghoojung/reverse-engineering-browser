@@ -107,14 +107,16 @@ before adding a native network hook; ordinary groups do not isolate traffic.
 
 The disabled-by-default native console is a separate mutation path. Patch 0011
 wires the browser session and per-frame renderer agent; the overlay owns their
-Mojo contract and bounded local transport. It evaluates explicit commands in a
+Mojo contract and local transport, which carries every record whole. It evaluates explicit commands in a
 selected main-world context. A disposable profile is the default. An explicit
 live-capture binding evaluates in a document the capture browser is already
 showing, keeps remote debugging, and does not exit that browser when the
 channel drops. It still cannot set breakpoints, step, or inspect paused frames.
 It creates no CDP endpoint and makes no undetectability guarantee. See
-[Native Console v2](../../../protocol/native-console-v2.md) for ownership,
-wire layouts, limits, and real-browser checks after rebuilding.
+[Native Console v2](../../../protocol/native-console-v2.md) for ownership and
+real-browser checks after rebuilding, and
+[v4](../../../protocol/native-console-v4.md) for wire layouts and the bounds
+that remain.
 Eligible HTTP and HTTPS documents must belong to a profile directory immediately
 inside the owned user-data root, including the fresh browser's `Default` profile.
 The user-data root itself is not a BrowserContext profile path.
@@ -129,15 +131,16 @@ Patch 0016 adds the separately armed document-start script experiment. It needs
 browser never advertises support, the registry refuses to bind a renderer, and
 arming fails closed. The switch alone arms nothing.
 
-The browser process owns the armed set and its byte-bounded output. It pushes
+The browser process owns the armed set and its output, retained up to 64 MiB
+with a visible drop count. It pushes
 the set over a process-wide Mojo interface bound in
 `BindHostReceiverForRenderer`, as one read-only shared memory region every
 renderer maps, so a renderer created after arming holds the set before its
 first document commits without a per-process copy. It only counts a renderer as
 ready once that renderer acknowledges the exact generation it can run, and it
-binds every live renderer. A snippet runs until it returns; Clear, a new arm or
-the end of the session sends Stop for the old generation over each renderer's
-IO-thread control pipe.
+binds every live renderer. A snippet runs until it returns; Remove, Clear, a
+new arm or the end of the session sends Stop for the scripts it ends over each
+renderer's IO-thread control pipe.
 
 The renderer injects at main-world script-context creation, which Blink performs
 before any script can run in that context. A same-origin commit from an initial
@@ -172,6 +175,24 @@ empty stack.
 - `patches/` contains small edits to upstream-owned files.
 - `patches/init/` contains brave-core edits that bootstrap applies before
   Brave's initialization; see [above](#pre-initialization-patches).
+
+Every overlay file and every file a patch creates starts with the project
+header, not the header of the upstream tree it lands in:
+
+```cpp
+// Copyright 2026 The Reverse Engineering Browser Authors
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this file,
+// You can obtain one at https://mozilla.org/MPL/2.0/.
+```
+
+The holder is the group listed in [`AUTHORS`](../../../AUTHORS). An upstream
+header would credit Brave, Chromium or V8 authors with project code, and the
+Chromium and V8 headers would put it under their BSD terms. Code adapted from
+upstream keeps its upstream notice below the project header. Files a patch only
+edits keep their upstream header. `make lint` runs
+`tools/check-project-headers.py`, which refuses a missing or upstream header;
+`--fix` rewrites one and rebases the later patches in its stack.
 
 Keep V8 edits in `patches/v8/`, relative to the independent V8 checkout.
 The synchronization script rejects destinations belonging to a nested Git
@@ -261,7 +282,7 @@ Canvas drawing metadata does not contain text, pixel data, or drawing
 arguments. When `--reb-capture-canvas-images` is explicitly present for an
 authorized session, the renderer may also submit the complete data URL returned
 by `HTMLCanvasElement.toDataURL()`. That output is marked sensitive, linked to
-the exact readback event, limited to 2 MiB, and sent through the separate
+the exact readback event, kept at any size, and sent through the separate
 artifact channel. It is disabled by default and never enters the renderer event
 ring.
 
@@ -303,11 +324,12 @@ authenticates to the event broker with a session identifier and a mode-0600
 token file, then sends exact fixed-size records over a Unix socket. A
 browser-process queue keeps those socket writes off the capture paths: an
 8,192-record lock-free ring and, behind it, a spill for a burst the broker
-cannot take as fast as renderers produce it. The spill is allocated only while
-a burst outruns the writer and freed once sent. It keeps each thread's records
-in order and is bounded at 256 MiB, about 800,000 records, which bounds the
-browser's memory when a page outruns the broker for longer than a burst. The
-renderer queue holds 8,192 records. Full queues still drop rather than block
+cannot take as fast as renderers produce it. The spill is mapped only while
+a burst outruns the writer and unmapped once sent. It keeps each thread's
+records in order and has no bound of its own: it holds what the broker has not
+taken yet while the system maps pages for it, and a record it has none for is a
+counted transport gap. Earlier browsers stopped it at 256 MiB, about 800,000
+records. The renderer queue holds 8,192 records. Full queues still drop rather than block
 the renderer; a dropped gap report carries the number of source records it
 represents into the next queue's drop counter. Queue-wide gap reports remain
 unattributed because both queues can mix tabs and frames. Sequence discontinuities
@@ -364,9 +386,11 @@ and remains the only process that owns the authenticated artifact socket.
 The VM category separately enables runtime-buffer snapshots for `ArrayBuffer`,
 `Uint8Array`, `Uint16Array`, and `Uint32Array` constructor results. V8 invokes
 an embedder callback after initialization; no JavaScript constructor or host
-builtin is wrapped. Buffers from 32 bytes through 16 MiB are copied into
-`bytecode_buffer` artifacts, with at most 16 snapshots per session sharing the
-32 MiB in-flight artifact pool.
+builtin is wrapped. Buffers of 32 bytes or more, of any size, are copied into
+`bytecode_buffer` artifacts, with at most 16 snapshots per session. A buffer
+and its allocating script's source are charged to the renderer's 256 MiB
+artifact credit until the browser has copied them out; one that the credit
+cannot take records `runtime_typed_array_backlog`.
 
 Runtime snapshots now carry exact allocating-script provenance. After the VM
 capture gate, V8 exposes the innermost JavaScript frame's native script identity,
@@ -467,9 +491,10 @@ it, and no arbitrary write/guest tracing or page API wrappers are installed.
 The allocator identity is captured at allocation and survives writes by another
 script. The currently executing mutator never becomes the source parent.
 
-Pending storage is separately capped at 16 objects and 32 MiB including whole
-backing-buffer lengths and source UTF-8 sizes (a tiny view cannot retain a giant
-backing buffer). Rejected pending entries name `runtime_buffer_checkpoint_limit`.
+Pending storage is separately capped at 16 objects, of any size: each keeps its
+buffer and source alive for the rest of one task, and its bytes are read once,
+at the checkpoint, into the artifact transfer. Rejected pending entries name
+`runtime_buffer_checkpoint_limit`.
 Disable, expiry or generation changes stop the drain before retained handle
 access or byte copying. Context destruction, detach, shared/resizable backing,
 and changed lengths fail closed at the checkpoint with named omissions. Isolate
@@ -659,7 +684,7 @@ needs the pinned Chromium build.
 
 ## Native JavaScript invocation identity (opt-in)
 
-Rebuilt browsers can give each call of up to 256 armed functions (for example
+Rebuilt browsers can give each call of every armed function (for example
 the hCaptcha challenge frame's `window.hsw`) an invocation identity that V8
 carries across the call's awaits and promise jobs. Write the site file with
 `tools/native-js-invocation-site.py` and launch with

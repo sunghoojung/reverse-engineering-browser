@@ -44,10 +44,14 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
   reb::NativeGuestPut(d.inline_payload, 32, 30, 8);
   reb::NativeGuestPut(d.inline_payload, 72, code.size(), 4);
   reb::NativeGuestPut(d.inline_payload, 92, 7, 4);
-  reb::NativeGuestPut(i.inline_payload, 0, 3, 2);
+  reb::NativeGuestPut(i.inline_payload, 0, reb::kNativeWasmGuestInvocationVersion, 2);
   reb::NativeGuestPut(i.inline_payload, 2, 128, 2);
   reb::NativeGuestPut(i.inline_payload, 8, 20, 8);
   reb::NativeGuestPut(i.inline_payload, 16, 30, 8);
+  // The activation began inside JavaScript invocation 9.
+  const auto inside = static_cast<std::uint64_t>(reb::NativeJsInvocationContextState::kInside);
+  reb::NativeGuestPut(i.inline_payload, 84, inside, 1);
+  reb::NativeGuestPut(i.inline_payload, 88, 9, 4);
   const auto digest = reb::NativeGuestDigest(
       std::span(reinterpret_cast<const std::uint8_t*>(recipe.data()), recipe.size()));
   for (std::size_t n = 0; n < digest.size(); ++n) {
@@ -117,6 +121,9 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
   Check(reb::IsValidWasmGuestInvocation(std::bit_cast<reb::EventRecord>(emitted[0])) &&
             reb::IsValidWasmGuestDispatch(std::bit_cast<reb::EventRecord>(emitted[1])),
         "Produced guest records pass the actual core validators");
+  Check(emitted[0].inline_payload[84] == static_cast<std::byte>(inside) &&
+            emitted[0].inline_payload[88] == std::byte{9},
+        "The invocation keeps the JavaScript invocation it began in");
   Check(emitted[2].header.artifact_id == module_id && emitted[2].header.parent_event_id == 101,
         "Host retains module and genuine dispatch parent");
   NativeArtifactCaptureSink::TransferCompleted(module_id,
@@ -234,7 +241,7 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
   // Fields: sequence, parent, parent dispatch, then one byte written at 80 + offset.
   for (const auto& [sequence, parent, dispatch, at, value] :
        {std::tuple{510, 29, 510, 0, 0}, std::tuple{512, 0, 511, 0, 0}, std::tuple{514, 30, 0, 0, 0},
-        std::tuple{516, 29, 499, 4, 1}, std::tuple{518, 29, 499, 0, 8}}) {
+        std::tuple{516, 29, 499, 5, 1}, std::tuple{518, 29, 499, 0, 8}}) {
     configure();
     i.header.sequence_number = static_cast<std::uint64_t>(sequence);
     d.header.sequence_number = static_cast<std::uint64_t>(sequence + 1);
@@ -292,23 +299,29 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
   Check(gap_for(136, "native_guest_artifact_unavailable"),
         "A capture without the artifact channel fills its own slot");
 
-  // Held hosts are bounded; overflow is published at once without parent.
+  // Every host waits for its parent, however many: 1,000, past the 64 an
+  // earlier browser held and the 256 it routed per configuration.
   configure();
   d.header.sequence_number = 140;
   sink.CaptureNativeGuest(capture, 2, [] { return true; });
-  for (std::size_t n = 0; n <= reb::kNativeGuestHeldHostLimit; ++n) {
+  constexpr std::size_t kHeldHosts = 1000;
+  const auto before_hold = typed().size();
+  for (std::size_t n = 0; n < kHeldHosts; ++n) {
     host.header.sequence_number = 200 + n;
     host.header.parent_event_id = 140;
     sink.CaptureNativeGuestHost(host, 2);
   }
-  Check(typed().back().header.sequence_number == 200 + reb::kNativeGuestHeldHostLimit &&
-            typed().back().header.parent_event_id == 0 &&
-            browser_gap("native_guest_host_parent_omitted") >= 1,
-        "Held-host overflow is published without its parent");
-  const auto before_release = typed().size();
+  Check(typed().size() == before_hold && !browser_gap("native_guest_host_parent_omitted"),
+        "Every host is held for its parent, with no omission");
   receive_all();
-  Check(typed().size() == before_release + 2 + reb::kNativeGuestHeldHostLimit,
-        "Held hosts are released after their parent");
+  const auto released = typed();
+  Check(released.size() == before_hold + 2 + kHeldHosts &&
+            std::all_of(released.end() - kHeldHosts, released.end(),
+                        [](const auto& e) {
+                          return e.header.type == NativeProbeType::kApiCall &&
+                                 e.header.parent_event_id == 140;
+                        }),
+        "Every held host is released after its parent, with its parent link");
 
   // Shortly before expiry, unresolved work becomes explicit gaps.
   auto& runner = *base::SequencedTaskRunner::GetCurrentDefault();
@@ -349,26 +362,22 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
   receive_all();
   runner.tasks.clear();
 
+  // No browser-wide ceiling: 1,000 samples, past the 256 an earlier browser
+  // allowed, each its own snapshot under one module and adapter.
   configure();
   d.header.sequence_number = 400;
   sink.CaptureNativeGuest(capture, 4, [] { return true; });
   capture.module_bytes = {};
-  for (std::size_t n = 1; n < reb::kNativeGuestSampleLimit; ++n) {
+  constexpr std::size_t kSamples = 1000;
+  for (std::size_t n = 1; n < kSamples; ++n) {
     d.header.sequence_number = 400 + n;
     sink.CaptureNativeGuest(capture, 4, [] { return true; });
   }
-  Check(transfers.size() == reb::kNativeGuestSampleLimit + 2,
-        "Entire sample budget shares one module and adapter");
-  d.header.sequence_number = 1000;
-  sink.CaptureNativeGuest(capture, 4, [] { return true; });
-  Check(transfers.size() == reb::kNativeGuestSampleLimit + 2 &&
-            gap_for(1000, "native_guest_browser_sample_budget"),
-        "Dependency count budget enforced explicitly");
-  const auto capped = events.size();
-  d.header.sequence_number = 1001;
-  sink.CaptureNativeGuest(capture, 4, [] { return true; });
-  Check(events.size() == capped + 1 && gap_for(1001, "native_guest_browser_sample_budget"),
-        "Every capture past the budget fills its own slot");
+  Check(transfers.size() == kSamples + 2 && !browser_gap("native_guest_browser_sample_budget"),
+        "Every sample shares one module and adapter, with no browser ceiling");
+  const auto before_samples = typed().size();
+  receive_all();
+  Check(typed().size() == before_samples + 1 + kSamples, "Every sample is published");
 
   // Bindings are held for live documents only: a gone document's group is
   // reclaimed for a new one, and past the bound a live set is refused.
@@ -412,6 +421,27 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
   sink.CaptureNativeGuest(capture, 1, [] { return true; });
   Check(transfers.empty() && gap_for(1002, "native_guest_dependency_rejected"),
         "Wrong invocation or dispatch category rejected");
+  capture.dispatch.header.category = reb::NativeProbeCategory::kVm;
+  const auto rejected_context = [&](std::uint64_t sequence, const std::string& check) {
+    transfers.clear();
+    capture.dispatch.header.sequence_number = sequence;
+    sink.CaptureNativeGuest(capture, 1, [] { return true; });
+    Check(transfers.empty() && gap_for(sequence, "native_guest_dependency_rejected"), check);
+  };
+  const auto context = [&](std::uint64_t state, std::uint64_t reserved, std::uint64_t id) {
+    reb::NativeGuestPut(i.inline_payload, 84, state, 1);
+    reb::NativeGuestPut(i.inline_payload, 85, reserved, 3);
+    reb::NativeGuestPut(i.inline_payload, 88, id, 4);
+  };
+  context(inside, 0, 0);
+  rejected_context(1003, "An invocation inside JavaScript without its identifier is rejected");
+  context(0, 0, 9);
+  rejected_context(1004, "An identifier outside a JavaScript invocation is rejected");
+  context(inside, 1, 9);
+  rejected_context(1005, "Reserved JavaScript context bytes must be zero");
+  context(inside, 0, 9);
+  reb::NativeGuestPut(i.inline_payload, 0, 3, 2);
+  rejected_context(1006, "Only the invocation version the renderer writes is accepted");
   std::cout << "PASS production guest ACK ordering, module verdicts and bounded retry, "
                "live-document binding reclaim, exact host parents without host loss, "
                "pre-expiry flush and explicit gaps\n";

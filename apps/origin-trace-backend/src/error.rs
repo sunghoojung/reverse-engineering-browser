@@ -31,6 +31,10 @@ pub enum Code {
     /// Retained bytes that no longer match the size or SHA-256 in their
     /// manifest record. Rereading cannot fix them, unlike a failed read.
     ArtifactIntegrity,
+    /// What the request names needs a confirmation that only the stored
+    /// state shows, such as a sensitive artifact. `details.confirmation`
+    /// names the field the researcher must set to true before a retry.
+    ConfirmationRequired,
 }
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -46,6 +50,12 @@ pub enum Cause {
     Disconnected,
     TransportFailure,
     InvalidReply,
+}
+/// A request field that confirms what the stored state requires.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Confirmation {
+    ConfirmedSensitive,
 }
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -67,6 +77,8 @@ pub struct Details {
     expected_generation: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     current_generation: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confirmation: Option<Confirmation>,
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     action_guidance: Option<Box<crate::action_guidance::ActionGuidance>>,
 }
@@ -122,6 +134,15 @@ impl Reason {
             details: Details {
                 phase: Some(Phase::CommandExchange),
                 cause: Some(cause),
+                ..Details::default()
+            },
+        }
+    }
+    pub fn confirmation(confirmation: Confirmation) -> Self {
+        Self {
+            code: Code::ConfirmationRequired,
+            details: Details {
+                confirmation: Some(confirmation),
                 ..Details::default()
             },
         }
@@ -244,6 +265,7 @@ mod tests {
             Code::NativeCaptureUnavailable,
             Code::DebuggerUnavailable,
             Code::ArtifactIntegrity,
+            Code::ConfirmationRequired,
         ];
         assert_eq!(
             serde_json::to_value(codes).unwrap(),

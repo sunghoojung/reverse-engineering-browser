@@ -86,10 +86,7 @@ async fn vm_pack_http_cli_parity_and_rejections() {
     let response = client.post(&route).json(&body).send().await.unwrap();
     assert_eq!(response.status(), 200);
     let report: Value = response.json().await.unwrap();
-    assert_eq!(
-        report,
-        vm_pack::request(&serde_json::to_vec(&body).unwrap(), true).unwrap()
-    );
+    assert_eq!(report, vm_pack::request(body.clone(), true).unwrap());
     let response = client
         .post(&route)
         .header("content-type", "text/plain")
@@ -129,19 +126,20 @@ async fn vm_pack_http_cli_parity_and_rejections() {
             .status(),
         400
     );
-    // Send only headers declaring more than the API's 1 GiB per-request
-    // buffer: rejection precedes body ingestion, so a client uploading a
-    // giant body could otherwise observe a broken pipe.
+    // The body parses as it arrives, so a declared 1 TiB is admitted; the
+    // deadline follows what arrived, so a client that sends none of it is
+    // refused within seconds and releases the comparison permit, which the
+    // CLI comparison below then takes.
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let address = url.strip_prefix("http://").unwrap();
     let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
-    socket.write_all(format!("POST /api/analysis/vm/packs/compare HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", (1usize << 30) + 1).as_bytes()).await.unwrap();
+    socket.write_all(format!("POST /api/analysis/vm/packs/compare HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", 1u64 << 40).as_bytes()).await.unwrap();
     let mut refusal = String::new();
-    tokio::time::timeout(Duration::from_secs(3), socket.read_to_string(&mut refusal))
+    tokio::time::timeout(Duration::from_secs(15), socket.read_to_string(&mut refusal))
         .await
         .unwrap()
         .unwrap();
-    assert!(refusal.starts_with("HTTP/1.1 400"));
+    assert!(refusal.starts_with("HTTP/1.1 408"), "{refusal}");
     let body_file = root.path().join("request.json");
     std::fs::write(&body_file, body.to_string()).unwrap();
     let base_url = url.clone();

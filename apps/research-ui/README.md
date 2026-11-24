@@ -64,6 +64,11 @@ The Findings view uses compact CodeBrowser-style docks: Program Trees holds
 captured findings, Symbol Tree lists the selected finding's retained handlers,
 the central Handler listing drives the linked evidence inspector, and analysis
 tools use a bottom tab strip. The layout keeps the Rosé Pine Moon palette.
+Findings list before the opcode workspace and its host links are read. Until
+then Symbol Tree and the Host event positions card say they are loading, and
+the tree and the finding's detail are `aria-busy`, rather than reporting no
+handlers or no proven link; a failed read names the failure. A poll that
+revalidates an unchanged workspace changes nothing on screen.
 Symbols and the up/down toolbar navigate the same selection. The literal handler
 filter matches retained source offsets, opcodes and labels; selecting a symbol
 clears an excluding filter. Arrow keys, Home and End navigate visible listing
@@ -905,8 +910,10 @@ the chip becomes a colored marker whose tooltip and accessible name keep the
 state. Snippet output appears in the transcript
 labeled `page JavaScript · console-document-start-script`, inserted as text and
 filterable by level like any other row. It is never evidence, never joined into
-correlated links, and never exported automatically. Clearing the set, or
-disconnecting, removes the scripts and their output. When a live capture cannot
+correlated links, and never exported automatically. **Arm** adds a script
+beside the armed ones and each armed script has its own **Remove**, which keeps
+its records. Clearing the set, or disconnecting, removes the scripts and their
+output. When a live capture cannot
 confirm that removal, Disconnect fails and the chip turns red and reads
 `Doc-start: unconfirmed` instead of switching off. See
 [Native Console v3](../../protocol/native-console-v3.md) and the
@@ -914,14 +921,16 @@ confirm that removal, Disconnect fails and the chip turns red and reads
 
 Set `REB_BRAVE_BINARY` to the matching rebuilt custom browser and use the live
 backend. The [native contract](../../protocol/native-console-v2.md) specifies
-ownership, rebuild compatibility and the real-browser acceptance gates. No
+ownership, rebuild compatibility and the real-browser acceptance gates, and
+[v4](../../protocol/native-console-v4.md) the bounds that remain. No
 breakpoints, stepping or paused-frame inspection are supplied by this console.
 Console sits at the foot of the sidebar (⌘ / Ctrl + J). When no compatible
 Console or live document is available and the transcript is empty, opening the
 dock focuses the unavailable state's **Check availability** action instead of
 opening Session settings over it. Commands are
 syntax colored while typing and in the transcript; primitive results use colors
-for their value types. Coloring uses inert text spans and a bounded tokenizer.
+for their value types. Coloring uses inert text spans and colors a long text's
+opening only; the rest is shown as plain text.
 Console keeps a persistent command composer below its independently scrolling
 transcript. Its header identifies the selected document and connection state;
 Find, Clear and Session settings remain available without leaving the dock.
@@ -932,20 +941,28 @@ refresh documents explicitly, or disconnect and start a fresh disposable session
 The Run button and Enter both submit; the composer also shows its UTF-8 size.
 A command runs until it returns: while it runs, Run becomes **Stop**, which ends
 it in the page and marks it Stopped, keeping the changes it already made. Input
-of any size up to the 64 MiB command record is accepted. The transcript shows a
-long command's first 4096 characters with its full size, and history keeps the
-newest command whole however large; inputs over 64 KiB are shown uncolored so
-typing stays fast.
+of any size up to the 4 GiB a Console record names is sent whole, the
+transcript shows it whole, and history keeps every command; inputs over 64 KiB
+are shown uncolored so typing stays fast.
 An empty prompt has no placeholder text. Fully typed built-in names do not open
 automatic suggestions, so Enter runs them unchanged; Ctrl+Space can still request
 their completions explicitly.
 
 New output follows only when already reading the bottom. Otherwise **Latest
 output** shows new entries and returns to the end explicitly. Filtering shows
-visible/retained counts and a no-match state. Output is bounded to 128 entries,
-256 KiB of text and 8,192 DOM elements; eviction counts stay visible without
-replacing connection errors. Clear removes output and releases retained values
-while preserving command history. Object expansion loads one native property
+visible/retained counts and a no-match state. The transcript keeps every entry
+until Clear and renders only the rows near the viewport, so hours of output
+scroll, filter and follow at the same cost, and filters search rows that are
+not rendered. The transcript never moves a scroll the reader is making, or
+the extent it scrolls through, so wheel momentum and the PageUp and PageDown
+animations run to their end; a row measured on the way is taken up once that
+scroll has stood still. Home, End, Command-Up and Command-Down put the
+focused transcript at its first or last entry at once, even while another
+scroll still moves, and End follows new entries again. A word of more than 4096 characters with no space, such
+as a long base64 or JSON string, wraps at any character, so every line of a
+1 MiB message stays inside the wrap width.
+An evaluation link in Traffic scrolls its command into view wherever it is. Clear removes output and releases retained values while
+preserving command history. Object expansion loads one native property
 page at a time; Previous/Next replace that page rather than growing the DOM.
 Loading, expired-handle errors and explicit retry remain local to the object;
 a failed page request keeps the previous page readable. If the live object shrinks
@@ -959,22 +976,23 @@ copy, store, release and other native utilities separate from passive inspection
 Toggle the dock with Console or Command/Ctrl+J while keeping the current workspace visible.
 Drag its top divider or use the focused divider's arrow keys to resize; Home resets
 the saved height. Enter runs, Shift+Enter adds a line, and Command/Ctrl+Enter also
-submits multiline input. Up/Down recalls a separate bounded command history at the first/last line.
+submits multiline input. Up/Down recalls a separate command history at the first/last line.
 Clearing output preserves history; Forget command history removes it. Undo/redo
 works for typing and completion insertion. An incomplete bracketed expression
 continues on Enter; Command/Ctrl+Enter explicitly submits. The next draft remains
 editable while a request runs.
 
-Completion combines built-in hints with bounded native properties and global
-lexical bindings. Calls, computed keys, strings and comments never cross the
+Completion combines built-in hints with native properties and global lexical
+bindings, every match at any path depth, and lexes only the edited line onward
+so a long source completes as it is typed. Calls, computed keys, strings and comments never cross the
 completion boundary. Native traversal stops at accessors and proxies. Suggestions
 include function argument counts where available. Fully typed names submit
 unchanged; Ctrl+Space explicitly requests completion.
 
-Results expand into property pages, DOM element previews, function source and
-source locations. Getters remain labeled, proxies are opaque, and retained values
+Results expand into property pages at any depth, DOM element previews,
+function source and source locations. Getters remain labeled, proxies are opaque, and retained values
 stay until they are released, the output is cleared or the page navigates.
-Explicit actions copy bounded property previews, store a
+Explicit actions copy property values, store a
 value as `window.tempN`, or release it. `$_` reads the previous result. `copy(value)`,
 `inspect(value)`, `getEventListeners(element)`, `monitorEvents(element)` and
 `unmonitorEvents(element)` are standalone console utilities. They evaluate their
@@ -995,8 +1013,8 @@ snippets are available without a permanent toolbar expansion.
 
 The document selector identifies top frames, named child frames, titles and
 URLs in the owned disposable browser. Navigation rejects old IDs and clears
-retained handles. Experiment activity opens a separate Traffic view of bounded
-native resource-completion metadata. It contains session/document/resource IDs
+retained handles. Experiment activity opens a separate Traffic view of every
+delivered native resource-completion record. It contains session/document/resource IDs
 and the last evaluation request ID; observation order does not prove causation.
 Paths, queries, headers and bodies are excluded. Source links search retained captured URLs with an explicit unverified label.
 They do not automatically open a source or claim an exact artifact relationship.
@@ -1134,6 +1152,7 @@ and an environment variable set to `0` or `1` seeds it for that app run:
 | **Request stacks** | On | `REB_NATIVE_REQUEST_STACKS` |
 | **Promise stacks** (turns on request stacks) | Off | `REB_NATIVE_PROMISE_STACKS` |
 | **Wasm dispatch sampling** | On | `REB_NATIVE_WASM_DISPATCH` |
+| **Every Wasm record** (turns on Wasm dispatch sampling) | Off | `REB_NATIVE_WASM_EVERY_RECORD` |
 | **Ignore debugger statements** | On | `REB_NATIVE_QUIET_MODE` |
 | **Allow document-start Console scripts** | On | `REB_CONSOLE_DOCUMENT_START` |
 | **Canvas images** (Content only) | On | `REB_CAPTURE_CANVAS_IMAGES` |
@@ -1147,7 +1166,11 @@ defaults always have, instead of failing the launch.
 By default every app session also enables quiet mode and native Wasm
 `br_table` and `call_indirect` dispatch capture; Wasm dispatch forces
 Liftoff-only compilation, so Wasm-heavy pages run slower. Turn either off in
-**Advanced options**. It also permits
+**Advanced options**. Wasm dispatch keeps up to 1024 full records per stream
+each second, 64 of one function; **Every Wasm record** keeps every record
+instead, with no window, browser ceiling or per-function count, and clears an
+inherited `REB_NATIVE_WASM_SAMPLES_PER_FUNCTION` or
+`REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE`, which it cannot be combined with. It also permits
 [document-start Console scripts](#document-start-scripts), which arms nothing;
 **Allow document-start Console scripts** turns that off.
 Guest-state and JavaScript dispatch-site capture still need an adapter or site
@@ -1328,10 +1351,9 @@ full targets.
 
 Canvas image capture is on in Content sessions and `make live`, and off in
 Metadata sessions, because rendered output can contain page content. Retained
-output stays in the local session artifact store, is
-limited to 2 MiB per image, and is joined to its exact `toDataURL` event. The UI
-continues to show operation names when image capture is off or an image exceeds
-the limit.
+output stays in the local session artifact store, is kept whole at any size,
+and is joined to its exact `toDataURL` event. The UI continues to show
+operation names when image capture is off or an image was not kept.
 
 The packaged app and `make live` ignore page `debugger;` statements by
 default. To let pages pause a development live capture:
@@ -1588,12 +1610,14 @@ For a live session that records a Wasm stream, VM Lab shows the session
 context's `capture_options.wasm_sampling` under its notice: the streams, the
 records each window keeps, the per-function and per-call-site allowances (an
 unnamed per-function allowance is the browser's 64), and the function and
-module filters. Its Reset sample budgets button posts
+module filters; a session that keeps every record says so in place of the
+window and allowances. Its Reset sample budgets button posts
 `reset_wasm_sample_budgets` and shows the new reset generation or the
 backend's refusal, for example while capture is stopped, under the policy;
 the button keeps its place at the end of the first line, and a narrow strip
 wraps only between the policy's parts. It is disabled when the session has no
-reset file, and a malformed label is named rather than shown. The strip is
+reset file or keeps every record, which has no window to reset, and a
+malformed label is named rather than shown. The strip is
 hidden for every other session.
 Filter reasons (`native_wasm_dispatch_filtered`, `native_wasm_indirect_filtered`,
 and their `_browser_` counterparts) are sample-policy exclusions: the
@@ -2159,9 +2183,12 @@ otherwise by the origin of its first document artifact: a retained HTML response
 internals start collapsed. A folder chain with one folder child reads as one row
 (`a/b/c`). Files show their plain name, eval code `VM<id>` as in DevTools, with
 a mask icon tinted by type and the two-letter kind code kept as its text. The
-artifact ID is in the muted meta column, the tooltip and Details; same-named
-siblings add a muted query, session or frame suffix, or their artifact ID when nothing else differs. Extension names are not captured,
-so extensions show their ID.
+artifact ID is in the muted meta column, the tooltip and Details. The name
+takes its width first; an ID that does not fit in what is left loses its leading
+digits, which neighboring IDs share, and a navigator narrower than 200 px hides
+it. Same-named siblings add a muted query, session or frame suffix, or their
+artifact ID when nothing else differs. Extension names are not captured, so
+extensions show their ID.
 
 Only rows near the viewport are mounted; the focused row stays mounted while
 scrolled away. One row is in the Tab order. Up/Down move through rows, Right
@@ -2456,8 +2483,9 @@ Saving changes nothing in the open page. A capture the app started follows the
 saved set: the pane says it tracks a saved function at once, and a removed one
 stops recording new calls while a call already running still settles. A
 function the page compiled before it was saved is tracked after the page
-reloads. A function saved once the capture has used all 256 site slots waits
-for the next capture, and the pane says so. With a Brave built before site
+reloads. A function saved once the capture has used all of its site slots
+waits for the next capture, and the pane says so. That is 48,806,446 sites,
+the most one shared memory region carries to a renderer. With a Brave built before site
 revisions the pane says tracking starts with the next capture. The start panel
 that **New Live Session…** opens shows "Tracking N functions" with each label
 and script URL, a Remove for each and Clear All (which asks once more), and
@@ -2468,8 +2496,8 @@ showed, so a list that changed since is refused rather than edited. Content mode
 the calls' settled-value digests; Metadata mode does not. The titlebar names
 what the running capture tracks, says when its Brave predates invocation
 capture and started without the sites, and warns when this session retained
-another version of a saved script, which the saved site will not match. At
-most 256 functions are saved, the most one capture can arm, in
+another version of a saved script, which the saved site will not match. The
+saved functions, any number up to the 48,806,446 one capture can arm, are in
 `~/Library/Application Support/Origin Trace/js-invocation-sites-v1.json` with a
 label sidecar; `REB_JS_INVOCATION_SITE_STORE` names another file. Stored-evidence
 native mode has no backend for these routes and says so. The routes and
@@ -3845,8 +3873,9 @@ do not generalize; unsupported inputs are retained without execution. See
 functions as the offline `origin-trace-vm-pack` CLI. Import local JSON, specify
 exact interpreter artifact IDs for comparison, then explicitly apply or compare.
 No imported code executes. Invalid schema, stale digests and undeclared source
-families are rejected. Cancel, Clear, bounded preview and complete report download
-are available. The local Rust HTTP backend is required; native stored-evidence
+families are rejected. A request runs until it is done or **Cancel** stops it,
+with its elapsed seconds in the status; Clear, the whole report and complete
+report download are available. The local Rust HTTP backend is required; native stored-evidence
 mode explains how to use the backend or CLI. See the
 [versioned pack contract](../../protocol/vm-analysis-pack-v1.md) for limits and
 agent-facing `vm_pack_apply`/`vm_pack_compare` routes.
@@ -3936,9 +3965,10 @@ Analysis content scrolls within the dock and ends at its wrapping bottom tabs.
 
 Analysis packs and Opcode ledger put local file selection and structured results
 first. Expand **Compare two builds** for the comparison workspace inputs and
-exact artifact IDs. Pack reports show bounded ranking/comparison tables;
-**Inspect raw report JSON** retains the original preview and the export keeps
-the complete exact response. Numeric identities too large for exact browser
+exact artifact IDs. Pack reports show paged ranking/comparison tables whose
+cells show the start of a long value and whose inspector shows all of it;
+**Inspect raw report JSON** shows the whole original response in the shared
+code view and the export keeps the complete exact response. Numeric identities too large for exact browser
 number display are labeled **See exact JSON**, never silently rounded.
 
 Ledger JSON editors are collapsed beneath coverage. **Create empty ledger**

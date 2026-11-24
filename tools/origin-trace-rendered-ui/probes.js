@@ -17,8 +17,11 @@
     for (let node = element; node; node = node.parentElement) {
       const style = getComputedStyle(node);
       if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
-      if (node.tagName === 'DETAILS' && !node.open && node !== element && !element.matches('summary') &&
-          node.querySelector(':scope > summary') !== element && !element.closest('summary')) return false;
+      // A closed disclosure shows only its own summary. A summary of a
+      // disclosure nested inside it is hidden with the rest, though WebKit
+      // still gives it a box.
+      if (node.tagName === 'DETAILS' && !node.open && node !== element &&
+          element.closest('summary')?.parentElement !== node) return false;
     }
     const rect = element.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;

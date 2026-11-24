@@ -116,13 +116,21 @@ The refusal is the gap `native_js_invocation_site_<n>_unsupported_function`.
 
 `native-js-invocation-sites-v1` has the exact form of
 `native-js-dispatch-sites-v1` with `shape` fixed to `function-entry`: compact
-canonical JSON, at most 128 KiB, 1 to 256 sites, each
-`(source_sha256, anchor_offset)` unique. Version 2 of the same file is a slot
-table of 0 to 256 sites with an `armed` flag each. The browser validates each
-version it reads, sends the renderer only fixed 44-byte records (shape byte 3
-and a disarmed flag), and the renderer never parses JSON.
+canonical JSON naming at least one site, each `(source_sha256, anchor_offset)`
+unique. Version 2 of the same file is a slot table, possibly empty, with an
+`armed` flag each. The browser validates each version it reads, sends the
+renderer only fixed 44-byte records (shape byte 3 and a disarmed flag), and
+the renderer never parses JSON.
 
-Records name a site by its one-byte slot, so a slot keeps its site for the
+There is no count or file size limit. Records name a site by a u32 slot, and
+the renderer's table grows in doubling segments, so tracking more functions
+costs memory in proportion and no fixed slot array. The one bound,
+48,806,446 sites, is structural: each renderer receives the whole table in
+one shared memory region, which Chromium maps only up to `INT_MAX` bytes. The
+browser parses a revision off its UI sequence and V8 finds a call's slot by
+binary search, so a long table costs neither the UI nor each call a scan.
+
+A slot keeps its site for the
 browser's lifetime. That is what lets a running capture change its sites: a
 removed site is disarmed in place instead of shifting every later slot, so
 each record still names the site it was recorded for. The browser and the
@@ -153,7 +161,9 @@ without saving. The rules ([HTTP API](../../protocol/http-api.md#saved-javascrip
   top-level `var` or function declaration of a classic script, which becomes a
   global property, but never a local or module declaration. A local variable
   named `window` is not told apart from the global object, which is why every
-  refusal lists candidates.
+  refusal lists candidates. The worker indexes a script's definitions in one
+  parse and the backend keeps that index by the script's SHA-256, so every
+  later name or position in the same script resolves without parsing it again.
 - **The anchor this tool accepts.** A position selects the innermost function
   whose definition contains it, with the binding head (`window.hsw=`) counted
   as part of the function. Bare-parameter and `async` arrows, whose anchor is
@@ -169,8 +179,8 @@ browser reads it unchanged, at
 beside the app's other per-user stores, plus a
 `js-invocation-sites-v1.labels.json` sidecar with each site's label, source URL
 and session, which the browser never reads. Both are written atomically with
-user-only permissions; an empty set has no site file. At most 256 sites, and a
-duplicate `(source_sha256, anchor_offset)` is refused.
+user-only permissions; an empty set has no site file. A duplicate
+`(source_sha256, anchor_offset)` is refused.
 
 Every capture the app starts arms the saved set from a private copy made at
 launch, an empty slot table when nothing is saved, and follows the set while
@@ -183,8 +193,8 @@ capture; removing one stops recording its new calls while a call already
 running still settles. A function the page compiled before its site was armed
 still cannot gain an entry call, so its calls are recorded after the page
 reloads, which recompiles it on the capture path. Once a capture has used all
-256 slots, a newly saved site waits for the next capture, and the pane says
-so. A Brave built before revisions keeps the startup sites, and the next
+48,806,446 slots, a newly saved site waits for the next capture, and the pane
+says so. A Brave built before revisions keeps the startup sites, and the next
 capture arms the set as before. The start dialog shows "Tracking N functions"
 with each label and Remove and Clear All; the titlebar names what the running
 capture tracks.
@@ -233,7 +243,7 @@ hashes them once, finds the function literal starting at each anchor, and
 reports `native_js_invocation_site_<n>_compiled_before_arming` when it already
 has bytecode without the entry. The site becomes observable after bytecode
 regeneration or a reload. Armed functions are never optimized
-(`kNeverOptimize`): at most 256 functions lose optimization, which keeps the
+(`kNeverOptimize`): only the armed functions lose optimization, which keeps the
 entry, exit and settle calls in the only tiers that run them (Ignition and
 Sparkplug) and keeps timing changes declared rather than tier-dependent.
 
@@ -557,7 +567,7 @@ Live (needs a rebuilt Brave, on the build machine):
 | Overlay | wire header, site-file and slot-table parsing for `function-entry`, the browser's lifetime slot table and revision polling, renderer ordinals, armed flags and gaps, Mojo configuration and `UpdateJsInvocationSites`, browser forwarding of Wasm context |
 | Protocol and backend | events 24 to 26, Wasm payload versions, C++/Python/Rust/JavaScript validators, origin-trace relations in the broker index, the value-flow join in the Rust trace builder, which the native app also answers through, viewer labels |
 | Tooling | `tools/native-js-invocation-site.py` writes the site file; the launcher's `REB_NATIVE_JS_INVOCATION_SITES`, `REB_NATIVE_JS_INVOCATION_DIGESTS`, `REB_NATIVE_JS_INVOCATION_IF_SUPPORTED` and `REB_NATIVE_JS_INVOCATION_LIVE` |
-| Saved sites | the worker's `invocation_site` query, the backend's site key, saved set, routes and slot-table follower (`js_invocation_sites.rs`), Sources **Track calls**, the titlebar, and the app's start panel and `captureDefaults` |
+| Saved sites | the worker's `invocation_site_index` operation and the query over it in `reb-js-lexer`, the backend's index cache, site key, saved set, routes and slot-table follower (`js_invocation_sites.rs`), Sources **Track calls**, the titlebar, and the app's start panel and `captureDefaults` |
 
 What runs in this repository's gate: the C++ parity and rule test, the Python
 validator, the Rust readers and value search, the shared trace cases over slices

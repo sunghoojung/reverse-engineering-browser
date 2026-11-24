@@ -12,13 +12,14 @@ index 9626911..4e459a4 100644
      "web/web_navigation_policy.h",
 diff --git a/third_party/blink/public/web/web_native_debugger.h b/third_party/blink/public/web/web_native_debugger.h
 new file mode 100644
-index 0000000..790ee68
+index 0000000..2db1b91
 --- /dev/null
 +++ b/third_party/blink/public/web/web_native_debugger.h
-@@ -0,0 +1,77 @@
-+// Copyright 2026 The Chromium Authors
-+// Use of this source code is governed by a BSD-style license that can be
-+// found in the LICENSE file.
+@@ -0,0 +1,78 @@
++// Copyright 2026 The Reverse Engineering Browser Authors
++// This Source Code Form is subject to the terms of the Mozilla Public
++// License, v. 2.0. If a copy of the MPL was not distributed with this file,
++// You can obtain one at https://mozilla.org/MPL/2.0/.
 +
 +#ifndef THIRD_PARTY_BLINK_PUBLIC_WEB_WEB_NATIVE_DEBUGGER_H_
 +#define THIRD_PARTY_BLINK_PUBLIC_WEB_WEB_NATIVE_DEBUGGER_H_
@@ -149,13 +150,14 @@ index a4e4a65..62001ff 100644
    void Trace(Visitor*) const override;
 diff --git a/third_party/blink/renderer/core/exported/web_native_debugger.cc b/third_party/blink/renderer/core/exported/web_native_debugger.cc
 new file mode 100644
-index 0000000..87e49a0
+index 0000000..ba29a04
 --- /dev/null
 +++ b/third_party/blink/renderer/core/exported/web_native_debugger.cc
-@@ -0,0 +1,176 @@
-+// Copyright 2026 The Chromium Authors
-+// Use of this source code is governed by a BSD-style license that can be
-+// found in the LICENSE file.
+@@ -0,0 +1,177 @@
++// Copyright 2026 The Reverse Engineering Browser Authors
++// This Source Code Form is subject to the terms of the Mozilla Public
++// License, v. 2.0. If a copy of the MPL was not distributed with this file,
++// You can obtain one at https://mozilla.org/MPL/2.0/.
 +
 +#include "third_party/blink/public/web/web_native_debugger.h"
 +

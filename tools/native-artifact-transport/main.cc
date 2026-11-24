@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -29,7 +30,6 @@
 
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_socket_client.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_socket_client.h"
-#include "brave/components/reverse_engineering_browser/common/native_js_invocation.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_ipc.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 
@@ -161,11 +161,6 @@ void WriteToken(const std::string& path) {
   Require(close(descriptor) == 0, "token close");
 }
 
-bool IsSocket(const std::string& path) {
-  struct stat metadata {};
-  return stat(path.c_str(), &metadata) == 0 && S_ISSOCK(metadata.st_mode);
-}
-
 bool WaitFor(const std::function<bool()>& done) {
   const auto deadline = Clock::now() + kWait;
   while (!done()) {
@@ -219,7 +214,12 @@ pid_t SpawnReceiver(const std::string& binary,
   Require(posix_spawn(&pid, binary.c_str(), &actions, nullptr, argv.data(), environ) == 0,
           "spawn receiver");
   posix_spawn_file_actions_destroy(&actions);
-  Require(WaitFor([&] { return IsSocket(socket_path); }), "receiver socket did not appear");
+  // The socket file appears at bind(), before the receiver listens, so a
+  // connection then is refused; the receiver reports once it listens.
+  Require(WaitFor([&] {
+            return ReadFile(log_path).find("Artifact receiver listening on ") != std::string::npos;
+          }),
+          "receiver did not listen");
   return pid;
 }
 
@@ -647,10 +647,10 @@ void ConfigureLiveInvocationSites(const std::string& root) {
   reb::NativeProbeSession::Get().site_revisions.clear();
 }
 
-// A following capture's writer rereads the site file each time the backend
-// advances the generation, never for the startup, an unchanged or an older
-// generation, and hands a file it cannot read to the session as an empty
-// revision, which the session refuses with its gap.
+// A following capture's writer rereads the whole site file each time the
+// backend advances the generation, never for the startup, an unchanged or an
+// older generation, and hands a file it cannot read to the session as an
+// empty revision, which the session refuses with its gap.
 void CheckLiveInvocationSites(const std::string& root) {
   const std::string sites = root + "/js-invocation-sites.json";
   const std::string generation = root + "/js-invocation-sites-generation";
@@ -672,21 +672,29 @@ void CheckLiveInvocationSites(const std::string& root) {
   ReplaceFile(generation, "0\n");
   settle();
   Require(session.site_revisions.size() == 1, "an unchanged or older generation rereads nothing");
-  ReplaceFile(sites, std::string(reb::kNativeJsInvocationSitesFileLimit + 1, ' '));
+  // A long file is read whole: the list has no fixed size.
+  const std::string long_revision(4u << 20, 'x');
+  ReplaceFile(sites, long_revision);
+  ReplaceFile(generation, "2\n");
+  Require(RunBrowserUntil([&] { return session.site_revisions.size() == 2; }) &&
+              session.site_revisions[1] == long_revision,
+          "a 4 MiB site file is read whole");
+  Require(std::remove(sites.c_str()) == 0, "remove " + sites);
   ReplaceFile(generation, "3\n");
-  Require(RunBrowserUntil([&] { return session.site_revisions.size() == 2; }),
-          "an over-limit site file is still a revision");
-  Require(session.site_revisions[1].empty(), "a file the writer cannot read is an empty revision");
+  Require(RunBrowserUntil([&] { return session.site_revisions.size() == 3; }),
+          "a missing site file is still a revision");
+  Require(session.site_revisions[2].empty(), "a file the writer cannot read is an empty revision");
   ReplaceFile(sites, "revision four");
   ReplaceFile(generation, "4\n");
-  Require(RunBrowserUntil([&] { return session.site_revisions.size() == 3; }) &&
-              session.site_revisions[2] == "revision four",
+  Require(RunBrowserUntil([&] { return session.site_revisions.size() == 4; }) &&
+              session.site_revisions[3] == "revision four",
           "the next generation reads again");
   auto& switches = base::CommandLine::ForCurrentProcess()->switches;
   switches.erase("reb-js-invocation-sites");
   switches.erase("reb-js-invocation-sites-generation");
-  std::cout << "PASS broker writer: a following capture rereads the site file only for a newer "
-               "generation and hands an unreadable one to the session as an empty revision\n";
+  std::cout << "PASS broker writer: a following capture rereads the whole site file, of any "
+               "size, only for a newer generation and hands an unreadable one to the session as "
+               "an empty revision\n";
 }
 
 reb::NativeProbeEvent RendererRecord(const std::uint32_t process, const std::uint64_t sequence) {

@@ -83,7 +83,8 @@ produce an ambiguous result instead of an arbitrary trace.
   stores. A store still being indexed past that returns `503` with how far
   indexing got, never a trace over part of the session. An unterminated last
   record that parses as a whole object is read as written.
-- Event and edge records are capped at 4 KiB, and artifact records at 8 KiB.
+- Event and edge records are capped at 4 KiB, and artifact records at the
+  manifest's bound, which fits a 2 MiB URL.
   An oversized, malformed or duplicate record anywhere in a store refuses every
   trace over that store until it is cleared: a trace never walks past damaged
   evidence.

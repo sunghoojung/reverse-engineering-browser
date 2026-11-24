@@ -71,10 +71,11 @@ detects that disconnect promptly and disables every renderer host and browser
 capture sink. No page script controls probe activation.
 
 Canvas output is a separate, explicit sensitive-capture mode. When enabled for
-the session, a successful `HTMLCanvasElement.toDataURL()` result of at most 2
-MiB becomes a `canvas_data_url` artifact linked by `creator_event_id` to the
-exact readback operation. Larger or invalid results still produce metadata but
-no artifact. Renderer code passes the output one way to the browser process;
+the session, a successful `HTMLCanvasElement.toDataURL()` result of any size
+becomes a `canvas_data_url` artifact linked by `creator_event_id` to the
+exact readback operation. An invalid result, or one the renderer's artifact
+credit cannot take (`canvas_data_url_backlog`), still produces metadata but no
+artifact. Renderer code passes the output one way to the browser process;
 the browser remains the only owner of the authenticated artifact connection.
 
 Web Audio call sites observe selected graph construction, connection, source
@@ -266,10 +267,11 @@ most 64 KiB with an incremental SHA-256. Tees, request content and renderer
 content share the 32 MiB in-flight pool in
 `common/native_artifact_memory_pool.h`, charged with each queued data frame and
 returned when the writer drops it; a stream that finds the pool full waits for
-it to drain. Compiled script source that no response body carries and WASM
-byte-buffer API inputs use a separate one-way Mojo submission, charged to a
-256 MiB renderer credit that the browser returns once it no longer holds the
-buffer; see
+it to drain. Compiled script source that no response body carries, WASM
+byte-buffer API inputs, the modules Wasm observations and guest captures
+carry, runtime buffers, Canvas images and stack script sources use a separate
+one-way Mojo submission of any size, charged to a 256 MiB renderer credit that
+the browser returns once it no longer holds the buffer; see
 [native compiled scripts](../../../../../../protocol/native-compiled-scripts-v2.md).
 The browser copies renderer-owned shared memory before validation and records
 the stable execution context plus exact capture origin. A dedicated writer
@@ -326,6 +328,10 @@ are compact identities for a sample a function, module, call-site, or the
 cap until the omitted counter saturates. `reset_wasm_sample_budgets` publishes
 the pending omitted count and starts a new ring. See
 [overflow identities](../../../../../../protocol/native-wasm-dispatch-v1.md#overflow-identities).
+Full Wasm records do not use the probe queue: each renderer thread sends them
+to `NativeProbeHost` in `CaptureWasmRecords` batches of up to 512, flushed
+when the recording task ends and before the thread's next other message. See
+[batches](../../../../../../protocol/native-wasm-dispatch-v1.md#producer-and-identity).
 See the [capability boundary and acceptance gates](../../../../../../protocol/vm-opcode-workspace-v2.md#native-browser-capability-boundary).
 The VM category also permits 32-byte through 16-MiB snapshots of runtime-created
 `ArrayBuffer`, `Uint8Array`, `Uint16Array`, and `Uint32Array` data. The V8 hook
@@ -348,8 +354,9 @@ Native JavaScript invocation records (`js_invocation_start`,
 `js_invocation_settle` and `js_invocation_request`, events 24 to 26) use
 `common/native_js_invocation.h` for the payloads and the 44-byte
 function-entry site records (shape 3), and `common/native_js_invocation_sites.h`
-for the browser-side site file. The sink records every start of up to 256
-sites with its site's next ordinal, tells V8 whether it recorded each start so
+for the browser-side site file. The sink keeps every site in a table of
+doubling segments named by a u32 slot, records every start with its site's
+next ordinal, tells V8 whether it recorded each start so
 V8 settles only those, and gives each request record the configuration's next
 ordinal; settles carry a digest only under the session's opt-in. It reads the current
 invocation through a provider Blink installs, for Wasm `br_table` and

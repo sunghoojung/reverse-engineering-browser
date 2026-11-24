@@ -21,7 +21,9 @@ inline constexpr std::uint16_t kArtifactProtocolVersion = 1;
 inline constexpr std::size_t kArtifactHeaderSize = 128;
 inline constexpr std::uint32_t kArtifactAckMagic = 0x4b414252U;
 inline constexpr std::size_t kArtifactAckSize = 32;
-inline constexpr std::uint32_t kMaxArtifactUrlBytes = 8'192;
+// url::kMaxURLChars, the longest URL Chromium carries between processes; the
+// overlay's kNativeArtifactMaxUrlBytes. Every URL the browser can name fits.
+inline constexpr std::uint32_t kMaxArtifactUrlBytes = 2U * 1024U * 1024U;
 inline constexpr std::uint32_t kMaxArtifactMimeTypeBytes = 255;
 inline constexpr std::uint16_t kArtifactFlagSensitive = 1U << 0U;
 // Free space the store's volume keeps. The store has no byte, artifact count

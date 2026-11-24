@@ -160,13 +160,15 @@ final class Harness {
       try await Task.sleep(nanoseconds: 100_000_000)
     }
     // Say whether input was lost or the app refused it (for example a stale
-    // history entry), so an intermittent timeout is diagnosable from the log.
+    // history entry), and what an open dialog's status line says, so an
+    // intermittent timeout is diagnosable from the log.
     let context = (try? await json(
       "({screens: [...document.querySelectorAll('.screen')].filter(screen => !screen.hidden).map(screen => screen.id).join(','), " +
       "focus: __rebUiProbe.describe(document.activeElement), documentFocused: document.hasFocus(), notice: document.querySelector('#investigation-notice')?.textContent ?? '', " +
       "back: document.querySelector('#investigation-back')?.innerText ?? '', forward: document.querySelector('#investigation-forward')?.innerText ?? '', " +
       "location: location.href, readyState: document.readyState, outgoing: window.__rebOutgoingDocument === true, " +
-      "requests: typeof state === 'object' ? state.requests.length : -1})"
+      "requests: typeof state === 'object' ? state.requests.length : -1, " +
+      "dialogStatus: [...document.querySelectorAll('dialog[open] [role=status]')].map(node => node.textContent).join(' | ')})"
     )).map { "\($0)" } ?? "state unavailable"
     throw HarnessError("Timed out: \(message) [active=\(NSApp.isActive), key=\(window.isKeyWindow), \(context)]")
   }

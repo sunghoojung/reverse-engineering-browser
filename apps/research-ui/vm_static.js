@@ -1,4 +1,4 @@
-/* Inert, bounded bytecode decoding under user-declared semantics. No VM execution. */
+/* Inert bytecode decoding under user-declared semantics. No VM execution. */
 const vmStatic = (() => {
   const json = typeof module === 'object' && module?.exports && typeof require === 'function'
     ? require('./captured_client.js').capturedClientJSON : (...args) => capturedClientJSON(...args);
@@ -18,24 +18,26 @@ const vmStatic = (() => {
   });
   const operationFlows = {jump:'jump',branch_zero:'branch',stack_branch_zero:'branch',call:'call',return:'return',halt:'halt'};
   const flowKinds = ['next','jump','branch','call','return','halt','unknown'];
-  const limits = Object.freeze({input_bytes:1048576,image_bytes:65536,opcodes:256,operands:8,entries:64,instructions:4096,edges:8192,pseudocode:8192,diagnostics:8257});
+  // No size limit: an image of any length decodes whole, and the report
+  // grows with it. What stays bounded is structure every valid document
+  // already has: none nests past five levels, so a deeper input is refused
+  // before it can exhaust the copy's stack.
+  const limits = Object.freeze({depth:16});
 
   // Object entry points accept data, not accessors, sparse arrays, prototypes or
   // serialization hooks. Serialized input additionally rejects duplicate keys.
   function document(input) {
     if (typeof input === 'string') {
-      if (input.length > limits.input_bytes || new TextEncoder().encode(input).length > limits.input_bytes) fail('Static VM JSON exceeds 1 MiB.');
-      const numbers = new Map(), value = json(input,numbers);
+      const numbers = new Map(), value = json(input,numbers,Infinity);
       for (const token of numbers.values()) if (!/^(0|-?[1-9][0-9]*)$/.test(token) || !Number.isSafeInteger(Number(token))) fail('Static VM numbers require canonical safe integer tokens.');
       return document(value);
     }
-    let nodes = 0;
     const active = new Set();
     function copy(value, depth) {
-      if (++nodes > 50000 || depth > 16) fail('Static VM JSON structure exceeds bounds.');
+      if (depth > limits.depth) fail('Static VM JSON nests deeper than any definition or image.');
       if (value === null || typeof value === 'boolean') return value;
       if (typeof value === 'number') { if (!Number.isSafeInteger(value) || Object.is(value,-0)) fail('Static VM numbers require exact safe integers.'); return value; }
-      if (typeof value === 'string') { if (value.length > limits.input_bytes) fail('Static VM string exceeds bounds.'); return value; }
+      if (typeof value === 'string') return value;
       if (typeof value !== 'object' || active.has(value)) fail('Static VM input must contain JSON data only.');
       const prototype = Object.getPrototypeOf(value), array = Array.isArray(value);
       if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) fail('Static VM input must contain plain JSON data.');
@@ -44,15 +46,13 @@ const vmStatic = (() => {
       active.add(value);
       let result;
       if (array) {
-        if (value.length > 50000 || keys.length !== value.length + 1 || !keys.every(key => key === 'length' || /^(0|[1-9][0-9]*)$/.test(key) && Number(key) < value.length)) fail('Static VM arrays must be dense JSON arrays.');
+        if (keys.length !== value.length + 1 || !keys.every(key => key === 'length' || /^(0|[1-9][0-9]*)$/.test(key) && Number(key) < value.length)) fail('Static VM arrays must be dense JSON arrays.');
         result = Array.from({length:value.length},(_,i) => copy(descriptors[String(i)].value,depth+1));
       } else result = Object.fromEntries(keys.map(key => [key,copy(descriptors[key].value,depth+1)]));
       active.delete(value);
       return result;
     }
-    const result = copy(input,0);
-    if (new TextEncoder().encode(JSON.stringify(result)).length > limits.input_bytes) fail('Static VM JSON exceeds 1 MiB.');
-    return result;
+    return copy(input,0);
   }
 
   function parseDefinition(input) {
@@ -60,12 +60,12 @@ const vmStatic = (() => {
     if (!exact(value,['format','definition_id','architecture','opcode_bytes','operand_endianness','register_count','opcodes']) || value.format !== 'reb-vm-definition-v1' ||
         !identifier(value.definition_id) || !['stack','register'].includes(value.architecture) || ![1,2].includes(value.opcode_bytes) ||
         !['little','big'].includes(value.operand_endianness) || !integer(value.register_count,value.architecture === 'stack' ? 0 : 1,value.architecture === 'stack' ? 0 : 64) ||
-        !Array.isArray(value.opcodes) || value.opcodes.length < 1 || value.opcodes.length > limits.opcodes) fail('Invalid bounded reb-vm-definition-v1.');
+        !Array.isArray(value.opcodes) || value.opcodes.length < 1) fail('Invalid reb-vm-definition-v1.');
     const codes = new Set();
     for (const opcode of value.opcodes) {
       if (!exact(opcode,['code','mnemonic','operands','semantics','flow']) || typeof opcode.code !== 'string' ||
           !new RegExp('^[a-f0-9]{'+value.opcode_bytes*2+'}$(?![\\s\\S])').test(opcode.code) || codes.has(opcode.code) || !name(opcode.mnemonic) ||
-          !Array.isArray(opcode.operands) || opcode.operands.length > limits.operands || !exact(opcode.semantics,['operation','args']) ||
+          !Array.isArray(opcode.operands) || !exact(opcode.semantics,['operation','args']) ||
           typeof opcode.semantics.operation !== 'string' || !Object.hasOwn(operationRoles,opcode.semantics.operation) || !Array.isArray(opcode.semantics.args)) fail('Invalid or duplicate opcode definition.');
       codes.add(opcode.code);
       const operands = new Map();
@@ -93,9 +93,9 @@ const vmStatic = (() => {
     const value = document(input);
     if (!exact(value,['format','image_id','definition_id','entry_offsets','bytes_hex']) || value.format !== 'reb-vm-bytecode-v1' ||
         !identifier(value.image_id) || !identifier(value.definition_id) || typeof value.bytes_hex !== 'string' ||
-        value.bytes_hex.length > limits.image_bytes*2 || !/^(?:[a-f0-9]{2})*$(?![\s\S])/.test(value.bytes_hex) ||
-        !Array.isArray(value.entry_offsets) || value.entry_offsets.length < 1 || value.entry_offsets.length > limits.entries ||
-        !value.entry_offsets.every(offset => integer(offset,0,65535)) || new Set(value.entry_offsets).size !== value.entry_offsets.length) fail('Invalid bounded reb-vm-bytecode-v1.');
+        !/^(?:[a-f0-9]{2})*$(?![\s\S])/.test(value.bytes_hex) ||
+        !Array.isArray(value.entry_offsets) || value.entry_offsets.length < 1 ||
+        !value.entry_offsets.every(offset => integer(offset,0,Number.MAX_SAFE_INTEGER)) || new Set(value.entry_offsets).size !== value.entry_offsets.length) fail('Invalid reb-vm-bytecode-v1.');
     return value;
   }
 
@@ -109,9 +109,13 @@ const vmStatic = (() => {
   async function analyze(definitionInput, imageInput, options = {}) {
     const definition = parseDefinition(definitionInput), image = parseImage(imageInput), settings = document(options);
     if (!object(settings) || Object.keys(settings).some(key => key !== 'max_instructions') ||
-        Object.hasOwn(settings,'max_instructions') && !integer(settings.max_instructions,1,limits.instructions)) fail('max_instructions must be an exact integer from 1 to 4096.');
+        Object.hasOwn(settings,'max_instructions') && !integer(settings.max_instructions,1,Number.MAX_SAFE_INTEGER)) fail('max_instructions must be an exact positive integer.');
     if (image.definition_id !== definition.definition_id) fail('Bytecode image and definition IDs disagree.');
-    const budget = settings.max_instructions ?? limits.instructions, bytes = Uint8Array.from(image.bytes_hex.match(/../g) ?? [],byte => parseInt(byte,16));
+    // Without max_instructions the whole image decodes. The hex is lowercase,
+    // as parseImage checked, and decodes in place: no string per byte.
+    const budget = settings.max_instructions ?? Infinity, hex = image.bytes_hex, bytes = new Uint8Array(hex.length / 2);
+    const nibble = code => (code <= 57 ? code - 48 : code - 87);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = nibble(hex.charCodeAt(i * 2)) << 4 | nibble(hex.charCodeAt(i * 2 + 1));
     const encoder = new TextEncoder();
     const [definition_canonical_sha256,definition_source_sha256,image_bytes_sha256,image_source_sha256] = await Promise.all([
       sha256(encoder.encode(JSON.stringify(canonical(definition)))),
@@ -122,7 +126,7 @@ const vmStatic = (() => {
     let cursor = 0, stopReason = 'end';
     const diagnostic = (offset,code,message) => diagnostics.push({offset,code,message});
     while (cursor < bytes.length) {
-      if (instructions.length === budget) { stopReason = 'instruction_budget'; diagnostic(cursor,stopReason,'Instruction budget reached; remaining bytes were not decoded.'); break; }
+      if (instructions.length === budget) { stopReason = 'instruction_budget'; diagnostic(cursor,stopReason,'The max_instructions budget asked for was reached; remaining bytes were not decoded.'); break; }
       if (cursor + definition.opcode_bytes > bytes.length) { stopReason = 'truncated_instruction'; diagnostic(cursor,stopReason,'Incomplete literal opcode bytes; decoding stopped.'); break; }
       const opcode = image.bytes_hex.slice(cursor*2,(cursor+definition.opcode_bytes)*2), declared = opcodes.get(opcode);
       if (!declared) { stopReason = 'unknown_opcode'; diagnostic(cursor,stopReason,'Opcode '+opcode+' has no declaration; no later bytes were guessed.'); break; }

@@ -2059,6 +2059,7 @@ mod tests {
             "line_count",
             "row_offset",
             "byte_offset",
+            "total_matches",
             "row_limit",
             "line_offset",
             "line_limit",

@@ -3486,6 +3486,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("!document.querySelector('#source-graph').hidden", "Graph is offered for a captured WASM artifact")
       try await ui.click("#source-graph")
       try await ui.waitUntil("(document.querySelector('#source-graph-host .block-graph-stats')?.textContent ?? '').includes('blocks')", timeout: 30, "the block graph did not finish laying out")
+      // The stage's ResizeObserver sizes the canvas in the next rendering
+      // update, before it paints, so layout is measured as it is first shown.
+      try await ui.settle()
       let evidence = try await ui.value("document.querySelector('#source-graph-host .block-graph-evidence').textContent") as? String ?? ""
       XCTAssertEqual(evidence, "declared", "\(size.name): the header says declared")
       let limits = try await ui.value("(() => { const box = document.querySelector('#source-graph-host .block-graph-limits'); const rect = box.getBoundingClientRect(); return {text: box.textContent, w: rect.width, right: rect.right, windowWidth: innerWidth}; })()") as? [String: Any] ?? [:]
@@ -3512,6 +3515,160 @@ final class OriginTraceRenderedUITests: XCTestCase {
       _ = try await ui.value("(document.documentElement.dataset.theme = 'dark', 1)")
       try await ui.click("#source-graph")
     }
+  }
+
+  // The block graph shapes of artifacts 341 to 345, cold at each size: the
+  // time from the native click on Graph to the frame after the first drawing
+  // (decode, transfer, layout and draw), and frames while Shift+Arrow pans at
+  // the opening zoom and fitted whole: the interval between frames, and the
+  // time a frame spent before this test's callback, which is the graph's
+  // draw. The numbers are printed as RENDERED_UI_GRAPH lines. A median
+  // interval fails past three display frames, or past twice the slower median
+  // of the 25-block exceptions shape at that size where that is longer: a
+  // display without a GPU, as on a CI host, holds even that shape to 30-50 ms
+  // a frame while its draw takes 1 ms, so the floor is the machine's, not the
+  // graph's. A single long frame does not fail, since a hidden or sleeping
+  // display stops frames whatever the page does. Then Shift+Arrow pushes the
+  // fitted view far past the bottom right, where it must stop on the drawing.
+  @MainActor
+  func test25bBlockGraphShapes() async throws {
+    let shapes = [("341", "ladder"), ("342", "dispatch256"), ("343", "loops"), ("344", "exceptions"), ("345", "large")]
+    for size in windowSizes + [("wide", 1440, 900)] {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      var medians: [(context: String, median: Double, result: [String: Any])] = []
+      for (id, name) in shapes {
+        let context = "\(size.name) \(name)"
+        try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"\(id)\"]")
+        try await ui.waitUntil("!document.querySelector('#source-graph').hidden && document.querySelector('#source-graph').getAttribute('aria-pressed') !== 'true'", "\(context): Graph is offered and closed")
+        _ = try await ui.value("""
+          (() => { const host = document.querySelector('#source-graph-host'); window.__rebGraphPaint = null;
+            document.querySelector('#source-graph').addEventListener('click', () => {
+              const started = performance.now();
+              const ready = () => host.querySelector('.block-graph-state').hidden && (host.querySelector('.block-graph-stats')?.textContent ?? '').includes('blocks');
+              const poll = () => requestAnimationFrame(() => {
+                if (!ready()) { if (performance.now() - started < 60000) poll(); return; }
+                requestAnimationFrame(() => { window.__rebGraphPaint = performance.now() - started; });
+              });
+              poll();
+            }, {capture: true, once: true});
+            return true; })()
+          """)
+        try await ui.click("#source-graph")
+        try await ui.waitUntil("typeof window.__rebGraphPaint === 'number'", timeout: 60, "\(context): the graph did not draw")
+        let paint = try await ui.value("window.__rebGraphPaint") as? Double ?? -1
+        let stats = try await ui.value("document.querySelector('#source-graph-host .block-graph-stats').textContent") as? String ?? ""
+        let error = try await ui.value("document.querySelector('#source-graph-host .block-graph-state').dataset.kind") as? String ?? ""
+        XCTAssertNotEqual(error, "error", "\(context): the graph drew without an error")
+        if name == "exceptions" {
+          let key = try await ui.value("document.querySelector('#source-graph-host .block-graph-legend').textContent") as? String ?? ""
+          XCTAssertTrue(key.contains("exception") && key.contains("unresolved"), "\(context): the key names exception and unresolved edges: \(key)")
+        }
+        try await assertLayout(ui, "#screen-sources", context)
+        try await assertInert(ui, context)
+        try await ui.screenshot("block-graph-\(name)-\(size.name)")
+        var frames: [String: Any] = [:]
+        for view in ["open", "fit"] {
+          if view == "fit" {
+            _ = try await ui.value("document.querySelector('#source-graph-host .block-graph-canvas').dispatchEvent(new KeyboardEvent('keydown', {key: '0', bubbles: true, cancelable: true}))")
+            try await ui.settle()
+            // Fit leaves the overlays clear: under the overview cue and the
+            // minimap the graph's canvas holds only its background. The CSS
+            // pixel at each side is skipped, where a card that ends on the
+            // clear area's edge may antialias.
+            let covered = try await ui.json("""
+              (() => { const host = document.querySelector('#source-graph-host'), canvas = host.querySelector('.block-graph-canvas'), box = canvas.getBoundingClientRect();
+                const sx = canvas.width / box.width, sy = canvas.height / box.height, context = canvas.getContext('2d');
+                const drawn = selector => { const element = host.querySelector(selector); if (!element || element.hidden) return -1;
+                  const r = element.getBoundingClientRect(), x = Math.max(0, Math.ceil((r.left - box.left + 1) * sx)), y = Math.max(0, Math.ceil((r.top - box.top + 1) * sy));
+                  const w = Math.min(canvas.width, Math.floor((r.right - box.left - 1) * sx)) - x, h = Math.min(canvas.height, Math.floor((r.bottom - box.top - 1) * sy)) - y;
+                  if (w <= 0 || h <= 0) return -1;
+                  const data = context.getImageData(x, y, w, h).data; let other = 0;
+                  for (let i = 4; i < data.length; i += 4) if (data[i] !== data[0] || data[i + 1] !== data[1] || data[i + 2] !== data[2]) other += 1;
+                  return other; };
+                return {cue: drawn('.block-graph-lod'), minimap: drawn('.block-graph-minimap')}; })()
+              """)
+            XCTAssertLessThanOrEqual(covered["cue"] as? Int ?? 1, 0, "\(context): Fit draws nothing under the overview cue: \(covered)")
+            XCTAssertLessThanOrEqual(covered["minimap"] as? Int ?? 1, 0, "\(context): Fit draws nothing under the minimap: \(covered)")
+            try await assertLayout(ui, "#screen-sources", "\(context) fitted")
+            try await ui.screenshot("block-graph-\(name)-fit-\(size.name)")
+          }
+          // Shift+Arrow is dispatched once a frame, after this callback asks
+          // for the next one, so the graph draws each pan first in the next
+          // frame. It steps right, down, left and up in turn, so every frame
+          // draws a new view and none reaches the edge a pan stops at.
+          let result = try await ui.json("""
+            (async () => { const canvas = document.querySelector('#source-graph-host .block-graph-canvas');
+              const press = key => canvas.dispatchEvent(new KeyboardEvent('keydown', {key, shiftKey: true, bubbles: true, cancelable: true}));
+              const zoom = document.querySelector('#source-graph-host .block-graph-zoom').textContent, intervals = [], draws = [];
+              await new Promise(done => { let last = 0, count = 0;
+                const tick = now => { if (last) { intervals.push(now - last); draws.push(performance.now() - now); } last = now;
+                  if (count++ === 90) { done(); return; } press(['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'][count % 4]); requestAnimationFrame(tick); };
+                requestAnimationFrame(tick); });
+              const stats = list => { list.sort((a, b) => a - b); return {p50: Math.round(list[list.length >> 1]), p95: Math.round(list[Math.floor(list.length * 0.95)]), max: Math.round(list[list.length - 1])}; };
+              return {zoom, interval: stats(intervals), draw: stats(draws)}; })()
+            """)
+          frames[view] = result
+          medians.append(("\(context) \(view)", (result["interval"] as? [String: Any])?["p50"] as? Double ?? .infinity, result))
+        }
+        print("RENDERED_UI_GRAPH \(size.name) \(name) firstPaintMs=\(Int(paint)) stats=\(String(reflecting: stats)) frames=\(frames)")
+        // Fitted whole, Shift+Arrow far past the bottom right stops on the
+        // drawing: the canvas holds more than its background.
+        _ = try await ui.value("""
+          (() => { const canvas = document.querySelector('#source-graph-host .block-graph-canvas');
+            for (const key of ['ArrowRight', 'ArrowDown']) for (let i = 0; i < 400; i += 1) canvas.dispatchEvent(new KeyboardEvent('keydown', {key, shiftKey: true, bubbles: true, cancelable: true}));
+            return true; })()
+          """)
+        try await ui.settle()
+        let colors = try await ui.value("""
+          (() => { const canvas = document.querySelector('#source-graph-host .block-graph-canvas'), data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data, seen = new Set();
+            for (let i = 0; i < data.length && seen.size < 2; i += 4) seen.add((data[i] << 16) | (data[i + 1] << 8) | data[i + 2]);
+            return seen.size; })()
+          """) as? Int ?? 0
+        XCTAssertGreaterThan(colors, 1, "\(context): a pan far past the drawing left the canvas blank")
+        if name == "dispatch256" { try await assertEdgeKey(ui, context) }
+        try await ui.click("#source-graph")
+      }
+      let floor = medians.filter { $0.context.hasPrefix("\(size.name) exceptions ") }.map(\.median).max() ?? .infinity
+      let bound = max(50, 2 * floor)
+      print("RENDERED_UI_GRAPH_BOUND \(size.name) floorMs=\(floor) boundMs=\(bound)")
+      for entry in medians {
+        XCTAssertLessThanOrEqual(entry.median, bound, "\(entry.context): panning is not smooth against this machine's \(floor) ms floor: \(entry.result)")
+      }
+    }
+  }
+
+  // The footer's key names the edge kinds drawn, here the loop's table edges,
+  // beside the graph and linear divider. Where the footer is too narrow to
+  // show it inline, Space on Key opens it whole and Escape returns a visible
+  // focus ring to Key, clear of the divider. A short window opens the graph
+  // without Linear; it is shown for the check and hidden again, so the
+  // shapes after this one draw as before.
+  @MainActor
+  private func assertEdgeKey(_ ui: Harness, _ context: String) async throws {
+    let linearHidden = try await ui.value("document.querySelector('.sources-editor').hasAttribute('data-graph-linear-hidden')") as? Bool == true
+    if linearHidden { try await ui.click("#source-graph-host .block-graph-tool", containing: "Linear") }
+    try await ui.waitUntil("!document.querySelector('#pane-divider-source-graph').hidden", "\(context): the graph and linear split has no divider")
+    let kinds = try await ui.value("document.querySelector('#source-graph-host .block-graph-legend').textContent") as? String ?? ""
+    XCTAssertTrue(kinds.contains("table"), "\(context): the key names table edges: \(kinds)")
+    let key = "#source-graph-host .block-graph-key-toggle"
+    if try await ui.value("getComputedStyle(document.querySelector('\(key)')).display === 'none'") as? Bool == true {
+      try await assertFullyVisible(ui, "#source-graph-host .block-graph-legend", "\(context) inline edge key")
+    } else {
+      _ = try await ui.value("(document.querySelector('\(key)').focus(), 1)")
+      try await ui.key(49, " ")
+      try await ui.waitUntil("document.querySelector('\(key)').getAttribute('aria-expanded') === 'true'", "\(context): Space did not open the edge key")
+      try await assertFullyVisible(ui, "#source-graph-host .block-graph-foot[data-key-open] > .block-graph-legend", "\(context) edge key")
+      try await ui.screenshot("block-graph-edge-key-\(context.replacingOccurrences(of: " ", with: "-"))")
+      try await ui.key(53, "\u{1B}")
+      try await ui.waitUntil("document.querySelector('\(key)').getAttribute('aria-expanded') === 'false' && document.activeElement === document.querySelector('\(key)')",
+        "\(context): Escape did not close the edge key onto Key")
+      let keyFocus = try await ui.json("__rebUiProbe.focusState()")
+      XCTAssertEqual(keyFocus["focusVisible"] as? Bool, true, "\(context): Key shows keyboard focus: \(keyFocus)")
+      XCTAssertNotEqual(keyFocus["indicator"] as? String, "none", "\(context): Key draws a focus ring: \(keyFocus)")
+    }
+    try await assertGraphDividerClear(ui, "\(context) Key beside the divider")
+    if linearHidden { try await ui.click("#source-graph-host .block-graph-tool", containing: "Linear") }
   }
 
   // Run offline: the dialog names the local sandbox above every field, sends
@@ -3667,20 +3824,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("!document.querySelector('#pane-divider-source-graph').hidden", "\(size.name): the graph and linear split has no divider")
       try await assertGraphDividerClear(ui, "\(size.name) wasm identification divider")
       try await ui.screenshot("wasm-identification-divider-\(size.name)")
-      // Key sits in the footer beside the divider. Space opens the edge key
-      // and Escape returns a visible focus ring to Key, clear of the divider.
-      let key = "#source-graph-host .block-graph-key-toggle"
-      _ = try await ui.value("(document.querySelector('\(key)').focus(), 1)")
-      try await ui.key(49, " ")
-      try await ui.waitUntil("document.querySelector('\(key)').getAttribute('aria-expanded') === 'true'", "\(size.name): Space did not open the edge key")
-      try await assertFullyVisible(ui, "#source-graph-host .block-graph-foot[data-key-open] > .block-graph-legend", "\(size.name) edge key")
-      try await ui.key(53, "\u{1B}")
-      try await ui.waitUntil("document.querySelector('\(key)').getAttribute('aria-expanded') === 'false' && document.activeElement === document.querySelector('\(key)')",
-        "\(size.name): Escape did not close the edge key onto Key")
-      let keyFocus = try await ui.json("__rebUiProbe.focusState()")
-      XCTAssertEqual(keyFocus["focusVisible"] as? Bool, true, "\(size.name): Key shows keyboard focus: \(keyFocus)")
-      XCTAssertNotEqual(keyFocus["indicator"] as? String, "none", "\(size.name): Key draws a focus ring: \(keyFocus)")
-      try await assertGraphDividerClear(ui, "\(size.name) Key focused beside the divider")
+      // The key names the edge kinds a drawing has. This module's functions
+      // are single blocks, so with no edge drawn the footer offers no Key
+      // (test25b opens it on the interpreter loop's table edges).
+      let footer = try await ui.json("(() => { const host = document.querySelector('#source-graph-host'); return {key: host.querySelector('.block-graph-key-toggle').hidden, kinds: host.querySelectorAll('.block-graph-legend .block-graph-key').length}; })()")
+      XCTAssertEqual(footer["key"] as? Bool, true, "\(size.name): a drawing without edges offers no Key: \(footer)")
+      XCTAssertEqual(footer["kinds"] as? Int, 0, "\(size.name): a drawing without edges names no edge kind: \(footer)")
       // Drag the divider with the pointer to the graph's minimum, where the
       // Functions menu must still open whole, and then to the linear view's
       // minimum. Home on the divider restores the default split and forgets

@@ -26,6 +26,13 @@ const report = join(root, 'build/rendered-ui-qa');
 const usage = 'usage: node tools/check-origin-trace-rendered-ui.mjs [--only <testName>]';
 const argv = process.argv.slice(2);
 const maximumHeight = process.env.REB_RENDERED_UI_MAX_HEIGHT;
+// A session folder (events.jsonl, origin-trace.jsonl, request-signals.jsonl,
+// artifacts) that test45FlowGraphPane also opens in the Graph pane, served by
+// a second packaged backend: how a large session draws in WebKit.
+const flowStores = process.env.REB_RENDERED_UI_FLOW_STORES;
+if (flowStores !== undefined) {
+  for (const name of ['events.jsonl', 'artifacts']) assert(existsSync(join(flowStores, name)), `REB_RENDERED_UI_FLOW_STORES has no ${name}`);
+}
 if (maximumHeight !== undefined) {
   assert(/^\d+$/.test(maximumHeight) && Number.isSafeInteger(Number(maximumHeight)) && Number(maximumHeight) >= 560,
     'REB_RENDERED_UI_MAX_HEIGHT must be an integer of at least 560 CSS pixels');
@@ -110,6 +117,7 @@ async function waitForFile(path, child, timeout = 30000) {
 const temporary = await mkdtemp(join(tmpdir(), 'reb-rendered-ui-'));
 let backend;
 let failingBackend;
+let flowBackend;
 let agentStandIn;
 const agentRequests = [];
 let log = '';
@@ -175,6 +183,22 @@ fetch("/getcaptcha");
     {type: 'content_block_start', index: 0, content_block: {type: 'text', text: ''}},
     {type: 'content_block_delta', index: 0, delta: {type: 'text_delta', text: answer}},
     {type: 'content_block_stop', index: 0}, {type: 'message_delta', delta: {stop_reason: 'end_turn'}, usage: {output_tokens: 32}}, {type: 'message_stop'}]);
+  // An answer streamed a word every 20 ms until the app hangs up, or for a
+  // minute, so test0bCopyWhileAgentStreams acts while the agent's events arrive.
+  const slowTurn = response => {
+    response.write(sse([{type: 'message_start', message: {id: `msg_${Math.random().toString(36).slice(2)}`, type: 'message', role: 'assistant', model: 'claude-opus-5-5', content: [], stop_reason: null, usage: {input_tokens: 16, output_tokens: 0}}},
+      {type: 'content_block_start', index: 0, content_block: {type: 'text', text: ''}}]));
+    let word = 0;
+    const timer = setInterval(() => {
+      if (word < 3000) {
+        response.write(sse([{type: 'content_block_delta', index: 0, delta: {type: 'text_delta', text: `streamed-word-${word++} `}}]));
+        return;
+      }
+      clearInterval(timer);
+      response.end(sse([{type: 'content_block_stop', index: 0}, {type: 'message_delta', delta: {stop_reason: 'end_turn'}, usage: {output_tokens: word}}, {type: 'message_stop'}]));
+    }, 20);
+    response.on('close', () => clearInterval(timer));
+  };
   agentStandIn = createServer((request, response) => {
     let body = '';
     request.setEncoding('utf8');
@@ -190,7 +214,8 @@ fetch("/getcaptcha");
       // A turn's first request asks for a tool; the request carrying its result
       // gets the answer. Earlier turns' results are history, not this signal.
       const last = JSON.stringify(JSON.parse(body || '{}').messages?.at(-1) ?? '');
-      response.end(last.includes('tool_result') ? textTurn() : toolTurn());
+      if (last.includes('Stream slowly')) slowTurn(response);
+      else response.end(last.includes('tool_result') ? textTurn() : toolTurn());
     });
   });
   await new Promise(done => agentStandIn.listen(0, '127.0.0.1', done));
@@ -227,6 +252,19 @@ fetch("/getcaptcha");
   assert.equal(failure.status, 503);
   assert.match((await failure.json()).error, /analysis-worker-failed: spawn \(1 omitted artifacts\)/);
 
+  let flowURL = null;
+  if (flowStores !== undefined) {
+    const flowRoot = join(temporary, 'flow-fixture'), flowEndpoint = join(flowRoot, 'endpoint');
+    await mkdir(flowRoot, {recursive: true});
+    flowBackend = spawn(join(host, 'Contents/MacOS/OriginTraceBackend'), ['--host', '127.0.0.1', '--port', '0',
+      '--endpoint-file', flowEndpoint, '--store', join(flowStores, 'events.jsonl'), '--trace-store', join(flowStores, 'origin-trace.jsonl'),
+      '--signal-store', join(flowStores, 'request-signals.jsonl'), '--artifacts', join(flowStores, 'artifacts'),
+      '--api-collection', join(flowRoot, 'collection.json'), '--local-analyst', join(flowRoot, 'analyst.json'),
+      '--js-invocation-site-store', join(flowRoot, 'sites.json')],
+    {cwd: temporary, stdio: 'ignore'});
+    flowURL = `${await waitForFile(flowEndpoint, flowBackend, 300000)}/?native=1`;
+  }
+
   const missingBrave = join(temporary, 'no-brave', 'Brave Browser Development.app', 'Contents', 'MacOS', 'Brave Browser Development');
   const derived = join(root, 'build/rendered-ui-derived');
   log += await run('xcodebuild', ['build-for-testing', '-project', join(harness, 'OriginTraceRenderedUITests.xcodeproj'),
@@ -252,6 +290,7 @@ fetch("/getcaptcha");
     CommandLineArguments: ['--ui-url', uiURL, '--api-collection', stores.apiCollection, '--local-analyst', stores.localAnalyst],
     EnvironmentVariables: {
       ...(maximumHeight === undefined ? {} : {REB_RENDERED_UI_MAX_HEIGHT: maximumHeight}),
+      ...(flowURL === null ? {} : {REB_RENDERED_UI_FLOW_URL: flowURL}),
       REB_DISABLE_AUTOMATIC_LIVE_SESSION: '1',
       // An explicit Brave that does not exist: Start in the start panel fails
       // at once and nothing launches, whatever Brave this machine has.
@@ -371,6 +410,7 @@ fetch("/getcaptcha");
 } finally {
   await writeFile(join(report, 'xcodebuild.log'), log).catch(() => {});
   if (failingBackend && failingBackend.exitCode === null) failingBackend.kill('SIGTERM');
+  if (flowBackend && flowBackend.exitCode === null) flowBackend.kill('SIGTERM');
   agentStandIn?.close();
   if (backend && backend.exitCode === null) backend.kill('SIGTERM');
   // Stop any app instance still running from this relocated copy.

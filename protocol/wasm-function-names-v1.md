@@ -89,7 +89,7 @@ and one `analyst_names` status member. No captured field changes.
 | `get_wasm_function_graph` | `analyst_name` for the function; the module's names in `analyst_names.functions`, so a `call N` row resolves |
 | `get_wasm_pseudocode` | `analyst_name` for the function; the module's names in `analyst_names.functions`, so a callee row resolves. The listing text and the callee table keep the module-supplied names |
 | `get_xrefs` | `selection.wasm_sha256` and `selection.function_index` identify the selection; rows that name a Wasm function carry `function_index` and `analyst_name`. A `call_indirect` row names a callee only when its table entry resolved in this instance; a null, out-of-bounds, foreign or unresolved entry is labeled by its resolution and carries no `function_index` |
-| `get_flow_graph` | Wasm nodes carry `sha256` and `analyst_name` |
+| `get_flow_graph` | Wasm nodes carry `sha256` and `analyst_name`; every page carries `analyst_names` |
 | `get_request_stack` | Wasm frames carry `module_sha256` and `analyst_name`, in the stack and every task segment |
 
 `analyst_names` has `status` (`none`, `ready`, `malformed`, `ambiguous` or
@@ -112,9 +112,10 @@ stored-evidence window runs, so they join names the same way. The
   an unchanged library costs one `stat` per read. Every library write renames a
   new file into place, so a new generation always has a new inode.
 - A library without Wasm names leaves documents unchanged apart from the small
-  status member. The flow graph, cached as bytes, is parsed only when one scan
-  of its `sha256` members finds a module that has a name; otherwise it is
-  extended as text. Its node and edge budgets bound that parse.
+  status member. The flow graph joins names while it encodes a generation's
+  nodes from typed values, and encodes again only when the library file
+  changes, so a page is a slice of that encoding and a name costs no parse of
+  the answer.
 - The UI asks every 2 s whether the library changed, with its last ETag.
   `GET /api/local-analyst` answers an unchanged file with 304 from the same
   `stat` (device, inode, size, modification time) and never reads it, so a name

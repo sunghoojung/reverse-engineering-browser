@@ -85,6 +85,169 @@ pub fn content(root: &Path, artifact: &Value, maximum: usize) -> Result<Vec<u8>>
     }
     Ok(bytes)
 }
+
+/// Verified reads of many artifacts' content for one pass, with the store's
+/// `blobs` directory resolved and opened once. A validated record's content
+/// path is `blobs/<sha256>.bin`, so the directory is the only component that
+/// could lead outside the store: it must be a real directory inside the
+/// canonical root, and each blob is opened beneath it without following a
+/// link, which refuses a link `content` would follow to a file inside the
+/// store. Size and SHA-256 are checked on every read; integrity is never
+/// cached.
+pub struct Blobs {
+    #[cfg(unix)]
+    directory: File,
+    #[cfg(not(unix))]
+    root: std::path::PathBuf,
+}
+
+impl Blobs {
+    /// The store's blobs directory, or None when the store has none.
+    pub fn open(root: &Path) -> Result<Option<Self>> {
+        let root = match root.canonicalize() {
+            Ok(root) => root,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let path = root.join("blobs");
+            let opened = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&path);
+            match opened {
+                Ok(directory) => Ok(Some(Self { directory })),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(_) => Err(Error::new(
+                    500,
+                    "Artifact content path escapes the artifact store",
+                )),
+            }
+        }
+        #[cfg(not(unix))]
+        Ok(Some(Self { root }))
+    }
+
+    /// The content of the blob with this SHA-256 into `bytes`, when it is a
+    /// regular file of `byte_size` bytes, at most `maximum`, whose digest
+    /// matches.
+    pub fn read(
+        &self,
+        sha256: &[u8; 32],
+        byte_size: u64,
+        maximum: usize,
+        bytes: &mut Vec<u8>,
+    ) -> Result<()> {
+        let name = format!("{}.bin", hex::encode(sha256));
+        #[cfg(unix)]
+        let file = {
+            use std::os::fd::{AsRawFd, FromRawFd};
+            let name = std::ffi::CString::new(name)
+                .map_err(|_| Error::new(500, "Malformed artifact content path"))?;
+            // SAFETY: `directory` is an open directory descriptor this value
+            // owns for the call, `name` is a NUL-terminated string that lives
+            // across it, and a returned descriptor is owned by the File at once.
+            let fd = unsafe {
+                libc::openat(
+                    self.directory.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            // SAFETY: `fd` was just opened and nothing else owns it.
+            unsafe { File::from_raw_fd(fd) }
+        };
+        #[cfg(not(unix))]
+        let file = regular_file(&self.root.join("blobs").join(name))?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(Error::new(
+                500,
+                "Artifact content path escapes the artifact store",
+            ));
+        }
+        if metadata.len() != byte_size {
+            return Err(Error::new(500, "Artifact content byte size is invalid")
+                .with_code(Code::ArtifactIntegrity));
+        }
+        if byte_size > maximum as u64 {
+            return Err(Error::bad("Artifact content exceeds its byte limit"));
+        }
+        bytes.clear();
+        file.take(maximum as u64 + 1).read_to_end(bytes)?;
+        if bytes.len() as u64 != byte_size {
+            return Err(Error::new(500, "Artifact content byte size is invalid")
+                .with_code(Code::ArtifactIntegrity));
+        }
+        if Sha256::digest(&bytes[..]).as_slice() != sha256 {
+            return Err(Error::new(500, "Artifact content hash is invalid")
+                .with_code(Code::ArtifactIntegrity));
+        }
+        Ok(())
+    }
+
+    /// `work` applied to each item's verified content, or to its read error,
+    /// on a few threads that each reuse one buffer. Results keep the items'
+    /// order. Items whose `wanted` is None are skipped. Stops early, leaving
+    /// the rest None, once `cancel` is set.
+    pub fn read_all<T: Sync, R: Send>(
+        &self,
+        items: &[T],
+        wanted: impl Fn(&T) -> Option<([u8; 32], u64, usize)> + Sync,
+        work: impl Fn(&T, Result<&[u8]>) -> R + Sync,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Vec<Option<R>> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // Reads are small and mostly cached: a few threads hide the open and
+        // read latency without crowding the backend's other blocking readers.
+        let threads = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .clamp(1, 8)
+            .min(items.len().max(1));
+        let next = AtomicUsize::new(0);
+        let mut results: Vec<Option<R>> = Vec::with_capacity(items.len());
+        results.resize_with(items.len(), || None);
+        let parts: Vec<Vec<(usize, R)>> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..threads)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let (mut done, mut bytes) = (Vec::new(), Vec::new());
+                        loop {
+                            let at = next.fetch_add(1, Ordering::Relaxed);
+                            if at >= items.len() || cancel.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            let Some((sha256, byte_size, maximum)) = wanted(&items[at]) else {
+                                continue;
+                            };
+                            let read = self.read(&sha256, byte_size, maximum, &mut bytes);
+                            done.push((at, work(&items[at], read.map(|()| &bytes[..]))));
+                        }
+                        done
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| {
+                    worker
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                })
+                .collect()
+        });
+        for (at, result) in parts.into_iter().flatten() {
+            results[at] = Some(result);
+        }
+        results
+    }
+}
+
 pub fn verified_range(
     root: &Path,
     artifact: &Value,

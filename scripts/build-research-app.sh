@@ -60,6 +60,7 @@ decoder_binary="${repo_root}/build/reb-decoder"
 agent_core_source="${repo_root}/apps/research-ui/macos/AgentCore.swift"
 agent_bridge_source="${repo_root}/apps/research-ui/macos/AgentBridge.swift"
 session_panel_source="${repo_root}/apps/research-ui/macos/SessionPanel.swift"
+page_outbox_source="${repo_root}/apps/research-ui/macos/NativePageOutbox.swift"
 agent_cli_source="${repo_root}/apps/research-ui/macos/AgentCLI.swift"
 agent_chatgpt_source="${repo_root}/apps/research-ui/macos/AgentChatGPTAuth.swift"
 cargo build --locked --release --manifest-path "${repo_root}/apps/deobfuscator-worker/Cargo.toml"
@@ -101,7 +102,7 @@ if application.is_dir():
 PY
 mkdir -p "${research_ui_resources}"
 # One explicit packaged copy serves both the native scheme and live HTTP UI.
-for asset in index.html app.css block_graph.css block_graph.js wasm_diff_view.css wasm_diff_view.js wasm_readable.css wasm_readable.js block_graph_layout.js graph_layout_client.js flow_graph.css flow_graph.js flow_graph_layout.js flow_timeline.js flow_workspace.css flow_workspace.js entropy_map.css entropy_map.js wasm_identification.css wasm_identification.js wasm_inspection.js command_palette.js evidence_chips.js evidence_chips.css app_state.js evidence_models.js evidence_package.js float32_inspector.js evidence_comparison.js source_syntax.js source_format.js code_view.js source_facts.js source_search.js source_tree.js traffic_view.js traffic_payload.js traffic_index.js traffic_filter.js traffic_columns.js traffic_overview.js traffic_copy.js network_scope.js request_tabs.js traffic_response.js traffic_headers.js traffic_cookies.js captured_client.js captured_export_formats.js vm_debugger.js vm_static.js vm_static_view.js vm_contextual.js vm_contextual_evidence.js vm_contextual_view.js vm_analysis_packs.js vm_opcode_ledger.js vm_opcode_ledger_view.js vm_semantics.js pane_layout.js native_console_completion.js native_console.js investigation_navigation.js investigation_notebook.js evidence_names.js wasm_function_names.js invocation_sites.js request_stack.js app.js agent_panel.js agent_panel.css session_panel.js session_panel.css vm_program_workspace.js xrefs_view.js xrefs_view.css value_flow_view.js value_flow_view.css wasm_runner.js wasm_runner.css debugger_sidebar.js debugger_sidebar.css debugger_pause.js debugger_pause.css analyst_runner_core.js analyst_runner_node.js; do
+for asset in index.html app.css block_graph.css block_graph.js wasm_diff_view.css wasm_diff_view.js wasm_readable.css wasm_readable.js block_graph_layout.js graph_layout_client.js flow_graph.css flow_graph.js flow_graph_model.js flow_graph_layout.js flow_graph_worker.js flow_timeline.js flow_workspace.css flow_workspace.js entropy_map.css entropy_map.js wasm_identification.css wasm_identification.js wasm_inspection.js command_palette.js evidence_chips.js evidence_chips.css app_state.js evidence_models.js evidence_package.js float32_inspector.js evidence_comparison.js source_syntax.js source_format.js code_view.js source_facts.js source_search.js source_tree.js traffic_view.js traffic_payload.js traffic_index.js traffic_filter.js traffic_columns.js traffic_overview.js traffic_copy.js network_scope.js request_tabs.js traffic_response.js traffic_headers.js traffic_cookies.js captured_client.js captured_export_formats.js vm_debugger.js vm_static.js vm_static_view.js vm_contextual.js vm_contextual_evidence.js vm_contextual_view.js vm_analysis_packs.js vm_opcode_ledger.js vm_opcode_ledger_view.js vm_semantics.js pane_layout.js native_console_completion.js native_console.js investigation_navigation.js investigation_notebook.js evidence_names.js wasm_function_names.js invocation_sites.js request_stack.js app.js agent_panel.js agent_panel.css session_panel.js session_panel.css vm_program_workspace.js xrefs_view.js xrefs_view.css value_flow_view.js value_flow_view.css wasm_runner.js wasm_runner.css debugger_sidebar.js debugger_sidebar.css debugger_pause.js debugger_pause.css analyst_runner_core.js analyst_runner_node.js; do
   cp "${repo_root}/apps/research-ui/${asset}" "${research_ui_resources}/${asset}"
 done
 # The agent dock's LangGraph loop: one browser bundle per provider, built from
@@ -120,17 +121,20 @@ cargo build --locked --release --manifest-path "${repo_root}/apps/origin-trace-b
 graph_layout_vendor="${repo_root}/apps/origin-trace-backend/vendor"
 triskel_revision="196ba112eba992c1460af3097c038defcf7a7e45"
 {
-  echo "OriginTraceBackend includes these projects, unmodified, for graph layout."
+  echo "OriginTraceBackend includes these projects for graph layout."
   echo
   echo "Triskel, commit ${triskel_revision}, under the Mozilla Public License 2.0."
   echo "Source: https://github.com/triskellib/triskel/tree/${triskel_revision}"
   echo "The compiled files are lib/include and lib/src without lib/src/renderer and"
   echo "lib/src/llvm, also in this application's source at"
-  echo "apps/origin-trace-backend/vendor/triskel."
+  echo "apps/origin-trace-backend/vendor/triskel. One is modified:"
+  echo "lib/src/layout/sugiyama/sugiyama.cpp is compiled with std::ranges::stable_sort"
+  echo "in place of std::ranges::sort in coordinate_assignment_iteration, a change"
+  echo "apps/origin-trace-backend/build.rs makes to a copy at build time."
   echo
   cat "${graph_layout_vendor}/triskel/LICENSE"
   echo
-  echo "{fmt} 12.2.0, header only, under the MIT license."
+  echo "{fmt} 12.2.0, header only and unmodified, under the MIT license."
   echo "Source: https://github.com/fmtlib/fmt/tree/12.2.0"
   echo
   cat "${graph_layout_vendor}/fmt/LICENSE"
@@ -223,7 +227,7 @@ smoke "${repo_root}/build/check-stored-evidence-backend" "${macos_path}/OriginTr
   -framework Cocoa \
   -framework WebKit \
   -framework Security \
-  "${swift_source}" "${stored_evidence_backend_source}" "${workspace_lease_source}" "${decoder_service_source}" "${agent_core_source}" "${agent_cli_source}" "${agent_chatgpt_source}" "${agent_bridge_source}" "${session_panel_source}" "${live_session_source}" "${live_session_options_source}" "${recorded_session_source}" "${close_guard_source}" "${close_smoke_source}" "${client_project_export_source}" "${client_project_smoke_source}" \
+  "${swift_source}" "${stored_evidence_backend_source}" "${workspace_lease_source}" "${decoder_service_source}" "${agent_core_source}" "${agent_cli_source}" "${agent_chatgpt_source}" "${agent_bridge_source}" "${session_panel_source}" "${page_outbox_source}" "${live_session_source}" "${live_session_options_source}" "${recorded_session_source}" "${close_guard_source}" "${close_smoke_source}" "${client_project_export_source}" "${client_project_smoke_source}" \
   -o "${macos_path}/OriginTrace"
 
 "${macos_path}/OriginTrace" --check-native-ui-url

@@ -49,7 +49,7 @@
 const flowGraphLayout = (() => {
   const METRICS = {nodeW: 220, nodeH: 34, gapX: 30, gapY: 64, segGap: 14, trackGap: 8, trackPad: 20, runGap: 24, laneGap: 56,
     lanePadX: 22, lanePadTop: 52, lanePadBottom: 26, margin: 40, top: 0, wrap: 5, bandAspect: 1, aspect: 1.6, portGap: 18, portInset: 14,
-    gutter: 18, loop: 20, sweeps: 12, transpose: true, slack: 1, refine: 1, straighten: 3, jogWork: 16};
+    gutter: 18, loop: 20, sweeps: 12, transpose: true, slack: 1, refine: 1, straighten: 3, jogWork: 16, centre: true};
   /* Route point types: the segment that arrives at the point. A corner is
    * rounded toward the next point. */
   const MOVE = 0, CURVE = 1, LINE = 2, CORNER = 3;
@@ -1534,6 +1534,9 @@ const flowGraphLayout = (() => {
       });
       return columns;
     };
+    // An aspect of 0 asks for one column: a lineage, read sideways, is one
+    // row of realms.
+    if (!(m.aspect > 0)) return columnsFor(Infinity);
     const score = columns => {
       let width = 2 * m.margin + (columns.length - 1) * m.laneGap, height = 0;
       for (const column of columns) { width += column.w; height = Math.max(height, column.h); }
@@ -1611,13 +1614,14 @@ const flowGraphLayout = (() => {
 
   // Engine -------------------------------------------------------------------
 
-  /** The layered layout of every band, before the bands are placed. */
-  function layered(graph, m) {
+  /** The layered layout of every band, before the bands are placed. The
+   * bands are in call order, or in `order`, which names every lane. */
+  function layered(graph, m, order = null) {
     const t0 = now(), {count, from, to} = graph;
     const w = Float32Array.from({length: count}, (_, v) => graph.w?.[v] ?? m.nodeW);
     const h = Float32Array.from({length: count}, (_, v) => graph.h?.[v] ?? m.nodeH);
     const layer = layerCards(graph, w, h, m);
-    const keys = laneOrder(count, graph, from, to, layer);
+    const keys = order ?? laneOrder(count, graph, from, to, layer);
     const I = buildItems(graph, w, h, layer, keys, m);
     const t1 = now();
     const tree = treap(I.total), largest = I.bands.reduce((max, band) => Math.max(max, band.items.length), 0);
@@ -1787,8 +1791,9 @@ const flowGraphLayout = (() => {
     let height = m.margin + m.top + highwayH;
     for (const band of I.bands) {
       const b = band.index, c = colOf[b], own = info[b];
-      // A band keeps its own width, centred in its column.
-      const laneX = colX[c] + (columns[c].w - own.w) / 2;
+      // A band keeps its own width, centred in its column, or at its start
+      // without `centre`, as a lineage's columns read from their tops.
+      const laneX = colX[c] + (m.centre ? (columns[c].w - own.w) / 2 : 0);
       offsetX[b] = laneX + m.lanePadX;
       for (const v of band.cards) {
         x[v] = offsetX[b] + (triskel[b] ? own.lx[v] : I.x[v] - w[v] / 2);
@@ -1897,30 +1902,87 @@ const flowGraphLayout = (() => {
     const outcomes = I.bands.map(band => ({reason: {code: band.cards.length < 2 ? 'one_card' : 'not_served'}}));
     const report = {revision: null, failure: null};
     if (engine === 'triskel') {
-      // Triskel is asked for each band of two or more cards, against the
-      // layered drawing's size with calls between bands on their usual sides.
-      const probe = routeState(I), sized = [];
-      for (const band of I.bands) {
-        if (band.cards.length < 2) continue;
-        const side = new Int8Array(I.edges);
-        for (const e of band.crossOut) side[e] = 1;
-        for (const e of band.crossIn) side[e] = -1;
-        const own = routeBand(I, band, side, probe, m);
-        const localIndex = new Map(band.cards.map((v, i) => [v, i]));
-        band.triskelEdges = [...band.forward, ...band.backs, ...band.loops].sort((a, b) => a - b);
-        sized.push({band, graph: {nodes: band.cards.map(v => [state.w[v], state.h[v]]), edges: band.triskelEdges.map(e => [localIndex.get(graph.from[e]), localIndex.get(graph.to[e])]),
-          width: own.contentW + own.gutterW, height: own.contentH}});
-      }
+      const sized = realmGraphs(graph, state, m);
       const answer = await graphLayoutClient.layOut(sized.map(item => item.graph), {all, signal, onSend: () => progress?.({stage: 'triskel'})});
-      sized.forEach((item, index) => { outcomes[item.band.index] = answer.outcomes[index]; });
+      sized.forEach((item, index) => { outcomes[item.lane] = answer.outcomes[index]; });
       report.revision = answer.revision;
       report.failure = answer.failure;
     }
     return assemble(graph, state, outcomes, report, m);
   }
+
+  /** Triskel's input: each band of two or more cards as graph-layout-v1
+   * takes it, sized as its layered drawing with its calls between bands on
+   * their usual sides, {lane, key, graph}. Each band keeps its calls in the
+   * order Triskel answers them (`triskelEdges`). */
+  function realmGraphs(graph, state, m = state.m) {
+    const {I} = state, probe = routeState(I), sized = [];
+    for (const band of I.bands) {
+      if (band.cards.length < 2) continue;
+      const side = new Int8Array(I.edges);
+      for (const e of band.crossOut) side[e] = 1;
+      for (const e of band.crossIn) side[e] = -1;
+      const own = routeBand(I, band, side, probe, m);
+      const localIndex = new Map(band.cards.map((v, i) => [v, i]));
+      band.triskelEdges = [...band.forward, ...band.backs, ...band.loops].sort((a, b) => a - b);
+      sized.push({lane: band.index, key: band.key, graph: {nodes: band.cards.map(v => [state.w[v], state.h[v]]),
+        edges: band.triskelEdges.map(e => [localIndex.get(graph.from[e]), localIndex.get(graph.to[e])]), width: own.contentW + own.gutterW, height: own.contentH}});
+    }
+    return sized;
+  }
+
+  /* The Graph pane's band interface (flow_graph_worker.js): the layered
+   * layout is drawn first, each realm's Triskel answer is swapped in when it
+   * comes, a refold keeps the band order and each unchanged band's answer,
+   * and a lineage is laid out on its own, left to right. A state is
+   * `layered`'s with the metrics (`m`) and each band's outcome and the
+   * report; it stays where the layout was made. */
+
+  /** The layered layout and its state: every band layered, or with the
+   * outcome `kept` gives its key. `order` keeps a band order. */
+  function layeredBands(graph, metrics = METRICS, order = null, kept = () => null, report = {revision: null, failure: null}) {
+    const m = {...METRICS, ...metrics}, state = layered(graph, m, order);
+    state.m = m;
+    state.outcomes = state.I.bands.map(band => kept(band.key) ?? {reason: {code: band.cards.length < 2 ? 'one_card' : 'not_served'}});
+    state.report = report;
+    return {layout: assemble(graph, state, state.outcomes, state.report, m), state};
+  }
+  /** The layout with `outcomes` per band ({result}, Triskel's, or {reason});
+   * the state keeps them for the next call. */
+  function withRealms(graph, state, outcomes, report) {
+    state.outcomes = outcomes; state.report = report;
+    return assemble(graph, state, outcomes, report, state.m);
+  }
+  /** A refold's layout: the bands keep `previous`'s order, and each lane in
+   * `keep` its outcome, so Triskel is not asked again for it. A kept lane
+   * must hold the same cards and calls inside it, in the same order, in both
+   * graphs. Layers, order and placement are a band's own, so a kept band
+   * whose calls to other bands also stayed draws as it did. A lane new to
+   * the graph takes call order again. */
+  function relayout(graph, previous, keep, metrics = previous.m) {
+    const index = new Map(previous.keys.map((key, band) => [key, band]));
+    for (let v = 0; v < graph.count; v += 1) if (!index.has(graph.lane[v])) return layeredBands(graph, metrics);
+    const present = new Set(graph.lane), order = previous.keys.filter(key => present.has(key));
+    return layeredBands(graph, metrics, order, key => (keep.has(key) ? previous.outcomes[index.get(key)] : null), previous.report);
+  }
+  /** A lineage: the layered layout turned to read left to right, so realms
+   * are columns in call order, each from its top, and causes sit left of
+   * what they led to (`direction` right). */
+  function lineage(graph, metrics = METRICS) {
+    const m = {...METRICS, ...metrics};
+    // A band's side pads become its top and bottom: the top holds its name.
+    // One column turned is one row of realms.
+    const {layout: local} = layeredBands({...graph, w: graph.h, h: graph.w},
+      {...m, lanePadX: m.lanePadTop, lanePadTop: m.lanePadX, lanePadBottom: m.lanePadX, aspect: 0, centre: false});
+    const routes = Float32Array.from(local.routes);
+    for (let i = 0; i < routes.length; i += 2) { const x = routes[i]; routes[i] = routes[i + 1]; routes[i + 1] = x; }
+    return {x: local.y, y: local.x, w: local.h, h: local.w, layer: local.layer, back: local.back, routes, routeTypes: local.routeTypes, routeStart: local.routeStart,
+      lanes: local.lanes.map(lane => ({key: lane.key, x: lane.y, y: lane.x, w: lane.h, h: lane.w})), width: local.height, height: local.width, direction: 'right',
+      engine: {name: 'layered', revision: null, triskel: false, realms: [], failure: null}};
+  }
   const transfer = layout => [layout.x.buffer, layout.y.buffer, layout.w.buffer, layout.h.buffer, layout.layer.buffer, layout.back.buffer,
     layout.routes.buffer, layout.routeTypes.buffer, layout.routeStart.buffer];
-  return {METRICS, ROUTE: {MOVE, CURVE, LINE, CORNER}, runAsync, transfer};
+  return {METRICS, ROUTE: {MOVE, CURVE, LINE, CORNER}, runAsync, transfer, layered: layeredBands, realmGraphs, withRealms, relayout, lineage};
 })();
 
 if (typeof importScripts === 'function') {

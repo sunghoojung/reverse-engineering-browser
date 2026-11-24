@@ -101,7 +101,9 @@ current product path.
 - [Repeater v1](./product/repeater-v1.md)
 - [Request Interception v1](./product/request-interception-v1.md)
 - [Request Origin Trace v1](./product/request-origin-trace-v1.md)
-- Draft: [Flow graph v2: request lineage and VM evidence](./product/flow-graph-v2.md)
+- Draft: [Flow graph v3: request lineage and VM evidence](./product/flow-graph-v3.md),
+  extending the implemented [flow graph v2](../protocol/flow-graph-v2.md)
+  contract
 - [Request Field Hypothesis Test v1](./product/request-field-hypothesis-test-v1.md)
 - Retired: [Request Field Provenance v1](./product/request-field-provenance-v1.md)
 - [Request Value Test v2](./product/request-value-test-v2.md)

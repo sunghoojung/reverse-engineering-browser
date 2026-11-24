@@ -217,13 +217,15 @@ final class Harness {
       try await Task.sleep(nanoseconds: 100_000_000)
     }
     // Say whether input was lost or the app refused it (for example a stale
-    // history entry), so an intermittent timeout is diagnosable from the log.
+    // history entry), and what an open dialog's status line says, so an
+    // intermittent timeout is diagnosable from the log.
     let context = (try? await json(
       "({screens: [...document.querySelectorAll('.screen')].filter(screen => !screen.hidden).map(screen => screen.id).join(','), " +
       "focus: __rebUiProbe.describe(document.activeElement), documentFocused: document.hasFocus(), notice: document.querySelector('#investigation-notice')?.textContent ?? '', " +
       "back: document.querySelector('#investigation-back')?.innerText ?? '', forward: document.querySelector('#investigation-forward')?.innerText ?? '', " +
       "location: location.href, readyState: document.readyState, outgoing: window.__rebOutgoingDocument === true, " +
-      "requests: typeof state === 'object' ? state.requests.length : -1})"
+      "requests: typeof state === 'object' ? state.requests.length : -1, " +
+      "dialogStatus: [...document.querySelectorAll('dialog[open] [role=status]')].map(node => node.textContent).join(' | ')})"
     )).map { "\($0)" } ?? "state unavailable"
     throw HarnessError("Timed out: \(message) [active=\(NSApp.isActive), key=\(window.isKeyWindow), \(context)]")
   }
@@ -239,6 +241,17 @@ final class Harness {
     try await waitUntil(
       "window.__rebOutgoingDocument === undefined && document.readyState === 'complete' && typeof state === 'object' && (\(requireRequests ? "state.requests.length > 0" : "true")) && !document.querySelector('#screen-traffic').hidden",
       timeout: 30, "the packaged UI did not load retained evidence")
+    try await settle()
+  }
+
+  // Opens another loopback UI in this window, such as the large Flow
+  // fixture's own backend, and waits for its document.
+  func load(_ url: URL) async throws {
+    _ = try await script("window.__rebOutgoingDocument = true; return true;")
+    webView.load(URLRequest(url: url))
+    try await waitUntil(
+      "window.__rebOutgoingDocument === undefined && document.readyState === 'complete' && typeof state === 'object'",
+      timeout: 120, "the UI at \(url.absoluteString) did not load")
     try await settle()
   }
 
@@ -274,7 +287,9 @@ final class Harness {
   }
 
   // Native pointer input: AppKit routes the event through WKWebView hit testing.
-  func click(_ selector: String, containing text: String? = nil) async throws {
+  // `holding` keeps the button down that long before the release, as a
+  // person's click does, while the app keeps running.
+  func click(_ selector: String, containing text: String? = nil, holding: Duration = .zero) async throws {
     try await activate()
     let point = try await reveal(selector, containing: text)
     try await activate()
@@ -282,6 +297,7 @@ final class Harness {
     let location = NSPoint(x: point.x, y: webView.isFlipped ? point.y : webView.bounds.height - point.y)
     let windowPoint = webView.convert(location, to: nil)
     for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+      if type == .leftMouseUp && holding > .zero { try await Task.sleep(for: holding) }
       guard let event = NSEvent.mouseEvent(
         with: type, location: windowPoint, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
         windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)
@@ -592,6 +608,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
   @MainActor
   private func assertLayout(_ ui: Harness, _ scope: String, _ context: String,
                             file: StaticString = #filePath, line: UInt = #line) async throws {
+    // Layout is judged as it paints: a ResizeObserver resizes a canvas after
+    // layout in the same frame, so a probe between the DOM change and that
+    // frame measures a size the user never sees.
+    try await ui.settle()
     let layout = try await ui.json("__rebUiProbe.layoutIssues('\(scope)')")
     let issues = layout["issues"] as? [String] ?? ["probe failed"]
     XCTAssertGreaterThan(layout["inView"] as? Int ?? 0, 0, "\(context): no visible controls in \(scope)", file: file, line: line)
@@ -932,6 +952,32 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
+  // Where the Traffic footer's counts are separate boxes, each, such as
+  // "98.0 kB transferred ·", stays on one line. The footer sits below the rows
+  // and inside the list, whatever its height.
+  @MainActor
+  private func assertFooterItemsWhole(_ ui: Harness, _ context: String) async throws {
+    let footer = try await ui.json("""
+      (() => { const status = document.querySelector('#request-window-status'), width = status.getBoundingClientRect().width;
+        const lines = item => { const range = document.createRange(); range.selectNodeContents(item);
+          return new Set([...range.getClientRects()].filter(rect => rect.width > 0).map(rect => Math.round(rect.top))).size; };
+        const counts = [...status.querySelectorAll('.request-window-count')], box = selector => document.querySelector(selector).getBoundingClientRect();
+        const rows = box('#request-rows'), bar = box('#screen-traffic .request-window'), pane = box('#screen-traffic .request-pane');
+        return {items: status.children.length, counts: counts.length, broken: counts.filter(item => lines(item) > 1).map(item => item.textContent),
+          lines: lines(status), text: status.textContent, display: getComputedStyle(status).display,
+          rowsBottom: rows.bottom, footerTop: bar.top, footerBottom: bar.bottom, paneBottom: pane.bottom}; })()
+      """)
+    print("RENDERED_UI_TRAFFIC_FOOTER \(context) \(footer)")
+    XCTAssertEqual(footer["counts"] as? Int, 3, "\(context): requests, transferred and resources are separate counts: \(footer)")
+    if footer["display"] as? String == "flex" {
+      XCTAssertEqual(footer["broken"] as? [String] ?? ["unreadable"], [], "\(context): a footer count broke across lines: \(footer)")
+    }
+    XCTAssertLessThanOrEqual(footer["rowsBottom"] as? Double ?? .infinity, (footer["footerTop"] as? Double ?? 0) + 1,
+      "\(context): the footer covers no row: \(footer)")
+    XCTAssertLessThanOrEqual(footer["footerBottom"] as? Double ?? .infinity, (footer["paneBottom"] as? Double ?? 0) + 1,
+      "\(context): the list cuts off its footer: \(footer)")
+  }
+
   // Columns fit the table, every cell with text has a tooltip, and Size, the
   // waterfall and the timing strip follow the fixture's recorded lengths and
   // timestamps. The strip and the column menu work from the keyboard.
@@ -963,6 +1009,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     XCTAssertEqual(table["untitled"] as? Int, 0, "\(context): truncated cells have tooltips")
     let footer = table["footer"] as? String ?? ""
     XCTAssertTrue(footer.contains(" transferred · ") && footer.contains(" resources"), "\(context): footer totals: \(footer)")
+    try await assertFooterItemsWhole(ui, context)
     XCTAssertEqual(table["bars"] as? Int, 120, "\(context): the timing strip has one bar per bucket")
     // syntheticTransferSize(3) in evidence-fixture.mjs.
     if visible.contains("size") {
@@ -1045,6 +1092,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertTrue(rowText.contains(expected.hostileUrlMarker), "\(size.name): hostile URL renders as literal text: \(rowText)")
       try await assertInert(ui, "\(size.name) traffic detail")
       try await assertLayout(ui, "#screen-traffic", "\(size.name) traffic detail")
+      try await assertFooterItemsWhole(ui, "\(size.name) traffic detail")
       try await ui.screenshot("traffic-detail-\(size.name)")
 
       // End and Home reach the ends of the whole list through unmounted rows; focus follows the selection.
@@ -2283,7 +2331,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
         """)
       XCTAssertTrue((state["marker"] as? String ?? "").contains("Service worker · installed from 1 tab"),
                     "\(size.name): the registrant link is marked on its row: \(state)")
-      XCTAssertTrue((state["footer"] as? String ?? "").contains("2 service worker requests no page caused not recorded"),
+      XCTAssertTrue((state["footer"] as? String ?? "").contains("2\u{00a0}service worker requests no page caused not recorded"),
                     "\(size.name): the footer names the counted no-page requests: \(state)")
       XCTAssertEqual(state["unresolvedHidden"] as? Bool, true, "\(size.name): the linked row is no capture error")
       try await assertLayout(ui, "#screen-traffic", "\(size.name) service worker registrant")
@@ -2699,6 +2747,200 @@ final class OriginTraceRenderedUITests: XCTestCase {
         "metadata-only cookies state did not render")
       try await ui.click("#inspector-tab-general")
     }
+  }
+
+  // The Graph pane draws the session's stacks from paged answers and keeps
+  // its words whole: the heading's title, count and state, and the footer's
+  // stack count, are never cut. A card lights its stacks once they are read,
+  // V draws their lineage alone, Fit reaches the whole session, and Details
+  // lists every caller and callee. With REB_RENDERED_UI_FLOW_STORES the same
+  // pane also opens that large session from its own backend.
+  @MainActor
+  func test45FlowGraphPane() async throws {
+    let expected = try Expectations.load()
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      // The worker's request is in the session that holds the stacks.
+      try await show(ui, "traffic")
+      try await ui.click("#screen-traffic .request-row", containing: expected.workerStackHost)
+      try await show(ui, "backtrace")
+      try await flowGraphPane(ui, size.name, ready: 60)
+    }
+    guard let large = ProcessInfo.processInfo.environment["REB_RENDERED_UI_FLOW_URL"].flatMap(URL.init(string:)) else { return }
+    let ui = try await prepare(windowSizes[0])
+    let harnessPage = try XCTUnwrap(ui.webView.url)
+    try await ui.load(large)
+    try await ui.activate()
+    // A lag monitor from the first frame: the longest the page went without
+    // running a task while the pane read, folded and drew the session.
+    _ = try await ui.value("""
+      (() => { window.__rebFlowLag = {max: 0, started: performance.now()}; let last = performance.now();
+        const tick = () => { const now = performance.now(); window.__rebFlowLag.max = Math.max(window.__rebFlowLag.max, now - last); last = now; window.__rebFlowLag.timer = setTimeout(tick, 16); };
+        tick(); return true; })()
+      """)
+    // Flow takes its session from the captured requests, so the list is
+    // read first.
+    try await show(ui, "traffic")
+    try await ui.waitUntil("document.querySelector('#screen-traffic .request-row') !== null", timeout: 600, "large: the session's requests were not listed")
+    // Each state the pane passes through, timed from Flow being shown.
+    _ = try await ui.value("""
+      (() => { const host = document.querySelector('#flow-graph-host'), box = host.querySelector('.flow-graph-state'), started = performance.now();
+        const phases = window.__rebFlowPhases = [];
+        const note = () => { const phase = `${host.dataset.state}: ${box.hidden ? '' : box.querySelector('strong')?.textContent ?? ''}`;
+          if (phases.at(-1)?.phase !== phase) phases.push({phase, at: Math.round(performance.now() - started) / 1000}); };
+        new MutationObserver(note).observe(host, {attributes: true, attributeFilter: ['data-state'], subtree: false});
+        new MutationObserver(note).observe(box, {childList: true, subtree: true, characterData: true, attributes: true});
+        // WebKit slows a page whose window is hidden or in the background.
+        const mark = phase => phases.push({phase, at: Math.round(performance.now() - started) / 1000});
+        document.addEventListener('visibilitychange', () => mark(`page ${document.visibilityState}`));
+        window.addEventListener('blur', () => mark('window blurred'));
+        window.addEventListener('focus', () => mark('window focused'));
+        note(); return true; })()
+      """)
+    let reportPhases: () async throws -> Void = {
+      let phases = try await ui.value("window.__rebFlowPhases.map(item => `${item.phase} at ${item.at} s`).join(' → ')") as? String ?? ""
+      print("RENDERED_UI_FLOW large phases: \(phases)")
+    }
+    try await show(ui, "backtrace")
+    do { try await flowGraphPane(ui, "large", ready: 1800) } catch { try? await reportPhases(); throw error }
+    try await reportPhases()
+    let lag = try await ui.json("({max: Math.round(window.__rebFlowLag.max), seconds: Math.round(performance.now() - window.__rebFlowLag.started) / 1000})")
+    print("RENDERED_UI_FLOW large session: longest task gap \(lag["max"] ?? "?") ms over \(lag["seconds"] ?? "?") s")
+    // Triskel in the background: Cancel stops a run in progress and offers
+    // the realms it left; asked, Triskel counts its seconds beside Cancel
+    // over the layered drawing, and Cancel stops it and offers it again.
+    let triskel = "document.querySelector('#flow-graph-host .flow-graph-triskel')"
+    let elapsed = "document.querySelector('#flow-graph-host .flow-graph-engine-run')"
+    let engine = "document.querySelector('#flow-graph-host .flow-graph-engine')"
+    try await ui.waitUntil("!\(triskel).hidden || (\(elapsed).hidden && !/waiting/.test(\(engine).title))", timeout: 600, "large: Triskel's state was not shown")
+    if try await ui.value("!\(triskel).hidden && \(triskel).textContent === 'Cancel'") as? Bool == true {
+      try await ui.click("#flow-graph-host .flow-graph-triskel")
+      try await ui.waitUntil("\(elapsed).hidden && !/waiting/.test(\(engine).title)", timeout: 60, "large: Cancel did not stop the unasked realms")
+    }
+    if try await ui.value("!\(triskel).hidden && \(triskel).textContent === 'Lay out with Triskel'") as? Bool == true {
+      try await ui.click("#flow-graph-host .flow-graph-triskel")
+      try await ui.waitUntil("\(triskel).textContent === 'Cancel' && /^Laying out with Triskel · \\d+ s$/.test(\(elapsed).textContent) && document.querySelector('#flow-graph-host .flow-graph-state').hidden",
+        timeout: 60, "large: Lay out with Triskel did not run Triskel over the drawing")
+      try await assertLayout(ui, "#flow-graph-host .flow-graph-status", "large Graph status while Triskel runs")
+      try await ui.screenshot("flow-graph-triskel-large")
+      try await ui.click("#flow-graph-host .flow-graph-triskel")
+      try await ui.waitUntil("!\(triskel).hidden && \(triskel).textContent === 'Lay out with Triskel' && \(elapsed).hidden && /Triskel was stopped/.test(\(engine).title)",
+        timeout: 60, "large: Cancel did not stop Triskel")
+      print("RENDERED_UI_FLOW large: Lay out with Triskel ran over the drawing and Cancel stopped it")
+    } else {
+      print("RENDERED_UI_FLOW large: Triskel laid out every realm unasked")
+    }
+    // The narrow window shows one pane at a time; the heading keeps its
+    // whole text with the large session's counts there too.
+    try await ui.resize(width: windowSizes[1].width, height: windowSizes[1].height)
+    if try await ui.value("document.querySelector('#flow-pane-graph').dataset.shown !== 'true'") as? Bool == true {
+      try await ui.click("#flow-tab-graph")
+    }
+    try await ui.waitUntil("document.querySelector('#flow-graph-host').dataset.state === 'ready'", timeout: 60, "large narrow: the Graph pane did not draw")
+    try await assertFlowHeading(ui, "large narrow")
+    try await assertLayout(ui, "#flow-graph-host .flow-graph-tools", "large narrow Graph tools")
+    try await assertLayout(ui, "#flow-graph-host .flow-graph-status", "large narrow Graph status")
+    try await ui.screenshot("flow-graph-narrow-large")
+    try await ui.load(harnessPage)
+  }
+
+  // Every part of the Flow graph heading shows its whole text, whatever the
+  // tools and an open Details drawer take, and its counts are grouped; the
+  // tools wrap left of the drawer rather than run under it.
+  @MainActor
+  private func assertFlowHeading(_ ui: Harness, _ name: String, file: StaticString = #filePath, line: UInt = #line) async throws {
+    try await ui.settle()
+    let heading = try await ui.json("""
+      (() => { const graph = document.querySelector('#flow-graph-host'), parts = [...graph.querySelectorAll('.flow-graph-heading > *')];
+        const tools = graph.querySelector('.flow-graph-tools').getBoundingClientRect(), box = graph.querySelector('.flow-graph-heading').getBoundingClientRect();
+        const drawer = graph.querySelector('.flow-graph-inspector'), edge = drawer && !drawer.hidden ? drawer.getBoundingClientRect().left : Infinity;
+        return {cut: parts.filter(part => part.textContent && part.scrollWidth > part.clientWidth + 0.5).map(part => part.textContent),
+          text: parts.map(part => part.textContent).join(' '), overlap: !(tools.top >= box.bottom || tools.left >= box.right),
+          underDrawer: box.right > edge + 0.5, toolsUnderDrawer: tools.right > edge + 0.5}; })()
+      """)
+    print("RENDERED_UI_FLOW \(name) heading: \(heading["text"] ?? "?")")
+    XCTAssertEqual(heading["cut"] as? [String], [], "\(name): the heading is cut: \(heading)", file: file, line: line)
+    XCTAssertEqual(heading["overlap"] as? Bool, false, "\(name): the tools cover the heading: \(heading)", file: file, line: line)
+    XCTAssertEqual(heading["underDrawer"] as? Bool, false, "\(name): Details covers the heading: \(heading)", file: file, line: line)
+    XCTAssertEqual(heading["toolsUnderDrawer"] as? Bool, false, "\(name): Details covers the tools: \(heading)", file: file, line: line)
+    let text = heading["text"] as? String ?? ""
+    XCTAssertTrue(text.contains("stack"), "\(name): the heading names the stacks: \(heading)", file: file, line: line)
+    XCTAssertNil(text.range(of: #"\d{4}"#, options: .regularExpression), "\(name): a heading count is not grouped: \(heading)", file: file, line: line)
+  }
+
+  @MainActor
+  private func flowGraphPane(_ ui: Harness, _ name: String, ready: TimeInterval) async throws {
+    // One pane at a time in a narrow window: the Graph is the first.
+    if try await ui.value("document.querySelector('#flow-pane-graph').dataset.shown !== 'true'") as? Bool == true {
+      try await ui.click("#flow-tab-graph")
+    }
+    let started = Date()
+    try await ui.waitUntil("['ready', 'empty', 'error', 'unavailable'].includes(document.querySelector('#flow-graph-host').dataset.state)",
+      timeout: ready, "\(name): the Graph pane did not draw")
+    let state = try await ui.json("({state: document.querySelector('#flow-graph-host').dataset.state, text: document.querySelector('#flow-graph-host .flow-graph-state').innerText})")
+    XCTAssertEqual(state["state"] as? String, "ready", "\(name): the Graph pane did not draw: \(state)")
+    guard state["state"] as? String == "ready" else { return }
+    print(String(format: "RENDERED_UI_FLOW %@: drawn in %.1f s", name, Date().timeIntervalSince(started)))
+    try await assertFlowHeading(ui, name)
+    // An empty timeline is a strip, never a dock of empty space.
+    let dock = try await ui.json("""
+      ({state: document.querySelector('#flow-timeline').dataset.state ?? '', height: document.querySelector('#flow-pane-timeline').getBoundingClientRect().height,
+        shown: document.querySelector('#flow-pane-timeline').dataset.shown})
+      """)
+    if ["idle", "empty"].contains(dock["state"] as? String ?? ""), dock["shown"] as? String == "true" {
+      XCTAssertLessThanOrEqual(dock["height"] as? Double ?? 999, 34, "\(name): an empty timeline keeps only its head: \(dock)")
+    }
+    // The footer's count stays whole however long the line before it.
+    let footerInside: () async throws -> [String: Any] = {
+      try await ui.json("""
+        (() => { const line = document.querySelector('#flow-graph-host .flow-graph-selection').getBoundingClientRect(),
+          count = document.querySelector('#flow-graph-host .flow-graph-selection-count').getBoundingClientRect();
+          return {inside: count.left >= line.left - 0.5 && count.right <= line.right + 0.5 && count.width > 0, title: document.querySelector('#flow-graph-host .flow-graph-selection').title}; })()
+        """)
+    }
+    let count = "document.querySelector('#flow-graph-host .flow-graph-selection-count')?.textContent ?? ''"
+    _ = try await ui.value("document.querySelector('#flow-graph-host .flow-graph-canvas').focus({focusVisible: true})")
+    // A chosen request lights the stacks its record named, read on demand.
+    if try await ui.value("document.querySelector('#flow-graph-host .flow-graph-selection-what').textContent.startsWith('Selected request')") as? Bool == true {
+      try await ui.waitUntil("/^[\\d,]+ stacks? · [\\d,]+ cards?$/.test(\(count))", timeout: 60, "\(name): the selected request's stacks were not read")
+      let footer = try await footerInside()
+      XCTAssertEqual(footer["inside"] as? Bool, true, "\(name): the request's counts are cut from the footer: \(footer)")
+      try await ui.screenshot("flow-graph-request-\(name)")
+      try await ui.key(53, "\u{1B}")
+    }
+    // A card from the keyboard: its stacks are read on demand.
+    try await ui.key(124, "\u{F703}", modifiers: [.function, .numericPad])
+    try await ui.waitUntil("/^[\\d,]+ stacks?$/.test(\(count))", timeout: 60, "\(name): the selected card's stacks were not read")
+    let footer = try await footerInside()
+    XCTAssertEqual(footer["inside"] as? Bool, true, "\(name): the stack count is cut from the footer: \(footer)")
+    try await ui.screenshot("flow-graph-selected-\(name)")
+    // V draws the lit stacks alone, left to right, and V again returns.
+    try await ui.key(9, "v")
+    try await ui.waitUntil("document.querySelector('#flow-graph-host').hasAttribute('data-lineage') && document.querySelector('#flow-graph-host .flow-graph-engine').textContent.startsWith('Lineage')",
+      timeout: 60, "\(name): V did not draw the lineage")
+    try await ui.screenshot("flow-graph-lineage-\(name)")
+    try await ui.key(9, "v")
+    try await ui.waitUntil("!document.querySelector('#flow-graph-host').hasAttribute('data-lineage')", "\(name): V again did not return to the session")
+    // Details lists every caller and callee; nothing is counted as more.
+    try await ui.key(34, "i")
+    try await ui.waitUntil("!document.querySelector('#flow-graph-host .flow-graph-inspector').hidden", "\(name): I did not open Details")
+    let details = try await ui.value("document.querySelector('#flow-graph-host .flow-graph-inspector').innerText") as? String ?? ""
+    XCTAssertNil(details.range(of: #"\b\d[\d,]* more\b"#, options: .regularExpression), "\(name): Details counts entries it does not list: \(details)")
+    try await assertLayout(ui, "#flow-graph-host .flow-graph-inspector", "\(name) Graph details")
+    try await assertFlowHeading(ui, "\(name) with Details")
+    try await ui.screenshot("flow-graph-details-\(name)")
+    _ = try await ui.value("document.querySelector('#flow-graph-host .flow-graph-canvas').focus({focusVisible: true})")
+    try await ui.key(53, "\u{1B}")
+    try await ui.key(53, "\u{1B}")
+    // Fit shows the whole session: below the box zoom, one block per realm.
+    try await ui.key(29, "0")
+    try await ui.settle()
+    let zoom = try await ui.value("document.querySelector('#flow-graph-host .flow-graph-zoom').textContent") as? String ?? ""
+    print("RENDERED_UI_FLOW \(name): Fit at \(zoom)")
+    try await ui.screenshot("flow-graph-fit-\(name)")
+    // The tools float over the canvas by design; the probe covers them alone.
+    try await lightScreenshot(ui, "flow-graph-fit", name, scope: "#flow-graph-host .flow-graph-tools")
+    try await assertInert(ui, "\(name) flow graph")
   }
 
   @MainActor
@@ -4921,6 +5163,57 @@ final class OriginTraceRenderedUITests: XCTestCase {
     let cliStopped = try await ui.value("webkit.messageHandlers.rebAgent.postMessage({op: 'status'}).then(status => status.engine.cliRunning)") as? Bool
     XCTAssertEqual(cliStopped, false, "turning off ends the CLI")
     try await ui.click("[data-auth=\"key\"]")
+    try await ui.click("#agent-close")
+  }
+
+  // A researcher copies a request while the agent's answer streams in: native
+  // hands the page an event about every 20 ms, some of them between the press
+  // and the click, and the copy still keeps the activation WebKit asks of a
+  // clipboard write. It runs after test0AgentPanel, on the document the app
+  // loaded, which alone reaches the agent bridge.
+  @MainActor
+  func test0bCopyWhileAgentStreams() async throws {
+    let expected = try Expectations.load()
+    let pasteboard = NSPasteboard.general
+    let saved = pasteboard.string(forType: .string)
+    defer { pasteboard.clearContents(); if let saved { pasteboard.setString(saved, forType: .string) } }
+    let ui = try await prepare(windowSizes[0])
+    let on = "['ready', 'running', 'stopped'].includes(document.getElementById('agent-dock').dataset.state)"
+    try await ui.click("#agent-toggle")
+    try await ui.waitUntil("__rebUiProbe.count('#agent-turn-on') === 1 && !document.getElementById('agent-turn-on').disabled", "the setup state did not show")
+    try await ui.click("#agent-turn-on")
+    try await ui.waitUntil("__rebUiProbe.count('#agent-consent-accept') === 1", "the consent step did not show")
+    try await ui.click("#agent-level-read-only")
+    try await ui.click("#agent-consent-accept")
+    try await ui.waitUntil("\(on) && __rebUiProbe.count('#agent-consent-accept') === 0", timeout: 20, "the agent did not turn on")
+    try await ui.click("#screen-traffic .request-row", containing: expected.requestBodyHost)
+    try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
+    // The stand-in provider streams this answer a word at a time until the app hangs up.
+    try await ui.click("#agent-input")
+    try await ui.type("Stream slowly")
+    try await ui.key(36, "\r")
+    let streamed = "(__rebUiProbe.text('#agent-log').match(/streamed-word-/g) ?? []).length"
+    try await ui.waitUntil("\(streamed) > 0", timeout: 20, "the answer did not start streaming")
+    for attempt in 1...5 {
+      try await ui.waitUntil("document.querySelector('#request-copy-url').textContent === 'Copy'", "Copy did not return to its label")
+      try await ui.click("#request-copy-url")
+      try await ui.waitUntil("document.querySelector('.traffic-row-menu') !== null", "the Copy menu did not open")
+      pasteboard.clearContents()
+      let before = try await ui.value(streamed) as? Int ?? 0
+      try await ui.click(".traffic-row-menu [role=menuitem]", containing: "Copy as cURL", holding: .milliseconds(150))
+      try await ui.waitUntil("document.querySelector('#request-copy-url').textContent !== 'Copy'", "Copy as cURL did not finish")
+      let after = try await ui.value(streamed) as? Int ?? 0
+      XCTAssertGreaterThan(after, before, "attempt \(attempt): the answer streamed through the click")
+      let copied = try await ui.json("({label: document.querySelector('#request-copy-url').textContent, notice: document.querySelector('#investigation-notice')?.textContent ?? ''})")
+      XCTAssertEqual(copied["label"] as? String, "Copied", "attempt \(attempt): \(copied)")
+      let curl = pasteboard.string(forType: .string) ?? ""
+      XCTAssertTrue(curl.hasPrefix("curl 'https://\(expected.requestBodyHost)/"), "attempt \(attempt): \(curl)")
+    }
+    let streaming = try await ui.value("document.getElementById('agent-send').getAttribute('aria-label') !== 'Send'") as? Bool
+    XCTAssertEqual(streaming, true, "the answer was still streaming after the last copy")
+    try await ui.screenshot("agent-copy-while-streaming")
+    try await agentTurnOff(ui)
+    try await ui.waitUntil("!\(on)", timeout: 15, "the agent did not turn off")
     try await ui.click("#agent-close")
   }
 

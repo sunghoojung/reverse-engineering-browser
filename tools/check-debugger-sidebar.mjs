@@ -119,6 +119,10 @@ async function until(predicate, message, timeout = 4 * POLL) {
   }
 }
 const settle = () => sleep(30);
+// The poll waits four times as long as the last read took, rounded to whole
+// seconds in the status title. A loaded runner can end a stub read well after
+// its delay, so a check asks for at least an interval, never for one exactly.
+const pollSeconds = ui => Number(/every (\d+) seconds/.exec(ui.sidebar.querySelector('.debugger-sidebar-status').title)?.[1] ?? 0);
 // A held request can be released once the stub has reached its hold.
 const release = async entry => { await until(() => entry?.release, 'a held request'); entry.release(); };
 const event = (ui, type, init = {}) => Object.assign(new ui.window.Event(type, {bubbles: true, cancelable: true}), init);
@@ -596,7 +600,7 @@ await check('the live region ignores how long reads take', async () => {
   const region = ui.sidebar.querySelector('.debugger-sidebar-status [aria-live], .debugger-sidebar-status[aria-live]');
   const first = region.textContent;
   store.delay = 900;
-  await until(() => /every 4 seconds/.test(ui.sidebar.querySelector('.debugger-sidebar-status').title), 'a slower read lengthens the interval', 3 * POLL + 2000);
+  await until(() => pollSeconds(ui) >= 4, 'a slower read lengthens the interval', 3 * POLL + 2000);
   assert.equal(region.textContent, first, 'the interval is outside the live region');
   ui.close();
 });
@@ -927,9 +931,9 @@ await check('arming reads the confirmed set at once', async () => {
   const section = () => ui.text('[data-debugger-section="watch-rules"] .debugger-section-body');
   ui.open();
   await until(() => ui.sidebar.querySelector('.debugger-watch-form'), 'the form');
-  // Slow reads stretch the poll to 6 seconds; arming just after one read ends.
+  // Slow reads stretch the poll to 6 seconds or more; arming just after one read ends.
   store.delay = 1500;
-  await until(() => /every 6 seconds/.test(ui.sidebar.querySelector('.debugger-sidebar-status').title), 'a 6 second interval', 4 * POLL);
+  await until(() => pollSeconds(ui) >= 6, 'an interval of at least 6 seconds', 4 * POLL);
   const form = ui.sidebar.querySelector('.debugger-watch-form');
   form.querySelector('textarea').value = '/collect';
   form.dispatchEvent(event(ui, 'submit'));

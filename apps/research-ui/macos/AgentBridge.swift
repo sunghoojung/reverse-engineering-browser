@@ -16,6 +16,7 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
   private weak var window: NSWindow?
   private var trustedURL: URL?
   private var documentReady = false
+  private let outbox = NativePageOutbox()
   private var sessionKey: String?
   private let environment = ProcessInfo.processInfo.environment
   private lazy var urlSession: URLSession = {
@@ -79,6 +80,7 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
   // in-flight request end with the document that started them.
   func navigationWillStart() {
     documentReady = false
+    outbox.reset()
     sessionKey = nil
     proxy.cancelAll()
     stopCLI()
@@ -100,16 +102,27 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
   ) {
     guard message.name == Self.handlerName,
       message.webView === webView, message.frameInfo.isMainFrame,
-      documentReady, let trustedURL, webView?.url == trustedURL,
+      let trustedURL, webView?.url == trustedURL,
       message.frameInfo.request.url == trustedURL, originMatches(message, trustedURL),
-      let body = message.body as? [String: Any], let op = body["op"] as? String
+      let body = message.body as? [String: Any], let op = body["op"] as? String,
+      // A request for events can wait from before the load finishes; events
+      // are posted only after it has.
+      documentReady || op == "events"
     else {
       replyHandler(nil, "The agent is unavailable outside the application document.")
       return
     }
+    if op == "events" {
+      guard let page = body["page"] as? String, (1...64).contains(page.count) else {
+        replyHandler(nil, "Malformed request for events.")
+        return
+      }
+      outbox.wait(page: page, replyHandler)
+      return
+    }
     Task { @MainActor in
-      do { replyHandler(try await self.handle(op, body), nil) }
-      catch { replyHandler(nil, agentRedactedError(error.localizedDescription)) }
+      do { self.outbox.answer(replyHandler, try await self.handle(op, body), nil) }
+      catch { self.outbox.answer(replyHandler, nil, agentRedactedError(error.localizedDescription)) }
     }
   }
 
@@ -440,15 +453,11 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
     }
   }
 
-  // Captured values and model text move as JSON arguments, never as script text.
+  // Captured values and model text reach the page as data in the answer to
+  // its request for events (NativePageOutbox), never as script.
   func deliver(_ event: [String: Any]) {
-    guard documentReady, let webView, JSONSerialization.isValidJSONObject(event),
-      let data = try? JSONSerialization.data(withJSONObject: event)
-    else { return }
-    let payload = String(decoding: data, as: UTF8.self)
-    webView.callAsyncJavaScript(
-      "window.__rebAgentEvent && window.__rebAgentEvent(JSON.parse(payload));",
-      arguments: ["payload": payload], in: nil, in: .page, completionHandler: nil)
+    guard documentReady, JSONSerialization.isValidJSONObject(event) else { return }
+    outbox.post(event)
   }
 
   private func confirmSignOut() async throws -> Bool {

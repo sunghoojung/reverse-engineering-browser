@@ -8,8 +8,35 @@ std::ranges::to and std::ranges::contains: GCC 14 or later, Clang 18 or later, o
 Apple Clang. Point the cc crate at one with CXX or CXX_<target>, for example \
 CXX_x86_64_unknown_linux_gnu=g++-14 on Ubuntu 24.04.";
 
+/// A fix to one upstream Triskel source. The engine is compiled from a copy
+/// in `OUT_DIR` with `upstream` replaced by `fixed`, so the vendored file stays
+/// the upstream copy that `vendor/README.md` verifies.
+struct Fix {
+    /// The source, under `vendor/triskel/lib/src`.
+    file: &'static str,
+    /// Text that occurs exactly once in that source.
+    upstream: &'static str,
+    fixed: &'static str,
+}
+
+/// `SugiyamaAnalysis::coordinate_assignment_iteration` places a layer's
+/// nodes and edge waypoints in priority order, and the bounds it places them
+/// in (`min_x`, `max_x`) keep them apart only when entries of equal priority
+/// are placed left to right, as `min_x` says. `std::ranges::sort` does not
+/// keep that order: libc++ can reorder equal entries in a range of 24 or
+/// more, libstdc++ in one of more than 16. An entry placed before its left
+/// neighbour is bounded by where that neighbour was in the previous pass; the
+/// neighbour then moves without regard to it, and nodes overlap or an edge
+/// runs through a node. A stable sort keeps the order the bounds assume.
+const FIXES: &[Fix] = &[Fix {
+    file: "layout/sugiyama/sugiyama.cpp",
+    upstream: "    std::ranges::sort(sorted_indexes, [&](size_t a, size_t b) {",
+    fixed: "    std::ranges::stable_sort(sorted_indexes, [&](size_t a, size_t b) {",
+}];
+
 fn main() {
     let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest dir"));
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("out dir"));
     let triskel = manifest.join("vendor/triskel/lib");
     let fmt = manifest.join("vendor/fmt/include");
     let bridge = manifest.join("cpp/triskel_bridge.cpp");
@@ -24,6 +51,16 @@ fn main() {
         !sources.is_empty(),
         "vendor/triskel/lib/src holds no C++ sources; see vendor/README.md"
     );
+    for fix in FIXES {
+        let source = triskel.join("src").join(fix.file);
+        let at = sources
+            .iter()
+            .position(|path| *path == source)
+            .unwrap_or_else(|| {
+                panic!("{} is not vendored; see vendor/README.md", source.display())
+            });
+        sources[at] = fixed(&source, fix, &out);
+    }
 
     let mut base = cc::Build::new();
     base.cpp(true)
@@ -89,6 +126,26 @@ fn main() {
         .try_create_archive("reb_triskel", &objects)
         .unwrap_or_else(|error| fail(&bridge, &error));
     cc::try_emit_link_directives(&base, &library).unwrap_or_else(|error| fail(&bridge, &error));
+}
+
+/// Writes `source` with `fix` applied under `out` and returns its path. A new
+/// upstream revision without the text stops the build, so the fix is either
+/// carried over or dropped on purpose.
+fn fixed(source: &Path, fix: &Fix, out: &Path) -> PathBuf {
+    let text = std::fs::read_to_string(source)
+        .unwrap_or_else(|error| panic!("{}: {error}", source.display()));
+    assert_eq!(
+        text.matches(fix.upstream).count(),
+        1,
+        "{} no longer holds the text build.rs fixes once; see vendor/README.md",
+        source.display()
+    );
+    let copy = out.join("triskel-fixed").join(fix.file);
+    std::fs::create_dir_all(copy.parent().expect("a file has a directory"))
+        .unwrap_or_else(|error| panic!("{}: {error}", copy.display()));
+    std::fs::write(&copy, text.replacen(fix.upstream, fix.fixed, 1))
+        .unwrap_or_else(|error| panic!("{}: {error}", copy.display()));
+    copy
 }
 
 fn collect(directory: &Path, sources: &mut Vec<PathBuf>) {

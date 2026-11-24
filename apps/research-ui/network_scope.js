@@ -77,7 +77,8 @@
     return totals;
   }
 
-  function captureExclusionNotice(totals) {
+  // One Traffic footer item per kind of traffic the capture did not record.
+  function captureExclusionItems(totals) {
     const parts = [];
     if (totals?.requests > 0n) {
       parts.push(`${totals.requests} browser-internal ${totals.requests === 1n ? 'request' : 'requests'} not recorded`);
@@ -104,7 +105,7 @@
     if (totals?.nonOrdinaryPage > 0n) {
       parts.push(`${totals.nonOrdinaryPage} memory-cache ${totals.nonOrdinaryPage === 1n ? 'reuse' : 'reuses'} in SVG images or popups not recorded`);
     }
-    return parts.join(' · ');
+    return parts;
   }
 
   // A row recorded before scheme classes is browser-internal when only the
@@ -143,7 +144,7 @@
     if (button.textContent !== label) button.textContent = label;
   }
 
-  const api = Object.freeze({decodeCaptureExclusion, captureExclusionTotals, captureExclusionNotice,
+  const api = Object.freeze({decodeCaptureExclusion, captureExclusionTotals, captureExclusionItems,
     isBrowserInternalRequest, isBrowserInternalSourceUrl, browserInternalView, renderBrowserInternalToggle});
   global.RebNetworkScope = api;
   if (typeof module === 'object' && module?.exports) module.exports = api;

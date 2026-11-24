@@ -283,6 +283,19 @@ assert.deepEqual([...gapsDetail.querySelectorAll('li')].map(item => item.textCon
 }
 runInContext('state.headerCoverage = null; renderTrafficWindowStatus(1, 1, false);', context);
 assert.equal(gapsButton.hidden, true, 'no gap, no button');
+// Each footer item is its own span, the counts marked to stay on one line,
+// and the text reads as the items joined by " · ".
+// An item's leading number is kept on the line of the word it counts.
+runInContext(`state.captureExclusions = {serviceWorker: 2n};
+  renderTrafficWindowStatus(98, 98, true, '', {sizes: {transferred: 98000, resources: 764000}, hiddenInternal: 3});
+  state.captureExclusions = null;`, context);
+const footerStatus = document.getElementById('request-window-status');
+assert.deepEqual([...footerStatus.children].map(item => [item.className, item.textContent]), [['request-window-count', '98 / 98 requests · '],
+  ['request-window-count', '98.0\u00a0kB transferred · '], ['request-window-count', '764\u00a0kB resources · '],
+  ['request-window-count', '3\u00a0browser-internal hidden · '], ['', '2\u00a0service worker requests no page caused not recorded · '],
+  ['', 'Selection outside filter']]);
+assert.equal(footerStatus.textContent, '98 / 98 requests · 98.0\u00a0kB transferred · 764\u00a0kB resources · 3\u00a0browser-internal hidden · ' +
+  '2\u00a0service worker requests no page caused not recorded · Selection outside filter');
 // Payload reads the native body record and target only, never a CDP exchange.
 runInContext(`state.inspectorTab = 'payload'; renderInspector();`, context);
 const payload = document.getElementById('payload-inspector');

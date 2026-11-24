@@ -13540,12 +13540,29 @@ async fn request_detail_routes_report_what_their_read_covered() {
         document
     };
 
-    let indexed = read(
-        "/api/request-headers?session_id=1&request_id=17",
-        "RequestHeaders",
-    )
-    .await;
-    assert_eq!(indexed["coverage"]["scope"], "request_range", "{indexed}");
+    // A read folds the request index for a bounded slice first. On a loaded
+    // machine opening the index can spend that slice, and until the index
+    // places this request the read scans the whole small store and says so.
+    let mut answers = 0;
+    let indexed = loop {
+        let indexed = read(
+            "/api/request-headers?session_id=1&request_id=17",
+            "RequestHeaders",
+        )
+        .await;
+        if indexed["coverage"]["scope"] == "request_range" {
+            break indexed;
+        }
+        assert_eq!(indexed["coverage"]["scope"], "store", "{indexed}");
+        assert_eq!(indexed["coverage"]["complete"], true, "{indexed}");
+        assert_eq!(indexed["coverage"]["malformed_lines"], 1, "{indexed}");
+        answers += 1;
+        assert!(
+            answers < 240,
+            "the request index never placed request 17: {indexed}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
     assert_eq!(indexed["coverage"]["complete"], true);
     assert_eq!(indexed["hops"][0]["request"][0]["state"], "empty");
     // A damaged line past the request's bytes is outside this read.

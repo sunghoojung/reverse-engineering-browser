@@ -1231,7 +1231,7 @@ const pivotElements = {signalRequestProfile: new TrafficFixtureNode(), signalDet
 const signalTab = new TrafficFixtureNode("button");
 let pivotScreen;
 let pivotInspectorOpen = false;
-const signalPivots = runInNewContext(appSection("      function renderSignalRequestProfile()", "      function signalTabKey(") +
+const signalPivots = runInNewContext((await readFile(join(root, "apps/research-ui/evidence_chips.js"), "utf8")) + "\n" + appSection("      function renderSignalRequestProfile()", "      function signalTabKey(") +
   ";({renderSignalRequestProfile,renderFingerprintDetail})", {
   state: pivotState, elements: pivotElements, document: {...trafficDocument, querySelector: () => signalTab},
   textElement: (tag, className, text) => {const node = new TrafficFixtureNode(tag); node.className = className; node.textContent = text; return node;},
@@ -2784,7 +2784,7 @@ function observationFixtureContext() {
   const artifacts = [{protocol_version:1,session_id:'7',artifact_id:'9',navigation_id:'101',frame_id:'301',parent_artifact_id:'0',creator_event_id:'95',execution_context_id:'23',capture_origin:'network_response',kind:'javascript',url:'https://fixture.invalid/assets/collector.js',mime_type:'text/javascript',byte_size:observationSourceBytes.length,sha256:observationSourceHash,sensitive:false}];
   return {events,artifacts,request:{id:'evidence-investigation-request',origin:'live',method:'POST',path:'telemetry.fixture.invalid',hostOnly:true,events:events.filter(event=>event.category==='network')},eventsLimited:false};
 }
-const observationCode = (await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8')) + '\n' + packageSource;
+const observationCode = (await readFile(join(root,'apps/research-ui/evidence_chips.js'),'utf8')) + '\n' + (await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8')) + '\n' + packageSource;
 const observationUI = runInNewContext(observationCode + ';({evidenceObservationModel,evidenceRequestKey,evidenceArtifactReference,isBrokerResponse,isArtifactResponse})', {TextDecoder, Uint8Array});
 const nativeNetworkProjection = runInNewContext(observationCode + ';({requestsFromEvents,evidenceObservationOutcome,evidenceObservationLabel,evidencePayload})', {TextDecoder, Uint8Array});
 for (const disposition of ['proxy_destroyed', 'redirect_handoff']) {
@@ -2868,7 +2868,7 @@ function observationPanelFixture(narrow = false, options = {}) {
   let comparisonFetch=options.fetcher || (async()=>Response.json(comparisonResult));
   nodes['evidence-package-mode'].append(nodes['evidence-package-panel'],nodes['evidence-comparison-section']);
   nodes['evidence-comparison-section'].append(nodes['evidence-comparison-close'],nodes['evidence-comparison-unavailable'],nodes['evidence-comparison-panel']);
-  const create=runInNewContext(observationCode+'\n'+comparisonSource+';createEvidenceWorkspace',{document,TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,setInterval,clearInterval,fetch:(...args)=>comparisonFetch(...args),location:{protocol:options.protocol||'http:'},window:{matchMedia:()=>({matches:narrow})}});
+  const create=runInNewContext(observationCode+'\n'+comparisonSource+';createEvidenceWorkspace',{document,Node:ObservationNode,TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,setInterval,clearInterval,fetch:(...args)=>comparisonFetch(...args),location:{protocol:options.protocol||'http:'},window:{matchMedia:()=>({matches:narrow})}});
   const panel=create({getContext:()=>context,packagePanel:{sync(){},setVisible(value){packageVisible=value;if(!value)packageCancels++;}},onTrace(){},onRequest(){},onSource(){sourceCalls++;return true;},canOpenSource:()=>true,
     ...(options.rangeFetch?{fetcher:(...args)=>options.rangeFetch(...args)}:{})});
   panel.setVisible(true);

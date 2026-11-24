@@ -89,6 +89,11 @@ function debuggerButton(text, className, onClick) {
   return button;
 }
 
+// A loss or gap count in the locale grouping the status bar and its chips use.
+function debuggerCount(value) {
+  return globalThis.RebEvidenceChips?.formatCount(value) ?? String(value);
+}
+
 // The recorded monotonic time, exact to the microsecond.
 function debuggerTime(ns) {
   try {
@@ -954,8 +959,8 @@ function debuggerUnread(view) {
 function debuggerGapFlag(view) {
   const gaps = view.hooks.sequenceGaps?.();
   return typeof gaps === 'bigint' && gaps > 0n
-    ? debuggerFlag(`${gaps.toLocaleString('en-US')} sequence ${gaps === 1n ? 'gap' : 'gaps'}`,
-      `${gaps} sequence-gap IDs in the retained window: records may be missing, so a missing row is unknown rather than absent.`, 'gap')
+    ? debuggerFlag(`${debuggerCount(gaps)} sequence ${gaps === 1n ? 'gap' : 'gaps'}`,
+      `${debuggerCount(gaps)} sequence-gap IDs in the retained window: records may be missing, so a missing row is unknown rather than absent.`, 'gap')
     : null;
 }
 
@@ -1629,22 +1634,22 @@ function debuggerObservationsSection() {
       // Never hidden silently: each of these is a flag above the list.
       const malformed = answer.observations_malformed + observations.refused + (loaded?.refused ?? 0);
       if (malformed > 0) {
-        flags.push(debuggerFlag(`${malformed.toLocaleString('en-US')} malformed, not shown`,
-          `${malformed} ${malformed === 1 ? 'record' : 'records'} in these reads ${malformed === 1 ? 'was' : 'were'} malformed and ${malformed === 1 ? 'is' : 'are'} not shown.`));
+        flags.push(debuggerFlag(`${debuggerCount(malformed)} malformed, not shown`,
+          `${debuggerCount(malformed)} ${malformed === 1 ? 'record' : 'records'} in these reads ${malformed === 1 ? 'was' : 'were'} malformed and ${malformed === 1 ? 'is' : 'are'} not shown.`));
       }
       for (const gap of answer.observation_budget_gaps.slice(0, 2)) {
         flags.push(debuggerFlag(`Renderer ${gap.process_id} capped (older build)`,
-          `Renderer ${gap.process_id}, from an earlier build, reached its 1,024 observation records in frame ${gap.frame_id} (gap #${gap.sequence_number}); its later records were refused until the next capture.`, 'gap'));
+          `Renderer ${gap.process_id}, from an earlier build, reached its ${debuggerCount(1024)} observation records in frame ${gap.frame_id} (gap #${gap.sequence_number}); its later records were refused until the next capture.`, 'gap'));
       }
       if (answer.observation_budget_gaps.length > 2) {
-        flags.push(debuggerFlag(`${answer.observation_budget_gaps.length - 2} more capped`, 'Further renderers from earlier builds that reached their 1,024 observation records.', 'gap'));
+        flags.push(debuggerFlag(`${debuggerCount(answer.observation_budget_gaps.length - 2)} more capped`, `Further renderers from earlier builds that reached their ${debuggerCount(1024)} observation records.`, 'gap'));
       }
       const gap = debuggerGapFlag(view);
       if (gap) flags.push(gap);
       if (observations.olderError) flags.push(debuggerFlag(`Older records not read: ${observations.olderError}`));
       if (current && loaded?.dropped) {
-        flags.push(debuggerFlag(`${loaded.dropped.toLocaleString('en-US')} older ${loaded.dropped === 1 ? 'row' : 'rows'} dropped`,
-          `The list keeps at most ${DEBUGGER_SIDEBAR.rows.toLocaleString('en-US')} records, so ${loaded.dropped.toLocaleString('en-US')} older ${loaded.dropped === 1 ? 'row was' : 'rows were'} dropped as newer ones arrived; get_events pages them.`));
+        flags.push(debuggerFlag(`${debuggerCount(loaded.dropped)} older ${loaded.dropped === 1 ? 'row' : 'rows'} dropped`,
+          `The list keeps at most ${debuggerCount(DEBUGGER_SIDEBAR.rows)} records, so ${debuggerCount(loaded.dropped)} older ${loaded.dropped === 1 ? 'row was' : 'rows were'} dropped as newer ones arrived; get_events pages them.`));
       }
       if (flags.length) {
         const row = debuggerNode('div', 'debugger-flags');

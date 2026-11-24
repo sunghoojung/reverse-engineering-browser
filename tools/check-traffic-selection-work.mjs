@@ -689,7 +689,7 @@ for (const change of [
   const state = {requests: oldRequests, selectedRequestId: 'retired', trafficRenderedView: {requests: oldRequests}};
   const noop = () => {};
   const context = {state, elements: {gaps: {}}, evidencePackagePanel: {sync: noop}, passiveSecurityPanel: {sync: noop},
-    eventGapLabel: () => '', emptyLocalAnalystWorkspace: () => ({limits: {}}), emptyDecoderEngine: () => ({})};
+    emptyLocalAnalystWorkspace: () => ({limits: {}}), emptyDecoderEngine: () => ({})};
   for (const name of ['renderShellStatus', 'setNetworkNotice', 'renderEvidence', 'renderDebugger', 'renderSources',
     'renderVmLab', 'renderApiCollection', 'renderLocalAnalyst', 'setToolsNotice', 'renderTools']) context[name] = noop;
   context.renderRequests = () => assert.equal(state.trafficRenderedView, null, 'Preview retires the old snapshot before repaint');

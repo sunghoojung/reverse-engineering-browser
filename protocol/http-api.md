@@ -2,7 +2,7 @@
 
 [`openapi.json`](openapi.json) describes the Rust loopback backend in
 `apps/origin-trace-backend`, including the [native console](native-console-v2.md)
-state and action routes and the
+state and action routes, whose records [v4](native-console-v4.md) carries whole, and the
 [live Wasm instance commands](live-wasm-instance-v1.md). Those commands are
 confirmed reads, writes, and calls on an already attached instance. They do
 not restore the retired `/api/debugger` routes. Without a command peer they
@@ -260,6 +260,11 @@ A retained artifact whose bytes no longer match the size or SHA-256 in its
 manifest record answers 500 with `artifact_integrity`. Reading it again cannot
 help, unlike any other 500.
 
+A request whose target needs a confirmation that only stored state shows, such
+as an analyst run over a sensitive artifact, answers 400 with
+`confirmation_required` and names the field in `details.confirmation`. Nothing
+was read or run. Set that field to true only after the researcher confirms.
+
 Health, events, session context, session summary and capture action results
 report `capture_state`, the live capture lifecycle: `running`,
 `stop_requested`, `stopped`, `ended`, `lost`, or `not_live` for idle and demo
@@ -310,8 +315,9 @@ This describes the CLI build, not a live server's identity, version or abilities
 reading the endpoint file or request body, opening the output file, or dispatching
 HTTP. Eligibility requires the supported execution policy, metadata valid under
 `RebExecutionMetadata`, `kind: operation`, effects limited to `analysis` (or no
-effects), and empty `state_dependent_effects`, `uncertainties` and `confirmations`.
-Missing, malformed, unsupported and action-dependent metadata fails closed.
+effects), empty `state_dependent_effects`, `uncertainties` and `confirmations`,
+and no `state_dependent_confirmations`. Missing, malformed, unsupported and
+action-dependent metadata fails closed.
 The discovery flag uses this same predicate. There is no method-based shortcut:
 inert evidence comparison POSTs qualify, but VM cache GETs, source-helper GETs,
 native session retirement and live browser controls do not.
@@ -690,9 +696,12 @@ budget, and its request waits that long; a client that stops waiting leaves it
 running. Meanwhile `get_native_console` answers at once with `command`, other
 actions are 409 refusals, and `interrupt` (`session_id`) stops it: the command
 answers `status: stopped`, `code: cancelled`, and keeps the changes it already
-made. Document-start rules for a child frame name that
-frame's exact origin with `frame: child`; see
-[Native Console v3](native-console-v3.md).
+made. Sources, values, messages and listings are whole, and a drained read
+(`poll`, `traffic`, document-start state) says with `more` that another page
+remains; see [Native Console v4](native-console-v4.md). Document-start rules
+for a child frame name that frame's exact origin with `frame: child`;
+`add_document_start` and `remove_document_start` change the armed set one
+script at a time; see [Native Console v3](native-console-v3.md).
 
 ## Session summary
 
@@ -975,9 +984,13 @@ The action routes are multiplexed, not invented REST resources:
 - Analyst execution requires the current saved JavaScript script and explicit
   confirmation. Protocol 2 names the selected artifact by `artifact_id` and
   `sha256`; the host reads the whole stored artifact, verifies it, and refuses
-  non-source kinds (400) and a changed SHA-256 (409). A sensitive artifact
-  needs `confirmed_sensitive=true`. A run has no deadline; dropping the request
-  stops its helper process.
+  non-source kinds (400) and a changed SHA-256 (409). Only the stored record
+  says whether the artifact is sensitive, so the host checks at run time: a
+  sensitive artifact without `confirmed_sensitive=true` is refused with 400
+  `confirmation_required` and `details.confirmation: "confirmed_sensitive"`
+  before any byte is read. A client asks the researcher and retries with the
+  confirmation; a non-sensitive artifact, or none, runs with `false`. A run has
+  no deadline; dropping the request stops its helper process.
 
 Known behavior worth preserving in clients:
 
@@ -986,8 +999,15 @@ Known behavior worth preserving in clients:
   bounds; offsets and identifiers must be canonical unsigned decimals.
 - At the application handler, malformed JSON, non-object bodies, invalid body
   lengths and unsupported chunked bodies return JSON 400 errors. A body read
-  exceeding five seconds, plus one second per declared 16 MiB, returns 408. Transport-level HTTP framing failures
-  may be rejected before the application handler and have no JSON guarantee.
+  exceeding five seconds, plus one second per declared 16 MiB, returns 408.
+  The Local Analyst and VM pack routes instead parse their body as it
+  arrives, so it is held once, as its parsed value, and their
+  `x-max-body-bytes` is 2^53 - 1, no practical bound. Their deadline follows
+  what arrived: five seconds plus one per 16 MiB received, not counting time
+  the parser takes, so a client that keeps sending is never refused for its
+  size and one that stalls is refused within seconds. Transport-level HTTP
+  framing failures may be rejected before the application handler and have
+  no JSON guarantee.
 - Unknown API paths return JSON 404; unsupported methods return JSON 405.
   Every application response includes `Cache-Control: no-store` and
   `X-Content-Type-Options: nosniff`. HEAD is not an equivalent of API GET.
@@ -1043,11 +1063,19 @@ descriptions. Individual execution entries have these fields:
   JSON Schema 2020-12 `when` predicate over the entire request. `{}` means
   unconditional. For example, unsigned JWT creation needs
   `allow_unsigned_confirmed=true` when `algorithm` is `none`; selected-field
-  capture needs `confirmed=true` when `enabled` is true. Analyst execution
-  lists `confirmed_sensitive=true` whenever the run names a selected artifact,
-  because only the stored manifest says whether it is sensitive; the
-  `sensitive-selected-artifact` prerequisite names that dependency.
-  Ordinary requiredness and boolean types remain in the request schema.
+  capture needs `confirmed=true` when `enabled` is true. Ordinary requiredness
+  and boolean types remain in the request schema.
+- `state_dependent_confirmations`, when present, lists confirmations that only
+  stored state decides, with the same `field` and `value: true` and a
+  human-readable `when`. A predicate over the request cannot see that state,
+  so listing one in `confirmations` would ask for it whenever it might apply.
+  The host reads the state when the request arrives. When it holds and the
+  field is not true, the request is refused with 400 `confirmation_required`
+  and `details.confirmation` naming the field, before anything is read or run.
+  A client asks the researcher then, or earlier when it already knows the
+  state, and never sets the field by default. Analyst execution's
+  `confirmed_sensitive` is the one such field: a run asks for it only when the
+  stored record of its selected artifact is sensitive.
 - `notes` supplies the effect scope and caveats. `sources` gives repository
   `path` and Rust `symbol` pointers for auditing, without fragile line numbers.
 
@@ -1093,8 +1121,8 @@ that static metadata cannot establish. Check the uncertainty and condition text.
 
 Important distinctions captured by the catalog:
 
-- VM GET can write its analysis cache. Native-console GET can retire an expired
-  or poisoned session, stop processes, and delete its temporary profile.
+- VM GET can write its analysis cache. Native-console GET can retire a
+  poisoned session, stop processes, and delete its temporary profile.
 - Capture clear truncates stored records after capture stops, while leaving
   artifact files. Workspace replacements and clear-history actions discard
   data even when they do not touch the live target.

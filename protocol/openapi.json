@@ -4859,7 +4859,7 @@
             }
           },
           "408": {
-            "description": "The bounded request-body read deadline expired, or the native decoder was busy or timed out.",
+            "description": "The bounded request-body read deadline expired.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5178,7 +5178,7 @@
             }
           }
         },
-        "x-max-body-bytes": 1073741824,
+        "x-max-body-bytes": 9007199254740991,
         "x-reb-execution": {
           "kind": "action-dependent",
           "effects": null,
@@ -5199,7 +5199,7 @@
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/app.rs",
-              "symbol": "App::post"
+              "symbol": "App::analyst_action"
             }
           ]
         },
@@ -7820,14 +7820,14 @@
         "x-reb-execution-schema": {
           "$ref": "#/components/schemas/RebExecutionMetadata"
         },
-        "description": "First Console step. In a live capture it lists the capture browser's HTTP(S) documents (document_source live_capture) and binding_id; before connect_live, state is idle and session_id null. Each target has id (the exact native document, valid only with this binding_id), frame (top or child), origin, url and label (display only, never identity), and for a child top_relation (same_origin, same_site, cross_site or undetermined) and out_of_process (true for a cross-site frame in its own renderer process). There is no parent link: choose a frame by frame, origin and url, and after connecting, evaluate location.ancestorOrigins to confirm its parents. Next: native_console_action connect_live with binding_id, target_id and confirm_live true. While connected, selection is selected, none, or stale when the document navigated, reloaded or was removed (stop, then connect_live with a current id). document_start_supported says whether this browser permits arm_document_start. At most 64 documents; truncated marks a cut listing. live_available false means no Console binding: restart the capture; no second browser is opened."
+        "description": "First Console step. In a live capture it lists the capture browser's HTTP(S) documents (document_source live_capture) and binding_id; before connect_live, state is idle and session_id null. Each target has id (the exact native document, valid only with this binding_id), frame (top or child), origin, url and label (whole, display only, never identity), and for a child top_relation (same_origin, same_site, cross_site or undetermined) and out_of_process (true for a cross-site frame in its own renderer process). There is no parent link: choose a frame by frame, origin and url, and after connecting, evaluate location.ancestorOrigins to confirm its parents. Next: native_console_action connect_live with binding_id, target_id and confirm_live true. While connected, selection is selected, none, or stale when the document navigated, reloaded or was removed (stop, then connect_live with a current id). document_start_supported says whether this browser permits arm_document_start. Every document is listed, however many; truncated marks a listing in which a document did not describe itself in time. live_available false means no Console binding: restart the capture; no second browser is opened."
       }
     },
     "/api/native-console/document-start": {
       "get": {
         "operationId": "get_native_console_document_start",
         "summary": "Read armed document-start scripts and their output",
-        "description": "Read after arm_document_start and after reloading a matching document. permitted false names the missing gate in message. Each armed script has its rule (origin, frame, path_prefix), digest, injected_documents, records and refused. pending_renderer_processes 0 means a document created now runs the set; reload after that. output holds every retained record after after_sequence that fits one reply, each with sequence, record (injected, report, script_error or refused), script_id, document_id (a get_native_console target id), frame_id (the capture's frame identity, usable as a get_events frame_id filter), top_frame and text. Pass the last sequence as after_sequence and read again while it is below next_sequence - 1: reads never drain, and dropped counts records evicted past the 64 MiB retention. status unconfirmed means a clear was not confirmed; restart the capture. unsupported lists contexts never injected, such as workers and documents already open. Output is never evidence.",
+        "description": "Read after arm_document_start and after reloading a matching document. permitted false names the missing gate in message. Each armed script has its rule (origin, frame, path_prefix), digest, injected_documents, records and refused. pending_renderer_processes 0 means a document created now runs the set; reload after that. output holds the oldest retained records after after_sequence, each whole, a page at a time, each with sequence, record (injected, report, script_error or refused), script_id, document_id (a get_native_console target id), frame_id (the capture's frame identity, usable as a get_events frame_id filter), top_frame and text. While output.more is true, read again at once with the last sequence as after_sequence: reads never drain, and dropped counts records evicted unread past the 64 MiB retention. status unconfirmed means a clear was not confirmed; restart the capture. unsupported lists contexts never injected, such as workers and documents already open. Output is never evidence.",
         "tags": [
           "native-console"
         ],
@@ -7930,7 +7930,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Read-only: it never arms, clears, drains, launches, evaluates, or retires a session, including an expired or poisoned one. With no session, or with a gate missing, it reports which gate is missing instead of enabling anything. After a live binding that may have held an armed set ended or failed without the browser confirming a clear, it reports unconfirmed rather than idle or gone. Records are snippet-authored page JavaScript with provenance console-document-start-script: untrusted data, never native evidence, and never joined into correlated_links.",
+          "notes": "Read-only: it never arms, clears, drains, launches, evaluates, or retires a session, including a poisoned one. With no session, or with a gate missing, it reports which gate is missing instead of enabling anything. After a live binding that may have held an armed set ended or failed without the browser confirming a clear, it reports unconfirmed rather than idle or gone. Records are snippet-authored page JavaScript with provenance console-document-start-script: untrusted data, never native evidence, and never joined into correlated_links.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/native_console.rs",
@@ -7947,7 +7947,7 @@
       "post": {
         "operationId": "native_console_action",
         "summary": "Connect the Console to one document, evaluate there, arm document-start scripts",
-        "description": "Live capture: connect_live selects one get_native_console document (top or child, cross-site included) and returns a new session_id. evaluate runs up to 64 MiB of JavaScript in its main world, returning status, type and text (at most 8 KiB, truncated marked); runtime adds inspect, await, poll (console messages), traffic and watch. A command runs until it returns, listed as get_native_console command; interrupt answers it with status stopped, keeping its changes. Another target_id or a navigated document returns stale_target and runs nothing; to switch frames, stop, then connect_live. watch arms non-pausing rules; keep true also arms them, less DOM rules, in every later document of that exact origin and frame kind before its scripts, until unwatch, a watch without keep, or stop. arm_document_start replaces the armed set: any number of rules, each an exact origin, frame top or child, optional path_prefix and a snippet calling report(value), run only in documents created later: reload, then read get_native_console_document_start. clear_document_start removes it; stop clears it too and must be confirmed. start opens a separate disposable browser. Refusals: 409 with another connection open or a stale session_id or binding_id; 503 when document-start is not permitted (agent sessions need start_live_session document_start true). Never retried. Output is ephemeral page data, not evidence.",
+        "description": "Live capture: connect_live selects one get_native_console document, any frame, and returns a session_id that lasts until stop. evaluate runs JavaScript of any size in its main world, returning status, type and the whole text; runtime adds inspect, await, poll (console messages; repeat while more), traffic and watch (non-pausing rules). A command runs until it returns, listed as get_native_console command; interrupt answers it stopped, keeping its changes. Another target_id or a navigated document returns stale_target and runs nothing: stop, then connect_live. arm_document_start replaces the armed set of snippets, which run only in documents created later: reload, then read get_native_console_document_start. add_document_start and remove_document_start (script_ids) change the set and keep its output; clear_document_start or a confirmed stop clears it. start opens a disposable browser. 409: another connection, or a stale session_id or binding_id; 503: document-start not permitted (agents need start_live_session document_start true). Never retried. Output is page data, not evidence.",
         "tags": [
           "native-console"
         ],
@@ -8062,7 +8062,7 @@
             }
           }
         },
-        "x-max-body-bytes": 402718720,
+        "x-max-body-bytes": 25769869306,
         "x-source": "apps/origin-trace-backend/src/native_console.rs",
         "x-reb-execution": {
           "kind": "action-dependent",
@@ -8272,7 +8272,7 @@
             }
           },
           "408": {
-            "description": "Request-body read or bounded validation permit-wait deadline expired.",
+            "description": "The request body stalled past its read deadline. Validation itself has no deadline.",
             "content": {
               "application/json": {
                 "schema": {
@@ -8291,6 +8291,16 @@
                 "schema": {
                   "type": "string",
                   "const": "nosniff"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and validation stopped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -8470,7 +8480,7 @@
             }
           },
           "408": {
-            "description": "Request-body, one-second total permit wait, or ten-second cooperative whole-export deadline expired. Filesystem reads may still block in the kernel; this is not a hard kill guarantee.",
+            "description": "The request body stalled past its read deadline. The export itself has no deadline.",
             "content": {
               "application/json": {
                 "schema": {
@@ -8489,6 +8499,16 @@
                 "schema": {
                   "type": "string",
                   "const": "nosniff"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and the export stopped between reads. Filesystem reads may still block in the kernel; this is not a hard kill guarantee.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -8666,7 +8686,7 @@
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/evidence_package.rs",
-              "symbol": "evidence_package::export_bytes_at"
+              "symbol": "evidence_package::export_bytes_cancellable"
             },
             {
               "path": "apps/origin-trace-backend/src/evidence.rs",
@@ -9877,7 +9897,7 @@
             }
           },
           "408": {
-            "description": "Body, admission or cooperative comparison deadline exceeded. No successful partial comparison is returned.",
+            "description": "The request body stalled past its read deadline. Comparison itself has no deadline.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9896,6 +9916,16 @@
                 "schema": {
                   "type": "string",
                   "const": "nosniff"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and the comparison stopped. No partial comparison is returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -11023,7 +11053,7 @@
         "x-reb-execution-schema": {
           "$ref": "#/components/schemas/RebExecutionMetadata"
         },
-        "x-max-body-bytes": 1073741824,
+        "x-max-body-bytes": 9007199254740991,
         "requestBody": {
           "required": true,
           "content": {
@@ -11165,7 +11195,7 @@
         "x-reb-execution-schema": {
           "$ref": "#/components/schemas/RebExecutionMetadata"
         },
-        "x-max-body-bytes": 1073741824,
+        "x-max-body-bytes": 9007199254740991,
         "requestBody": {
           "required": true,
           "content": {
@@ -11524,7 +11554,7 @@
             },
             {
               "path": "apps/origin-trace-backend/src/deobfuscation.rs",
-              "symbol": "Deobfuscator::invocation_site"
+              "symbol": "Deobfuscator::invocation_index"
             }
           ]
         },
@@ -19510,42 +19540,40 @@
                 "type": "object",
                 "additionalProperties": false,
                 "required": [
-                  "max_artifact_bytes",
-                  "max_js_matches_per_rule",
-                  "max_js_function_regions",
-                  "max_js_region_work_bytes",
-                  "max_wasm_sections",
-                  "max_wasm_section_bytes",
                   "max_bytecode_snapshot_bytes",
                   "max_manifest_line_bytes",
-                  "max_event_line_bytes",
-                  "max_wasm_functions",
-                  "max_wasm_instructions"
+                  "max_event_line_bytes"
                 ],
                 "properties": {
                   "max_artifact_bytes": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "description": "Producers before 1.12.0 only: artifacts larger than this were refused. Every artifact is now read whole."
                   },
                   "max_js_matches_per_rule": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "description": "Producers before 1.12.0 only: matches counted per rule and region. Every match is now counted."
                   },
                   "max_js_function_regions": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "description": "Producers before 1.12.0 only: function regions examined. Every region is now examined."
                   },
                   "max_js_region_work_bytes": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "description": "Producers before 1.12.0 only: bytes scanned over all regions. Each region now scans only its own text, so the scan is linear in the source."
                   },
                   "max_wasm_sections": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "description": "Producers before 1.12.0 only: modules with more sections were refused."
                   },
                   "max_wasm_section_bytes": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "description": "Producers before 1.12.0 only: modules with a larger section were refused."
                   },
                   "max_bytecode_snapshot_bytes": {
                     "type": "integer",
@@ -19561,11 +19589,13 @@
                   },
                   "max_wasm_functions": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "description": "Producers before 1.12.0 only: modules with more defined functions were refused."
                   },
                   "max_wasm_instructions": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "description": "Producers before 1.12.0 only: modules with more instructions were refused."
                   },
                   "max_graph_edges": {
                     "type": "integer",
@@ -22815,14 +22845,14 @@
                   "effects": [
                     "process-stop"
                   ],
-                  "when": "Worker completion, timeout, or a dropped request cleans up the owned process group (worker::run_cancel)."
+                  "when": "Worker completion or a dropped request cleans up the owned process group (worker::run_cancel)."
                 }
               ],
               "uncertainties": [],
               "prerequisites": [
                 {
                   "id": "decoder-available",
-                  "condition": "The decoder must be executable and its serialized worker must become available within two seconds."
+                  "condition": "The decoder must be executable. Operations run one at a time, so a request waits for the one before it."
                 }
               ],
               "confirmations": [],
@@ -22868,14 +22898,14 @@
                   "effects": [
                     "process-stop"
                   ],
-                  "when": "Worker completion, timeout, or a dropped request cleans up the owned process group (worker::run_cancel)."
+                  "when": "Worker completion or a dropped request cleans up the owned process group (worker::run_cancel)."
                 }
               ],
               "uncertainties": [],
               "prerequisites": [
                 {
                   "id": "decoder-available",
-                  "condition": "The decoder must be executable and its serialized worker must become available within two seconds."
+                  "condition": "The decoder must be executable. Operations run one at a time, so a request waits for the one before it."
                 }
               ],
               "confirmations": [],
@@ -22926,14 +22956,14 @@
                   "effects": [
                     "process-stop"
                   ],
-                  "when": "Worker completion, timeout, or a dropped request cleans up the owned process group (worker::run_cancel)."
+                  "when": "Worker completion or a dropped request cleans up the owned process group (worker::run_cancel)."
                 }
               ],
               "uncertainties": [],
               "prerequisites": [
                 {
                   "id": "decoder-available",
-                  "condition": "The decoder must be executable and its serialized worker must become available within two seconds."
+                  "condition": "The decoder must be executable. Operations run one at a time, so a request waits for the one before it."
                 }
               ],
               "confirmations": [],
@@ -23012,14 +23042,14 @@
                   "effects": [
                     "process-stop"
                   ],
-                  "when": "Worker completion, timeout, or a dropped request cleans up the owned process group (worker::run_cancel)."
+                  "when": "Worker completion or a dropped request cleans up the owned process group (worker::run_cancel)."
                 }
               ],
               "uncertainties": [],
               "prerequisites": [
                 {
                   "id": "decoder-available",
-                  "condition": "The decoder must be executable and its serialized worker must become available within two seconds."
+                  "condition": "The decoder must be executable. Operations run one at a time, so a request waits for the one before it."
                 }
               ],
               "confirmations": [
@@ -24085,7 +24115,7 @@
               },
               "confirmed_sensitive": {
                 "type": "boolean",
-                "description": "Must be true when the stored record of the selected artifact is sensitive. The host reads sensitivity from the manifest, not from the request."
+                "description": "The researcher's confirmation that a sensitive selected artifact's bytes may be included. The host reads sensitivity from the stored record at run time, not from the request; a sensitive artifact without it is refused with confirmation_required before any byte is read, and a non-sensitive one or none runs with false."
               }
             },
             "required": [
@@ -24126,10 +24156,6 @@
                 {
                   "id": "saved-analyst-script",
                   "condition": "library_generation, script_id, and source must match the current saved JavaScript analyst script."
-                },
-                {
-                  "id": "sensitive-selected-artifact",
-                  "condition": "confirmed_sensitive must be true when the stored record of evidence.selected_artifact is sensitive."
                 }
               ],
               "confirmations": [
@@ -24137,21 +24163,13 @@
                   "field": "confirmed",
                   "value": true,
                   "when": {}
-                },
+                }
+              ],
+              "state_dependent_confirmations": [
                 {
                   "field": "confirmed_sensitive",
                   "value": true,
-                  "when": {
-                    "type": "object",
-                    "required": ["evidence"],
-                    "properties": {
-                      "evidence": {
-                        "type": "object",
-                        "required": ["selected_artifact"],
-                        "properties": {"selected_artifact": {"type": "object"}}
-                      }
-                    }
-                  }
+                  "when": "The stored record of evidence.selected_artifact is sensitive, as its sensitive field in get_artifacts shows."
                 }
               ],
               "notes": "Executes an explicitly selected saved script in a disposable analyst helper, separate from the browser, over caller-supplied frozen evidence and the selected artifact's verified stored bytes. There is no execution deadline, CPU limit or input, result or log size limit.",
@@ -24163,6 +24181,10 @@
                 {
                   "path": "apps/origin-trace-backend/src/analyst.rs",
                   "symbol": "normalize"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/analyst.rs",
+                  "symbol": "Run::admit"
                 }
               ]
             },
@@ -24213,7 +24235,7 @@
             }
           }
         ],
-        "description": "Run IDs and script IDs must be positive. Run requires the current saved JavaScript script, matching source and workspace generation. selected_artifact.sensitive=true requires confirmed_sensitive=true. Cancellation is a separate concurrent request. Replacement enforces root id=1/name=Analyst Workspace, tree and cumulative size limits in src/workspace.rs."
+        "description": "Run IDs and script IDs must be positive. Run requires the current saved JavaScript script, matching source and workspace generation. A selected artifact whose stored record is sensitive requires confirmed_sensitive=true, checked at run time. Cancellation is a separate concurrent request. Replacement enforces root id=1/name=Analyst Workspace, tree and cumulative size limits in src/workspace.rs."
       },
       "AnalystRunResult": {
         "type": "object",
@@ -30720,17 +30742,18 @@
             "enum": [
               "live_capture"
             ],
-            "description": "Present for native HTTP(S) documents in the already-bound capture browser. Discovery does not opt the user into live execution. URLs/titles are bounded display metadata only."
+            "description": "Present for native HTTP(S) documents in the already-bound capture browser. Discovery does not opt the user into live execution. URLs and titles are whole display metadata only."
           },
           "targets": {
             "type": "array",
-            "maxItems": 64,
+            "description": "Every eligible document, however many.",
             "items": {
               "$ref": "#/components/schemas/NativeConsoleTarget"
             }
           },
           "truncated": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "True when a listed document did not describe itself in time, so the listing is partial. No document and no field is ever cut to fit a record."
           },
           "selected_target_id": {
             "oneOf": [
@@ -30897,20 +30920,21 @@
           },
           "targets": {
             "type": "array",
-            "maxItems": 64,
+            "description": "Every eligible document, however many.",
             "items": {
               "$ref": "#/components/schemas/NativeConsoleTarget"
             }
           },
           "truncated": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "True when a listed document did not describe itself in time, so the listing is partial. No document and no field is ever cut to fit a record."
           },
           "document_source": {
             "type": "string",
             "enum": [
               "live_capture"
             ],
-            "description": "Present for native HTTP(S) documents in the already-bound capture browser. Discovery does not opt the user into live execution. URLs/titles are bounded display metadata only."
+            "description": "Present for native HTTP(S) documents in the already-bound capture browser. Discovery does not opt the user into live execution. URLs and titles are whole display metadata only."
           },
           "selected_target_id": {
             "oneOf": [
@@ -31002,11 +31026,7 @@
           },
           "text": {
             "type": "string",
-            "maxLength": 8192,
-            "x-max-utf8-bytes": 8192
-          },
-          "truncated": {
-            "type": "boolean"
+            "description": "The whole result text, however long."
           },
           "code": {
             "$ref": "#/components/schemas/ErrorCode"
@@ -31021,8 +31041,7 @@
           "session_id",
           "status",
           "type",
-          "text",
-          "truncated"
+          "text"
         ],
         "allOf": [
           {
@@ -31060,8 +31079,8 @@
               },
               "url": {
                 "type": "string",
-                "maxLength": 4096,
-                "description": "Explicit authorized HTTP(S) target without embedded credentials."
+                "maxLength": 2097152,
+                "description": "Explicit authorized HTTP(S) target without embedded credentials, up to the 2 MiB a Chromium URL can hold."
               },
               "document_start": {
                 "type": "boolean",
@@ -31390,8 +31409,7 @@
               "source": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 67108864,
-                "x-max-utf8-bytes": 67108864
+                "x-max-utf8-bytes": 4294967295
               }
             },
             "required": [
@@ -31571,14 +31589,13 @@
               "scripts": {
                 "type": "array",
                 "minItems": 1,
-                "description": "Replaces the whole armed set atomically. A refusal leaves the previous set and its output exactly as they were. Any number of scripts of any size, as long as the command fits one 64 MiB Console payload as JSON.",
+                "description": "Replaces the whole armed set atomically. A refusal leaves the previous set and its output exactly as they were. Any number of scripts of any size in one Console record of up to 4 GiB as JSON; add_document_start grows a set past that.",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
                   "properties": {
                     "origin": {
                       "type": "string",
-                      "maxLength": 256,
                       "description": "One exact http(s) origin spelled as url::Origin::Serialize writes it: lowercase, with no path, credentials, wildcard, host suffix, trailing slash or default port, an IPv6 host as its canonical bracketed literal, and a numeric host as four decimal octets. Any other spelling is refused, because no document's origin could equal it."
                     },
                     "frame": {
@@ -31591,13 +31608,11 @@
                     },
                     "path_prefix": {
                       "type": "string",
-                      "maxLength": 256,
                       "description": "Optional literal committed-path prefix starting with /. No query or fragment. Absent matches every path in that origin."
                     },
                     "source": {
                       "type": "string",
-                      "x-max-utf8-bytes": 67108864,
-                      "description": "The snippet. It runs in the page main world with the page's full authority until it returns, and receives a report(value) function. Clearing or replacing the set, or ending the session, stops it. Log argument kinds, lengths, counts and digests, never raw strings, tokens, cookies, credentials or bodies."
+                      "description": "The snippet. It runs in the page main world with the page's full authority until it returns, and receives a report(value) function. Removing it, clearing or replacing the set, or ending the session stops it. Log argument kinds, lengths, counts and digests, never raw strings, tokens, cookies, credentials or bodies."
                     }
                   },
                   "required": [
@@ -31632,7 +31647,7 @@
                   "effects": [
                     "data-discard"
                   ],
-                  "when": "Replacing the armed set increments its generation, which discards the previous generation's bounded output and makes report functions a page retained inert."
+                  "when": "Replacing the armed set discards the previous set's output and makes report functions a page retained from it inert."
                 },
                 {
                   "effects": [
@@ -31674,7 +31689,7 @@
                   "when": {}
                 }
               ],
-              "notes": "Declares the authorization boundary: one exact origin, exactly one frame kind, an optional literal path prefix. There is no pattern, wildcard, URL guessing, or retroactive injection into documents that are already open. Snippet output is bounded page JavaScript, never evidence.",
+              "notes": "Declares the authorization boundary: one exact origin, exactly one frame kind, an optional literal path prefix. There is no pattern, wildcard, URL guessing, or retroactive injection into documents that are already open. Snippet output is page JavaScript, never evidence.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/native_console.rs",
@@ -31683,6 +31698,205 @@
                 {
                   "path": "apps/origin-trace-backend/src/native_console.rs",
                   "symbol": "validate_document_start"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "add_document_start",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$",
+                "description": "Canonical nonzero uint64 decimal identifier."
+              },
+              "scripts": {
+                "type": "array",
+                "minItems": 1,
+                "description": "Arms these scripts beside the ones already armed, which keep their ids, their output and their running injections. A refusal leaves the set and its output exactly as they were. Any number of scripts of any size in one Console record of up to 4 GiB as JSON; send several adds for more.",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "origin": {
+                      "type": "string",
+                      "description": "One exact http(s) origin spelled as url::Origin::Serialize writes it: lowercase, with no path, credentials, wildcard, host suffix, trailing slash or default port, an IPv6 host as its canonical bracketed literal, and a numeric host as four decimal octets. Any other spelling is refused, because no document's origin could equal it."
+                    },
+                    "frame": {
+                      "type": "string",
+                      "enum": [
+                        "top",
+                        "child"
+                      ],
+                      "description": "Exactly one frame kind. Request both as two rules so the armed set always states which frames it reaches."
+                    },
+                    "path_prefix": {
+                      "type": "string",
+                      "description": "Optional literal committed-path prefix starting with /. No query or fragment. Absent matches every path in that origin."
+                    },
+                    "source": {
+                      "type": "string",
+                      "description": "The snippet. It runs in the page main world with the page's full authority until it returns, and receives a report(value) function. Removing it, clearing or replacing the set, or ending the session stops it. Log argument kinds, lengths, counts and digests, never raw strings, tokens, cookies, credentials or bodies."
+                    }
+                  },
+                  "required": [
+                    "origin",
+                    "frame",
+                    "source"
+                  ]
+                }
+              },
+              "confirm_document_start": {
+                "type": "boolean",
+                "const": true,
+                "description": "Confirm that armed snippets run automatically in every new matching document, before that document's own scripts."
+              }
+            },
+            "required": [
+              "action",
+              "session_id",
+              "scripts",
+              "confirm_document_start"
+            ],
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "code-execution",
+                "disposable-target-mutation"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "live-target-mutation"
+                  ],
+                  "when": "The session is an explicitly authorized live capture binding, so matching documents are real captured pages rather than a disposable browser's."
+                }
+              ],
+              "uncertainties": [
+                "A native transport timeout leaves it unknown whether the browser added the scripts. Read the state before adding again; nothing is retried automatically.",
+                "An armed snippet's effects depend on the supplied source. It runs in the page main world of every new matching document with that page's full authority, and work it schedules can outlive its injection."
+              ],
+              "prerequisites": [
+                {
+                  "id": "local-request",
+                  "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+                },
+                {
+                  "id": "bounded-json-object",
+                  "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+                },
+                {
+                  "id": "native-action-idle",
+                  "condition": "No other native console action may hold the session lock."
+                },
+                {
+                  "id": "native-session-current",
+                  "condition": "session_id must equal the current native console session."
+                },
+                {
+                  "id": "native-document-start-permitted",
+                  "condition": "The browser must advertise document-start support on its target listing, which requires the rebuilt overlay and the browser-session switch."
+                }
+              ],
+              "confirmations": [
+                {
+                  "field": "confirm_document_start",
+                  "value": true,
+                  "when": {}
+                }
+              ],
+              "notes": "Each added script declares its own authorization boundary, as for arm_document_start. Scripts already armed are untouched. Snippet output is page JavaScript, never evidence.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_console.rs",
+                  "symbol": "NativeConsole::action"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/native_console.rs",
+                  "symbol": "validate_document_start"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "remove_document_start",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$",
+                "description": "Canonical nonzero uint64 decimal identifier."
+              },
+              "script_ids": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "description": "Armed scripts to remove, by the script_id get_native_console_document_start lists. Every id must be armed, or nothing is removed.",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]{0,19}$",
+                  "description": "Canonical nonzero uint64 decimal identifier."
+                }
+              }
+            },
+            "required": [
+              "action",
+              "session_id",
+              "script_ids"
+            ],
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [
+                "A native transport timeout leaves it unknown whether the browser removed the scripts. Read the state before relying on it; nothing is retried automatically."
+              ],
+              "prerequisites": [
+                {
+                  "id": "local-request",
+                  "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+                },
+                {
+                  "id": "bounded-json-object",
+                  "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+                },
+                {
+                  "id": "native-action-idle",
+                  "condition": "No other native console action may hold the session lock."
+                },
+                {
+                  "id": "native-session-current",
+                  "condition": "session_id must equal the current native console session."
+                },
+                {
+                  "id": "native-document-start-permitted",
+                  "condition": "The browser must advertise document-start support on its target listing, which requires the rebuilt overlay and the browser-session switch."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Removes the named scripts and stops their running injections. The other armed scripts, their ids and every retained record, the removed scripts' included, stay. New documents stop running the removed snippets, and a report function a page retained from one becomes an inert no-op. Work a snippet already scheduled in a page is not rolled back.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_console.rs",
+                  "symbol": "NativeConsole::action"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/native_console.rs",
+                  "symbol": "validate_script_ids"
                 }
               ]
             }
@@ -34013,7 +34227,7 @@
               "source": {
                 "type": "string",
                 "minLength": 1,
-                "x-max-utf8-bytes": 67108864
+                "x-max-utf8-bytes": 4294967295
               }
             },
             "required": [
@@ -34038,7 +34252,7 @@
               "offset": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 65536
+                "maximum": 9007199254740991
               }
             },
             "required": [
@@ -34059,15 +34273,12 @@
               },
               "path": {
                 "type": "array",
-                "maxItems": 8,
                 "items": {
-                  "type": "string",
-                  "x-max-utf8-bytes": 128
+                  "type": "string"
                 }
               },
               "prefix": {
-                "type": "string",
-                "x-max-utf8-bytes": 128
+                "type": "string"
               }
             },
             "required": [
@@ -34257,11 +34468,7 @@
             ]
           },
           "text": {
-            "type": "string",
-            "x-max-utf8-bytes": 2048
-          },
-          "truncated": {
-            "type": "boolean"
+            "type": "string"
           },
           "handle": {
             "type": "string",
@@ -34273,8 +34480,7 @@
         },
         "required": [
           "type",
-          "text",
-          "truncated"
+          "text"
         ]
       },
       "NativeConsoleLocation": {
@@ -34282,8 +34488,7 @@
         "additionalProperties": false,
         "properties": {
           "url": {
-            "type": "string",
-            "x-max-utf8-bytes": 2048
+            "type": "string"
           },
           "line": {
             "type": "integer",
@@ -34294,8 +34499,7 @@
             "minimum": 1
           },
           "function": {
-            "type": "string",
-            "x-max-utf8-bytes": 2048
+            "type": "string"
           }
         },
         "required": [
@@ -34308,8 +34512,7 @@
         "additionalProperties": false,
         "properties": {
           "name": {
-            "type": "string",
-            "x-max-utf8-bytes": 2048
+            "type": "string"
           },
           "accessor": {
             "type": "boolean"
@@ -34328,16 +34531,13 @@
         "additionalProperties": false,
         "properties": {
           "text": {
-            "type": "string",
-            "x-max-utf8-bytes": 2048
+            "type": "string"
           },
           "url": {
-            "type": "string",
-            "x-max-utf8-bytes": 512
+            "type": "string"
           },
           "stack": {
-            "type": "string",
-            "x-max-utf8-bytes": 2048
+            "type": "string"
           },
           "line": {
             "type": "integer",
@@ -34353,9 +34553,6 @@
           },
           "time": {
             "type": "number"
-          },
-          "truncated": {
-            "type": "boolean"
           }
         },
         "required": [
@@ -34364,8 +34561,7 @@
           "stack",
           "line",
           "level",
-          "time",
-          "truncated"
+          "time"
         ]
       },
       "NativeConsoleActivity": {
@@ -34388,12 +34584,10 @@
             "pattern": "^(0|[1-9][0-9]{0,19})$"
           },
           "origin": {
-            "type": "string",
-            "x-max-utf8-bytes": 256
+            "type": "string"
           },
           "method": {
-            "type": "string",
-            "x-max-utf8-bytes": 16
+            "type": "string"
           },
           "status": {
             "type": "integer"
@@ -34457,15 +34651,13 @@
                 ]
               },
               "text": {
-                "type": "string",
-                "x-max-utf8-bytes": 8192
+                "type": "string"
               },
               "value": {
                 "$ref": "#/components/schemas/NativeConsoleValue"
               },
               "properties": {
                 "type": "array",
-                "maxItems": 32,
                 "items": {
                   "$ref": "#/components/schemas/NativeConsoleProperty"
                 }
@@ -34473,53 +34665,51 @@
               "offset": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 65536
+                "maximum": 9007199254740991
               },
               "more": {
-                "type": "boolean"
-              },
-              "truncated": {
-                "type": "boolean"
+                "type": "boolean",
+                "description": "inspect: another inspect at offset reads the next properties. poll and traffic: more records were waiting than one page carries, so poll again at once."
               },
               "location": {
                 "$ref": "#/components/schemas/NativeConsoleLocation"
               },
               "stack": {
                 "type": "array",
-                "maxItems": 16,
                 "items": {
                   "$ref": "#/components/schemas/NativeConsoleLocation"
                 }
               },
               "messages": {
                 "type": "array",
-                "maxItems": 32,
                 "items": {
                   "$ref": "#/components/schemas/NativeConsoleMessage"
-                }
+                },
+                "description": "The oldest waiting console messages, each whole, a page at a time."
               },
               "dropped": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 2147483647
+                "maximum": 2147483647,
+                "description": "Saturating count of records evicted unread past the 64 MiB a document or the browser keeps for an owner that is not polling."
               },
               "events": {
                 "description": "traffic: the selected document's oldest resource completions that fit one 64 KiB reply. The browser keeps every event until it is read; more is true while some remain, and dropped counts only events of documents a listing can no longer name.",
                 "type": "array",
                 "items": {
                   "$ref": "#/components/schemas/NativeConsoleActivity"
-                }
+                },
+                "description": "The oldest waiting resource completions of this document, a page at a time."
               },
               "items": {
                 "type": "array",
-                "maxItems": 24,
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
                   "properties": {
                     "name": {
                       "type": "string",
-                      "pattern": "^[A-Za-z_$][\\w$]{0,127}$"
+                      "pattern": "^[A-Za-z_$][\\w$]*$"
                     },
                     "kind": {
                       "enum": [
@@ -34528,8 +34718,7 @@
                       ]
                     },
                     "signature": {
-                      "type": "string",
-                      "maxLength": 128
+                      "type": "string"
                     }
                   },
                   "required": [
@@ -34553,8 +34742,7 @@
                     ],
                     "properties": {
                       "origin": {
-                        "type": "string",
-                        "x-max-utf8-bytes": 256
+                        "type": "string"
                       },
                       "frame": {
                         "enum": [
@@ -34756,6 +34944,33 @@
                 "when": {
                   "type": "object",
                   "description": "JSON Schema 2020-12 predicate over the whole request. Empty object means unconditional. This only describes a server confirmation field."
+                }
+              }
+            }
+          },
+          "state_dependent_confirmations": {
+            "type": "array",
+            "description": "Confirmations needed only when stored state that the request cannot show holds, such as a sensitive selected artifact. Absent means none. The host reads that state when the request arrives; when it holds and field is not true, the request is refused with confirmation_required and details.confirmation naming field, before anything is read or run. A client asks the researcher then, or earlier when it already knows the state holds, and never sets the field by default.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "field",
+                "value",
+                "when"
+              ],
+              "properties": {
+                "field": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]*$"
+                },
+                "value": {
+                  "const": true
+                },
+                "when": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "The stored state that makes the confirmation necessary."
                 }
               }
             }
@@ -35368,14 +35583,15 @@
           "idle_backend",
           "native_capture_unavailable",
           "debugger_unavailable",
-          "artifact_integrity"
+          "artifact_integrity",
+          "confirmation_required"
         ],
-        "description": "Stable bounded application reason. artifact_integrity means retained bytes no longer match the size or SHA-256 in their manifest record, so reading them again cannot help. invalid_request/state_conflict/protocol_error are coarse classifications; precise reasons are only supplied by migrated source paths. application_failed does not imply rollback or no side effects. A command-exchange timeout or lost/malformed reply uses command_outcome_unknown, not a confirmed-no-op claim. This can include interrupted queued or partial writes and does not prove a send completed."
+        "description": "Stable bounded application reason. artifact_integrity means retained bytes no longer match the size or SHA-256 in their manifest record, so reading them again cannot help. confirmation_required means the stored state behind the request, such as a sensitive selected artifact, needs the confirmation that details.confirmation names; nothing was read or run, and a retry needs the researcher's confirmation, never a default. invalid_request/state_conflict/protocol_error are coarse classifications; precise reasons are only supplied by migrated source paths. application_failed does not imply rollback or no side effects. A command-exchange timeout or lost/malformed reply uses command_outcome_unknown, not a confirmed-no-op claim. This can include interrupted queued or partial writes and does not prove a send completed."
       },
       "ErrorDetails": {
         "type": "object",
         "additionalProperties": false,
-        "maxProperties": 7,
+        "maxProperties": 8,
         "properties": {
           "phase": {
             "type": "string",
@@ -35399,6 +35615,13 @@
           },
           "current_generation": {
             "$ref": "#/components/schemas/SafeInteger"
+          },
+          "confirmation": {
+            "type": "string",
+            "enum": [
+              "confirmed_sensitive"
+            ],
+            "description": "With confirmation_required: the request field that must be true for what the request names in the current stored state."
           },
           "selection_reason": {
             "type": "string",
@@ -36391,9 +36614,9 @@
       },
       "EvidencePackageArtifactByteSize": {
         "type": "string",
-        "maxLength": 8,
-        "pattern": "^(?:0|[1-9][0-9]{0,6}|1[0-5][0-9]{6}|16[0-6][0-9]{5}|167[0-6][0-9]{4}|1677[0-6][0-9]{3}|16777[0-1][0-9]{2}|1677720[0-9]{1}|1677721[0-5]|16777216)$",
-        "description": "Original artifact byte count as canonical unsigned decimal, at most 16777216 bytes. Artifact bytes are omitted and are not reverified by this validator.",
+        "maxLength": 20,
+        "pattern": "^(?:0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]{1}|1844674407370955161[0-4]|18446744073709551615)$",
+        "description": "Original artifact byte count as canonical unsigned 64-bit decimal, of any size. Artifact bytes are omitted and are not reverified by this validator.",
         "not": {
           "pattern": "[^0-9]"
         }
@@ -42537,13 +42760,13 @@
             "description": "Whether this browser session permits arming at all. False means a gate is missing, not that the set is empty."
           },
           "contract_version": {
-            "const": 3,
+            "const": 4,
             "type": "integer"
           },
           "generation": {
             "type": "string",
             "pattern": "^(0|[1-9][0-9]{0,19})$",
-            "description": "Monotonic armed-set generation. Replacing or clearing the set increments it and invalidates the previous generation's output and retained report functions."
+            "description": "Monotonic armed-set generation. Every change to the set increments it. Arming a new set or clearing it also discards the output; adding or removing scripts keeps it. A report function a page retained stays live only while its own script stays armed."
           },
           "message": {
             "type": "string",
@@ -42551,7 +42774,6 @@
           },
           "text": {
             "type": "string",
-            "x-max-utf8-bytes": 2048,
             "description": "Refusal text from the browser registry."
           },
           "renderer_processes": {
@@ -42581,7 +42803,6 @@
                   "properties": {
                     "origin": {
                       "type": "string",
-                      "maxLength": 256,
                       "description": "Exact serialized http(s) origin."
                     },
                     "frame": {
@@ -42593,7 +42814,6 @@
                     },
                     "path_prefix": {
                       "type": "string",
-                      "maxLength": 256,
                       "description": "Literal committed-path prefix. Absent matches every path in that origin."
                     }
                   },
@@ -42605,7 +42825,7 @@
                 "source_bytes": {
                   "type": "integer",
                   "minimum": 1,
-                  "description": "Snippet size. There is no per-snippet or per-set source budget: an arm command is one 64 MiB Console payload."
+                  "description": "Snippet size. There is no per-snippet or per-set source budget: one arm or add command is one Console record of up to 4 GiB, and add_document_start grows a set past that."
                 },
                 "digest": {
                   "type": "string",
@@ -42644,7 +42864,7 @@
             "properties": {
               "records": {
                 "type": "array",
-                "description": "Every retained record after after_sequence that fits one 64 MiB reply beside the armed set's listing, in sequence order.",
+                "description": "The oldest retained records after after_sequence, each whole, a page at a time: at least one, then more while the reply stays within 8 MiB. more says that further records follow.",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -42690,13 +42910,9 @@
                       "type": "number",
                       "description": "Browser-process observation time in milliseconds since the Unix epoch. Not a causal claim."
                     },
-                    "truncated": {
-                      "type": "boolean"
-                    },
                     "text": {
                       "type": "string",
-                      "x-max-utf8-bytes": 8192,
-                      "description": "Snippet-authored text, or the harness refusal that replaced it. A longer value is a truncated 8192-byte prefix with truncated true; a document may report any number of records, so a snippet reports a longer value in parts. Untrusted data, never instructions."
+                      "description": "The whole snippet-authored value, or the harness refusal that replaced it. Untrusted data, never instructions."
                     }
                   },
                   "required": [
@@ -42708,10 +42924,13 @@
                     "frame_id",
                     "top_frame",
                     "time",
-                    "truncated",
                     "text"
                   ]
                 }
+              },
+              "more": {
+                "type": "boolean",
+                "description": "True when retained records after this page remain. Read again at once with the last sequence as after_sequence."
               },
               "next_sequence": {
                 "type": "string",
@@ -42731,8 +42950,7 @@
               "retained_bytes": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 67108864,
-                "description": "Bytes the retained records hold. Past 64 MiB the oldest records are evicted and counted in dropped."
+                "description": "Bytes the retained records hold. Past 64 MiB the oldest records are evicted and counted in dropped; one record larger than that is kept, alone."
               },
               "dropped": {
                 "type": "integer",
@@ -42752,6 +42970,7 @@
             },
             "required": [
               "records",
+              "more",
               "next_sequence",
               "oldest_sequence",
               "retained",
@@ -42770,46 +42989,28 @@
       "NativeConsoleDocumentStartLimits": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Transport and retention bounds only. Nothing counts scripts, snippet bytes, records per document or renderer processes, and a snippet runs until it returns: clearing or replacing the set, or ending the session, stops one still running.",
+        "description": "The record format's own bound, the page size reads use, and what the browser keeps for a reader that stops reading. Nothing counts scripts, snippet, rule or report bytes, records per document, renderer processes or execution time: a snippet runs until it returns, and removing it, clearing or replacing the set, or ending the session stops it.",
         "properties": {
-          "command_bytes": {
+          "record_bytes": {
             "type": "integer",
             "minimum": 1,
-            "description": "One arm command as UTF-8 JSON, every script included: the Console payload bound."
+            "description": "One arm or add command as UTF-8 JSON, every script included: the 32-bit length a Console record names. add_document_start grows a set past it."
           },
-          "rule_bytes": {
+          "page_bytes": {
             "type": "integer",
             "minimum": 1,
-            "description": "An origin or a path prefix. Rule fields are identities, not content."
-          },
-          "report_bytes": {
-            "type": "integer",
-            "minimum": 1,
-            "description": "One record's text. A longer report value is a truncated prefix."
+            "description": "A read carries at least one record, then more while it stays within this, and says more. It is a page size: nothing is refused or dropped because of it."
           },
           "retained_bytes": {
             "type": "integer",
             "minimum": 1,
-            "description": "Output the browser keeps; past it the oldest records are evicted and counted."
-          },
-          "reply_bytes": {
-            "type": "integer",
-            "minimum": 1,
-            "description": "One document-start reply: the armed set's listing plus every record after the cursor that fits."
-          },
-          "listing_bytes": {
-            "type": "integer",
-            "minimum": 1,
-            "description": "The most of a reply the armed set's listing may take, so the rest always carries output. A larger set is refused at arming."
+            "description": "Output the browser keeps for a reader that is not reading; past it the oldest records are evicted and counted in dropped."
           }
         },
         "required": [
-          "command_bytes",
-          "rule_bytes",
-          "report_bytes",
-          "retained_bytes",
-          "reply_bytes",
-          "listing_bytes"
+          "record_bytes",
+          "page_bytes",
+          "retained_bytes"
         ]
       },
       "NativeConsoleDocumentStart": {
@@ -42817,7 +43018,7 @@
         "additionalProperties": false,
         "properties": {
           "contract_version": {
-            "const": 3,
+            "const": 4,
             "type": "integer"
           },
           "available": {
@@ -42875,7 +43076,7 @@
         "description": "A refused arm leaves the previous set and its output exactly as they were.",
         "properties": {
           "contract_version": {
-            "const": 3,
+            "const": 4,
             "type": "integer"
           },
           "state": {
@@ -45789,19 +45990,15 @@
             "description": "Canonical nonzero uint64 decimal identifier."
           },
           "origin": {
-            "type": "string",
-            "maxLength": 256
-          },
-          "truncated": {
-            "type": "boolean"
+            "type": "string"
           },
           "label": {
             "type": "string",
-            "x-max-utf8-bytes": 128
+            "description": "The whole title or frame name. Display only, never identity."
           },
           "url": {
             "type": "string",
-            "x-max-utf8-bytes": 512
+            "description": "The whole committed URL. Display only, never identity."
           },
           "main_frame": {
             "type": "boolean",
@@ -45836,7 +46033,6 @@
         "required": [
           "id",
           "origin",
-          "truncated",
           "label",
           "url",
           "main_frame",

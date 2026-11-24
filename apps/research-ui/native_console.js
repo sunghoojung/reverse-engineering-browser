@@ -5,22 +5,26 @@
   const toggle = element('toggle');
   const encoder = new TextEncoder();
   const history = [];
-  let historyIndex = null, draft = '', historyBytes = 0;
+  let historyIndex = null, draft = '';
   let session = null, available = false, pending = 0, disconnected = false, initialized = false, documentSource = 'disposable';
   let liveListing = null, liveAvailable = false, listingRunning = false;
   let liveBinding = null, selectedBinding = null;
   controls.mode.value = 'disposable';
   const selectedDocument = () => !!controls.target.value && [...controls.target.options].some(option => option.value === controls.target.value && !option.disabled);
-  let outputBytes = 0, outputNodes = 0, removed = 0, partialTargets = false, outputGeneration = 0;
+  let partialTargets = false, outputGeneration = 0;
   let queue = Promise.resolve(), generation = 0, pollRunning = false;
   let checking = false, submitting = false, commandNumber = 0, unread = 0;
   // A command runs in the page until it returns; Stop ends it there.
   let commandsRunning = 0, stopping = false;
-  // One command record carries at most 64 MiB, its JSON escapes included.
-  const commandLimit = 64 * 1024 * 1024;
-  // The transcript and its search show a command's opening; history keeps it whole.
-  const commandPreview = 4096;
-  const previewCommand = source => source.length > commandPreview ? source.slice(0, commandPreview) : source;
+  // A Console record names its length in 32 bits, so one command is at most
+  // 4 GiB as UTF-8 JSON, its escapes included. Nothing else bounds a source.
+  const recordLimit = 4294967295;
+  const recordBytes = value => encoder.encode(JSON.stringify(value)).length;
+  // WebKit lays out in 1/64 px steps of a 32-bit integer, so no element can be
+  // taller than about 33.5 million px. A transcript taller than this is drawn
+  // compressed into it rather than past it, where its newest rows would be
+  // out of reach.
+  const transcriptExtent = 1 << 24;
   let sizedSource = '', sourceBytes = 0;
   const sourceSize = () => {
     const value = controls.source.value;
@@ -29,10 +33,11 @@
   };
   const formatBytes = n => n < 1024 ? `${n} bytes` : n < 1048576 ? `${(n / 1024).toFixed(1)} KiB` : `${(n / 1048576).toFixed(1)} MiB`;
   const numberId = value => typeof value === 'string' && /^[1-9][0-9]{0,19}$/.test(value) && BigInt(value) <= 18446744073709551615n;
-  const documentStartActions = ['arm_document_start', 'clear_document_start'];
+  const documentStartActions = ['arm_document_start', 'add_document_start', 'remove_document_start', 'clear_document_start'];
   const validState = (value, version = 2) => value?.contract_version === version && ['ready', 'idle'].includes(value.state) &&
     (value.state === 'ready' ? numberId(value.session_id) : value.session_id === null);
   const types = ['undefined', 'null', 'boolean', 'number', 'string', 'bigint', 'symbol', 'function', 'object', 'promise', 'accessor'];
+  const levels = ['debug', 'info', 'warning', 'error'];
   function notice(message, error = false) {
     controls.notice.textContent = message; controls.notice.title = message;
     controls.notice.dataset.kind = error ? 'error' : 'status'; controls.notice.hidden = !message;
@@ -84,17 +89,329 @@
     updateOutputState();
   }
   function updateOutputState() {
-    const rows = [...controls.output.children], visible = rows.filter(row => !row.hidden).length;
-    element('empty').hidden = !!rows.length;
-    element('no-matches').hidden = !rows.length || !!visible;
-    element('output-count').textContent = `${visible === rows.length ? rows.length : `${visible} / ${rows.length}`} entries${removed ? ` · ${removed} older removed` : ''}`;
-    element('latest').hidden = !rows.length || atBottom();
+    const total = transcript.size(), visible = transcript.visible();
+    element('empty').hidden = !!total;
+    element('no-matches').hidden = !total || !!visible;
+    element('output-count').textContent = `${visible === total ? total : `${visible} / ${total}`} entries`;
+    element('latest').hidden = !total || atBottom();
     element('latest').textContent = unread ? `${unread} new · Latest ↓` : 'Latest output ↓';
   }
   function atBottom() { return controls.scroll.scrollHeight - controls.scroll.scrollTop - controls.scroll.clientHeight < 40; }
-  function followLatest() { controls.scroll.scrollTop = controls.scroll.scrollHeight; unread = 0; updateOutputState(); }
-  controls.scroll.addEventListener('scroll', () => { if (atBottom()) unread = 0; updateOutputState(); });
-  element('latest').addEventListener('click', followLatest);
+  // Every entry stays, whole, until Clear, and only the entries around the
+  // viewport are in the document: a page that logs for hours would otherwise
+  // grow the DOM until layout, scrolling and search stall. An entry built from
+  // a record (a page message, a document-start record, a boundary) is rebuilt
+  // when it scrolls back in. One that holds live state, a command or a result
+  // with expandable values, keeps its node while it is detached.
+  const transcript = (() => {
+    const entries = [], owners = new WeakMap();
+    // shown is the filtered order. tops[i] is where shown[i] starts and
+    // tops[shown.length] is the transcript's height; an entry that was never
+    // rendered counts as the median rendered height until it is, so one very
+    // tall entry does not stretch every other.
+    let shown = [], tops = [0], stale = false, from = 0, to = 0, follow = true, scheduled = false;
+    const heights = new Map();
+    let measured = 0, typical = 24, typicalStale = false;
+    // position is the transcript offset at the top of the viewport. While the
+    // transcript fits, it is the scroll offset. Once it is compressed, a
+    // wheel, key or touch scroll moves it by exactly its own distance and a
+    // scrollbar drag maps proportionally onto the whole transcript; shift is
+    // the scroll offset it was last placed at.
+    let position = 0, shift = 0, compressed = false, jump = null;
+    // A scroll the layout did not make is the reader's. While one goes on,
+    // the layout never moves the scroll offset, since that would stop a
+    // keyboard scroll animation or momentum part way, and keeps the extent
+    // it laid out, laid, so the scroll keeps the destination it was aimed
+    // at: a row measured on the way moves the space around the drawn rows
+    // instead, and the scroll offset and extent take that up once the scroll
+    // settles. placed is the offset the layout last left; pull asks to
+    // follow the end because entries arrived or Latest was chosen.
+    let placed = 0, laid = 0, scrolling = false, pull = false;
+    // held is the edge Home or End last put the transcript at, -1 for the
+    // start and 1 for the end, while it holds it there, and 0 otherwise.
+    let held = 0, heldSince = 0;
+    // Drawn beyond each edge of the viewport, so a scroll step rarely reaches
+    // an edge that is not drawn yet.
+    const overscan = 800;
+    function count(height, step) {
+      const key = Math.round(height), next = (heights.get(key) || 0) + step;
+      if (next) heights.set(key, next); else heights.delete(key);
+      measured += step; typicalStale = true;
+    }
+    function estimate() {
+      if (typicalStale) {
+        typicalStale = false; typical = 24;
+        let seen = 0;
+        for (const key of [...heights.keys()].sort((a, b) => a - b)) { seen += heights.get(key); if (seen * 2 > measured) { typical = key; break; } }
+      }
+      return typical;
+    }
+    // A disclosure, a loaded property page or a narrower panel changes a
+    // rendered row's height after it was measured.
+    const resized = new ResizeObserver(changes => {
+      if (changes.some(change => { const entry = owners.get(change.target); return entry?.node === change.target && entry.height !== change.target.getBoundingClientRect().height; })) schedule();
+    });
+    const text = entry => entry.build ? entry.text : entry.node.textContent + (entry.command ?? '');
+    const level = entry => entry.build ? entry.level : entry.node.dataset.level;
+    function matches(entry) {
+      const query = controls.filter.value.toLocaleLowerCase(), wanted = controls.level.value;
+      return (!query || text(entry).toLocaleLowerCase().includes(query)) && (wanted === 'all' || level(entry) === wanted);
+    }
+    function node(entry) {
+      if (!entry.node) { entry.node = entry.build(); owners.set(entry.node, entry); }
+      resized.observe(entry.node);
+      return entry.node;
+    }
+    function offsets() {
+      if (!stale) return;
+      const size = estimate();
+      tops = new Array(shown.length + 1); tops[0] = 0;
+      for (let index = 0; index < shown.length; ++index) tops[index + 1] = tops[index] + (shown[index].height ?? size);
+      stale = false;
+    }
+    // The shown entry at transcript offset y.
+    function at(y) {
+      let low = 0, high = shown.length - 1;
+      while (low < high) { const middle = (low + high + 1) >> 1; if (tops[middle] <= y) low = middle; else high = middle - 1; }
+      return Math.max(0, low);
+    }
+    function detach(start, end) {
+      for (let index = start; index < end; ++index) {
+        const entry = shown[index], row = entry.node;
+        if (!row) continue;
+        // Focus would fall to the document with the row; keep it in the transcript.
+        if (row.contains(document.activeElement)) controls.scroll.focus({preventScroll: true});
+        resized.unobserve?.(row); row.remove();
+        // A record row is rebuilt when it returns, unless a disclosure in it is open.
+        if (entry.build && !row.querySelector('details[open]')) entry.node = null;
+      }
+    }
+    // Keeps shown[start, end) in the document, moving only the rows that
+    // enter or leave it.
+    function render(start, end) {
+      if (end <= from || start >= to) { detach(from, to); from = to = start; }
+      else {
+        if (start > from) { detach(from, start); from = start; }
+        if (end < to) { detach(end, to); to = end; }
+      }
+      if (start < from) { const head = []; for (let index = start; index < from; ++index) head.push(node(shown[index])); controls.output.prepend(...head); from = start; }
+      if (end > to) { const tail = []; for (let index = to; index < end; ++index) tail.push(node(shown[index])); controls.output.append(...tail); to = end; }
+    }
+    function measure() {
+      let changed = false;
+      for (let index = from; index < to; ++index) {
+        const entry = shown[index], height = entry.node.getBoundingClientRect().height;
+        if (height === entry.height) continue;
+        if (entry.height != null) count(entry.height, -1);
+        count(height, 1); entry.height = height; changed = true;
+      }
+      if (changed) stale = true;
+      return changed;
+    }
+    // Draws the rows around position until their measured heights settle.
+    // Anchored, the first visible entry stays where the reader sees it while
+    // the entries above it are measured. With below, the bottom of the
+    // viewport stays that far above the end of the transcript instead.
+    function fill(viewport, below, anchored) {
+      for (let pass = 0; pass < 8; ++pass) {
+        if (below != null) position = tops[shown.length] - viewport - below;
+        position = Math.max(0, Math.min(position, tops[shown.length] - viewport));
+        const anchor = at(position), offset = tops[anchor] - position;
+        render(shown.length ? at(position - overscan) : 0, shown.length ? Math.min(shown.length, at(position + viewport + overscan) + 1) : 0);
+        const changed = measure();
+        offsets();
+        if (changed && shown.length && anchored) position = tops[anchor] - offset;
+        if (!changed) break;
+      }
+      position = Math.max(0, Math.min(position, tops[shown.length] - viewport));
+    }
+    function layout() {
+      scheduled = false;
+      const viewport = controls.scroll.clientHeight;
+      // A hidden panel measures nothing; it is laid out when it is shown.
+      if (root.hidden || !viewport) return;
+      const base = controls.output.getBoundingClientRect().top - controls.scroll.getBoundingClientRect().top + controls.scroll.scrollTop;
+      const scrolled = controls.scroll.scrollTop - base, jumped = jump != null;
+      offsets();
+      const squeezed = tops[shown.length] > transcriptExtent, moved = scrolled - shift;
+      // Across a change between fitting and compressed, the position stays
+      // and the scroll offset moves to it, as it does for a jump.
+      const forced = jumped || squeezed !== compressed, writable = forced || !scrolling, end = follow && pull && writable;
+      // Where the reader is: the scroll offset moves the position by exactly
+      // its own distance, except that a long move of a compressed
+      // transcript, a scrollbar drag, maps onto the whole of it.
+      if (jumped) position = jump;
+      else if (squeezed === compressed) {
+        position = squeezed && Math.abs(moved) > 2 * viewport
+          ? scrolled / (transcriptExtent - viewport) * (tops[shown.length] - viewport) : position + moved;
+      }
+      jump = null;
+      fill(viewport, end ? 0 : null, true);
+      let height = tops[shown.length], drawn = tops[to] - tops[from];
+      compressed = height > transcriptExtent;
+      let extent = compressed ? transcriptExtent : writable ? height : laid;
+      const range = extent - viewport, last = height - viewport;
+      // The drawn rows sit wherever the reader is scrolled, so any measured
+      // difference above them moves the space before them, not the reader.
+      let target = scrolled, before = target - (position - tops[from]);
+      const placeable = before >= 0 && before + drawn <= extent;
+      if (compressed) {
+        // Unless that would put them past either end of the extent, or the
+        // scroll offset is at an end the reader has not reached: then the
+        // scroll offset moves to where the position maps.
+        if (forced || end || !placeable || target <= 0 && position > 0 || target >= range && position < last) {
+          target = position / last * range; before = target - (position - tops[from]);
+        }
+      } else if (writable) { target = position; before = tops[from]; }
+      else if (!placeable) {
+        // A reader scrolling to either end of the extent reaches that end of
+        // the transcript, and whatever was measured on the way moves the rows.
+        if (before < 0) { position = scrolled; fill(viewport, null, false); }
+        else fill(viewport, extent - scrolled - viewport, false);
+        height = tops[shown.length]; drawn = tops[to] - tops[from]; before = scrolled - (position - tops[from]);
+        // Rows that no longer fit the extent at all are laid out at their height.
+        if (before < 0 || before + drawn > extent) {
+          position = scrolled; fill(viewport, null, false);
+          extent = height = tops[shown.length]; drawn = tops[to] - tops[from]; before = tops[from]; target = position;
+        }
+      }
+      controls.output.style.paddingTop = `${before}px`;
+      controls.output.style.paddingBottom = `${extent - before - drawn}px`;
+      // Scroll offsets are whole pixels, so a fractional end would leave the
+      // newest row a pixel short; the browser clamps this one to the true end.
+      if (end) controls.scroll.scrollTop = controls.scroll.scrollHeight;
+      else if (Math.abs(scrolled - target) >= 1) controls.scroll.scrollTop = base + target;
+      if (writable) pull = false;
+      placed = controls.scroll.scrollTop; shift = placed - base; laid = extent;
+      updateOutputState();
+    }
+    function schedule() {
+      if (scheduled) return;
+      scheduled = true; Promise.resolve().then(layout);
+    }
+    // A new filter is a new transcript, laid out at its own extent.
+    function refilter() {
+      detach(from, to); from = to = 0;
+      shown = entries.filter(matches); stale = true; scrolling = false; held = 0; schedule();
+    }
+    // Only the reader's own scrolls start or stop following the end. One the
+    // layout made can arrive after more entries did, when it no longer looks
+    // like the end, so it leaves following as it was.
+    // A reader's scroll is over once it has stood still: three frames after
+    // a scrollend, or 300 ms where none comes. A scrollend alone does not say
+    // so, since WebKit fires one after each step of its keyboard scroll, one
+    // for an animation that a newer scroll cancels, such as a PageDown that
+    // PageUp interrupts, and one for the layout's own write, after the newer
+    // scroll has begun. Frames count the stillness,
+    // not a timer: a frame dispatches the scrolls that arrived before it runs
+    // its callbacks, so a page that was busy never settles under a scroll
+    // that is still moving.
+    // A scroll down that ends within reach of the end lands on it, since rows
+    // measured on the way can grow the transcript past where it was aimed.
+    // A scroll up is never pulled back.
+    let descending = false, ended = false, still = 0, since = 0, watching = false;
+    function watch() {
+      if (watching) return;
+      watching = true;
+      requestAnimationFrame(function frame(now) {
+        if (!scrolling) { watching = false; return; }
+        if (!still++) since = now;
+        if (ended ? still < 3 : now - since < 300) { requestAnimationFrame(frame); return; }
+        watching = scrolling = false;
+        if (follow && descending) pull = true;
+        layout();
+      });
+    }
+    // Choosing Latest ends any scroll the reader was making.
+    function latest() { follow = pull = true; unread = 0; scrolling = false; held = 0; layout(); updateOutputState(); }
+    // Home, End, Command-Up and Command-Down put the transcript at that edge
+    // in one write, as a jump does, and end any scroll still under way; End
+    // follows new entries again, as Latest does. A write does not stop
+    // WebKit's keyboard scroll at once: it takes one more step on its own
+    // path. So the edge is held: a scroll that no key, wheel, pointer or
+    // touch on the transcript began goes back to it, until the reader does
+    // one of those or the edge has held for 300 ms. A scroll animated to the
+    // edge would not reliably arrive: WebKit before bug 330293 aims Home and
+    // End by a distance from a position an animation may have left, it can
+    // drop a smooth scroll asked for while its keyboard scroll still moves,
+    // and as it fires scrollend after each step, the layout settles a smooth
+    // scroll that pauses for three frames and its write stops it short.
+    function toEdge(toward) {
+      const holding = held;
+      if (toward > 0) latest(); else { follow = scrolling = false; jump = 0; layout(); updateOutputState(); }
+      if (!holding) requestAnimationFrame(function hold(now) {
+        if (!held) return;
+        heldSince ||= now;
+        if (now - heldSince < 300) requestAnimationFrame(hold); else held = 0;
+      });
+      held = toward; heldSince = 0;
+    }
+    function edge(event) {
+      if (event.altKey || event.ctrlKey || event.shiftKey) return 0;
+      if (event.metaKey) return event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : 0;
+      return event.key === 'Home' ? -1 : event.key === 'End' ? 1 : 0;
+    }
+    controls.scroll.addEventListener('keydown', event => {
+      held = 0;
+      const toward = edge(event);
+      if (!toward || event.defaultPrevented || event.target.closest('input, textarea, select, [contenteditable]')) return;
+      event.preventDefault(); toEdge(toward);
+    });
+    for (const type of ['wheel', 'pointerdown', 'touchstart']) controls.scroll.addEventListener(type, () => { held = 0; }, {passive: true});
+    controls.scroll.addEventListener('scroll', () => {
+      if (held && controls.scroll.scrollTop !== placed) { toEdge(held); return; }
+      if (controls.scroll.scrollTop !== placed) {
+        follow = atBottom(); if (follow) unread = 0;
+        descending = controls.scroll.scrollTop > placed; scrolling = true; ended = false; still = 0;
+        watch();
+      }
+      layout(); updateOutputState();
+    });
+    controls.scroll.addEventListener('scrollend', () => { if (scrolling) ended = true; });
+    new ResizeObserver(schedule).observe(controls.scroll);
+    return {
+      size: () => entries.length,
+      visible: () => shown.length,
+      layout, schedule, refilter,
+      // A record entry is {build, text, level}; a live one is {node, command}.
+      add(entry) {
+        entries.push(entry);
+        if (entry.node) owners.set(entry.node, entry);
+        if (matches(entry)) { shown.push(entry); if (!stale) tops.push(tops[tops.length - 1] + estimate()); }
+        if (!follow) ++unread;
+        pull = true;
+        schedule();
+        return entry.node;
+      },
+      // A live row changed: it may now be taller, or start or stop matching.
+      changed(row) {
+        const entry = row && owners.get(row);
+        if (!entry) return;
+        if ((controls.filter.value || controls.level.value !== 'all') && shown.includes(entry) !== matches(entry)) refilter();
+        else schedule();
+      },
+      clear() {
+        detach(from, to); from = to = 0;
+        entries.length = 0; shown = []; tops = [0]; stale = false; heights.clear(); measured = 0; typical = 24; typicalStale = false;
+        follow = true; unread = 0; position = shift = laid = 0; compressed = false; jump = null;
+        pull = scrolling = false; held = 0;
+        controls.output.style.paddingTop = controls.output.style.paddingBottom = '0px';
+      },
+      latest,
+      // Live rows that match, rendered or not.
+      find: predicate => entries.filter(entry => !entry.build && predicate(entry.node)),
+      // Scrolls one entry to the middle of the viewport and returns its row.
+      reveal(entry) {
+        if (!shown.includes(entry)) { controls.filter.value = ''; controls.level.value = 'all'; refilter(); }
+        offsets();
+        const index = shown.indexOf(entry);
+        follow = false; held = 0; jump = tops[index] - (controls.scroll.clientHeight - (entry.height ?? estimate())) / 2;
+        layout();
+        return entry.node;
+      }
+    };
+  })();
+  element('latest').addEventListener('click', () => transcript.latest());
   element('empty-action').addEventListener('click', () => {
     if (!session) {
       if (documentSource === 'live_capture') { if (selectedDocument()) { controls.connection.open = true; if (controls['live-consent'].checked) controls.start.click(); else controls['live-consent'].focus(); } else controls.target.focus(); }
@@ -143,7 +460,7 @@
     });
     const value = await response.json();
     if (!response.ok) throw new Error(typeof value.error === 'string' ? value.error : `Console returned ${response.status}`);
-    if (!validState(value, documentStartActions.includes(action) ? 3 : 2) || value.state !== (action === 'stop' ? 'idle' : 'ready') ||
+    if (!validState(value, documentStartActions.includes(action) ? 4 : 2) || value.state !== (action === 'stop' ? 'idle' : 'ready') ||
         !['start', 'stop', 'connect_live'].includes(action) && value.session_id !== identity) throw new TypeError('Malformed native console response');
     return value;
   }
@@ -219,16 +536,15 @@
         controls['live-consent'].checked = false;
       }
     }
-    if (!Array.isArray(value.targets) || value.targets.length > 64 || typeof value.truncated !== 'boolean' || value.targets.some(target =>
-      !numberId(target.id) || typeof target.origin !== 'string' || encoder.encode(target.origin).length > 256 ||
-      typeof target.label !== 'string' || encoder.encode(target.label).length > 128 || typeof target.url !== 'string' || encoder.encode(target.url).length > 512 ||
-      typeof target.main_frame !== 'boolean' || typeof target.truncated !== 'boolean') || new Set(value.targets.map(target => target.id)).size !== value.targets.length) throw new TypeError('Malformed document listing');
+    if (!Array.isArray(value.targets) || typeof value.truncated !== 'boolean' || value.targets.some(target =>
+      !numberId(target.id) || typeof target.origin !== 'string' || typeof target.label !== 'string' || typeof target.url !== 'string' ||
+      typeof target.main_frame !== 'boolean') || new Set(value.targets.map(target => target.id)).size !== value.targets.length) throw new TypeError('Malformed document listing');
     const invalid = documentSource === 'live_capture' && !!session && value.selected_target_id === null;
     document.dispatchEvent(new CustomEvent('reb:console-documents', {detail: value.targets.map(target => ({url: target.url, main_frame: target.main_frame}))}));
     clearTargets(); partialTargets = value.truncated;
     for (const target of value.targets) {
       const option = document.createElement('option'); option.value = target.id;
-      option.textContent = `${target.label || `${target.main_frame ? 'top' : 'frame'} #${target.id}`} · ${target.origin}${target.truncated ? '…' : ''}`;
+      option.textContent = `${target.label || `${target.main_frame ? 'top' : 'frame'} #${target.id}`} · ${target.origin}`;
       option.dataset.url = target.url;
       option.title = `${target.label} · ${target.url} · document ${target.id}`; controls.target.append(option);
     }
@@ -245,33 +561,9 @@
       ? (value.targets.length ? `${liveNotice}${partialTargets ? ' Document listing is partial.' : ''}` : 'No eligible documents yet. Open an HTTP or HTTPS page in the live capture.')
       : (value.targets.length ? `Select a document in the disposable browser.${partialTargets ? ' Document listing is partial.' : ''}` : 'No eligible documents yet. Open an HTTP or HTTPS page in the disposable browser, then refresh.'));
   }
-  function boundRow(row) {
-    if (!row?.isConnected) return;
-    const previous = Number(row.dataset.bytes || 0);
-    const bytes = encoder.encode(row.textContent).length + encoder.encode(row.dataset.command || '').length;
-    row.dataset.bytes = bytes; outputBytes += bytes - previous;
-    const nodes = row.querySelectorAll('*').length + 1; outputNodes += nodes - Number(row.dataset.nodes || 0); row.dataset.nodes = nodes;
-    while (controls.output.children.length > 128 || outputBytes > 262144 || outputNodes > 8192) {
-      const oldest = controls.output.firstElementChild;
-      outputBytes -= Number(oldest.dataset.bytes || 0); outputNodes -= Number(oldest.dataset.nodes || 0); oldest.remove(); ++removed;
-    }
-    // Eviction stays in the transcript footer, never replacing a transport error.
-    filter();
-  }
-  function appendRow(row) {
-    const follow = atBottom();
-    const anchor = [...controls.output.children].find(child => child.getBoundingClientRect().bottom >= controls.scroll.getBoundingClientRect().top);
-    const top = anchor?.getBoundingClientRect().top;
-    controls.output.append(row); boundRow(row);
-    if (follow) followLatest();
-    else {
-      ++unread;
-      if (anchor?.isConnected) controls.scroll.scrollTop += anchor.getBoundingClientRect().top - top;
-      updateOutputState();
-    }
-  }
+  function changedRow(row) { transcript.changed(row); }
   function boundary(text) {
-    const row = document.createElement('div'); row.className = 'native-console-boundary'; row.textContent = text; appendRow(row);
+    transcript.add({text, build: () => { const row = document.createElement('div'); row.className = 'native-console-boundary'; row.textContent = text; return row; }});
   }
   function button(label, action) {
     const control = document.createElement('button'); control.type = 'button'; control.textContent = label;
@@ -280,9 +572,60 @@
       catch (error) { notice(`${error.message}. The action was not retried.`, true); }
     }); return control;
   }
+  // WebKit measures a word, text with no break opportunity in it, as one
+  // width, and past a few thousand characters that width loses precision:
+  // the lines of a 1 MiB message held a character too many or too few, and
+  // its last line ran past the wrap width. A word of more than 4096 code
+  // units, without a space, tab or line break, goes in as runs of at most
+  // that many, each ending on a grapheme boundary and the next after a <wbr>.
+  // The <wbr> keeps WebKit from laying out the runs as one word, which takes
+  // seconds, and the word breaks anywhere, so each line stays full up to the
+  // wrap width. Copy, Find and textContent see one text. Absent text is
+  // empty, as it is for textContent.
+  const textRun = 4096, graphemes = new Intl.Segmenter(undefined, {granularity: 'grapheme'});
+  function textRuns(text) {
+    if (text.length <= textRun) return text ? [text] : [];
+    const nodes = [];
+    let segments = null, plain = 0;
+    for (let at = 0, first = 0; at <= text.length; ++at) {
+      const code = at < text.length ? text.charCodeAt(at) : 32;
+      if (code !== 32 && code !== 9 && code !== 10 && code !== 12 && code !== 13) continue;
+      if (at - first > textRun) {
+        segments ??= graphemes.segment(text);
+        const start = segments.containing(first).index, word = document.createElement('span');
+        word.className = 'native-console-word';
+        for (let from = start; from < at;) {
+          let next = Math.min(from + textRun, at);
+          if (next < at) { const cluster = segments.containing(next); next = cluster.index > from ? cluster.index : cluster.index + cluster.segment.length; }
+          if (from > start) word.append(document.createElement('wbr'));
+          word.append(text.slice(from, next)); from = next;
+        }
+        if (start > plain) nodes.push(text.slice(plain, start));
+        nodes.push(word); plain = at;
+      }
+      first = at + 1;
+    }
+    if (plain < text.length) nodes.push(text.slice(plain));
+    return nodes;
+  }
+  function appendText(node, value) { node.append(...textRuns(value == null ? '' : String(value))); return node; }
+  // A command or function source is colored over its first 8192 characters,
+  // as the composer colors it. A long word in a colored token or in the
+  // plain rest goes in as runs.
+  const coloredCode = 8192;
+  function appendCode(container, value) {
+    const source = value == null ? '' : String(value), colored = source.length <= coloredCode ? source.length : graphemes.segment(source).containing(coloredCode).index;
+    const code = document.createDocumentFragment(); appendCommandColors(code, source.slice(0, colored));
+    for (const node of [...code.childNodes]) {
+      if (node.nodeType === 3) container.append(...textRuns(node.data));
+      else { if (node.textContent.length > textRun) node.replaceChildren(...textRuns(node.textContent)); container.append(node); }
+    }
+    return appendText(container, source.slice(colored));
+  }
+  const locationText = value => value && typeof value.url === 'string' && Number.isInteger(value.line) && value.line >= 1 ? `${value.url || 'console'}:${value.line}:${value.column || 1}` : '';
   function location(container, value) {
-    if (!value || typeof value.url !== 'string' || value.url.length > 2048 || !Number.isInteger(value.line) || value.line < 1) return;
-    const control = button(`${value.url || 'console'}:${value.line}:${value.column || 1}`, () => {
+    if (!locationText(value)) return;
+    const control = button(locationText(value), () => {
       const live = documentSource === 'live_capture';
       const detail = {url: value.url, line: value.line, unavailable: false, live};
       document.dispatchEvent(new CustomEvent('reb-console-location', {detail}));
@@ -297,18 +640,19 @@
   async function copyValue(value, scope) {
     if (value?.handle && value.type === 'object') {
       const page = await runtime({operation: 'inspect', handle: value.handle, offset: 0}, scope.target, false, scope.session, scope.generation);
-      if (page?.status === 'ok') { await copy(JSON.stringify({preview: value.text, properties: page.properties, truncated: page.more}, null, 2)); return; }
+      if (page?.status === 'ok') { await copy(JSON.stringify({preview: value.text, properties: page.properties, more: page.more}, null, 2)); return; }
     }
     await copy(value?.text || '');
   }
   function checkValue(value) {
-    if (!value || !types.includes(value.type) || typeof value.text !== 'string' || encoder.encode(value.text).length > 2048 || typeof value.truncated !== 'boolean' || value.handle != null && !numberId(value.handle)) throw new TypeError('Malformed runtime value');
+    if (!value || !types.includes(value.type) || typeof value.text !== 'string' || value.handle != null && !numberId(value.handle)) throw new TypeError('Malformed runtime value');
   }
-  function renderValue(container, value, scope, depth = 0) {
+  // Each level expands only when opened, one page at a time, so any depth can be inspected.
+  function renderValue(container, value, scope) {
     checkValue(value);
-    if (value.handle && ['object', 'function', 'promise'].includes(value.type) && depth < 8) {
+    if (value.handle && ['object', 'function', 'promise'].includes(value.type)) {
       const disclosure = document.createElement('details'); disclosure.className = 'native-console-object';
-      const summary = document.createElement('summary'); appendCommandColors(summary, `${value.text}${value.truncated ? ' …' : ''}`);
+      const summary = document.createElement('summary'); appendCode(summary, value.text);
       const children = document.createElement('div'); children.className = 'native-console-properties';
       const actions = document.createElement('div'); actions.className = 'native-console-actions';
       const status = document.createElement('div'); status.className = 'native-console-property-status'; status.setAttribute('role', 'status');
@@ -330,14 +674,14 @@
           if (!disclosure.isConnected) return;
           focusBeforeUpdate = document.activeElement;
           if (!result || result.status !== 'ok') throw new Error(result?.text || 'Inspection unavailable. Refresh documents if the connection was lost.');
-          if (!Array.isArray(result.properties) || result.properties.length > 17 || typeof result.more !== 'boolean' || !Number.isInteger(result.offset) || result.offset < 0 || result.offset > Math.min(65536, pageOffset + 16) || result.more && result.offset <= pageOffset || result.offset < pageOffset && (result.more || result.properties.length !== 0)) throw new TypeError('Malformed property page.');
+          if (!Array.isArray(result.properties) || result.properties.length > 17 || typeof result.more !== 'boolean' || !Number.isInteger(result.offset) || result.offset < 0 || result.offset > pageOffset + 16 || result.more && result.offset <= pageOffset || result.offset < pageOffset && (result.more || result.properties.length !== 0)) throw new TypeError('Malformed property page.');
           const fragment = document.createDocumentFragment();
           for (const property of result.properties) {
-            if (typeof property.name !== 'string' || property.name.length > 2048) throw new TypeError('Malformed property name.');
+            if (typeof property.name !== 'string') throw new TypeError('Malformed property name.');
             checkValue(property.value);
             const row = document.createElement('div'); row.className = 'native-console-property';
             const name = document.createElement('span'); name.className = 'native-console-property-name'; name.textContent = `${property.name}: `;
-            row.append(name); renderValue(row, property.value, scope, depth + 1); fragment.append(row);
+            row.append(name); renderValue(row, property.value, scope); fragment.append(row);
           }
           // Replace one property page. Navigating a large object never grows a
           // permanent list or retains detached child pages and their handles.
@@ -347,7 +691,7 @@
           pageUnavailable = pageOffset > 0 && !result.more && result.properties.length === 0 && result.offset <= pageOffset;
           previous.textContent = pageUnavailable ? 'First properties' : 'Previous properties';
           retry.textContent = pageUnavailable ? 'Reload this page' : 'Retry inspection'; retry.hidden = !pageUnavailable;
-          status.textContent = pageUnavailable ? `This page is no longer available (${result.offset} properties remain). Return to the first page or reload this page if the object changes.` : result.properties.length ? `Properties ${pageOffset + 1}–${result.offset || result.properties.length}${pageOffset === 0 && result.properties.some(property => property.name === '[[Prototype]]') ? ' + prototype' : ''}${result.truncated ? ' · limited to first 65536 indices' : ''}` : 'No inspectable properties.';
+          status.textContent = pageUnavailable ? `This page is no longer available (${result.offset} properties remain). Return to the first page or reload this page if the object changes.` : result.properties.length ? `Properties ${pageOffset + 1}–${result.offset || result.properties.length}${pageOffset === 0 && result.properties.some(property => property.name === '[[Prototype]]') ? ' + prototype' : ''}` : 'No inspectable properties.';
           previous.disabled = offset === 0; more.disabled = !result.more;
           pager.hidden = previous.disabled && more.disabled && retry.hidden;
         } catch (error) {
@@ -361,7 +705,7 @@
               [focusBeforeUpdate, document.body].includes(document.activeElement)) {
             (!previous.disabled ? previous : !more.disabled ? more : !retry.hidden ? retry : summary).focus();
           }
-          boundRow(container.closest('.native-console-result'));
+          changedRow(container.closest('.native-console-result'));
         }
       }
       actions.append(button('Copy properties', () => copyValue(value, scope)), button('Store as variable', async () => {
@@ -369,12 +713,12 @@
         if (result) notice(result.status === 'ok' ? `Stored as ${result.text} in the selected page.` : result.text, result.status !== 'ok');
       }), button('Release', async () => {
         const result = await runtime({operation: 'release', handle: value.handle}, scope.target, false, scope.session, scope.generation);
-        if (result?.status === 'ok') { released = true; loaded = true; children.replaceChildren(); summary.textContent = `${value.text} (released)`; status.textContent = 'Value released. Run a new command to inspect it again.'; pager.hidden = true; actionDetails.hidden = true; boundRow(container.closest('article')); }
+        if (result?.status === 'ok') { released = true; loaded = true; children.replaceChildren(); summary.textContent = `${value.text} (released)`; status.textContent = 'Value released. Run a new command to inspect it again.'; pager.hidden = true; actionDetails.hidden = true; changedRow(container.closest('article')); }
       }));
       location(actions, value.location);
       if (value.type === 'function') actions.append(button('Show function source', async () => {
         const result = await runtime({operation: 'source', handle: value.handle}, scope.target, false, scope.session, scope.generation);
-        if (result?.text && disclosure.isConnected) { pager.hidden = true; status.textContent = result.status === 'ok' ? 'Native function source' : 'Source unavailable'; const source = document.createElement('pre'); appendCommandColors(source, result.text); children.replaceChildren(source); disclosure.open = true; loaded = true; boundRow(container.closest('article')); }
+        if (result?.text && disclosure.isConnected) { pager.hidden = true; status.textContent = result.status === 'ok' ? 'Native function source' : 'Source unavailable'; const source = document.createElement('pre'); appendCode(source, result.text); children.replaceChildren(source); disclosure.open = true; loaded = true; changedRow(container.closest('article')); }
       }));
       // An element describes itself by its tag; window and document describe
       // themselves as a plain Object, and the runtime lists their listeners
@@ -384,13 +728,12 @@
         const result = await runtime({operation: 'listeners', handle: value.handle}, scope.target, false, scope.session, scope.generation);
         if (!result) return;
         children.replaceChildren(); pager.hidden = true; status.textContent = 'Registered event listeners'; loaded = true; disclosure.open = true;
-        if (result.status !== 'ok') { children.textContent = result.text; return; }
+        if (result.status !== 'ok') { appendText(children, result.text); return; }
         if (!result.properties?.length) children.textContent = 'No registered listeners.';
-        for (const property of (result.properties || []).slice(0, 32)) {
-          const row = document.createElement('div'); row.className = 'native-console-property'; row.append(document.createTextNode(property.name + ': ')); renderValue(row, property.value, scope, depth + 1); children.append(row);
+        for (const property of result.properties || []) {
+          const row = document.createElement('div'); row.className = 'native-console-property'; row.append(document.createTextNode(property.name + ': ')); renderValue(row, property.value, scope); children.append(row);
         }
-        if (result.truncated) children.append(document.createTextNode('Listener listing truncated at 32.'));
-        boundRow(container.closest('article'));
+        changedRow(container.closest('article'));
       }));
       // Monitoring is per element only.
       if (element) actions.append(button('Monitor events', async () => { const result = await runtime({operation: 'monitor', handle: value.handle}, scope.target, false, scope.session, scope.generation); if (result) notice(result.text); }),
@@ -404,13 +747,14 @@
       }
     } else {
       const output = document.createElement('span'); output.className = 'native-console-primitive'; output.dataset.type = value.type;
-      output.textContent = value.type === 'string' ? JSON.stringify(value.text) : value.text; container.append(output);
-      if (value.truncated) container.append(document.createTextNode(' … (truncated)'));
+      appendText(output, value.type === 'string' ? JSON.stringify(value.text) : value.text); container.append(output);
     }
   }
   async function awaitValue(container, value, scope, replace = false) {
     if (container.dataset.awaiting === 'true') return;
     const started = Date.now(); const token = generation;
+    // Checks often at first, then once a second, for as long as it takes.
+    const delay = () => Date.now() - started < 10000 ? 200 : 1000;
     const wait = String(Number(container.dataset.wait || 0) + 1); container.dataset.wait = wait;
     container.dataset.awaiting = 'true';
     const current = () => container.dataset.wait === wait && container.isConnected && token === generation && session === scope.session && controls.target.value === scope.target;
@@ -420,14 +764,14 @@
         if (!current()) return;
         const result = await runtime({operation: 'await', handle: value.handle}, scope.target, true, scope.session, scope.generation);
         if (!result || !current()) return;
-        if (result.status === 'pending' && Date.now() - started < 10000) { polling = true; setTimeout(tick, 200); return; }
+        if (result.status === 'pending') { polling = true; setTimeout(tick, delay()); return; }
         const settled = document.createElement('div'); settled.className = 'native-console-value';
         if (result.value) { renderValue(settled, result.value, scope); const row = container.closest('article'); row.dataset.status = result.status; row.dataset.level = result.status === 'ok' ? 'result' : 'error'; }
-        else settled.textContent = result.status === 'pending' ? 'Promise still pending after 10 seconds. Await again or stop waiting.' : result.text || 'Await stopped';
+        else appendText(settled, result.text || 'Await stopped');
         if (replace && result.value) { container.replaceChildren(); renderValue(container, result.value, scope); }
         else if (replace) container.replaceChildren(settled);
         else { container.querySelector('summary').textContent = result.status === 'rejected' ? 'Promise {<rejected>}' : result.status === 'ok' ? 'Promise {<fulfilled>}' : value.text; container.append(settled); }
-        boundRow(container.closest('article'));
+        changedRow(container.closest('article'));
       } finally {
         // Only a newer wait owns the flag, so every other exit lets Await run again.
         if (!polling && container.dataset.wait === wait) container.dataset.awaiting = 'false';
@@ -437,44 +781,46 @@
   }
   function result(value, source, scope) {
     const row = document.createElement('article'); row.className = 'native-console-result'; row.dataset.status = value.status; row.dataset.requestId = value.request_id || '';
-    row.dataset.level = value.status === 'ok' ? 'result' : 'error'; row.dataset.command = previewCommand(source); row.dataset.commandId = scope.command; row.dataset.commandNumber = scope.command; row.dataset.consoleSession = scope.session; row.dataset.consoleDocument = scope.target;
+    row.dataset.level = value.status === 'ok' ? 'result' : 'error'; row.dataset.commandId = scope.command; row.dataset.commandNumber = scope.command; row.dataset.consoleSession = scope.session; row.dataset.consoleDocument = scope.target;
     row.setAttribute('aria-label', `Result for command ${scope.command}: ${value.status}`);
     const output = document.createElement('div'); output.className = 'native-console-value';
     row.append(output);
     if (value.value) { row.dataset.type = value.value.type; renderValue(output, value.value, scope); }
-    else { output.textContent = value.text || value.status; location(row, value.location); }
-    if (Array.isArray(value.stack)) for (const frame of value.stack.slice(0, 16)) { const entry = document.createElement('div'); location(entry, frame); row.append(entry); }
+    else { appendText(output, value.text || value.status); location(row, value.location); }
+    if (Array.isArray(value.stack)) for (const frame of value.stack) { const entry = document.createElement('div'); location(entry, frame); row.append(entry); }
     const details = document.createElement('details'); details.className = 'native-console-result-details';
-    const summary = document.createElement('summary'); summary.textContent = value.value?.truncated ? 'Truncated' : '⋯'; summary.setAttribute('aria-label', `Result details: ${value.status}`);
+    const summary = document.createElement('summary'); summary.textContent = '⋯'; summary.setAttribute('aria-label', `Result details: ${value.status}`);
     const label = document.createElement('div'); label.className = 'native-console-result-type'; label.textContent = `${value.status} · session ${scope.session} · document ${scope.target} · ${scope.live ? 'live capture' : 'disposable experiment'}`;
     label.append(button('Copy result', () => value.value ? copyValue(value.value, scope) : copy(value.text || '')), button('Save snippet', () => saveSnippet(source)), button('Experiment activity', async () => {
-      // The browser keeps every event until it is read and pages them by
-      // reply size; read on while it says more remain. A page that keeps
-      // loading stops this read after 64 replies, and the rest wait for the
-      // next one.
-      const events = []; let dropped = 0, more = true, read = false;
-      for (let page = 0; more && page < 64; page += 1) {
-        const reply = await runtime({operation: 'traffic'}, scope.target, false, scope.session, scope.generation);
+      // Each read drains the oldest page of this document's activity, so read
+      // until none remains and show every page that arrived.
+      const events = []; let dropped = 0, read = false, reply;
+      do {
+        reply = await runtime({operation: 'traffic'}, scope.target, false, scope.session, scope.generation);
         if (reply?.status !== 'ok') break;
-        read = true; events.push(...(reply.events || [])); dropped += reply.dropped || 0; more = reply.more === true;
-      }
-      if (read) document.dispatchEvent(new CustomEvent('reb-console-traffic', {detail: {session: scope.session, target: scope.target, request: value.request_id, events, dropped, more}}));
-    })); details.append(summary, label); row.append(details); appendRow(row);
+        read = true; dropped += reply.dropped || 0;
+        for (const event of reply.events || []) events.push(event);
+      } while (reply.more === true);
+      if (read) document.dispatchEvent(new CustomEvent('reb-console-traffic', {detail: {session: scope.session, target: scope.target, request: value.request_id, events, dropped}}));
+    })); details.append(summary, label); row.append(details); transcript.add({node: row, command: source});
     if (value.value?.type === 'promise' && /^\s*await\b/.test(source)) awaitValue(output, value.value, scope, true);
     return row;
   }
+  function logRow(message) {
+    const row = document.createElement('article'); row.className = 'native-console-result native-console-log'; row.dataset.level = message.level;
+    const time = document.createElement('span'); time.className = 'native-console-time'; time.textContent = new Date(message.time).toLocaleTimeString(); row.append(time);
+    const output = document.createElement('pre'); appendText(output, message.text); row.append(output); location(row, message);
+    if (message.stack) { const details = document.createElement('details'); const summary = document.createElement('summary'); summary.textContent = 'Stack'; const stack = document.createElement('pre'); appendText(stack, message.stack); details.append(summary, stack); row.append(details); }
+    return row;
+  }
   function logs(value, epoch = outputGeneration) {
-    if (!Array.isArray(value.messages) || value.messages.length > 32 || !Number.isInteger(value.dropped) || value.dropped < 0) throw new TypeError('Malformed console messages');
-    if (value.messages.some(message => !message || !['debug', 'info', 'warning', 'error'].includes(message.level) || typeof message.text !== 'string' || message.text.length > 8192 || typeof message.time !== 'number' || !Number.isFinite(message.time) || Math.abs(message.time) > 8640000000000000 || message.stack != null && (typeof message.stack !== 'string' || message.stack.length > 8192))) throw new TypeError('Malformed page message');
+    if (!Array.isArray(value.messages) || !Number.isInteger(value.dropped) || value.dropped < 0 || value.more != null && typeof value.more !== 'boolean') throw new TypeError('Malformed console messages');
+    if (value.messages.some(message => !message || !levels.includes(message.level) || typeof message.text !== 'string' || typeof message.time !== 'number' || !Number.isFinite(message.time) || Math.abs(message.time) > 8640000000000000 || message.stack != null && typeof message.stack !== 'string')) throw new TypeError('Malformed page message');
     if (epoch !== outputGeneration) return;
     if (value.dropped) boundary(`${value.dropped} page messages dropped before delivery.`);
     for (const message of value.messages) {
-      const row = document.createElement('article'); row.className = 'native-console-result native-console-log'; row.dataset.level = message.level;
-      const time = document.createElement('span'); time.className = 'native-console-time'; time.textContent = new Date(message.time).toLocaleTimeString(); row.append(time);
-      const output = document.createElement('pre'); output.textContent = message.text; row.append(output); location(row, message);
-      if (message.truncated) row.append(document.createTextNode(' (truncated)'));
-      if (message.stack) { const details = document.createElement('details'); const summary = document.createElement('summary'); summary.textContent = 'Stack'; const stack = document.createElement('pre'); stack.textContent = message.stack; details.append(summary, stack); row.append(details); }
-      appendRow(row);
+      transcript.add({level: message.level, build: () => logRow(message),
+        text: `${new Date(message.time).toLocaleTimeString()}${message.text}${locationText(message)}${message.stack ? `Stack${message.stack}` : ''}`});
     }
   }
 
@@ -484,7 +830,9 @@
   const documentStart = (() => {
     const ds = name => element(`ds-${name}`);
     const sequence = value => typeof value === 'string' && /^(0|[1-9][0-9]{0,19})$/.test(value);
-    let view = null, cursor = '0', refreshing = false, tick = 0, failed = false, lastGeneration = null;
+    // Output sequences only grow within a browser session, whatever the set
+    // does, so the cursor only moves forward until the next connection.
+    let view = null, cursor = '0', refreshing = false, tick = 0, failed = false, armedKey = '';
     function requested() { return ds('enable').checked === true; }
     function armedCount() { return view?.document_start?.scripts?.length || 0; }
     function permitted() { return view?.document_start?.permitted === true; }
@@ -536,13 +884,21 @@
       for (const name of ['origin', 'frame', 'path', 'source', 'consent']) ds(name).disabled = !ready;
       const scripts = view?.document_start?.scripts || [];
       const list = ds('armed');
-      list.replaceChildren();
-      for (const script of scripts) {
-        const item = document.createElement('li');
-        const prefix = script.rule.path_prefix ? ` path ${script.rule.path_prefix}*` : ' any path';
-        item.textContent = `#${script.script_id} ${script.rule.origin} · ${script.rule.frame} frame ·${prefix} · ${script.source_bytes} bytes · ${script.digest} · ${script.injected_documents} documents · ${script.records} records · ${script.refused} refused`;
-        list.append(item);
+      // Rebuilt only when the set changes, so a focused Remove stays focused.
+      const key = JSON.stringify(scripts);
+      if (key !== armedKey) {
+        armedKey = key; list.replaceChildren();
+        for (const script of scripts) {
+          const item = document.createElement('li');
+          const prefix = script.rule.path_prefix ? ` path ${script.rule.path_prefix}*` : ' any path';
+          const label = document.createElement('span');
+          label.textContent = `#${script.script_id} ${script.rule.origin} · ${script.rule.frame} frame ·${prefix} · ${script.source_bytes} bytes · ${script.digest} · ${script.injected_documents} documents · ${script.records} records · ${script.refused} refused`;
+          const remove = button('Remove', () => removeScript(script.script_id)); remove.className = 'native-console-button';
+          remove.setAttribute('aria-label', `Remove document-start script ${script.script_id}`);
+          item.append(label, remove); list.append(item);
+        }
       }
+      for (const remove of list.querySelectorAll('button')) remove.disabled = !ready;
       const unsupported = view?.unsupported;
       if (Array.isArray(unsupported) && unsupported.every(entry => typeof entry?.context === 'string')) {
         // Out of scope whatever a rule declares, so a rule that did not match
@@ -555,19 +911,18 @@
         `${output.retained} retained · ${output.dropped} dropped · ${output.unattributed} unattributed · ${output.stale} stale · ${pendingProcesses ? `${pendingProcesses} renderer processes not ready yet` : 'every renderer holds this set'}`;
     }
     function reset() {
-      view = null; cursor = '0'; failed = false; lastGeneration = null;
+      view = null; cursor = '0'; failed = false;
       ds('consent').checked = false; message(''); render();
     }
     function check(records) {
-      // A read returns every retained record after the cursor that fits one
-      // reply, so there is no count to check, only each record's shape.
+      // A read returns the oldest records after the cursor, each whole, a page
+      // at a time, so there is no count or size to check, only each shape.
       if (!Array.isArray(records)) throw new TypeError('Malformed document-start output');
       for (const record of records) {
         if (!record || !sequence(record.sequence) || record.provenance !== 'console-document-start-script' ||
             !['injected', 'report', 'script_error', 'refused'].includes(record.record) ||
             !numberId(record.script_id) || !sequence(record.document_id) || !sequence(record.frame_id) ||
-            typeof record.top_frame !== 'boolean' || typeof record.truncated !== 'boolean' ||
-            typeof record.text !== 'string' || encoder.encode(record.text).length > 8192 ||
+            typeof record.top_frame !== 'boolean' || typeof record.text !== 'string' ||
             typeof record.time !== 'number' || !Number.isFinite(record.time) || Math.abs(record.time) > 8640000000000000) {
           throw new TypeError('Malformed document-start record');
         }
@@ -579,26 +934,31 @@
       if (epoch !== outputGeneration) return;
       if (dropped) boundary(`${dropped} document-start records were dropped before delivery.`);
       for (const record of records) {
-        const row = document.createElement('article');
-        row.className = 'native-console-result native-console-ds-record';
-        row.dataset.level = record.record === 'script_error' ? 'error' : record.record === 'refused' ? 'warning' : 'info';
-        row.dataset.record = record.record;
-        row.dataset.consoleDocument = record.document_id;
-        row.setAttribute('aria-label', `Document-start ${record.record} for script ${record.script_id} in document ${record.document_id}`);
-        const time = document.createElement('span'); time.className = 'native-console-time';
-        time.textContent = new Date(record.time).toLocaleTimeString(); row.append(time);
-        const label = document.createElement('span'); label.className = 'native-console-ds-provenance';
-        // Provenance is spelled out on every row: this is page JavaScript the
-        // snippet produced, never native capture evidence.
-        label.textContent = `page JavaScript · console-document-start-script · ${record.record} · script ${record.script_id} · document ${record.document_id} · ${record.top_frame ? 'top' : 'child'} frame`;
-        row.append(label);
-        const output = document.createElement('pre'); output.textContent = record.text; row.append(output);
-        if (record.truncated) row.append(document.createTextNode(' (truncated)'));
-        appendRow(row);
+        const level = record.record === 'script_error' ? 'error' : record.record === 'refused' ? 'warning' : 'info';
+        const provenance = `page JavaScript · console-document-start-script · ${record.record} · script ${record.script_id} · document ${record.document_id} · ${record.top_frame ? 'top' : 'child'} frame`;
+        transcript.add({level, build: () => recordRow(record, level, provenance),
+          text: `${new Date(record.time).toLocaleTimeString()}${provenance}${record.text}`});
       }
     }
+    function recordRow(record, level, provenance) {
+      const row = document.createElement('article');
+      row.className = 'native-console-result native-console-ds-record';
+      row.dataset.level = level;
+      row.dataset.record = record.record;
+      row.dataset.consoleDocument = record.document_id;
+      row.setAttribute('aria-label', `Document-start ${record.record} for script ${record.script_id} in document ${record.document_id}`);
+      const time = document.createElement('span'); time.className = 'native-console-time';
+      time.textContent = new Date(record.time).toLocaleTimeString(); row.append(time);
+      const label = document.createElement('span'); label.className = 'native-console-ds-provenance';
+      // Provenance is spelled out on every row: this is page JavaScript the
+      // snippet produced, never native capture evidence.
+      label.textContent = provenance;
+      row.append(label);
+      const output = document.createElement('pre'); output.textContent = record.text; row.append(output);
+      return row;
+    }
     function apply(value, epoch = outputGeneration) {
-      if (value?.contract_version !== 3 || !['idle', 'ready'].includes(value.state) ||
+      if (value?.contract_version !== 4 || !['idle', 'ready'].includes(value.state) ||
           (value.available !== undefined && typeof value.available !== 'boolean') || !value.document_start ||
           !['ok', 'error', 'idle', 'unavailable', 'unconfirmed'].includes(value.document_start.status)) {
         throw new TypeError('Malformed document-start state');
@@ -615,13 +975,9 @@
       if (next.output) {
         check(next.output.records);
         if (!sequence(next.output.next_sequence) || !sequence(next.output.oldest_sequence) ||
-            !Number.isInteger(next.output.dropped) || next.output.dropped < 0) {
+            !Number.isInteger(next.output.dropped) || next.output.dropped < 0 || typeof next.output.more !== 'boolean') {
           throw new TypeError('Malformed document-start output');
         }
-        // A new generation replaces the previous set's output, so restart the
-        // cursor instead of silently skipping the new generation's records.
-        if (lastGeneration !== null && next.generation !== lastGeneration) cursor = '0';
-        lastGeneration = next.generation ?? null;
         if (next.output.records.length) {
           rows(next.output.records, next.output.dropped, epoch);
           cursor = next.output.records.at(-1).sequence;
@@ -630,17 +986,23 @@
       view = value; failed = false;
     }
     async function refresh(force = false) {
-      if (refreshing || (!force && (root.hidden || pending || submitting))) return;
+      // A connected panel keeps reading while it is hidden, so its transcript
+      // holds what the browser retained before the browser has to evict it.
+      if (refreshing || (!force && (root.hidden && !session || pending || submitting))) return;
       if (!force && ++tick % 4) return;
       refreshing = true;
       const epoch = generation, identity = session;
       const execute = async () => {
         try {
-          const response = await fetch(`/api/native-console/document-start?after_sequence=${cursor}`, {cache: 'no-store'});
-          const value = await response.json();
-          if (epoch !== generation || identity !== session) return;
-          if (!response.ok) throw new Error(typeof value.error === 'string' ? value.error : `Document-start read returned ${response.status}`);
-          apply(value);
+          // A backlog arrives a page at a time; read on while more remains.
+          for (let more = true; more;) {
+            const response = await fetch(`/api/native-console/document-start?after_sequence=${cursor}`, {cache: 'no-store'});
+            const value = await response.json();
+            if (epoch !== generation || identity !== session) return;
+            if (!response.ok) throw new Error(typeof value.error === 'string' ? value.error : `Document-start read returned ${response.status}`);
+            apply(value);
+            more = value.document_start.output?.more === true && value.document_start.output.records.length > 0;
+          }
         } catch (error) {
           // Preserve the last understandable state; a failed read changes nothing.
           if (epoch === generation) { failed = true; message(`${error.message} The read was not retried.`, true); }
@@ -648,36 +1010,45 @@
       };
       const result = queue.then(execute); queue = result.catch(() => {}); return result;
     }
+    // Arming adds the script beside the ones already armed, so a set of any
+    // size is built one script at a time; Remove and Clear take them away.
     ds('arm').addEventListener('click', () => {
       if (ds('arm').disabled) return;
       const script = {origin: ds('origin').value.trim(), frame: ds('frame').value, source: ds('source').value};
       const prefix = ds('path').value.trim();
       if (prefix) script.path_prefix = prefix;
-      // The same bound the backend applies: one arm command is one Console
-      // payload. A snippet has no size budget of its own.
-      if (encoder.encode(JSON.stringify({operation: 'arm', scripts: [script]})).length > commandLimit) {
-        message('A document-start command can be at most 64 MiB, counting its JSON escapes. Nothing was armed.', true);
+      // The bound the backend applies: one command is one Console record.
+      if (recordBytes({operation: 'add', scripts: [script]}) > recordLimit) {
+        message('A document-start command can be at most 4 GiB, counting its JSON escapes. Nothing was armed.', true);
         return;
       }
-      enqueue('arm_document_start', {scripts: [script], confirm_document_start: true}, value => {
+      enqueue('add_document_start', {scripts: [script], confirm_document_start: true}, value => {
         const armed = value?.document_start?.status === 'ok';
-        // Only a replaced set discards the previous generation's records. A
-        // refusal leaves them, so the cursor must not rewind and re-render.
-        if (armed) { cursor = '0'; lastGeneration = null; }
         ds('consent').checked = false;
         apply(value);
         message(armed ? 'Armed. Reload a matching document to run it; documents already open are not injected.' : (value.document_start.text || 'Arming was refused.'), !armed);
         boundary(armed
           ? `Document-start script armed for ${script.origin} ${script.frame} frame. New matching documents run it before their own scripts.`
-          : 'Document-start arming was refused. The previously armed set is unchanged.');
+          : 'Document-start arming was refused. The armed set is unchanged.');
         render();
       });
     });
+    function removeScript(id) {
+      if (!session || !permitted() || pending || submitting) return;
+      enqueue('remove_document_start', {script_ids: [id]}, value => {
+        const removed = value?.document_start?.status === 'ok';
+        apply(value);
+        message(removed ? `Script #${id} removed. New documents stop running it; its records stay.` : (value.document_start.text || 'Removal was refused.'), !removed);
+        boundary(removed
+          ? `Document-start script #${id} removed. Work it already scheduled in a page is not rolled back.`
+          : `Document-start script #${id} was not removed. The armed set is unchanged.`);
+        render();
+      });
+    }
     ds('clear').addEventListener('click', () => {
       if (ds('clear').disabled) return;
       enqueue('clear_document_start', {}, value => {
         const cleared = value?.document_start?.status === 'ok';
-        if (cleared) { cursor = '0'; lastGeneration = null; }
         ds('consent').checked = false;
         apply(value);
         message(cleared
@@ -700,11 +1071,19 @@
     return {refresh, render, reset, requested, armed: armedCount};
   })();
 
+  // A connected panel polls while it is hidden too: the renderer keeps a
+  // bounded backlog for an owner that stops reading, and this one never does.
   async function poll() {
-    if (pollRunning || root.hidden || !session || disconnected || !controls.target.value || pending) return;
+    if (pollRunning || !session || disconnected || !controls.target.value || pending) return;
     pollRunning = true;
     const epoch = outputGeneration, context = generation;
-    try { const value = await runtime({operation: 'poll'}, controls.target.value, true); if (value?.status === 'ok') logs(value, epoch); }
+    try {
+      for (let more = true; more && context === generation && epoch === outputGeneration;) {
+        const value = await runtime({operation: 'poll'}, controls.target.value, true);
+        if (value?.status !== 'ok') break;
+        logs(value, epoch); more = value.more === true && value.messages.length > 0;
+      }
+    }
     catch (error) {
       if (context === generation) { invalidateTargets(); disconnected = true; notice(`${error.message}. Refresh documents to recover. Commands were not retried.`, true); renderControls(); }
     }
@@ -750,11 +1129,8 @@
     const result = queue.then(execute); queue = result.catch(() => {}); return result;
   }
   setInterval(() => { poll(); refreshLiveDocuments(); watchSession(); documentStart.refresh(); }, 500);
-  function filter() {
-    const query = controls.filter.value.toLocaleLowerCase(), level = controls.level.value;
-    for (const row of controls.output.children) row.hidden = !!query && !(row.textContent + (row.dataset.command || '')).toLocaleLowerCase().includes(query) || level !== 'all' && row.dataset.level !== level;
-    updateOutputState();
-  }
+  // Search covers every entry, rendered or not, and never changes one.
+  function filter() { transcript.refilter(); updateOutputState(); }
   controls.filter.addEventListener('input', filter); controls.level.addEventListener('change', filter);
   function search() { element('filter-row').hidden = false; element('search').setAttribute('aria-expanded', 'true'); controls.filter.focus(); controls.filter.select(); }
   function closeSearch() { controls.filter.value = ''; controls.level.value = 'all'; filter(); element('filter-row').hidden = true; element('search').setAttribute('aria-expanded', 'false'); (controls.source.disabled ? element('search') : controls.source).focus(); }
@@ -762,7 +1138,7 @@
   element('search').addEventListener('click', search);
   controls.filter.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); closeSearch(); } });
   element('timestamps').addEventListener('change', event => { root.dataset.timestamps = String(event.target.checked); });
-  element('forget').addEventListener('click', () => { history.length = 0; historyBytes = 0; historyIndex = null; draft = ''; notice('Command history forgotten.'); });
+  element('forget').addEventListener('click', () => { history.length = 0; historyIndex = null; draft = ''; notice('Command history forgotten.'); });
   async function initialize(force = false) {
     if (checking || initialized && !force) return;
     checking = true; renderControls();
@@ -846,8 +1222,8 @@
   const completion = createNativeConsoleCompletion(controls.source, element('highlight'), root, async query => {
     if (!session || disconnected || !controls.target.value) return null;
     const result = await runtime({operation: 'complete', path: query.path, prefix: query.prefix}, controls.target.value, true);
-    if (result?.status !== 'ok' || !Array.isArray(result.items) || result.items.length > 24) return null;
-    return result.items.filter(item => typeof item.name === 'string' && /^[A-Za-z_$][\w$]{0,127}$/.test(item.name) && ['property', 'function'].includes(item.kind));
+    if (result?.status !== 'ok' || !Array.isArray(result.items)) return null;
+    return result.items.filter(item => typeof item.name === 'string' && /^[A-Za-z_$][\w$]*$/.test(item.name) && ['property', 'function'].includes(item.kind));
   });
   controls.source.addEventListener('scroll', syncInputMirror); new ResizeObserver(syncInputMirror).observe(controls.source);
   controls.source.addEventListener('input', () => { historyIndex = null; sizeInput(); renderControls(); });
@@ -856,7 +1232,7 @@
     // Clear invalidates delayed transcript replies, not the native execution
     // context. Queued/new explicit commands retain their document ownership.
     ++outputGeneration;
-    controls.output.replaceChildren(); outputBytes = 0; outputNodes = 0; removed = 0; unread = 0; updateOutputState();
+    transcript.clear(); updateOutputState();
     if (session && controls.target.value && !disconnected) await runtime({operation: 'clear'});
     if (!disconnected) notice('');
     renderControls();
@@ -864,35 +1240,30 @@
   const snippets = [];
   function saveSnippet(source) {
     if (!snippets.includes(source)) snippets.push(source);
-    // The newest snippet always stays, however large.
-    while (snippets.length > 16 || snippets.length > 1 && snippets.reduce((bytes, value) => bytes + encoder.encode(value).length, 0) > 65536) snippets.shift();
     const select = element('snippets'); select.replaceChildren();
     snippets.forEach((text, index) => { const option = document.createElement('option'); option.value = index; option.textContent = text.split('\n')[0].slice(0, 64); select.append(option); });
     select.disabled = !snippets.length; notice('Snippet saved in this app session.');
   }
   element('load-snippet').addEventListener('click', () => { const source = snippets[Number(element('snippets').value)]; if (source != null) { controls.source.value = source; sizeInput(); renderControls(); controls.connection.open = false; controls.source.focus(); } });
+  // Every command stays recallable, whole, until Forget history.
   function remember(source) {
-    if (history.at(-1) === source) return;
-    history.push(source); historyBytes += encoder.encode(source).length;
-    // The newest command always stays recallable, however large.
-    while (history.length > 128 || history.length > 1 && historyBytes > 262144) historyBytes -= encoder.encode(history.shift()).length;
+    if (history.at(-1) !== source) history.push(source);
   }
   controls.form.addEventListener('submit', async event => {
     event.preventDefault(); if (submitting || pending || !session || disconnected || !selectedDocument()) return;
     const source = controls.source.value;
     if (!source.trim()) { notice('Enter JavaScript to run.', true); return; }
-    if (encoder.encode(JSON.stringify({operation: 'evaluate', source})).length > commandLimit) { notice('A command can be at most 64 MiB, counting its JSON escapes. Nothing ran.', true); return; }
+    if (recordBytes({operation: 'evaluate', source}) > recordLimit) { notice('A command can be at most 4 GiB, counting its JSON escapes. Nothing ran.', true); return; }
     const helper = source.trim().match(/^(copy|inspect|getEventListeners|monitorEvents|unmonitorEvents)\(([\s\S]*)\)\s*;?$/);
     if (helper && !helper[2].trim()) { notice('Enter an expression inside the console utility.', true); return; }
     submitting = true; renderControls();
     completion.close(); historyIndex = null; remember(source); notice(partialTargets ? 'Document listing is partial.' : '');
     const scope = {session, generation, command: ++commandNumber, target: controls.target.value, url: controls.target.selectedOptions[0]?.dataset.url || '', live: documentSource === 'live_capture'};
     controls.source.value = ''; sizeInput(); controls.source.focus();
-    const commandRow = document.createElement('article'); commandRow.className = 'native-console-result native-console-command'; commandRow.dataset.level = 'result'; commandRow.dataset.command = previewCommand(source); commandRow.dataset.commandId = scope.command; commandRow.dataset.commandNumber = scope.command; commandRow.dataset.consoleSession = scope.session; commandRow.dataset.consoleDocument = scope.target;
+    const commandRow = document.createElement('article'); commandRow.className = 'native-console-result native-console-command'; commandRow.dataset.level = 'result'; commandRow.dataset.commandId = scope.command; commandRow.dataset.commandNumber = scope.command; commandRow.dataset.consoleSession = scope.session; commandRow.dataset.consoleDocument = scope.target;
     const commandStatus = document.createElement('span'); commandStatus.className = 'native-console-command-status'; commandStatus.textContent = `#${scope.command} · Running`; commandStatus.setAttribute('role', 'status'); commandRow.append(commandStatus);
-    const expression = document.createElement('pre'); expression.className = 'native-console-expression'; expression.append(document.createTextNode('> ')); appendCommandColors(expression, previewCommand(source)); commandRow.append(expression);
-    if (source.length > commandPreview) { const rest = document.createElement('p'); rest.className = 'native-console-command-rest'; rest.textContent = `… ${(source.length - commandPreview).toLocaleString()} more characters not shown · ${formatBytes(encoder.encode(source).length)} in all · ↑ recalls it whole`; commandRow.append(rest); }
-    appendRow(commandRow);
+    const expression = document.createElement('pre'); expression.className = 'native-console-expression'; expression.append(document.createTextNode('> ')); appendCode(expression, source); commandRow.append(expression);
+    transcript.add({node: commandRow});
     try {
       const value = await runtime({operation: 'evaluate', source: helper ? helper[2] : source}, scope.target, false, scope.session, scope.generation);
       if (value) {
@@ -910,8 +1281,8 @@
             const reply = await runtime({operation: kind === 'getEventListeners' ? 'listeners' : kind === 'monitorEvents' ? 'monitor' : 'unmonitor', handle: value.value.handle}, scope.target, false, scope.session, scope.generation);
             if (reply?.properties) {
               const row = result(value, source, scope); const output = document.createElement('div'); output.className = 'native-console-properties';
-              for (const property of reply.properties.slice(0, 32)) { const item = document.createElement('div'); item.className = 'native-console-property'; item.append(document.createTextNode(property.name + ': ')); renderValue(item, property.value, scope); output.append(item); }
-              row.append(output); boundRow(row);
+              for (const property of reply.properties) { const item = document.createElement('div'); item.className = 'native-console-property'; item.append(document.createTextNode(property.name + ': ')); renderValue(item, property.value, scope); output.append(item); }
+              row.append(output); changedRow(row);
             } else result({status: reply?.status || 'error', text: reply?.text || 'Utility unavailable'}, source, scope);
           } else { const row = result(value, source, scope); if (kind === 'inspect' && value.value?.handle) { const object = row.querySelector('.native-console-object'); if (object) object.open = true; } }
         } else result(value, source, scope);
@@ -923,7 +1294,7 @@
     } catch (error) {
       commandStatus.textContent = `#${scope.command} · Result unavailable`;
       commandRow.dataset.level = 'error'; notice(`${error.message}. The command was not retried.`, true);
-    } finally { submitting = false; boundRow(commandRow); renderControls(); }
+    } finally { submitting = false; changedRow(commandRow); renderControls(); }
   });
   function incomplete(source) {
     const tokens = sourcePrettyTokens(source, 'javascript');
@@ -982,7 +1353,7 @@
   function setOpen(open) {
     root.hidden = !open; document.querySelector('#workspace').dataset.consoleOpen = String(open);
     toggle.setAttribute('aria-expanded', String(open)); toggle.setAttribute('aria-pressed', String(open));
-    if (open) { sizeInput(); initialize(); focusPrompt(); poll(); }
+    if (open) { sizeInput(); initialize(); transcript.layout(); focusPrompt(); poll(); }
     else { completion.close(); controls.connection.open = false; toggle.focus(); }
   }
   toggle.addEventListener('click', () => setOpen(root.hidden)); element('close').addEventListener('click', () => setOpen(false));
@@ -1008,6 +1379,15 @@
     watch(rules, keep = false) {
       if (!this.liveDocument()) return Promise.resolve({status: 'error', text: 'No live Console connection to a selected document'});
       return runtime(rules ? {operation: 'watch', rules, ...(keep ? {keep: true} : {})} : {operation: 'unwatch'});
+    },
+    // The command, or else the result, of one evaluation request, opened and
+    // scrolled into view; null when the transcript no longer holds it.
+    reveal(request, session_id, target_id) {
+      const rows = transcript.find(row => row.dataset.requestId === request && row.dataset.consoleSession === session_id && row.dataset.consoleDocument === target_id);
+      const entry = rows.find(entry => entry.node.matches('.native-console-command')) ?? rows[0];
+      if (!entry) return null;
+      if (root.hidden) setOpen(true);
+      return transcript.reveal(entry);
     }
   });
   renderControls();

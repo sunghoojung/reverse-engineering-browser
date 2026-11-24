@@ -161,7 +161,9 @@ without saving. The rules ([HTTP API](../../protocol/http-api.md#saved-javascrip
   top-level `var` or function declaration of a classic script, which becomes a
   global property, but never a local or module declaration. A local variable
   named `window` is not told apart from the global object, which is why every
-  refusal lists candidates.
+  refusal lists candidates. The worker indexes a script's definitions in one
+  parse and the backend keeps that index by the script's SHA-256, so every
+  later name or position in the same script resolves without parsing it again.
 - **The anchor this tool accepts.** A position selects the innermost function
   whose definition contains it, with the binding head (`window.hsw=`) counted
   as part of the function. Bare-parameter and `async` arrows, whose anchor is
@@ -565,7 +567,7 @@ Live (needs a rebuilt Brave, on the build machine):
 | Overlay | wire header, site-file and slot-table parsing for `function-entry`, the browser's lifetime slot table and revision polling, renderer ordinals, armed flags and gaps, Mojo configuration and `UpdateJsInvocationSites`, browser forwarding of Wasm context |
 | Protocol and backend | events 24 to 26, Wasm payload versions, C++/Python/Rust/JavaScript validators, origin-trace relations in the broker index, the value-flow join in the Rust trace builder, which the native app also answers through, viewer labels |
 | Tooling | `tools/native-js-invocation-site.py` writes the site file; the launcher's `REB_NATIVE_JS_INVOCATION_SITES`, `REB_NATIVE_JS_INVOCATION_DIGESTS`, `REB_NATIVE_JS_INVOCATION_IF_SUPPORTED` and `REB_NATIVE_JS_INVOCATION_LIVE` |
-| Saved sites | the worker's `invocation_site` query, the backend's site key, saved set, routes and slot-table follower (`js_invocation_sites.rs`), Sources **Track calls**, the titlebar, and the app's start panel and `captureDefaults` |
+| Saved sites | the worker's `invocation_site_index` operation and the query over it in `reb-js-lexer`, the backend's index cache, site key, saved set, routes and slot-table follower (`js_invocation_sites.rs`), Sources **Track calls**, the titlebar, and the app's start panel and `captureDefaults` |
 
 What runs in this repository's gate: the C++ parity and rule test, the Python
 validator, the Rust readers and value search, the shared trace cases over slices

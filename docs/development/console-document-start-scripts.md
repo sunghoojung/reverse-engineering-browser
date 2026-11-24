@@ -87,10 +87,9 @@ report(
 
 It never logs a raw string, so it cannot leak a token, cookie, credential or
 body even if the observed function handled one. Keep that property in anything
-you write. `report` accepts a string, number, boolean or bigint; a string over
-8192 UTF-8 bytes is kept as a visibly truncated prefix, and any other argument
-produces a `refused` record instead. A document can report any number of
-records, so report a longer value in parts.
+you write. `report` accepts a string, number, boolean or bigint, and a string
+of any length is one record, whole; any other argument produces a `refused`
+record instead. A document can report any number of records.
 
 Arm it against the exact origin, for top frames, under the fixture's path:
 
@@ -119,6 +118,12 @@ request = urllib.request.Request(url + "/api/native-console/actions", data=body,
 print(json.dumps(json.load(urllib.request.urlopen(request)), indent=2))
 PY
 ```
+
+`arm_document_start` replaces whatever was armed. To keep the armed scripts
+and add another, send the same body with `"action": "add_document_start"`; to
+take one away, send `{"action": "remove_document_start", "session_id": …,
+"script_ids": ["<script_id>"]}`. A removed script's records stay. In the
+Console panel, **Arm** adds and each armed script has its own **Remove**.
 
 Then reload the page and read the output:
 
@@ -189,16 +194,16 @@ wildcard, no host suffix, and no URL guessing.
   positive value is a readiness gap, not a lost record. Every live renderer
   receives the set, however many there are.
 - **Reads do not drain.** Pass the last `sequence` you saw as
-  `after_sequence`. A read returns every retained record after it that fits one
-  reply, so read again while the last `sequence` is below `next_sequence` - 1.
-  A failed or slow read cannot lose a record; the browser keeps 64 MiB of
-  output and reports `dropped` when it evicts the oldest.
+  `after_sequence`. A read returns one page of the records after it, so read
+  again at once while `output.more` is true. Sequences only grow within a
+  browser session. A failed or slow read cannot lose a record; the browser
+  keeps 64 MiB of output and reports `dropped` when it evicts the oldest.
 - **Output is page JavaScript.** Every record carries provenance
   `console-document-start-script`, is snippet-authored untrusted text, and is
   never evidence, never correlated, and never exported automatically.
-- **A snippet runs until it returns.** Nothing times it out. Clearing or
-  replacing the set, or ending the session, stops one that is still running,
-  through the same IO-thread Stop a Console command uses.
+- **A snippet runs until it returns.** Nothing times it out. Removing it,
+  clearing or replacing the set, or ending the session, stops one that is still
+  running, through the same IO-thread Stop a Console command uses.
 - **Clearing really stops it.** After `clear_document_start`, a `report`
   function the page retained becomes an inert no-op. Work the snippet already
   scheduled in the page is not rolled back.
@@ -210,12 +215,13 @@ wildcard, no host suffix, and no URL guessing.
 
 ## Limits worth remembering
 
-No script count, snippet size, per-document record or execution-time budget.
-One arm command is one 64 MiB Console payload; each renderer maps the encoded
-set read-only rather than copying it. A report is at most 8192 bytes, the
-browser keeps 64 MiB of output with a visible drop count, a read returns every
-record after its cursor that fits one 64 MiB reply, and the experiment lives at
-most one hour, bounded by the Console session.
+No script count, snippet size, report size, per-document record or
+execution-time budget. A command is one Console record of up to 4 GiB; each
+renderer maps the encoded set read-only rather than copying it. The browser
+keeps 64 MiB of output with a visible drop count, a read returns a page of
+8 MiB that always carries a record, and the experiment lives as long as the
+Console session. [Native Console v4](../../protocol/native-console-v4.md)
+says why each of these remains.
 
 A snippet runs with the page's full main-world authority. The `(function(report)
 { … })` wrapper exists to supply `report`; it is not a sandbox. A page can see

@@ -284,8 +284,17 @@ final class Harness {
     try await settle()
   }
 
-  func key(_ code: UInt16, _ characters: String, modifiers: NSEvent.ModifierFlags = []) async throws {
+  // Without settling, the next step starts while the key's work, such as a
+  // scroll animation, may still run.
+  func key(_ code: UInt16, _ characters: String, modifiers: NSEvent.ModifierFlags = [], settling: Bool = true) async throws {
     try await activate()
+    try press(code, characters, modifiers: modifiers)
+    if settling { try await settle() }
+  }
+
+  // One press and release, sent to the window at once and without first
+  // activating it, so a test can send it from a callback.
+  func press(_ code: UInt16, _ characters: String, modifiers: NSEvent.ModifierFlags = []) throws {
     for type in [NSEvent.EventType.keyDown, .keyUp] {
       guard let event = NSEvent.keyEvent(
         with: type, location: .zero, modifierFlags: modifiers, timestamp: ProcessInfo.processInfo.systemUptime,
@@ -294,7 +303,6 @@ final class Harness {
       else { throw HarnessError("Could not create a key event") }
       window.sendEvent(event)
     }
-    try await settle()
   }
 
   // Types into the focused field with native key events, one character each.
@@ -433,6 +441,17 @@ final class Harness {
 struct HarnessError: Error, CustomStringConvertible {
   let description: String
   init(_ description: String) { self.description = description }
+}
+
+// Answers a message the page posts, on the app's main thread as it arrives,
+// so a test can act on something the page saw with no script call between.
+@MainActor
+final class PageSignal: NSObject, WKScriptMessageHandler {
+  let received: @MainActor () -> Void
+  init(_ received: @escaping @MainActor () -> Void) { self.received = received }
+  func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+    received()
+  }
 }
 
 struct Expectations: Decodable {
@@ -675,6 +694,20 @@ final class OriginTraceRenderedUITests: XCTestCase {
     try await assertFullyVisible(ui, ".vm-workbench-tabs", "\(context) analysis tabs")
   }
 
+  // Program Trees lists findings before the opcode workspace behind the Symbol
+  // Tree and handler listing, and its host links, arrive; each arrival
+  // rebuilds the detail. A test that selects a finding and reads its analysis
+  // waits until the detail and the tree are no longer busy, not only for the
+  // findings.
+  @MainActor
+  private func openVmFindings(_ ui: Harness) async throws {
+    try await show(ui, "vm")
+    try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+    try await ui.waitUntil("document.querySelector('#vm-detail[aria-busy=\"false\"]') !== null && " +
+      "document.querySelector('#vm-symbol-list[aria-busy=\"false\"]') !== null",
+      "the opcode workspace and host links behind the selected finding did not load")
+  }
+
   @MainActor
   private func setVmAnalysisExpanded(_ ui: Harness, _ expanded: Bool) async throws {
     let toggle = try await ui.json("""
@@ -694,8 +727,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     ]
     for size in sizes {
       let ui = try await prepare(size)
-      try await show(ui, "vm")
-      try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await openVmFindings(ui)
       try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 107")
       try await setVmAnalysisExpanded(ui, false)
@@ -781,8 +813,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     ]
     for size in sizes {
       let ui = try await prepare(size)
-      try await show(ui, "vm")
-      try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await openVmFindings(ui)
       try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 107")
       try await setVmAnalysisExpanded(ui, false)
@@ -806,8 +837,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     ]
     for size in sizes {
       let ui = try await prepare(size)
-      try await show(ui, "vm")
-      try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await openVmFindings(ui)
       try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 18446744073709551615")
       try await assertCompleteCompactFindings(ui, size.name)
@@ -1025,6 +1055,24 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.key(53, "\u{1B}")
       let cleared = try await ui.value("document.querySelector('#source-tree-filter').value === '' && document.querySelectorAll('#source-tree [data-artifact-id]').length > 1") as? Bool
       XCTAssertEqual(cleared, true, "\(size.name): Escape clears the filter and restores the tree")
+      // A 20-digit artifact ID never squeezes the name it labels: the ID takes
+      // what the name leaves and keeps its last digits, and the row's title
+      // keeps it whole.
+      try await ui.click("#source-tree-filter")
+      try await ui.type("18446744073709551615")
+      let wide = try await ui.json("""
+        (() => { const row = document.querySelector('#source-tree [data-artifact-id="18446744073709551615"]');
+          const raw = row?.querySelector('.source-tree-raw'), meta = row?.querySelector('.source-tree-meta');
+          return {found: Boolean(row), name: raw?.textContent ?? '', nameClipped: raw ? raw.scrollWidth > raw.clientWidth + 1 : true,
+            metaWidth: meta?.clientWidth ?? 0, metaDirection: meta ? getComputedStyle(meta).direction : '', title: row?.title ?? ''}; })()
+        """)
+      XCTAssertEqual(wide["found"] as? Bool, true, "\(size.name): the golden artifact is a Sources file: \(wide)")
+      XCTAssertEqual(wide["nameClipped"] as? Bool, false, "\(size.name): a 20-digit ID leaves its name whole: \(wide)")
+      XCTAssertEqual(wide["metaDirection"] as? String, "rtl", "\(size.name): a clipped ID loses its leading digits: \(wide)")
+      XCTAssertTrue((wide["title"] as? String ?? "").contains("artifact 18446744073709551615"), "\(size.name): the row's title names the whole ID: \(wide)")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) sources wide artifact ID")
+      try await ui.screenshot("sources-tree-wide-id-\(size.name)")
+      try await ui.key(53, "\u{1B}")
       try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"303\"]")
       try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('retainedLine')", "retained source did not render")
       let source = try await ui.value("document.querySelector('#source-code').innerText") as? String ?? ""
@@ -1068,8 +1116,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     ]
     for size in sizes {
       let ui = try await prepare(size)
-      try await show(ui, "vm")
-      try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await openVmFindings(ui)
       try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 107")
       try await assertFullyVisible(ui, "#vm-symbol-list .vm-symbol-row", "\(size.name) symbol tree")
@@ -1189,8 +1236,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
   func test8VmHostLinksSpacing() async throws {
     for size in windowSizes {
       let ui = try await prepare(size)
-      try await show(ui, "vm")
-      try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await openVmFindings(ui)
       try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 107")
       try await setVmAnalysisExpanded(ui, false)
@@ -1226,8 +1272,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     ]
     for size in sizes {
       let ui = try await prepare(size)
-      try await show(ui, "vm")
-      try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await openVmFindings(ui)
       try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 107")
       try await assertFullyVisible(ui, "#vm-symbol-list .vm-symbol-row", "\(size.name) symbol tree")
@@ -2685,8 +2730,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
           if (path === '/api/native-console') return Promise.resolve(reply({contract_version: 2, state: 'idle', session_id: null,
             available: true, live_available: true, document_source: 'live_capture', binding_id: '5', truncated: false,
             selected_target_id: null, document_start_supported: true, message: 'live capture',
-            targets: [{id: '21', origin: 'https://authorized.test', label: 'top #21', url: 'https://authorized.test/', main_frame: true, truncated: false}]}));
-          if (path.startsWith('/api/native-console/document-start')) return Promise.resolve(reply({contract_version: 3, available: true,
+            targets: [{id: '21', origin: 'https://authorized.test', label: 'top #21', url: 'https://authorized.test/', main_frame: true}]}));
+          if (path.startsWith('/api/native-console/document-start')) return Promise.resolve(reply({contract_version: 4, available: true,
             state: 'idle', session_id: null, document_start: {status: 'idle', permitted: false, scripts: [],
               message: 'Connect the Console with document-start scripts enabled, then arm a rule.'}}));
           return original(input, init);
@@ -2742,6 +2787,310 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let clipped = try await ui.value("__rebUiProbe.clippedText('.native-console-head')") as? [String] ?? ["probe failed"]
       XCTAssertEqual(clipped, [], "\(size.name): clipped Console header text")
       try await ui.screenshot("live-capture-defaults-\(size.name)")
+    }
+  }
+
+  // The Console transcript keeps every entry and draws only the rows near the
+  // viewport. This test's page fetch stands in for a live capture document
+  // that logs twelve thousand messages of mixed heights and then one of 1 MiB,
+  // so WebKit itself lays out the window: the drawn rows stay few and always
+  // cover the viewport, the scroll offset, PageDown, Home, End and Command-Up
+  // and -Down reach every part of the transcript, Home lands on the start and
+  // stays there even when pressed while PageDown still moves, the large
+  // message is drawn whole and inside its wrap width, and search finds a row
+  // that is not in the document.
+  @MainActor
+  func test45ConsoleTranscriptKeepsEveryEntry() async throws {
+    // The rows in the document, the largest gap between visible rows, and the
+    // message numbers drawn, in order. Gaps and the end are whole pixels, since
+    // rows lay out at fractions of one.
+    let window = """
+      (() => {
+        const scroll = document.querySelector('#native-console-scroll'), view = scroll.getBoundingClientRect();
+        const top = view.top + scroll.clientTop, bottom = top + scroll.clientHeight;
+        const rows = [...document.querySelector('#native-console-output').children], boxes = rows.map(row => row.getBoundingClientRect());
+        const number = row => Number(/^rendered message (\\d+)/.exec(row.querySelector('pre')?.textContent ?? '')?.[1] ?? -1);
+        let edge = top, gap = 0;
+        for (const box of boxes.filter(box => box.bottom > top + 0.5 && box.top < bottom - 0.5)) { gap = Math.max(gap, box.top - edge); edge = Math.max(edge, box.bottom); }
+        gap = Math.max(gap, bottom - edge);
+        const numbers = rows.map(number).filter(value => value >= 0), visible = rows.findIndex((row, index) => boxes[index].bottom > top + 0.5);
+        const large = rows.findIndex(row => row.querySelector('pre')?.textContent.length === 1 << 20);
+        return {drawn: rows.length, gap: Math.floor(gap), numbers: numbers.length, first: numbers[0] ?? -1, last: numbers.at(-1) ?? -1,
+          contiguous: numbers.every((value, index) => !index || value === numbers[index - 1] + 1),
+          visible: visible < 0 ? -2 : number(rows[visible]), firstDrawn: rows[0]?.textContent.slice(0, 40) ?? '',
+          large: large >= 0, largeHeight: large < 0 ? 0 : Math.round(boxes[large].height), largeEnd: large < 0 ? 0 : Math.floor(Math.abs(boxes[large].bottom - bottom)),
+          offset: Math.round(scroll.scrollTop), end: Math.round(scroll.scrollHeight - scroll.clientHeight),
+          count: document.querySelector('#native-console-output-count').textContent};
+      })()
+      """
+    let frames = "new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => done(true))))"
+    // Records each scroll, scrollend, key and layout write on the transcript,
+    // and each frame whose geometry changed, so a failed wait shows how the
+    // transcript got where it is. Scrolls are seen before the transcript's
+    // own listener can answer them. A step is a scroll the layout did not write;
+    // the app's WebKit fires scrollend after each one, so scrollend does not
+    // say a scroll is over. keys() says, for each key, how many steps came
+    // since the key before it, how many frames since the last of them,
+    // whether the transcript handled it, and how many writes followed it.
+    // steps() counts the steps since the last key. relay() posts
+    // rebTranscriptStep on the first step after the next PageDown. still(ms)
+    // resolves once the transcript has not scrolled for that long.
+    let recorder = """
+      (() => {
+        const scroll = document.querySelector('#native-console-scroll'), output = document.querySelector('#native-console-output');
+        const offset = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop'), log = [], keys = [];
+        const geometry = () => `top ${offset.get.call(scroll)} height ${scroll.scrollHeight} padding ${output.style.paddingTop} ${output.style.paddingBottom}`;
+        let moved = performance.now(), last = '', repeats = 0, steps = 0, frames = 0, stepped = 0, written = null, relay = false;
+        const note = text => { log.push(`${performance.now().toFixed(1)} ${text}`); if (log.length > 500) log.splice(0, 100); last = ''; };
+        Object.defineProperty(scroll, 'scrollTop', {configurable: true, get() { return offset.get.call(this); },
+          set(value) {
+            note(`write ${value} over ${geometry()}`); offset.set.call(this, value); written = offset.get.call(this);
+            if (keys.length) ++keys[keys.length - 1].writes;
+          }});
+        document.addEventListener('scroll', event => {
+          if (event.target !== scroll) return;
+          moved = performance.now(); note(`scroll ${geometry()}`);
+          if (offset.get.call(scroll) === written) { written = null; return; }
+          ++steps; stepped = frames;
+          if (relay && keys.at(-1)?.key === 'PageDown') { relay = false; note('relay'); window.webkit.messageHandlers.rebTranscriptStep.postMessage(true); }
+        }, true);
+        document.addEventListener('scrollend', event => { if (event.target === scroll) note(`scrollend ${geometry()}`); }, true);
+        document.addEventListener('keydown', event => {
+          keys.push({key: event.key, steps, sinceStep: steps ? frames - stepped : -1, handled: false, writes: 0}); steps = 0;
+          note(`keydown ${event.key}${event.metaKey ? ' with Command' : ''}`);
+        }, true);
+        document.addEventListener('keydown', event => { if (keys.length) keys[keys.length - 1].handled = event.defaultPrevented; });
+        document.addEventListener('keyup', event => note(`keyup ${event.key}`), true);
+        (function frame() {
+          ++frames;
+          const now = geometry();
+          if (now !== last) { note(`frame ${now}`); last = now; repeats = 1; }
+          else log[log.length - 1] = log[log.length - 1].replace(/ x\\d+$/, '') + ` x${++repeats}`;
+          requestAnimationFrame(frame);
+        })();
+        window.__rebTranscript = {
+          log: () => log.slice(-200).join('\\n'),
+          keys: () => keys.slice(-8),
+          steps: () => steps,
+          relay: () => { relay = true; return true; },
+          still: ms => new Promise(done => (function frame(now) { if (now - moved >= ms) done(true); else requestAnimationFrame(frame); })(performance.now())),
+        };
+        return true;
+      })()
+      """
+    // Where the lines of the 1 MiB message end, against its wrap width. The
+    // message is one character repeated in a monospace font, so every line
+    // but the last holds as many as fit, and the last holds the rest. Line
+    // boxes alone miss the fault, since WebKit reports them from the same
+    // drifting widths, so the line count and the last line's width are
+    // checked too. WebKit counts content within 1/64 px of the width as fitting.
+    let wrap = """
+      (() => {
+        const pre = [...document.querySelectorAll('#native-console-output pre')].find(node => node.textContent.length === 1 << 20);
+        if (!pre) return {found: false};
+        const style = getComputedStyle(pre), box = pre.getBoundingClientRect(), side = name => parseFloat(style[name]), round = value => Math.round(value * 10) / 10;
+        const start = box.left + side('borderLeftWidth') + side('paddingLeft'), edge = box.right - side('borderRightWidth') - side('paddingRight');
+        const height = box.height - side('borderTopWidth') - side('paddingTop') - side('paddingBottom') - side('borderBottomWidth');
+        const sample = document.createElement('span');
+        sample.style.cssText = 'position: absolute; visibility: hidden; white-space: pre';
+        for (const name of ['fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'fontStretch', 'letterSpacing']) sample.style[name] = style[name];
+        sample.textContent = pre.textContent.slice(0, 1000); document.body.append(sample);
+        const advance = sample.getBoundingClientRect().width / 1000; sample.remove();
+        const length = pre.textContent.length, fits = Math.floor((edge - start + 1 / 64) / advance), lines = Math.round(height / side('lineHeight'));
+        const expected = Math.ceil(length / fits), remainder = length - (expected - 1) * fits;
+        const range = document.createRange(); range.selectNodeContents(pre);
+        const boxes = [...range.getClientRects()].filter(rect => rect.width > 0), top = boxes[boxes.length - 1].top;
+        const last = boxes.filter(rect => Math.abs(rect.top - top) < 1), lastLeft = Math.min(...last.map(rect => rect.left)), lastRight = Math.max(...last.map(rect => rect.right));
+        const widest = Math.max(...boxes.map(rect => rect.right));
+        return {found: true, runs: pre.querySelectorAll('wbr').length + 1, start: round(start), edge: round(edge), advance, fits, lines, expected,
+          lastLeft: round(lastLeft), lastRight: round(lastRight), lastWidth: round(lastRight - lastLeft), remainderWidth: round(remainder * advance), widest: round(widest),
+          inside: lines === expected && Math.abs(lastLeft - start) <= 0.5 && Math.abs(lastRight - lastLeft - remainder * advance) <= 0.5 && lastRight <= edge + 0.5 && widest <= edge + 0.5};
+      })()
+      """
+    // A wait that says where the transcript was, and how it got there, if it times out.
+    func wait(_ ui: Harness, _ condition: String, timeout: TimeInterval = 15, _ message: String) async throws {
+      do { try await ui.waitUntil(condition, timeout: timeout, message) }
+      catch {
+        let state = (try? await ui.json(window)) ?? [:]
+        let events = (try? await ui.value("window.__rebTranscript?.log() ?? ''")) as? String ?? ""
+        let keys = (try? await ui.value("JSON.stringify(window.__rebTranscript?.keys() ?? [])")) as? String ?? ""
+        throw HarnessError("\(error) \(state)\nkeys \(keys)\n\(events)")
+      }
+    }
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      _ = try await ui.webView.callAsyncJavaScript(
+        """
+        const original = window.fetch.bind(window);
+        const reply = value => new Response(JSON.stringify(value), {status: 200, headers: {'Content-Type': 'application/json'}});
+        const total = 12000, page = 1000;
+        let session = null, sent = 0, large = false;
+        const state = () => ({contract_version: 2, state: session ? 'ready' : 'idle', session_id: session, available: true});
+        const listing = () => ({...state(), document_source: 'live_capture', live_available: true, binding_id: '5', truncated: false,
+          selected_target_id: session ? '31' : null, document_start_supported: false, message: 'live capture',
+          targets: [{id: '31', origin: 'https://authorized.test', label: 'top #31', url: 'https://authorized.test/', main_frame: true}]});
+        window.fetch = async (input, init) => {
+          const path = typeof input === 'string' ? input : input.url;
+          if (path === '/api/native-console') return reply(listing());
+          if (path.startsWith('/api/native-console/document-start')) return reply({contract_version: 4, available: true,
+            state: session ? 'ready' : 'idle', session_id: session, document_start: {status: 'unavailable', permitted: false, scripts: [],
+              message: 'This live capture does not permit document-start scripts'},
+            limits: {record_bytes: 4294967295, page_bytes: 8388608, retained_bytes: 67108864}});
+          if (path !== '/api/native-console/actions') return original(input, init);
+          const action = JSON.parse(init.body);
+          if (action.action === 'connect_live') { session = '77'; return reply(listing()); }
+          if (action.action === 'stop') { session = null; return reply(state()); }
+          if (action.command?.operation !== 'poll') return reply({...state(), request_id: '1', runtime: {status: 'ok', text: 'Complete'}});
+          // A page of a thousand messages at a time, every 97th two lines
+          // tall, then the 1 MiB message alone, as the bridge pages a backlog.
+          const messages = [], time = Date.now();
+          if (sent < total) for (const end = sent + page; sent < end; ++sent) messages.push({level: sent % 7 ? 'info' : 'warning',
+            text: sent % 97 ? `rendered message ${sent}` : `rendered message ${sent}\\nsecond line`, time});
+          else if (!large) { large = true; messages.push({level: 'info', text: 'x'.repeat(1 << 20), time}); }
+          return reply({...state(), request_id: '1', runtime: {status: 'ok', messages, dropped: 0, more: sent < total || !large}});
+        };
+        return true;
+        """, contentWorld: .page)
+      try await ui.click("#native-console-toggle")
+      try await ui.waitUntil("!document.querySelector('#native-console-mode').disabled", "\(size.name): the Console did not finish its availability check")
+      _ = try await ui.value(
+        """
+        (() => { const mode = document.querySelector('#native-console-mode'); mode.value = 'live_capture'; mode.dispatchEvent(new Event('change')); return true; })()
+        """)
+      try await ui.waitUntil("document.querySelectorAll('#native-console-target option[value=\"31\"]').length === 1",
+        "\(size.name): the live capture document was not listed")
+      _ = try await ui.value(
+        """
+        (() => { const target = document.querySelector('#native-console-target'); target.value = '31'; target.dispatchEvent(new Event('change'));
+          const consent = document.querySelector('#native-console-live-consent'); consent.checked = true; consent.dispatchEvent(new Event('change'));
+          document.querySelector('#native-console-start').click(); return true; })()
+        """)
+      try await wait(ui, "(() => { const state = \(window); return state.large && state.largeEnd === 0; })()", timeout: 60,
+        "\(size.name): the transcript did not follow to the end of twelve thousand messages and the 1 MiB one")
+      _ = try await ui.value(frames)
+
+      // At the end the 1 MiB message is drawn whole, below the last small rows.
+      let end = try await ui.json(window)
+      let entries = Int((end["count"] as? String ?? "").split(separator: " ").first ?? "") ?? 0
+      XCTAssertGreaterThan(entries, 12000, "\(size.name): every message is an entry: \(end)")
+      XCTAssertEqual(end["large"] as? Bool, true, "\(size.name): the 1 MiB message is drawn whole: \(end)")
+      XCTAssertGreaterThan(end["largeHeight"] as? Int ?? 0, 100_000, "\(size.name): the 1 MiB message wraps in full: \(end)")
+      XCTAssertLessThan(end["drawn"] as? Int ?? .max, 250, "\(size.name): only rows near the viewport are drawn: \(end)")
+      XCTAssertEqual(end["offset"] as? Int, end["end"] as? Int, "\(size.name): the transcript follows its end: \(end)")
+      XCTAssertEqual(end["gap"] as? Double, 0, "\(size.name): drawn rows cover the viewport at the end: \(end)")
+      let wrapped = try await ui.json(wrap)
+      XCTAssertEqual(wrapped["inside"] as? Bool, true, "\(size.name): every line of the 1 MiB message stays inside its wrap width: \(wrapped)")
+      try await ui.screenshot("console-transcript-end-\(size.name)")
+
+      // A quarter of the way down is the middle of the small rows, which are
+      // estimated until drawn. Each scroll step there draws only what it
+      // reaches and leaves no gap.
+      _ = try await ui.value("(() => { const scroll = document.querySelector('#native-console-scroll'); scroll.scrollTop = scroll.scrollHeight / 4; return true; })()")
+      _ = try await ui.value(frames)
+      let middle = try await ui.json(window)
+      let visible = middle["visible"] as? Int ?? -1
+      XCTAssertTrue((1000...11000).contains(visible), "\(size.name): a quarter of the way down reaches the middle rows: \(middle)")
+      let steps = try await ui.json(
+        """
+        (async () => {
+          const scroll = document.querySelector('#native-console-scroll');
+          let gap = 0, drawn = 0, contiguous = true, moved = 0;
+          const start = (\(window)).visible;
+          for (let step = 0; step < 40; ++step) {
+            scroll.scrollTop += step < 20 ? 137 : -211;
+            await \(frames);
+            const state = \(window);
+            gap = Math.max(gap, state.gap); drawn = Math.max(drawn, state.drawn); contiguous &&= state.contiguous; moved = state.visible - start;
+          }
+          return {gap, drawn, contiguous, moved};
+        })()
+        """)
+      XCTAssertEqual(steps["gap"] as? Double, 0, "\(size.name): every scroll step leaves the viewport covered: \(steps)")
+      XCTAssertLessThan(steps["drawn"] as? Int ?? .max, 250, "\(size.name): scrolling draws only rows near the viewport: \(steps)")
+      XCTAssertEqual(steps["contiguous"] as? Bool, true, "\(size.name): the drawn rows are consecutive messages: \(steps)")
+      XCTAssertLessThan(steps["moved"] as? Int ?? 0, 0, "\(size.name): scrolling up moved back past where it started: \(steps)")
+      try await assertLayout(ui, "#native-console-panel", "\(size.name) Console transcript middle")
+      try await ui.screenshot("console-transcript-middle-\(size.name)")
+
+      // The keyboard scrolls the focused transcript. PageDown is WebKit's own,
+      // and a lone one takes a step in each of several frames.
+      _ = try await ui.value(recorder)
+      _ = try await ui.value("(() => { document.querySelector('#native-console-scroll').focus({focusVisible: true}); return true; })()")
+      let before = try await ui.json(window)
+      try await ui.key(121, "\u{F72D}", modifiers: [.function])
+      try await wait(ui, "(\(window)).visible > \(before["visible"] as? Int ?? 0)", "\(size.name): PageDown did not scroll the transcript")
+      _ = try await ui.value("window.__rebTranscript.still(300)")
+      let paged = try await ui.json(window)
+      let lone = try await ui.value("window.__rebTranscript.steps()") as? Int ?? 0
+      XCTAssertEqual(paged["gap"] as? Double, 0, "\(size.name): PageDown leaves the viewport covered: \(paged)")
+      XCTAssertGreaterThanOrEqual(lone, 3, "\(size.name): a lone PageDown takes a step in each of at least three frames: \(lone) steps")
+
+      // Home pressed while a second PageDown still moves lands on the start,
+      // in one write by the transcript, and stays there. The page reports
+      // PageDown's first step and the test presses Home from that report, with
+      // no script call between them, so Home goes down before PageDown's next
+      // frame however slow the runner is. A try counts when Home followed
+      // fewer steps than a lone PageDown takes, the last of them within a
+      // frame; one that did not is made again, up to five times.
+      let relay = PageSignal { [weak ui] in try? ui?.press(115, "\u{F729}", modifiers: [.function]) }
+      let pages = ui.webView.configuration.userContentController
+      pages.add(relay, contentWorld: .page, name: "rebTranscriptStep")
+      defer { pages.removeScriptMessageHandler(forName: "rebTranscriptStep", contentWorld: .page) }
+      var home: [String: Any] = [:], overlapped = false, tries: [String] = []
+      for attempt in 0..<5 {
+        _ = try await ui.value("window.__rebTranscript.relay()")
+        try await ui.key(121, "\u{F72D}", modifiers: [.function], settling: false)
+        try await wait(ui, "window.__rebTranscript.keys().at(-1)?.key === 'Home'", "\(size.name): Home was not pressed on PageDown's first step")
+        try await wait(ui, "(\(window)).offset === 0", "\(size.name): Home pressed while PageDown moved did not reach the start of the transcript")
+        home = try await ui.json("window.__rebTranscript.keys().at(-1)")
+        tries.append("\(home)")
+        let steps = home["steps"] as? Int ?? 0, since = home["sinceStep"] as? Int ?? .max
+        overlapped = steps >= 1 && steps < lone && since <= 1
+        if overlapped || attempt == 4 { break }
+        _ = try await ui.value("(() => { document.querySelector('#native-console-scroll').scrollTop = \(paged["offset"] as? Int ?? 0); return true; })()")
+        _ = try await ui.value("window.__rebTranscript.still(300)")
+      }
+      if !overlapped {
+        XCTFail("\(size.name): in none of 5 tries did Home go down while PageDown still moved (fewer than \(lone) steps, the last within a frame): \(tries)")
+      }
+      XCTAssertEqual(home["handled"] as? Bool, true, "\(size.name): the transcript went to its start itself: \(home)")
+      _ = try await ui.value("window.__rebTranscript.still(300)")
+      let start = try await ui.json(window)
+      XCTAssertEqual(start["offset"] as? Int, 0, "\(size.name): Home stays at the start once PageDown's steps were due: \(start)")
+      XCTAssertEqual(start["first"] as? Int, 0, "\(size.name): the first message is drawn at the start: \(start)")
+      XCTAssertEqual(start["firstDrawn"] as? String, "Context selected: top #31 · https://auth", "\(size.name): the first entry is kept: \(start)")
+      XCTAssertEqual(start["gap"] as? Double, 0, "\(size.name): drawn rows cover the viewport at the start: \(start)")
+      try await ui.screenshot("console-transcript-start-\(size.name)")
+
+      // End, Command-Up and Command-Down reach their edges the same way.
+      let atEnd = "(() => { const state = \(window); return state.large && state.largeEnd === 0; })()"
+      try await ui.key(119, "\u{F72B}", modifiers: [.function])
+      try await wait(ui, atEnd, "\(size.name): End did not return to the 1 MiB message")
+      try await ui.key(126, "\u{F700}", modifiers: [.command, .function, .numericPad])
+      try await wait(ui, "(\(window)).offset === 0", "\(size.name): Command-Up did not reach the start of the transcript")
+      try await ui.key(125, "\u{F701}", modifiers: [.command, .function, .numericPad])
+      try await wait(ui, atEnd, "\(size.name): Command-Down did not return to the 1 MiB message")
+      let edges = try await ui.value("window.__rebTranscript.keys().slice(-3).map(key => `${key.key} ${key.handled}`).join(', ')") as? String ?? ""
+      let keys = try await ui.value("JSON.stringify(window.__rebTranscript.keys())") as? String ?? ""
+      XCTAssertEqual(edges, "End true, ArrowUp true, ArrowDown true", "\(size.name): the transcript went to each edge itself: \(keys)")
+
+      // Search runs over every entry, drawn or not, and Escape restores them.
+      try await ui.click("#native-console-search")
+      _ = try await ui.value(
+        """
+        (() => { const filter = document.querySelector('#native-console-filter'); filter.value = 'rendered message 4242'; filter.dispatchEvent(new Event('input')); return true; })()
+        """)
+      try await ui.waitUntil("document.querySelector('#native-console-output-count').textContent === '1 / \(entries) entries'",
+        "\(size.name): search did not find the one undrawn match")
+      _ = try await ui.value(frames)
+      let found = try await ui.json(window)
+      XCTAssertEqual(found["numbers"] as? Int, 1, "\(size.name): search draws only its match: \(found)")
+      XCTAssertEqual(found["first"] as? Int, 4242, "\(size.name): search drew the matching message: \(found)")
+      try await assertLayout(ui, "#native-console-panel", "\(size.name) Console transcript search")
+      try await ui.screenshot("console-transcript-search-\(size.name)")
+      try await ui.key(53, "\u{1B}")
+      try await ui.waitUntil("document.querySelector('#native-console-output-count').textContent === '\(entries) entries'",
+        "\(size.name): closing search did not restore every entry")
     }
   }
   @MainActor
@@ -3158,6 +3507,53 @@ final class OriginTraceRenderedUITests: XCTestCase {
       "(async () => { const body = {action: 'replace_local_analyst_workspace', expected_generation: \(generation), " +
       "folders: (await fetch('/api/local-analyst', {cache: 'no-store'}).then(response => response.json())).folders, files: JSON.parse(\(String(reflecting: files)))}; " +
       "return (await fetch('/api/local-analyst/actions', \(post))).status; })()")
+    try await returnToHarness(ui, harnessURL)
+  }
+
+  // The packaged decoder runs one request at a time with no deadline. A queue
+  // that lasts seconds, longer than the two a request once had, is answered
+  // in full, and requests the page abandons leave the queue at once.
+  @MainActor
+  func test21bDecoderQueueHasNoDeadline() async throws {
+    let ui = try Harness()
+    try await ui.waitForInitialLoad()
+    let harnessURL = try XCTUnwrap(ui.webView.url)
+    ui.webView.load(URLRequest(url: try XCTUnwrap(URL(string: "reb://app/index.html?native=1"))))
+    try await ui.waitUntil("location.protocol === 'reb:' && document.readyState === 'complete' && typeof state === 'object'",
+      timeout: 30, "the bundled workspace did not load")
+    let result = try await ui.json(
+      """
+      (async () => {
+        const bytes = new Uint8Array(768 * 1024);
+        for (let offset = 0; offset < bytes.length; offset += 65536) crypto.getRandomValues(bytes.subarray(offset, offset + 65536));
+        let binary = '';
+        for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+        const input = btoa(binary);
+        const send = (id, signal) => fetch('/api/decoder/actions', {method: 'POST', cache: 'no-store', signal,
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({protocol_version: 1, action: 'transform', operation_id: id, operation: 'gzip-compress', input_base64: input})})
+          .then(response => response.status, () => 'aborted');
+        let started = performance.now();
+        const queued = await Promise.all(Array.from({length: 160}, (_, index) => send(index + 1)));
+        const queuedMs = Math.round(performance.now() - started);
+        const controller = new AbortController();
+        const abandoned = Array.from({length: 150}, (_, index) => send(index + 1, controller.signal));
+        await new Promise(resolve => setTimeout(resolve, 300));
+        controller.abort();
+        const stopped = await Promise.all(abandoned);
+        started = performance.now();
+        const next = await send(1);
+        const nextMs = Math.round(performance.now() - started);
+        return {answered: queued.filter(status => status === 200).length, statuses: [...new Set(queued)].join(','), queuedMs,
+          aborted: stopped.filter(status => status === 'aborted').length, next, nextMs};
+      })()
+      """)
+    print("decoder queue in the packaged app: \(result)")
+    XCTAssertEqual(result["answered"] as? Int, 160, "every queued request is answered: \(result)")
+    XCTAssertGreaterThan(result["aborted"] as? Int ?? 0, 0, "the page abandoned queued requests: \(result)")
+    XCTAssertEqual(result["next"] as? Int, 200, "the next request is answered: \(result)")
+    // The abandoned queue would take seconds to drain if it still ran.
+    XCTAssertLessThan(result["nextMs"] as? Int ?? .max, 1_500, "abandoned requests left the queue: \(result)")
     try await returnToHarness(ui, harnessURL)
   }
 

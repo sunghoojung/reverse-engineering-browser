@@ -152,12 +152,12 @@ Every classification caller re-executes itself through a shared hidden worker
 entry, including the CLI, backend, API executable and Cargo harnesses. Packaged
 names do not change worker selection; no sibling analyzer is discovered.
 The standalone `OriginTraceVMAnalyzer` remains the live-session batch CLI.
-Artifacts up to 8 MiB are analyzed in full within a separate temporary heap
-ceiling of 64 MiB + 80 times source bytes (704 MiB at 8 MiB). The worker allocator
+Artifacts of any size are analyzed in full within a separate temporary heap
+ceiling: the machine's physical memory less a reserve. The worker allocator
 checks every allocation before calling the system allocator, including arena,
 semantic, indexing and serialization storage. Refusal exits only that worker,
 with fixed-size allocation/work telemetry. The caller keeps the same artifact
-work ledger and the existing 128 MiB retained-record cap. A five-minute deadline
+work ledger, which counts work without a budget. A five-minute deadline
 plus one minute per started MiB is only a hang backstop. Worker timeout, crash,
 spawn and protocol failures are distinct counted `analysis-worker-failed`
 omissions, never saved or cached. The CLI fails and the API returns 503; an
@@ -169,9 +169,9 @@ Reserved 32/64 MiB recursive stacks are separate from heap accounting. Actual
 worker allocation peaks (including 32 bytes of overhead per allocation) are
 reported by the ignored measurement test as `parser_peak_bytes`. Process RSS
 also includes resident stack pages, allocator/runtime overhead and the parent;
-measure both processes together. The 8 MiB target is below roughly 1 GiB peak
-RSS on a local workstation, not a guarantee about unrelated concurrent work.
-Oversize, dense, excessively nested and unavailable-worker inputs have counted
+measure both processes together. An 18 MB bundle classifies in about 2 s at
+330 MB peak RSS on a local workstation, not a guarantee about unrelated
+concurrent work. Excessively nested and unavailable-worker inputs have counted
 omissions.
 
 Claims describe the statically bound table. Runtime replacement through `eval`

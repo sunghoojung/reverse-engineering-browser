@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -16,15 +16,19 @@ namespace reb {
 namespace {
 
 bool Ready(int socket, short events, NativeConsoleDeadline deadline) noexcept {
+  const bool forever = deadline == NativeConsoleDeadline::max();
   for (;;) {
-    const auto remaining = deadline - std::chrono::steady_clock::now();
-    if (remaining <= decltype(remaining)::zero()) {
-      return false;
+    int timeout = -1;
+    if (!forever) {
+      const auto remaining = deadline - std::chrono::steady_clock::now();
+      if (remaining <= decltype(remaining)::zero()) {
+        return false;
+      }
+      const auto millis = std::chrono::ceil<std::chrono::milliseconds>(remaining).count();
+      timeout = static_cast<int>(std::min<decltype(millis)>(millis, INT_MAX));
     }
-    const auto millis = std::chrono::ceil<std::chrono::milliseconds>(remaining).count();
     pollfd descriptor{socket, events, 0};
-    const int result =
-        poll(&descriptor, 1, static_cast<int>(std::min<decltype(millis)>(millis, INT_MAX)));
+    const int result = poll(&descriptor, 1, timeout);
     if (result > 0) {
       // POLLHUP may accompany the last readable bytes. Let recv distinguish
       // those bytes from EOF instead of discarding a complete final response.
@@ -108,6 +112,31 @@ bool NativeConsoleWrite(int socket,
                         std::span<const std::byte> bytes,
                         std::chrono::milliseconds stall) noexcept {
   return Write(socket, bytes, {}, stall);
+}
+
+void NativeConsoleWidenBuffers(int socket) noexcept {
+  constexpr int kBytes = 1024 * 1024;
+  static_cast<void>(setsockopt(socket, SOL_SOCKET, SO_SNDBUF, &kBytes, sizeof(kBytes)));
+  static_cast<void>(setsockopt(socket, SOL_SOCKET, SO_RCVBUF, &kBytes, sizeof(kBytes)));
+}
+
+bool NativeConsoleReadPayload(int socket,
+                              std::size_t bytes,
+                              std::chrono::milliseconds stall,
+                              std::string& out) {
+  // Doubling keeps the copies linear in the payload.
+  constexpr std::size_t kFirstStep = 1 << 20;
+  out.clear();
+  while (out.size() < bytes) {
+    const std::size_t offset = out.size();
+    const std::size_t next = std::min(bytes, std::max(kFirstStep, offset * 2));
+    out.resize(next);
+    if (!Read(socket, std::as_writable_bytes(std::span(out).subspan(offset)), {}, stall)) {
+      out.clear();
+      return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace reb

@@ -13718,18 +13718,33 @@ async fn cookie_provenance_reads_every_list_and_script_call_of_the_session() {
     cookie_list(&mut events, &mut manifest, 6_002, "2", true);
     server.file("artifacts/manifest.jsonl", &jsonl(&manifest));
     server.file("events.jsonl", &jsonl(&events));
-    let document: Value = server
-        .get("/api/cookie-provenance?session_id=1&name=sid")
-        .await
-        .json()
-        .await
-        .unwrap();
-    assert_schema(
-        &spec,
-        &json!({"$ref": "#/components/schemas/CookieProvenance"}),
-        &document,
-        "provenance",
-    );
+    // The request index folds a long store in steps; until it reaches the
+    // end an answer says it covered a bounded range, not the store.
+    let mut answers = 0;
+    let document: Value = loop {
+        let document: Value = server
+            .get("/api/cookie-provenance?session_id=1&name=sid")
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert_schema(
+            &spec,
+            &json!({"$ref": "#/components/schemas/CookieProvenance"}),
+            &document,
+            "provenance",
+        );
+        if document["coverage"]["complete"] == true {
+            break document;
+        }
+        assert_eq!(document["coverage"]["scope"], "bounded_range", "{document}");
+        answers += 1;
+        assert!(
+            answers < 240,
+            "provenance never covered the store: {document}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
     assert_eq!(document["coverage"]["scope"], "store", "{document}");
     assert_eq!(document["coverage"]["complete"], true);
     assert_eq!(document["coverage"]["limited"], false);

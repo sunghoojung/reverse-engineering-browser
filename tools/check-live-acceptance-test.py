@@ -922,12 +922,13 @@ class Evidence(unittest.TestCase):
         self.backend.summary = {"checks": [{"code": "request_content_not_retained", "category": "request_body",
                                             "reason": volume.TRANSFER_REFUSED, "count": "2"}]}
         rest, peak = memory
+        rests = {phase: [rest] * 8 for phase in volume.PHASES}
         self.run_.measurements[volume.NAME] = volume.Memory(
-            4242, [rest] * 8, {"responses": [rest, peak, rest], "requests": [rest, peak], "script": [rest]})
+            4242, rests, {"responses": [rest, peak, rest], "requests": [rest, peak], "script": [rest]})
         # The same Brave without a session grows by half as much.
         alone = rest + (peak - rest) // 2
         self.run_.measurements[volume.REFERENCE] = volume.Memory(
-            4343, [rest] * 8, {"responses": [rest, alone], "requests": [alone], "script": [rest]})
+            4343, rests, {"responses": [rest, alone], "requests": [alone], "script": [rest]})
 
     def test_volume_bodies_script_posts_and_memory(self):
         sizes = {"RESPONSE_SIZE": 64 * 1024, "REQUEST_SIZE": 48 * 1024, "SCRIPT_BYTES": 4096, "POSTS": 40,
@@ -973,12 +974,33 @@ class Evidence(unittest.TestCase):
                 mock.patch.object(volume, "SAMPLE_SECONDS", 3600), \
                 mock.patch.object(self.run_, "wait", return_value=True), \
                 mock.patch.object(self.run_.fixture, "wait_beacons"), \
-                mock.patch.object(self.run_.fixture, "release"):
+                mock.patch.object(self.run_.fixture, "release") as release:
             memory = volume.measure(self.run_, volume.NAME, 4242)
         self.assertTrue(all(memory.phases.get(phase) for phase in volume.PHASES), memory.phases)
+        # The page waits at each phase's gate until the driver has read it at rest.
+        self.assertEqual([call.args[0] for call in release.call_args_list],
+                         [f"{volume.NAME}:{phase}:go" for phase in volume.PHASES])
+        for phase in volume.PHASES:
+            self.assertIn(f"REB.wait('{volume.NAME}:{phase}:go'", volume.INDEX)
+
+    def test_volume_memory_grows_from_each_phase_rest(self):
+        # Memory the responses left allocated is not charged to the requests.
+        memory = volume.Memory(4242, {"responses": [100_000, 101_000, 99_000], "requests": [150_000]},
+                               {"responses": [100_000, 160_000], "requests": [150_000, 160_000]})
+        self.assertEqual(memory.growth("responses"), 60_000 * 1024)
+        self.assertEqual(memory.growth("requests"), 10_000 * 1024)
+        self.assertIsNone(memory.growth("script"))
+
+    def test_volume_reference_runs_the_session_browser_arguments(self):
+        with mock.patch.object(self.run_.options, "brave", Path("/nonexistent/brave")):
+            refused = volume.reference(self.run_, "/brave --user-data-dir=/profile --no-first-run")
+        self.assertIn("runs without --disable-background-networking", refused)
+        # The uploads are strings: a typed array the page built would be a VM snapshot, not a request body.
+        self.assertNotIn("Array(", volume.INDEX)
 
     def test_volume_memory_needs_the_page_without_a_session(self):
-        self.run_.measurements[volume.NAME] = volume.Memory(4242, [100_000] * 8, {"responses": [120_000]})
+        self.run_.measurements[volume.NAME] = volume.Memory(4242, {"responses": [100_000] * 8},
+                                                            {"responses": [120_000]})
         self.run_.measurements[volume.REFERENCE] = "no Brave executable to run the page without a session"
         volume.check_memory(self.run_)
         self.assertEqual(self.report.lines[-1].status, "FAIL")

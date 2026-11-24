@@ -18981,7 +18981,7 @@
                   {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 4096
+                    "maxLength": 131072
                   },
                   {
                     "type": "null"

@@ -513,6 +513,8 @@ from the full classification. Each site names the artifact, its raw digest and
 static `byte_offset`, the shape, the decoded text's UTF-16LE SHA-256 and length,
 and the UTF-16 anchor. `file` is the exact canonical file text (sorted keys, no
 whitespace, as base::JSONWriter writes it), or null when nothing can be armed.
+Its size follows from its sites, about 280 bytes each, so 256 sites stay inside
+the 128 KiB a site file holds.
 Every interpreter candidate that is not armed is listed in `refused` with
 `js-dispatch-shape-unobservable` (aliased call, self call, if ladder, optional
 chain), `js-dispatch-anchor-unresolved`, `js-dispatch-site-limit` past the 256

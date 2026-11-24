@@ -2168,6 +2168,14 @@ mod tests {
         let (request, limits) = request(extra);
         execute(&request, limits, &module(source), Instant::now()).unwrap()
     }
+    /// `run` with an hour for its deadline, past the 10 s a request may ask
+    /// for, for a test whose subject is not time: no loaded machine keeps a
+    /// small module that long, so its outcome is never `deadline_exceeded`.
+    fn run_untimed(source: &str, extra: Value) -> Value {
+        let (request, mut limits) = request(extra);
+        limits.deadline_ms = 3_600_000;
+        execute(&request, limits, &module(source), Instant::now()).unwrap()
+    }
     fn fixture(name: &str) -> String {
         std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2528,17 +2536,20 @@ mod tests {
     #[test]
     fn memory_and_table_limits_are_totals() {
         // Each memory or table fits the limit alone; together they do not.
-        let memories = run(&fixture("limits.wat"), json!({}));
+        // The subject is memory and tables, not time, and the 2 s default
+        // deadline once ended a run here on a loaded machine, so each run
+        // gets an hour, which none reaches.
+        let memories = run_untimed(&fixture("limits.wat"), json!({}));
         assert_eq!(memories["outcome"]["status"], "memory_limit", "{memories}");
         assert_eq!(memories["outcome"]["phase"], "instantiate");
-        let fits = run(
+        let fits = run_untimed(
             &fixture("limits.wat"),
             json!({"limits":{"memory_pages":320}}),
         );
         assert_eq!(fits["outcome"]["status"], "returned", "{fits}");
-        let tables = run(&fixture("tables.wat"), json!({}));
+        let tables = run_untimed(&fixture("tables.wat"), json!({}));
         assert_eq!(tables["outcome"]["status"], "table_limit", "{tables}");
-        let many = run(
+        let many = run_untimed(
             &repeated("(module ", "(memory 1) ", 17, "(func (export \"run\")))"),
             json!({}),
         );
@@ -2550,7 +2561,7 @@ mod tests {
                 .contains("at most 16")
         );
         // Growth counts against the same total: 2 + 3 pages fit 5, 2 more do not.
-        let grow = run(
+        let grow = run_untimed(
             "(module (memory $a 2) (memory $b 1) (func (export \"run\") (result i32)
                 (drop (memory.grow $b (i32.const 2))) (memory.grow $a (i32.const 1))))",
             json!({"limits":{"memory_pages":5}}),

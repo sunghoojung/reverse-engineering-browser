@@ -1908,9 +1908,13 @@ The timing strip above the table counts request starts in 120 buckets. Drag
 across it to filter to that time range; with it focused, Right or Left Arrow
 selects or moves a bucket, Shift+Arrow grows or shrinks the range, and Escape
 or **Clear range** removes it. The footer reads `N / M requests · X transferred
-· Y resources` for the matching requests of the whole session. Each item stays
-whole: a narrow footer breaks its line between items, and only an item longer
-than the line, such as a count of traffic not recorded, wraps inside itself.
+· Y resources` for the matching requests of the whole session. Each count
+stays on one line, so a narrow footer breaks between items. Where the counts
+cannot share a row with the footer's buttons they take a row of their own, and
+an item that does not fit on the current line starts the next. Beside a short
+stacked inspector, where the list has no line to spare, they flow beside the
+buttons instead, and only a longer item, such as a count of traffic not
+recorded, wraps inside itself.
 
 A content session keeps every body whole. When the artifact receiver refuses a
 body to keep its free-disk reserve, the browser still lists it and names it as

@@ -3640,26 +3640,28 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       // `totals`: the index's matching sizes, hidden browser-internal rows and rows without a tab.
       function renderTrafficWindowStatus(visibleCount, totalCount, outside, note = '', totals = null) {
         const bytes = value => trafficBytesLabel(value).replace(' ', '\u00a0');
+        // A count is [text, true]: it stays on one line. Other items may wrap.
         const items = [];
         // A null total is a session nothing has been read from yet: no counts, the note leads.
         if (totalCount !== null) {
-          items.push(`${visibleCount === null ? '' : `${visibleCount.toLocaleString('en-US')} / `}${totalCount.toLocaleString('en-US')} requests`);
-          if (totals?.sizes) items.push(`${bytes(totals.sizes.transferred)} transferred`, `${bytes(totals.sizes.resources)} resources`);
-          if (totals?.hiddenInternal) items.push(`${totals.hiddenInternal.toLocaleString('en-US')} browser-internal hidden`);
+          items.push([`${visibleCount === null ? '' : `${visibleCount.toLocaleString('en-US')} / `}${totalCount.toLocaleString('en-US')} requests`, true]);
+          if (totals?.sizes) items.push([`${bytes(totals.sizes.transferred)} transferred`, true], [`${bytes(totals.sizes.resources)} resources`, true]);
+          if (totals?.hiddenInternal) items.push([`${totals.hiddenInternal.toLocaleString('en-US')} browser-internal hidden`, true]);
         }
-        items.push(...globalThis.RebNetworkScope?.captureExclusionItems(state.captureExclusions) ?? []);
-        if (outside) items.push('Selection outside filter');
-        if (note) items.push(note);
-        if (totalCount === null && items.length) items[0] = items[0].replace(/^./, letter => letter.toUpperCase());
-        // Each item is its own box, so a narrow footer breaks lines between
-        // items and never inside a short one, such as "98.0 kB transferred".
-        // An item longer than the line wraps by itself. The text is the items
-        // joined by " · ", with each separator ending the item before it.
+        for (const item of globalThis.RebNetworkScope?.captureExclusionItems(state.captureExclusions) ?? []) items.push([item, false]);
+        if (outside) items.push(['Selection outside filter', false]);
+        if (note) items.push([note, false]);
+        if (totalCount === null && items.length) items[0][0] = items[0][0].replace(/^./, letter => letter.toUpperCase());
+        // Each item is its own span, so a narrow footer breaks lines between
+        // items and never inside a count, such as "98.0 kB transferred". The
+        // text is the items joined by " · ", each separator ending the item
+        // before it.
         const status = document.querySelector('#request-window-status');
-        if (status.textContent !== items.join(' · ')) {
-          status.replaceChildren(...items.map((item, index) => {
+        if (status.textContent !== items.map(([text]) => text).join(' · ')) {
+          status.replaceChildren(...items.map(([text, count], index) => {
             const span = document.createElement('span');
-            span.textContent = index < items.length - 1 ? `${item} · ` : item;
+            if (count) span.className = 'request-window-count';
+            span.textContent = index < items.length - 1 ? `${text} · ` : text;
             return span;
           }));
         }

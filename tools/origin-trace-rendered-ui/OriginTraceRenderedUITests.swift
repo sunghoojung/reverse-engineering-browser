@@ -932,25 +932,24 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
-  // The Traffic footer's counts break between items: an item narrower than the
-  // footer, such as "98.0 kB transferred ·", stays on one line. Only an item
-  // longer than the line wraps, and it then fills the line. The footer sits
-  // below the rows and inside the list, whatever its height.
+  // The Traffic footer's counts, such as "98.0 kB transferred ·", each stay on
+  // one line. The footer sits below the rows and inside the list, whatever its
+  // height.
   @MainActor
   private func assertFooterItemsWhole(_ ui: Harness, _ context: String) async throws {
     let footer = try await ui.json("""
       (() => { const status = document.querySelector('#request-window-status'), width = status.getBoundingClientRect().width;
         const lines = item => { const range = document.createRange(); range.selectNodeContents(item);
           return new Set([...range.getClientRects()].filter(rect => rect.width > 0).map(rect => Math.round(rect.top))).size; };
-        const items = [...status.children], box = selector => document.querySelector(selector).getBoundingClientRect();
+        const counts = [...status.querySelectorAll('.request-window-count')], box = selector => document.querySelector(selector).getBoundingClientRect();
         const rows = box('#request-rows'), bar = box('#screen-traffic .request-window'), pane = box('#screen-traffic .request-pane');
-        return {items: items.length, broken: items.filter(item => lines(item) > 1 && item.getBoundingClientRect().width < width - 1)
-          .map(item => item.textContent), lines: lines(status), text: status.textContent,
+        return {items: status.children.length, counts: counts.length, broken: counts.filter(item => lines(item) > 1).map(item => item.textContent),
+          lines: lines(status), text: status.textContent, display: getComputedStyle(status).display,
           rowsBottom: rows.bottom, footerTop: bar.top, footerBottom: bar.bottom, paneBottom: pane.bottom}; })()
       """)
     print("RENDERED_UI_TRAFFIC_FOOTER \(context) \(footer)")
-    XCTAssertGreaterThan(footer["items"] as? Int ?? 0, 1, "\(context): the footer counts are separate items: \(footer)")
-    XCTAssertEqual(footer["broken"] as? [String] ?? ["unreadable"], [], "\(context): a short footer item broke across lines: \(footer)")
+    XCTAssertEqual(footer["counts"] as? Int, 3, "\(context): requests, transferred and resources are separate counts: \(footer)")
+    XCTAssertEqual(footer["broken"] as? [String] ?? ["unreadable"], [], "\(context): a footer count broke across lines: \(footer)")
     XCTAssertLessThanOrEqual(footer["rowsBottom"] as? Double ?? .infinity, (footer["footerTop"] as? Double ?? 0) + 1,
       "\(context): the footer covers no row: \(footer)")
     XCTAssertLessThanOrEqual(footer["footerBottom"] as? Double ?? .infinity, (footer["paneBottom"] as? Double ?? 0) + 1,

@@ -283,12 +283,12 @@ assert.deepEqual([...gapsDetail.querySelectorAll('li')].map(item => item.textCon
 }
 runInContext('state.headerCoverage = null; renderTrafficWindowStatus(1, 1, false);', context);
 assert.equal(gapsButton.hidden, true, 'no gap, no button');
-// The counts are footer items, each its own box so lines break between them,
+// Each footer item is its own span, the counts marked to stay on one line,
 // and the text reads as the items joined by " · ".
 runInContext(`renderTrafficWindowStatus(98, 98, true, '', {sizes: {transferred: 98000, resources: 764000}});`, context);
 const footerStatus = document.getElementById('request-window-status');
-assert.deepEqual([...footerStatus.children].map(item => [item.tagName, item.textContent]), [['SPAN', '98 / 98 requests · '],
-  ['SPAN', '98.0\u00a0kB transferred · '], ['SPAN', '764\u00a0kB resources · '], ['SPAN', 'Selection outside filter']]);
+assert.deepEqual([...footerStatus.children].map(item => [item.className, item.textContent]), [['request-window-count', '98 / 98 requests · '],
+  ['request-window-count', '98.0\u00a0kB transferred · '], ['request-window-count', '764\u00a0kB resources · '], ['', 'Selection outside filter']]);
 assert.equal(footerStatus.textContent, '98 / 98 requests · 98.0\u00a0kB transferred · 764\u00a0kB resources · Selection outside filter');
 // Payload reads the native body record and target only, never a CDP exchange.
 runInContext(`state.inspectorTab = 'payload'; renderInspector();`, context);

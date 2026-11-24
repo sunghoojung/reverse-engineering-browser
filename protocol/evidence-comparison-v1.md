@@ -81,7 +81,7 @@ source scans and selection coverage never become complete-capture claims.
   the outer limit; whitespace inside a package token counts against its limit.
 - Framing depth at most 33 before RawValue scanning. Each original independently
   retains the validator's 32-level, 200,000-node, 4,096-byte string, 1,024-event,
-  64-artifact, 4,096-reference and 4,096-gap limits and cooperative budget.
+  64-artifact, 4,096-reference and 4,096-gap limits.
 - Options are bounded before materialization: profile token 128 bytes, facet
   token 512 bytes, paging token five bytes. Unknown/duplicate outer keys fail.
 - Comparison reserves one of the existing two package permits with immediate
@@ -90,12 +90,14 @@ source scans and selection coverage never become complete-capture claims.
   capacity returns HTTP 503/resource_limit before ingestion, with no large-body
   queue and no automatic retry. Closed admission returns dependency_unavailable.
   A client still uploading after early rejection can observe a transport error.
-  The existing four-operation I/O pool retains its one-second dispatch wait.
+  Admission then waits for a slot of the four-operation I/O pool, with no
+  deadline.
   The reserved package permit transfers into the blocking worker and remains
   owned until it finishes even if the caller disconnects. A body timeout,
   interrupted body or admission failure drops the permit without starting work.
-  Comparison has a 10-second cooperative work deadline, including blocking
-  executor queue time after admission.
+  Comparison has no work deadline: it runs until it is done, and a request
+  that goes away stops it between steps with HTTP 499 `cancelled`. Producers
+  before this revision stopped it at 10 seconds with HTTP 408.
 - At most 2,181 logical rows, 100 retained response rows, 12 differences per row,
   and 512 KiB encoded output. Output serialization enforces the bound while
   writing. Offset is 0–2,181. A beyond-end page is empty, not a missing result.

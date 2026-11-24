@@ -62,7 +62,8 @@ env:
 jobs:
   lint:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Clippy checks the backend's test targets too, about a minute more.
+    timeout-minutes: 15
 
     steps:
       - name: Check out repository

@@ -26,7 +26,7 @@ function mountVmAnalysisPacks(root) {
     const element = document.createElement(tag); element.textContent = text; element.className = className; return element;
   };
   const inputs = {}, epochs = {}, pickers = {}, statuses = {};
-  let generation = 0, controller = null, reportText = null, pending = false, review = null;
+  let generation = 0, controller = null, reportText = null, pending = false, review = null, ticker = null;
   root.className = 'vm-tool-shell';
   const heading = node('h2', 'Analysis packs', 'vm-tool-title');
   const help = node('p', 'Apply a ranking overlay or compare instruction sets across two builds.', 'vm-tool-subtitle');
@@ -41,8 +41,12 @@ function mountVmAnalysisPacks(root) {
   const empty = () => { review = null; results.textContent = ''; results.append(node('h3', 'No analysis report yet'), node('p', 'Choose a pack and the local evidence to analyze. Results will appear here without changing the original evidence.', 'vm-tool-empty')); };
   empty();
   const raw = node('details', '', 'vm-tool-editor'); raw.append(node('summary', 'Inspect raw report JSON'));
-  const output = node('pre', '', 'vm-pack-output'); output.tabIndex = 0; output.setAttribute('aria-label', 'Analysis pack report preview'); raw.append(output);
-  const textValue = value => typeof value === 'string' ? value.length > 2048 ? value.slice(0, 2048) + '…' : value : typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : value == null ? '—' : 'See exact JSON';
+  // The report and each row are shown whole in the shared code view, which
+  // mounts only the rows near view.
+  const output = node('div', '', 'vm-pack-output-host'); raw.append(output);
+  let reportView = null, rowView = null;
+  const jsonView = (text, label, className) => createCodeView({text, syntax: codeViewSyntax('json'), label, className, wrap: true});
+  const textValue = value => typeof value === 'string' ? value : typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : value == null ? '—' : 'See exact JSON';
   // JSON.parse is only for presentation. Never show a rounded integer as an
   // evidence identity, and never use this presentation copy for an export.
   const displayJson = (value, space = 2) => JSON.stringify(value, (_key, item) =>
@@ -92,8 +96,7 @@ function mountVmAnalysisPacks(root) {
           detail.append(node('h4', `${side === 'left' ? 'Left' : 'Right'} workspace identity`), node('pre', displayJson(report[side]), 'vm-pack-row-json'));
         }
         detail.append(node('p', mode === 'compare' ? 'Family bindings and effect matches are declarations and hypotheses. Behavioral equivalence is not proven.' : 'This ranking overlay does not change the original evidence or generic scores.'));
-        for (const limitation of (Array.isArray(report.limitations) ? report.limitations.slice(0, 32) : [])) detail.append(node('p', textValue(limitation)));
-        if (Array.isArray(report.limitations) && report.limitations.length > 32) detail.append(node('p', 'First 32 limitations shown. The complete report export retains every limitation.'));
+        for (const limitation of (Array.isArray(report.limitations) ? report.limitations : [])) detail.append(node('p', textValue(limitation)));
         return;
       }
       if (selected == null) { detail.append(node('h3', 'No selected row'), node('p', rows.length ? 'Clear or change the filter to inspect retained report rows.' : 'The accepted report has no rows.', 'vm-tool-empty')); return; }
@@ -108,8 +111,8 @@ function mountVmAnalysisPacks(root) {
         field('Effect shape SHA-256', entry?.effect_shape_digest);
       }
       detail.append(node('h4', 'Retained row evidence'));
-      const json = displayJson(entry) || 'null', preview = node('pre', json.length > 65536 ? `${json.slice(0, 65536)}\n… Row preview limited to 65,536 characters. Complete exact values remain in the report export.` : json, 'vm-pack-row-json');
-      preview.tabIndex = 0; detail.append(preview);
+      rowView?.dispose(); rowView = jsonView(displayJson(entry) || 'null', 'Retained row evidence', 'vm-pack-row-json');
+      detail.append(rowView.box);
       detail.append(node('p', 'Presentation only. Unsafe integer identities are marked See exact JSON. The complete report export retains the original response bytes.', 'vm-tool-subtitle'));
     }
     function renderListing(focus = false) {
@@ -123,7 +126,7 @@ function mountVmAnalysisPacks(root) {
         row.setAttribute('aria-selected', String(index === selected)); row.setAttribute('data-pack-row', String(index));
         row.className = index === selected ? 'selected' : '';
         const cells = mode === 'apply' ? [entry?.artifact_id, entry?.anti_bot_score, entry?.generic_anti_bot_score, labelText(entry?.labels)] : [entry?.left?.opcode, entry?.right?.opcode, entry?.status, entry?.match_basis];
-        for (const value of cells) row.append(node('td', textValue(value)));
+        for (const value of cells) { const cell = node('td'); cell.append(node('span', textValue(value), 'vm-pack-cell')); row.append(cell); }
         row.addEventListener('click', () => select(index, true));
         row.addEventListener('keydown', event => {
           if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
@@ -169,7 +172,9 @@ function mountVmAnalysisPacks(root) {
   root.addEventListener('vm-workspace-previous', () => review?.move(-1));
   const invalidate = () => {
     generation++; controller?.abort(); controller = null; pending = false; reportText = null;
-    output.textContent = ''; empty(); download.disabled = true; apply.disabled = false; compare.disabled = false;
+    clearInterval(ticker); ticker = null;
+    reportView?.dispose(); rowView?.dispose(); reportView = rowView = null;
+    output.replaceChildren(); empty(); download.disabled = true; apply.disabled = false; compare.disabled = false;
   };
   for (const [key, title] of [['pack', 'Analysis pack'], ['analysis', 'VM analysis (apply)'], ['left', 'Left opcode workspace'], ['right', 'Right opcode workspace']]) {
     const label = node('label', title, 'vm-tool-import-card'), picker = node('input'); picker.type = 'file'; picker.setAttribute('aria-label', title); picker.accept = '.json,application/json';
@@ -201,31 +206,35 @@ function mountVmAnalysisPacks(root) {
     if (pending) return;
     selectAction(mode);
     invalidate(); const current = generation;
-    let timer;
     try {
       if (!['http:', 'https:'].includes(location.protocol)) throw new Error('This view needs the local Rust HTTP backend. Use make ui or the offline origin-trace-vm-pack CLI.');
       const body = vmPackRequestText(mode, inputs, ids.left.value, ids.right.value);
       pending = true; apply.disabled = true; compare.disabled = true; controller = new AbortController();
       const requestController = controller;
-      timer = setTimeout(() => requestController.abort(), 30000);
-      status.textContent = 'Validating exact source identities and running data-only analysis…';
+      // The analysis runs until it is done or the researcher cancels it.
+      const started = Date.now(), working = 'Validating exact source identities and running data-only analysis';
+      status.textContent = `${working}…`;
+      ticker = setInterval(() => { if (current === generation) status.textContent = `${working} · ${Math.floor((Date.now() - started) / 1000)} s. Cancel stops it.`; }, 1000);
+      ticker?.unref?.();
       const response = await fetch(`/api/analysis/vm/packs/${mode}`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body, signal: controller.signal, redirect: 'error'});
-      const bytes = await evidencePackageReadBytes(response, 33554432, requestController.signal);
+      const bytes = await evidencePackageReadBytes(response, Infinity, requestController.signal);
       const text = new TextDecoder('utf-8', {fatal: true}).decode(bytes);
       if (current !== generation) return;
-      if (!response.ok) { let message = `Local backend refused the request (${response.status}).`; try { const error = JSON.parse(text).error; if (typeof error === 'string' && error.length <= 8192) message = error; } catch {} throw new Error(message); }
+      if (!response.ok) { let message = `Local backend refused the request (${response.status}).`; try { const error = JSON.parse(text).error; if (typeof error === 'string') message = error; } catch {} throw new Error(message); }
       // Parse only for display metadata; downloads retain exact original text.
       const report = JSON.parse(text), expected = mode === 'apply' ? 'vm-pack-application' : 'vm-instruction-set-comparison';
       if (report.contract_version !== 1 || report.document_kind !== expected || !/^[a-f0-9]{64}$/.test(report.document_digest) ||
           !Array.isArray(mode === 'apply' ? report.rankings : report.rows) || mode === 'compare' && report.behavioral_equivalence_proven !== false) throw new Error('Malformed pack report.');
-      renderReport(report, mode); imports.open = false; reportText = text; output.textContent = text.length > 65536 ? `${text.slice(0, 65536)}\n… Preview limited to 65,536 characters. Download retains the complete report.` : text;
+      clearInterval(ticker); ticker = null;
+      renderReport(report, mode); imports.open = false; reportText = text;
+      reportView = jsonView(text, 'Analysis pack report', 'vm-pack-output'); output.replaceChildren(reportView.box);
       const count = mode === 'apply' ? report.rankings?.length : report.rows?.length;
       status.textContent = `${mode === 'apply' ? 'Ranking overlay' : 'Build comparison'} ready · ${count ?? 'unknown'} rows. Original evidence retained. Report identity and limitations are below.`;
       download.disabled = false;
     } catch (error) {
-      if (current === generation) status.textContent = error.name === 'AbortError' ? 'Request cancelled or deadline exceeded. No report accepted; retry explicitly.' : `Analysis refused: ${error.message}`;
+      if (current === generation) status.textContent = error.name === 'AbortError' ? 'Request cancelled. No report accepted; retry explicitly.' : `Analysis refused: ${error.message}`;
     } finally {
-      clearTimeout(timer); if (current === generation) { pending = false; controller = null; apply.disabled = false; compare.disabled = false; }
+      if (current === generation) { clearInterval(ticker); ticker = null; pending = false; controller = null; apply.disabled = false; compare.disabled = false; }
     }
   };
   const apply = button('Apply ranking pack', () => run('apply'));
@@ -251,7 +260,7 @@ function mountVmAnalysisPacks(root) {
     }
     const url = URL.createObjectURL(new Blob([reportText], {type: 'application/json'})), link = node('a'); link.href = url; link.download = 'vm-pack-report.json'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   }); download.disabled = true;
-  const boundaries = node('details', '', 'vm-tool-editor'); boundaries.append(node('summary', 'Input limits and research boundaries'), limits, node('p', 'Packs are inert declarations. No imported source or bytecode executes and no external service is contacted. Reports may contain private evidence; review before sharing.'));
+  const boundaries = node('details', '', 'vm-tool-editor'); boundaries.append(node('summary', 'Inputs and research boundaries'), limits, node('p', 'Packs are inert declarations. No imported source or bytecode executes and no external service is contacted. Reports may contain private evidence; review before sharing.'));
   root.append(heading, help, imports, actions, status, results, raw, boundaries);
   return {clear: () => { invalidate(); }, run};
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -20,22 +20,20 @@
 #include "native_wasm_guest_wire.h"
 namespace reb {
 inline constexpr std::size_t kNativeGuestSnapshotLimit = 65536;
-inline constexpr std::size_t kNativeGuestSampleLimit = 256;
 inline constexpr std::size_t kNativeGuestAdapterLimit = 8192;
-// Dispatch sites per adapter. Every site draws on the one shared sample limit,
-// so the snapshot budget (sample limit x snapshot limit, at most 16 MiB) and
-// the 128 sampled activations are never multiplied per site.
+// Dispatch sites per adapter. Every site draws on the one shared sample limit
+// the recipe chooses, any count from 1 to 2^32 - 1 (the dispatch payload's
+// u32 sample index), and the 128 sampled activations are never multiplied
+// per site.
 inline constexpr std::size_t kNativeGuestSiteLimit = 8;
-// Host events per capture configuration that may travel the parent-binding
-// path. Later hosts stay on the ordinary bounded queue, unparented, after one
-// explicit omission marker; the events themselves are never dropped here.
-inline constexpr std::size_t kNativeGuestHostParentLimit = 256;
-// Host events the browser holds while their parent dispatch awaits artifact
-// receipts. Beyond this, a host is published at once without its parent link.
-inline constexpr std::size_t kNativeGuestHeldHostLimit = 64;
 // Module transfers per document binding. The renderer resends the module only
 // after the browser reports that the previous transfer was not accepted.
 inline constexpr std::uint8_t kNativeGuestModuleAttemptLimit = 3;
+// Module verdicts the renderer remembers. Each answers one capture that
+// carried module bytes, and a document binding has at most one pending, so a
+// pending verdict is overwritten only after this many later sends; that
+// binding then resends instead of waiting. Nothing is lost either way.
+inline constexpr std::size_t kNativeGuestModuleVerdictRing = 256;
 // The enclosing guest activation as the engine resolved it once, at this
 // activation's first selected dispatch. kUnresolved never names a guess.
 enum class NativeWasmGuestParent : std::uint8_t { kNone, kResolved, kUnresolved };
@@ -116,8 +114,7 @@ inline bool IsValidNativeGuestSiteShape(const NativeWasmGuestSite& site) noexcep
 }
 inline bool IsValidNativeGuestAdapterShape(const NativeWasmGuestAdapter& adapter) noexcept {
   if (adapter.json.empty() || adapter.json.size() > kNativeGuestAdapterLimit ||
-      !adapter.sample_limit || adapter.sample_limit > kNativeGuestSampleLimit ||
-      !adapter.site_count || adapter.site_count > adapter.sites.size())
+      !adapter.sample_limit || !adapter.site_count || adapter.site_count > adapter.sites.size())
     return false;
   for (std::size_t i = 0; i < adapter.site_count; ++i)
     if (!IsValidNativeGuestSiteShape(adapter.sites[i]) ||

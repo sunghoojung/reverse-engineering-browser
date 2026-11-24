@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -11,6 +11,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -53,29 +54,24 @@ std::uint64_t FrameIdentity(const blink::WebLocalFrame* frame) noexcept {
 }
 
 // Never formats an object, invokes an accessor, or calls a page-replaceable
-// conversion: only primitives reach this function.
+// conversion: only primitives reach this function. The text is whole.
 std::string PrimitiveText(v8::Isolate* isolate,
                           v8::Local<v8::Context> context,
-                          v8::Local<v8::Value> value,
-                          bool& truncated) {
+                          v8::Local<v8::Value> value) {
   if (value->IsString() || value->IsBigInt()) {
     v8::Local<v8::String> text;
     if (value->IsBigInt()) {
-      if (value.As<v8::BigInt>()->WordCount() > 16) {
-        truncated = true;
-        return "[BigInt larger than 1024 bits]";
-      }
+      // BigInt formatting is engine code and calls nothing the page defined.
       if (!value->ToString(context).ToLocal(&text))
         return std::string();
     } else {
       text = value.As<v8::String>();
     }
-    std::array<char, kNativeConsoleDocumentStartReportLimit> buffer{};
-    std::size_t characters = 0;
-    const auto bytes = text->WriteUtf8(isolate, buffer.data(), buffer.size(),
-                                       v8::String::WriteFlags::kReplaceInvalidUtf8, &characters);
-    truncated = truncated || characters < static_cast<std::size_t>(text->Length());
-    return std::string(buffer.data(), bytes);
+    // A lone surrogate becomes U+FFFD, which has the same UTF-8 length.
+    std::string result(text->Utf8Length(isolate), '\0');
+    result.resize(text->WriteUtf8(isolate, result.data(), result.size(),
+                                  v8::String::WriteFlags::kReplaceInvalidUtf8));
+    return result;
   }
   if (value->IsBoolean())
     return value.As<v8::Boolean>()->Value() ? "true" : "false";
@@ -174,9 +170,11 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
     Inject(render_frame, frame->MainWorldScriptContext(), state);
   }
 
-  // Called from the `report` function the injected snippet received. A function
-  // the page retained past a re-arm or clear resolves to no script and becomes
-  // an inert no-op, so clearing the experiment stops all output.
+  // Called from the `report` function the injected snippet received, which
+  // names its script by id. Ids are never reused, so a function the page
+  // retained keeps working while its script stays armed, through any add or
+  // remove of another, and becomes an inert no-op once its own script is
+  // removed, replaced or cleared.
   void Report(const v8::FunctionCallbackInfo<v8::Value>& info) {
     auto* frame = blink::WebLocalFrame::FrameForCurrentContext();
     // V8 15.7 deprecates Data() in favor of DataV2(), which returns v8::Data.
@@ -184,27 +182,29 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
     if (!frame || bound.IsEmpty() || !bound->IsValue() || !bound.As<v8::Value>()->IsBigInt())
       return;
     bool lossless = false;
-    const auto data = bound.As<v8::BigInt>()->Uint64Value(&lossless);
-    const auto epoch = static_cast<std::uint32_t>(data >> 32);
-    const std::size_t index = static_cast<std::uint32_t>(data);
-    if (!lossless || epoch != epoch_ || index >= scripts_.size())
+    const auto script_id = bound.As<v8::BigInt>()->Uint64Value(&lossless);
+    // The decoded set is in increasing id order.
+    const auto found = std::lower_bound(scripts_.begin(), scripts_.end(), script_id,
+                                        [](const NativeConsoleDocumentStartScript& script,
+                                           std::uint64_t id) { return script.script_id < id; });
+    if (!lossless || found == scripts_.end() || found->script_id != script_id)
       return;
+    const auto index = static_cast<std::size_t>(found - scripts_.begin());
     if (info.Length() != 1) {
-      Emit(frame, index, NativeConsoleDocumentStartRecord::kRefused, false,
+      Emit(frame, index, NativeConsoleDocumentStartRecord::kRefused,
            "report(value) takes exactly one argument");
       return;
     }
     const auto value = info[0];
     if (!value->IsString() && !value->IsNumber() && !value->IsBoolean() && !value->IsBigInt()) {
-      Emit(frame, index, NativeConsoleDocumentStartRecord::kRefused, false,
+      Emit(frame, index, NativeConsoleDocumentStartRecord::kRefused,
            std::string("report(value) refused ") + ValueKind(value) +
                "; pass a string, number, boolean or bigint");
       return;
     }
-    bool truncated = false;
     auto* const isolate = info.GetIsolate();
-    const auto text = PrimitiveText(isolate, isolate->GetCurrentContext(), value, truncated);
-    Emit(frame, index, NativeConsoleDocumentStartRecord::kReport, truncated, text);
+    Emit(frame, index, NativeConsoleDocumentStartRecord::kReport,
+         PrimitiveText(isolate, isolate->GetCurrentContext(), value));
   }
 
  private:
@@ -222,7 +222,6 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
       mapping_ = scripts.Map();
     if (mapping_.IsValid() && DecodeNativeConsoleDocumentStartScripts(
                                   mapping_.GetMemoryAsSpan<std::uint8_t>(), scripts_)) {
-      generation_ = generation;
       by_origin_.resize(scripts_.size());
       for (std::uint32_t index = 0; index < by_origin_.size(); ++index)
         by_origin_[index] = index;
@@ -242,10 +241,10 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
   }
 
   void Disarm() {
-    // Every retained `report` function becomes inert, and the mapping and the
-    // views into it are released rather than retained at their peak size.
+    // A retained `report` function finds its script again only in a set that
+    // still holds it, and the mapping and the views into it are released
+    // rather than retained at their peak size.
     ++epoch_;
-    generation_ = 0;
     std::vector<NativeConsoleDocumentStartScript>().swap(scripts_);
     std::vector<std::uint32_t>().swap(by_origin_);
     mapping_ = base::ReadOnlySharedMemoryMapping();
@@ -260,11 +259,12 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
     v8::Context::Scope entered(context);
     if (isolate->IsExecutionTerminating())
       return;
-    // Runs until it returns. A Clear, a new arm or the end of the session
-    // stops it from the IO thread. A snippet that synchronously creates a
-    // matching frame nests here, and stopping the outer execution ends both.
+    // Runs until it returns. Removing its script, a Clear, a new arm or the
+    // end of the session stops it from the IO thread. A snippet that
+    // synchronously creates a matching frame nests here, and stopping the
+    // outer execution ends both.
     auto& execution = NativeConsoleExecution::Get();
-    execution.Begin(isolate, kNativeConsoleDocumentStartStopBit | generation_);
+    execution.Begin(isolate, kNativeConsoleDocumentStartStopBit | scripts_[index].script_id);
     v8::TryCatch failure(isolate);
     bool ran = false;
     {
@@ -285,8 +285,11 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
       v8::Local<v8::Value> wrapper;
       v8::Local<v8::Function> report;
       v8::Local<v8::Value> ignored;
-      const auto data = (std::uint64_t{epoch_} << 32) | static_cast<std::uint32_t>(index);
-      if (v8::String::NewFromUtf8(isolate, snippet.data(), v8::NewStringType::kNormal,
+      const auto script_id = scripts_[index].script_id;
+      // A snippet past V8's string length fails to build, and is reported as
+      // failing to compile rather than cut.
+      if (snippet.size() <= static_cast<std::size_t>(std::numeric_limits<int>::max()) &&
+          v8::String::NewFromUtf8(isolate, snippet.data(), v8::NewStringType::kNormal,
                                   static_cast<int>(snippet.size()))
               .ToLocal(&body) &&
           v8::String::NewFromUtf8(isolate, name.data(), v8::NewStringType::kNormal,
@@ -304,7 +307,7 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
             v8::Script::Compile(context, source, &script_origin).ToLocal(&script) &&
             script->Run(context).ToLocal(&wrapper) && wrapper->IsFunction() &&
             v8::Function::New(context, &DocumentStart::Dispatch,
-                              v8::BigInt::NewFromUnsigned(isolate, data))
+                              v8::BigInt::NewFromUnsigned(isolate, script_id))
                 .ToLocal(&report);
         if (compiled) {
           // Announce before calling, so this document's own records follow the
@@ -319,19 +322,18 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
     }
     if (execution.Finish() != NativeConsoleExecution::End::kReturned) {
       failure.Reset();
-      Emit(frame, index, NativeConsoleDocumentStartRecord::kScriptError, false,
-           "Snippet stopped by a Clear, a new arm or the end of the session; changes are not "
-           "rolled back");
+      Emit(frame, index, NativeConsoleDocumentStartRecord::kScriptError,
+           "Snippet stopped by removing it, a Clear, a new arm or the end of the session; changes "
+           "are not rolled back");
       return;
     }
     if (!ran) {
       std::string text = "Snippet failed to compile or threw";
-      bool truncated = false;
       const auto message = failure.Message();
       if (!message.IsEmpty()) {
-        text = PrimitiveText(isolate, context, message->Get(), truncated);
+        text = PrimitiveText(isolate, context, message->Get());
       }
-      Emit(frame, index, NativeConsoleDocumentStartRecord::kScriptError, truncated, text);
+      Emit(frame, index, NativeConsoleDocumentStartRecord::kScriptError, text);
     }
   }
 
@@ -344,7 +346,7 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
         blink::WebString::FromUtf8("Reverse Engineering Browser: document-start Console script " +
                                    base::NumberToString(scripts_[index].script_id) +
                                    " runs in this document's main world before its own scripts")));
-    Emit(frame, index, NativeConsoleDocumentStartRecord::kInjected, false,
+    Emit(frame, index, NativeConsoleDocumentStartRecord::kInjected,
          "Snippet injected before this document's own scripts");
   }
 
@@ -353,20 +355,18 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
   void Emit(blink::WebLocalFrame* frame,
             std::size_t index,
             NativeConsoleDocumentStartRecord record,
-            bool truncated,
             const std::string& text) {
     if (!host_.is_bound() || index >= scripts_.size())
       return;
     const base::UnguessableToken document = frame->GetDocument().Token().value();
     if (document.is_empty())
       return;
-    // Every record is sent: a document has no record budget. The browser
-    // keeps a bounded output and counts what it evicts.
-    host_->Observed(generation_, scripts_[index].script_id, FrameIdentity(frame), document,
-                    static_cast<std::uint32_t>(record), truncated, text);
+    // Every record is sent whole: a document has no record budget. The
+    // browser keeps what it holds for readers and counts what it evicts.
+    host_->Observed(scripts_[index].script_id, FrameIdentity(frame), document,
+                    static_cast<std::uint32_t>(record), text);
   }
 
-  std::uint64_t generation_ = 0;
   std::uint32_t epoch_ = 1;
   base::ReadOnlySharedMemoryMapping mapping_;
   // Views into `mapping_`, in arming order.

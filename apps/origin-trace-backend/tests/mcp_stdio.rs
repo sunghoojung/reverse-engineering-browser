@@ -308,6 +308,85 @@ fn retained_wasm(server: &Server, bytes: &[u8]) -> String {
     hash
 }
 
+/// Over MCP, a run asks for `confirmed_sensitive` only when the stored record
+/// of the artifact it names is sensitive, which no request predicate can see.
+#[test]
+fn analyst_runs_need_the_sensitive_confirmation_only_for_a_sensitive_artifact() {
+    use sha2::{Digest, Sha256};
+    let server = Server::start();
+    let artifacts = server._root.path().join("artifacts");
+    std::fs::create_dir_all(artifacts.join("blobs")).unwrap();
+    let mut manifest = String::new();
+    let mut references = Vec::new();
+    // A script is never sensitive and a response body always is.
+    for (id, kind, origin, context) in [
+        ("1", "javascript", "dynamic_javascript", "1"),
+        ("2", "response_body", "network_response", "0"),
+    ] {
+        let body = format!("var synthetic{id} = {id};");
+        let hash = hex::encode(Sha256::digest(&body));
+        std::fs::write(artifacts.join(format!("blobs/{hash}.bin")), &body).unwrap();
+        manifest.push_str(&format!(
+            "{}\n",
+            json!({"protocol_version": 1, "artifact_id": id,
+            "session_id": "1", "navigation_id": "1", "frame_id": "1", "parent_artifact_id": "0",
+            "creator_event_id": "0", "execution_context_id": context,
+            "capture_origin": origin, "kind": kind,
+            "url": "https://owned.test/run.js", "mime_type": "text/javascript",
+            "byte_size": body.len(), "sha256": hash, "sensitive": kind == "response_body",
+            "content_path": format!("blobs/{hash}.bin")})
+        ));
+        references.push(json!({"artifact_id": id, "sha256": hash}));
+    }
+    std::fs::write(artifacts.join("manifest.jsonl"), manifest).unwrap();
+    let mut mcp = at_level(&server, "full");
+    let source = "return WB.Node.Evidence.selectedArtifact().content;";
+    let saved = mcp.request(
+        "tools/call",
+        json!({"name": "analyst_action", "arguments": {"body": {
+            "action": "replace_local_analyst_workspace", "expected_generation": 0,
+            "folders": [{"id": 1, "name": "Analyst Workspace", "parent_id": null}],
+            "files": [{"id": 1, "folder_id": 1, "name": "Read", "kind": "analyst-script",
+                "language": "javascript", "content": source}]}}}),
+    );
+    assert_eq!(saved["result"]["isError"], false, "{saved}");
+    let generation = saved["result"]["structuredContent"]["generation"].clone();
+    let mut run = |id: u64, selected: &Value, confirmed_sensitive: bool| {
+        mcp.request(
+            "tools/call",
+            json!({"name": "analyst_action", "arguments": {"body": {
+                "action": "run_local_analyst_script", "protocol_version": 2, "run_id": id,
+                "script_id": 1, "library_generation": generation, "source": source,
+                "variables": {}, "evidence": {"events": [], "artifacts": [], "trace_edges": [],
+                    "signal_profiles": [], "vm_analysis": null, "selected_artifact": selected,
+                    "summary": {}},
+                "confirmed": true, "confirmed_sensitive": confirmed_sensitive}}}),
+        )
+    };
+    let plain = run(1, &references[0], false);
+    assert_eq!(plain["result"]["isError"], false, "{plain}");
+    assert_eq!(
+        plain["result"]["structuredContent"]["result_text"],
+        json!("var synthetic1 = 1;").to_string()
+    );
+    let refused = run(2, &references[1], false);
+    assert_eq!(refused["result"]["isError"], true, "{refused}");
+    let refusal: Value = serde_json::from_str(tool_text(&refused)).unwrap();
+    assert_eq!(refusal["http_status"], 400);
+    assert_eq!(refusal["code"], "confirmation_required");
+    assert_eq!(
+        refusal["details"],
+        json!({"confirmation": "confirmed_sensitive"})
+    );
+    assert!(!refused.to_string().contains("synthetic2"), "{refused}");
+    let confirmed = run(3, &references[1], true);
+    assert_eq!(confirmed["result"]["isError"], false, "{confirmed}");
+    assert_eq!(
+        confirmed["result"]["structuredContent"]["result_text"],
+        json!("var synthetic2 = 2;").to_string()
+    );
+}
+
 /// One `reb-api mcp` connection at a permission level.
 fn at_level(server: &Server, level: &str) -> Mcp {
     Mcp::start_with(vec![

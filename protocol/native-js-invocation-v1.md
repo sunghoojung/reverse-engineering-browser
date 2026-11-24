@@ -8,8 +8,8 @@ limit below exists, is
 
 ## Enablement
 
-Rebuild Brave with V8 patches `0011`, `0023`, `0024` and `0025`, Chromium
-patches `0021`, `0066` and `0067` and the overlay.
+Rebuild Brave with V8 patches `0011`, `0023`, `0024`, `0025` and `0026`,
+Chromium patches `0021`, `0066`, `0067` and `0068` and the overlay.
 Launch a native live session with
 `REB_NATIVE_JS_INVOCATION_SITES=/absolute/path/sites.json`. The launcher adds
 `--js-flags=--reb-js-invocation-capture` and
@@ -77,25 +77,35 @@ refuses any other character. The backend computes the same key when Origin
 Trace saves a site by name or position; both check
 `tools/fixtures/native-js-invocation/site-cases.json`.
 
-Version 2 is a slot table of 0 to 256 entries, each with an `armed` boolean,
-in the same canonical form with sorted keys:
+Version 2 is a slot table that may be empty, each entry with an `armed`
+boolean, in the same canonical form with sorted keys:
 
 ```json
 {"sites":[{"anchor_offset":120,"armed":false,"artifact_id":"12","artifact_sha256":"<64 lowercase hex>","byte_offset":118,"shape":"function-entry","source_length":456,"source_sha256":"<64 lowercase hex>"}],"version":2}
 ```
 
 Entry n is slot n. A disarmed slot keeps its site so later slots are not
-renumbered; it records no new call. Version 1 is a slot table whose 1 to 256
-entries are all armed. The backend writes version 2 when it revises a
+renumbered; it records no new call. Version 1 is a slot table of at least
+one entry, all armed. The backend writes version 2 when it revises a
 following capture's file; the app's empty set starts as
 `{"sites":[],"version":2}`.
+
+Neither version has a count or file size limit below 48,806,446 sites
+(`kNativeJsInvocationSiteListLimit`). That bound is structural: each renderer
+receives the whole table as one `mojo_base.mojom.BigBuffer`, and Chromium maps
+one shared memory region only up to `INT_MAX` bytes of 44-byte records. It is
+far inside the records' u32 slot. The browser parses a revision off its UI
+sequence, so a long table never blocks it.
 
 The browser sends the renderer only fixed 44-byte records: `source_sha256`
 (32 bytes), `source_length` (u32), `anchor_offset` (u32), shape byte 3, a
 flags byte whose bit 0 means disarmed, and 2 zero bytes. Any other flag bit,
 a dispatch record (shape 1 or 2) here, or a function-entry record as a
 dispatch site is refused. A null record array means the session tracks no
-invocations; an empty one means it tracks with no slot yet.
+invocations; an empty one means it tracks with no slot yet. A table over 64
+KiB travels in shared memory; one the renderer cannot map arrives invalid and
+is refused with the configuration's `native_js_invocation_input_unavailable`
+gap.
 
 Generators, async generators, class constructors and class initializer
 functions are never armed; see the design for why.
@@ -115,7 +125,7 @@ backend as `--js-invocation-session-generation`.
 Whenever the backend reads the saved set, it compares it with the capture's
 slot table. A removed site is disarmed in its slot, a saved one is armed
 again in its slot, and a new one takes the next slot; a site saved after all
-256 slots are used waits for the next capture and its saved entry says
+48,806,446 slots are used waits for the next capture and its saved entry says
 `armed_in_capture: false`. The backend replaces the site file with the new
 slot table and then the generation file with the next decimal, each by an
 atomic rename, so Brave never applies a generation without its table. A
@@ -123,8 +133,9 @@ write that fails keeps the capture's table, reports `revision_error`, and is
 retried at the next listing.
 
 Brave's broker writer reads the generation on its wake of about 250 ms. A
-greater one makes it reread the site file on that thread, and the browser
-sequence sends the table to every renderer of the session
+greater one makes it reread the whole site file on that thread. A sequenced
+pool task parses it, in order, and the browser sequence sends the table to
+every renderer of the session
 (`UpdateJsInvocationSites`); a renderer that starts later is configured with
 it. A table that renumbers a slot or is invalid is refused with one
 `native_js_invocation_sites_revision_refused` gap and the capture keeps its
@@ -149,8 +160,15 @@ cache and the compilation cache.
 `v8::JsInvocationSite`, `JsInvocationStart`, `JsInvocationSettle`,
 `JsInvocationContext`, `JsInvocationCallbacks`,
 `Isolate::SetJsInvocationCallbacks` and `Isolate::GetCurrentJsInvocation`.
-`kJsInvocationSiteLimit` is 256 (8 before patch `0023`), the most slots the
-records' one-byte site slot can name; `kJsInvocationArgumentLimit` is 8 and
+Patch `0026` removes `kJsInvocationSiteLimit` (8 before patch `0023`, 256
+before `0026`): a slot is a `uint32_t`, so V8 arms the first 2^32 sites of a
+larger list and no others. `sites(epoch, sites, capacity)` copies the first
+`min(count, capacity)` sites and returns the whole count, and V8 calls it
+again with room for every site when the first call reports more. V8 keeps
+the sites sorted by source length, digest and anchor, so a script's sites
+are one range found by binary search and a call's slot by its anchor within
+it. A slot is stored as a Number, and a watched promise carries `(ID << 32) |
+slot` as a BigInt. `kJsInvocationArgumentLimit` is 8 and
 `kJsInvocationDigestByteLimit` is 1 MiB. V8 pulls the epoch (0 means
 inactive) and the sites when the epoch changes, or when the optional
 `revision(epoch)` changes: then it copies the sites again and keeps the
@@ -234,7 +252,7 @@ never changes a layout.
 | --- | --- | --- | --- |
 | 0 | version (2) | u16 | |
 | 2 | size (128) | u16 | |
-| 4 | site slot | u8 | 0 to 255, below the armed site count |
+| 4 | version 1 site slot | u8 | zero |
 | 5 | flags | u8 | bit 0 parent unknown, bit 1 arguments truncated; other bits zero |
 | 6 | argument count | u16 | actual arguments excluding the receiver, saturating at 65535; bit 1 is set exactly when it exceeds 8 |
 | 8 | script ID | u32 | nonzero V8 script ID, scoped to the renderer isolate |
@@ -247,7 +265,8 @@ never changes a layout.
 | 40 | argument low bits | 8 x u32 | integer: low 32 bits; boolean: 0 or 1; otherwise and beyond the count 0 |
 | 72 | source SHA-256 | 32 bytes | the armed site's key |
 | 104 | document ID | u64 | nonzero digest of the DocumentToken |
-| 112 | reserved, all zero | 16 bytes | |
+| 112 | site slot | u32 | below the armed site count |
+| 116 | reserved, all zero | 12 bytes | |
 
 Value kinds: 1 integer, 2 non-integer number, 3 string, 4 symbol,
 5 undefined, 6 null, 7 boolean, 8 BigInt, 9 other object, 10 function,
@@ -261,7 +280,7 @@ Value kinds: 1 integer, 2 non-integer number, 3 string, 4 symbol,
 | --- | --- | --- | --- |
 | 0 | version (2) | u16 | |
 | 2 | size (128) | u16 | |
-| 4 | site slot | u8 | 0 to 255, below the armed site count |
+| 4 | version 1 site slot | u8 | zero |
 | 5 | outcome | u8 | 1 fulfilled, 2 rejected |
 | 6 | via | u8 | 1 synchronous return (fulfilled only), 2 synchronous throw (rejected only), 3 the native promise the caller received |
 | 7 | value kind | u8 | 1 to 14 |
@@ -275,7 +294,8 @@ Value kinds: 1 integer, 2 non-integer number, 3 string, 4 symbol,
 | 24 | rolling hash | u64 | with state 1: `h = h * 0x100000001b3 + byte` modulo 2^64 over those bytes |
 | 32 | value SHA-256 | 32 bytes | with state 1 only; otherwise zero |
 | 64 | document ID | u64 | nonzero |
-| 72 | reserved, all zero | 56 bytes | |
+| 72 | site slot | u32 | below the armed site count |
+| 76 | reserved, all zero | 52 bytes | |
 
 State 2 never applies to a fulfilled string or bytes; state 3 applies only to
 a fulfilled string or bytes; state 4 only to fulfilled bytes that are
@@ -306,7 +326,8 @@ while at least one recorded invocation of the configuration had not settled
 ### Version 1 records
 
 Builds before V8 patch `0023` and Chromium patch `0066` wrote version 1. It
-has the same layout except: the site slot is 0 to 7; start bytes 28..30 are a
+has the same layout except: the site slot is byte 4, 0 to 7, and start bytes
+112..116 and settle bytes 72..76 are reserved zero; start bytes 28..30 are a
 u16 site sample index below 64 and bytes 30..32 a u16 sample index below 256;
 request bytes 12..14 are a u16 sample index below 256 and bytes 14..16 are
 zero. Every consumer still reads version 1 with those rules. The event query

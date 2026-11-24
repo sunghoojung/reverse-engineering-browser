@@ -6,16 +6,16 @@ import {runInNewContext} from 'node:vm';
 
 export function createConsoleFixture() {
   const fixture = {session:null, sequence:10, target:'101', calls:[], messages:[], pending:[], endless:[], inspectMode:'ok', stateMode:'ok', pollMode:'ok', propertyCount:48, request:0, receipts:[], receiptSequence:0, errors:[]};
-  const value = (type,text,handle) => ({type,text,truncated:false,...(handle?{handle}:{})});
+  const value = (type,text,handle) => ({type,text,...(handle?{handle}:{})});
   const state = () => ({contract_version:2,state:fixture.session?'ready':'idle',session_id:fixture.session,available:true});
-  const targets = () => [{id:fixture.target,origin:'https://fixture.invalid',label:'Console workbench fixture',url:'https://fixture.invalid/console',main_frame:true,truncated:false}];
+  const targets = () => [{id:fixture.target,origin:'https://fixture.invalid',label:'Console workbench fixture',url:'https://fixture.invalid/console',main_frame:true}];
   fixture.respond = async (path, action) => {
     if (path === '/api/native-console') return fixture.stateMode === 'error' ? {status:503,body:{error:'Synthetic unavailable backend'}} : {status:200,body:state()};
     // This fixture's session never permits document-start scripts, so the panel
     // must stay usable with the experiment reported as unavailable.
-    if (path.startsWith('/api/native-console/document-start')) return {status:200,body:{contract_version:3,available:true,state:fixture.session?'ready':'idle',session_id:fixture.session,
+    if (path.startsWith('/api/native-console/document-start')) return {status:200,body:{contract_version:4,available:true,state:fixture.session?'ready':'idle',session_id:fixture.session,
       document_start:{status:'unavailable',permitted:false,scripts:[],message:'Synthetic session does not permit document-start scripts'},
-      limits:{command_bytes:67108864,rule_bytes:256,report_bytes:8192,retained_bytes:67108864,reply_bytes:67108864,listing_bytes:33554432}}};
+      limits:{record_bytes:4294967295,page_bytes:8388608,retained_bytes:67108864}}};
     fixture.calls.push(structuredClone(action));if(fixture.calls.length>512)throw new Error('Synthetic action limit exceeded');
     if (action.action === 'start') {fixture.session=String(++fixture.sequence);fixture.request=0;return {status:200,body:{...state(),targets:targets(),truncated:false}};}
     if (action.action === 'stop') {fixture.session=null;return {status:200,body:state()};}
@@ -28,17 +28,17 @@ export function createConsoleFixture() {
     let runtime={status:'ok',text:'Complete'};
     if (command.operation === 'evaluate') {
       if (command.source === 'fixture.slow') await new Promise(resolve=>fixture.pending.push(resolve));
-      if (command.source === 'fixture.endless') {await new Promise(resolve=>fixture.endless.push(resolve));return {status:200,body:{...state(),status:'stopped',type:'undefined',text:'Stopped; changes are not rolled back',truncated:false,code:'cancelled',details:{}}};}
+      if (command.source === 'fixture.endless') {await new Promise(resolve=>fixture.endless.push(resolve));return {status:200,body:{...state(),status:'stopped',type:'undefined',text:'Stopped; changes are not rolled back',code:'cancelled',details:{}}};}
       if (command.source === 'fixture.fail') return {status:503,body:{error:'Synthetic transport failure'}};
       if (command.source === 'fixture.stale') return {status:200,body:{...state(),status:'stale_target',text:'Synthetic document replaced',request_id:requestId}};
-      runtime={status:'ok',value:command.source==='fixture.object'?value('object','Object {alpha, guarded, nested}', '1'):command.source==='fixture.malformed'?{type:'invented',text:'bad',truncated:false}:command.source==='fixture.throw'?null:value('number','42')};
+      runtime={status:'ok',value:command.source==='fixture.object'?value('object','Object {alpha, guarded, nested}', '1'):command.source==='fixture.malformed'?{type:'invented',text:'bad'}:command.source==='fixture.throw'?null:value('number','42')};
       if(command.source==='fixture.throw') runtime={status:'exception',text:'Synthetic exception: inert <script>text</script>'};
       // window and document describe themselves as a plain Object, as the native runtime does.
       const described={'fixture.window':['Object','7'],'fixture.element':['<button#go>','8'],'fixture.array':['Array(2)','9'],'fixture.plain':['Object','12']}[command.source];
       if(described) runtime={status:'ok',value:value('object',...described)};
     }
     if (command.operation === 'listeners') runtime=command.handle==='12'?{status:'error',text:'Select an Element, document or window to inspect its listeners'}
-      :{status:'ok',properties:[{name:'click',value:value('function','ƒ onTap(…)','11')}],more:false,offset:0,truncated:false};
+      :{status:'ok',properties:[{name:'click',value:value('function','ƒ onTap(…)','11')}],more:false,offset:0};
     if (command.operation === 'inspect') {
       if(fixture.inspectMode==='pending') await new Promise(resolve=>fixture.pending.push(resolve));
       const end=Math.min(fixture.propertyCount,command.offset+16);
@@ -173,8 +173,8 @@ async function checkConsolePaneScroll(root) {
 export async function checkConsoleCompletion(root) {
   const syntax = await readFile(join(root, 'apps/research-ui/source_syntax.js'), 'utf8');
   const completion = await readFile(join(root, 'apps/research-ui/native_console_completion.js'), 'utf8');
-  const {suggest, query} = runInNewContext(syntax + completion +
-    ';({suggest:nativeConsoleSuggestions,query:nativeConsoleCompletionQuery})');
+  const {suggest, query, lex, tokens} = runInNewContext(syntax + completion +
+    ';({suggest:nativeConsoleSuggestions,query:nativeConsoleCompletionQuery,lex:nativeConsoleLex,tokens:sourcePrettyTokens})');
   const plain = value => JSON.parse(JSON.stringify(value));
   for (const [source, caret, prefix, start, end, path, names] of [
     ['document.que', 12, 'que', 9, 12, ['document'], ['querySelector', 'querySelectorAll']],
@@ -217,19 +217,35 @@ export async function checkConsoleCompletion(root) {
     assert(complete('', 0, true));
     assert.equal(complete('document.', -1), null);
     assert.equal(complete('document.', 10), null);
-    assert(complete(' '.repeat(8180) + 'document.que', 8192));
-    assert.equal(complete(' '.repeat(8181) + 'document.que', 8193), null);
+    // No source, path or identifier is too long to complete.
+    assert(complete(' '.repeat(1 << 20) + 'document.que', (1 << 20) + 12));
+    assert(complete('document.que' + ' '.repeat(1 << 20), 12));
   }
-  const chain = Array(8).fill('owner').join('.') + '.pr';
-  assert.equal(query(chain, chain.length).path.length, 8);
-  assert.equal(query('owner.' + chain, chain.length + 6), null);
-  for (const source of ['a'.repeat(128) + '.', 'a'.repeat(128)]) {
-    assert(query(source, source.length), '128-unit identifiers remain accepted');
+  const chain = Array(32).fill('owner').join('.') + '.pr';
+  assert.equal(query(chain, chain.length).path.length, 32);
+  for (const source of ['a'.repeat(4096) + '.', 'a'.repeat(4096)]) assert(query(source, source.length), 'long identifiers are accepted');
+  // Completion lexes incrementally. Whatever the edit, the tokens equal a
+  // fresh lex of the same text, and the tokens that ended before the edited
+  // line are the previous pass's own, so a keystroke never re-lexes them.
+  const plainTokens = list => list.map(({kind, start, end, text}) => ({kind, start, end, text}));
+  const significant = list => list.filter(token => !['whitespace', 'comment', 'line-comment'].includes(token.kind));
+  const base = 'const a = "x\\"y";\n/* block\n comment */ let r = /re[/]g/i;\nconst t = `tick\n${a}`;\n' +
+    'x = a / b / c; // line\nfoo.bar?.baz(1.5e3, .5, 0x1f);\n';
+  let text = base.repeat(64);
+  const edits = [[40, 0, '"'], [41, 1, ''], [text.length - 3, 0, '\u0060'], [200, 0, '/*'], [205, 0, '*/'], [12, 0, '\n'],
+    [text.length, 0, 'document.que'], [300, 6, ''], [500, 0, '/ x /'], [0, 0, '`'], [0, 1, ''], [777, 0, "'"]];
+  lex(text);
+  for (const [at, removed, inserted] of edits) {
+    const position = Math.min(at, text.length), before = lex(text).tokens.slice();
+    text = text.slice(0, position) + inserted + text.slice(position + removed);
+    const lexed = lex(text);
+    assert.deepEqual(plainTokens(lexed.tokens), plainTokens(tokens(text, 'javascript')), `edit at ${position}`);
+    assert.deepEqual(plainTokens(lexed.significant), plainTokens(significant(tokens(text, 'javascript'))), `significant after edit at ${position}`);
+    const line = text.lastIndexOf('\n', position - 1) + 1;
+    const kept = before.filter(token => token.end < line);
+    assert(kept.every((token, index) => lexed.tokens[index] === token), `tokens before the edited line are reused at ${position}`);
   }
-  for (const source of ['a'.repeat(129) + '.', 'a'.repeat(129)]) {
-    assert.equal(query(source, source.length), null, '129-unit identifiers remain rejected');
-  }
-  console.log('PASS Console completion shared lexical boundaries, UTF-16 ranges, catalog/native separation and exact input/path/identifier limits (not rendered QA)');
+  console.log('PASS Console completion shared lexical boundaries, UTF-16 ranges, catalog/native separation, unlimited input/path/identifier length and incremental lexing (not rendered QA)');
 }
 
 // Behavioral DOM fixture only. Pixel, hit testing and keyboard coverage use the
@@ -242,11 +258,15 @@ export async function checkConsoleDOM(root) {
     constructor(tag='div') {this.tagName=tag;this.children=[];this.parentNode=null;this.dataset={};this.style={};this.attributes={};this.listeners={};this._text='';this.className='';this.value='';this.hidden=false;this.disabled=false;this.scrollTop=0;this.clientHeight=100;this.clientWidth=600;this.scrollHeight=100;this.selectionStart=0;this.selectionEnd=0;}
     get isConnected(){return this===document.body||!!this.parentNode?.isConnected;}
     get firstElementChild(){return this.children[0];}
+    get childNodes(){return this.children;}
+    get nodeType(){return this.tagName==='text'?3:1;}
+    get data(){return this.textContent;}
     get textContent(){return this._text+this.children.map(child=>child.textContent).join('');}
     set textContent(text){this.replaceChildren();this._text=String(text);}
     get options(){return this.children;}
     get selectedOptions(){return this.children.filter(child=>child.value===this.value);}
     append(...children){for(let child of children){if(typeof child==='string'){const text=new Node('text');text.textContent=child;child=text;}if(child.tagName==='fragment'){this.append(...[...child.children]);continue;}child.remove();child.parentNode=this;this.children.push(child);}}
+    prepend(...children){const tail=this.children;this.children=[];this.append(...children);for(const child of tail)this.children.push(child);}
     replaceChildren(...children){for(const child of this.children)child.parentNode=null;this.children=[];this._text='';this.append(...children);if(this.tagName==='select'&&!this.children.some(child=>child.value===this.value))this.value=this.children[0]?.value||'';}
     remove(){if(this.parentNode){this.parentNode.children.splice(this.parentNode.children.indexOf(this),1);this.parentNode=null;}}
     setAttribute(name,value){this.attributes[name]=String(value);}
@@ -273,11 +293,16 @@ export async function checkConsoleDOM(root) {
   const get=id=>document.querySelector('#native-console-'+id);
   const workspace=new Node();workspace.id='workspace';body.append(workspace);
   const summary=new Node('summary'),menu=new Node();menu.className='native-console-connection-body';get('connection').append(summary,menu);menu.append(get('start'),get('stop'),get('refresh'));get('target').append(new Node('option'));
-  get('level').value='all';get('scroll').append(get('output'));get('output').clientHeight=100;get('source').value='';
+  get('level').value='all';get('scroll').append(get('output'));get('output').clientHeight=100;get('scroll').clientHeight=1e9;get('source').value='';
   const fixture=createConsoleFixture();let copies=0;
   const source=await readFile(join(root,'apps/research-ui/native_console.js'),'utf8');
-  const context={document,TextEncoder,console,setTimeout,clearTimeout,setInterval(){},ResizeObserver:class{observe(){}},MutationObserver:class{observe(){}},CustomEvent:class{},navigator:{clipboard:{writeText:async()=>{copies++;}}},createNativeConsoleCompletion:()=>({close(){},keydown(){return false;}}),codeViewColor:(node,text)=>{node.append(document.createTextNode(text));return node;},sourcePrettyTokens:()=>[],fetch:async(path,options)=>{const reply=await fixture.respond(path,options?.body?JSON.parse(options.body):null);return {ok:reply.status===200,status:reply.status,json:async()=>reply.body};}};
-  runInNewContext(source.replace(/\}\)\(\);\s*$/, 'globalThis.testConsole = {initialize, logs, poll, renderControls, state:()=>({session,pending,submitting,generation,outputGeneration,outputBytes,outputNodes})};})();'),context);
+  // Animation frames run only when a check advances them, 16 ms apart.
+  const animation=[];let clock=0;
+  const frames=(count=1)=>{for(let frame=0;frame<count;frame+=1){clock+=16;for(const callback of animation.splice(0))callback(clock);}};
+  const context={document,TextEncoder,console,setTimeout,clearTimeout,setInterval(){},requestAnimationFrame:callback=>animation.push(callback),ResizeObserver:class{observe(){}},MutationObserver:class{observe(){}},CustomEvent:class{},navigator:{clipboard:{writeText:async()=>{copies++;}}},createNativeConsoleCompletion:()=>({close(){},keydown(){return false;}}),codeViewColor:(node,text)=>{node.append(document.createTextNode(text));return node;},sourcePrettyTokens:()=>[],fetch:async(path,options)=>{const reply=await fixture.respond(path,options?.body?JSON.parse(options.body):null);return {ok:reply.status===200,status:reply.status,json:async()=>reply.body};}};
+  // The layout extent becomes settable so a model transcript can pass it.
+  const staged=source.replace('const transcriptExtent = 1 << 24;','let transcriptExtent = 1 << 24;');assert.notEqual(staged,source,'the transcript extent is declared where the fixture expects it');
+  runInNewContext(staged.replace(/\}\)\(\);\s*$/, 'globalThis.testConsole = {initialize, logs, poll, renderControls, extent:value=>{transcriptExtent=value;}, state:()=>({session,pending,submitting,generation,outputGeneration,entries:transcript.size()})};})();'),context);
   // Exercise production disclosure listeners separately from the scheduling
   // counterexample: positioning and inside pointers must never close the menu.
   get('connection').open=true;await get('connection').emit('toggle');
@@ -309,7 +334,7 @@ export async function checkConsoleDOM(root) {
   await growthPager.children[2].click();await settle();assert.match(growing.textContent,/0 properties remain/);
   fixture.propertyCount=48;growthPager.children[2].focus();await growthPager.children[2].click();await settle();assert.match(growing.textContent,/property32/);assert.equal(growing.querySelectorAll('.native-console-property').length,16);assert.equal(document.activeElement,growthPager.children[0]);
   // A populated lower offset or non-progressing more=true remains malformed.
-  for(const malformed of [{properties:[],offset:-1,more:false},{properties:[{name:'bad',value:{type:'number',text:'1',truncated:false}}],offset:4,more:false},{properties:[],offset:16,more:true},{properties:[],offset:65537,more:false}]){
+  for(const malformed of [{properties:[],offset:-1,more:false},{properties:[{name:'bad',value:{type:'number',text:'1'}}],offset:4,more:false},{properties:[],offset:16,more:true},{properties:[],offset:1e6,more:false}]){
     fixture.respond=async(path,action)=>{const reply=await response(path,action);if(action?.command?.operation==='inspect')reply.body.runtime={status:'ok',...malformed};return reply;};
     await growthPager.children[0].click();await settle();assert.match(growing.textContent,/Malformed property page/);assert.match(growing.textContent,/property32/);assert.equal(growthPager.children[0].disabled,false);
   }
@@ -325,14 +350,16 @@ export async function checkConsoleDOM(root) {
   assert.equal(fixture.calls.filter(call=>call.action==='interrupt').length,1);
   assert.equal(get('run').hidden,false);assert.equal(get('interrupt').hidden,true);assert.equal(get('interrupt').disabled,false);
   assert.match(get('output').textContent,/· Stopped/);assert.match(get('output').textContent,/changes are not rolled back/);
-  // Input of any size up to the record: the transcript shows its opening, and
-  // a command past the record is refused before anything is sent.
+  // Input of any size: the transcript shows a command whole, and one past the
+  // old 64 MiB bound is sent whole too.
   const long='/*'+'x'.repeat(10000)+'*/ fixture.long';await submit(long);await settle();
   const longRow=get('output').querySelectorAll('.native-console-command').at(-1);
-  assert.equal(longRow.dataset.command.length,4096);assert.match(longRow.textContent,/more characters not shown/);
+  assert(longRow.textContent.includes(long),'A long command is shown whole');
+  const texts=node=>node.tagName==='text'?[node.textContent]:node.children.flatMap(texts);
+  assert(longRow.querySelector('.native-console-word')&&texts(longRow.querySelector('pre')).every(text=>text.length<=4096),'A long word in a command is drawn in bounded runs');
   assert.equal(fixture.calls.filter(call=>call.command?.source===long).length,1,'A long command is sent whole');
-  const sentBefore=fixture.calls.length;await submit('x'.repeat(64*1024*1024));await settle();
-  assert.equal(fixture.calls.length,sentBefore);assert.match(get('notice').textContent,/at most 64 MiB/);
+  const huge='x'.repeat(64*1024*1024+1);await submit(huge);await settle();
+  assert.equal(fixture.calls.filter(call=>call.command?.source===huge).length,1,'A command past 64 MiB is sent whole');
   get('source').value='';await get('source').emit('input');
   await submit('fixture.fail');assert.match(get('output').textContent,/Outcome unavailable/);assert.match(get('notice').textContent,/never retried/);assert.equal(get('source').disabled,true);
   const retained=get('output').textContent;await get('refresh').click();await settle();assert.equal(get('output').textContent.startsWith(retained),true);get('target').value=fixture.target;await get('target').emit('change');await settle();
@@ -357,15 +384,15 @@ export async function checkConsoleDOM(root) {
   // Native Message emits finite numeric Unix milliseconds. Validate the
   // entire batch before any Date conversion, dropped marker or row insertion.
   for(const time of [-8640000000000000,-0.5,0,0.5,1700000000000.125,8640000000000000]){
-    api.logs({messages:[{level:'info',text:'valid timestamp boundary',time}],dropped:0});
+    api.logs({messages:[{level:'info',text:'valid timestamp boundary',time}],dropped:0});await settle();
     assert.equal(get('output').children.at(-1).querySelector('.native-console-time').textContent,new Date(time).toLocaleTimeString());
   }
   let timestampCoercions=0;const coercibleTime={valueOf(){timestampCoercions++;return 0;},toString(){timestampCoercions++;return '0';}};
   const invalidTimes=[undefined,null,false,'0','2026-10-07T00:00:00Z',[],{}, {valueOf:0,toString:0},coercibleTime,NaN,Infinity,-Infinity,-8640000000000001,8640000000000001];
-  const retainedBeforeTime=get('output').textContent,countsBeforeTime=get('output-count').textContent,bytesBeforeTime=api.state().outputBytes,nodesBeforeTime=api.state().outputNodes;
+  const retainedBeforeTime=get('output').textContent,countsBeforeTime=get('output-count').textContent,entriesBeforeTime=api.state().entries;
   for(const time of invalidTimes){
     assert.throws(()=>api.logs({messages:[{level:'info',text:'must remain atomic',time:0},{level:'info',text:'invalid timestamp',time}],dropped:1}),/Malformed page message/);
-    assert.equal(get('output').textContent,retainedBeforeTime);assert.equal(get('output-count').textContent,countsBeforeTime);assert.equal(api.state().outputBytes,bytesBeforeTime);assert.equal(api.state().outputNodes,nodesBeforeTime);
+    assert.equal(get('output').textContent,retainedBeforeTime);assert.equal(get('output-count').textContent,countsBeforeTime);assert.equal(api.state().entries,entriesBeforeTime);
   }
   assert.equal(timestampCoercions,0,'Timestamp validation must not coerce objects');
   fixture.messages.push({level:'info',text:'must remain atomic',time:0},{level:'info',text:'bad time',time:{valueOf:0,toString:0}});await api.poll();
@@ -383,10 +410,179 @@ export async function checkConsoleDOM(root) {
     await listed.click();await settle();assert.equal(fixture.calls.at(-1).command.operation,'listeners');assert.equal(fixture.calls.at(-1).command.handle,'7');assert.match(object.textContent,/Registered event listeners/);assert.match(object.textContent,/click: ƒ onTap/);}
   {const {object}=await actionsOf('fixture.plain');await object.querySelector('.native-console-value-actions').querySelectorAll('button').find(node=>node.textContent==='Event listeners').click();await settle();
     assert.match(object.textContent,/Select an Element, document or window to inspect its listeners/,'Another object is refused by the runtime, in its words');}
-  for(let i=0;i<140;i++)api.logs({messages:[{level:'info',text:`fixture message ${i}`,time:0}],dropped:0});
-  assert(get('output').children.length<=128);assert(api.state().outputBytes<=262144);assert(api.state().outputNodes<=8192);assert.match(get('output-count').textContent,/older removed/);
+  // Every entry stays: 12,000 messages are all counted and searchable while
+  // only the rows around the viewport are in the document, and scrolling
+  // moves that window without dropping or repeating a row.
+  {
+    const scroll=get('scroll'),output=get('output'),row=20,viewport=400;let top=0;
+    const content=()=>parseFloat(output.style.paddingTop||0)+parseFloat(output.style.paddingBottom||0)+output.children.reduce((sum,child)=>sum+child.getBoundingClientRect().height,0);
+    Object.defineProperties(scroll,{clientHeight:{value:viewport,writable:true,configurable:true},scrollHeight:{get:content,configurable:true},
+      scrollTop:{get:()=>top,set:next=>{top=Math.max(0,Math.min(next,content()-viewport));},configurable:true}});
+    scroll.getBoundingClientRect=()=>({top:0,bottom:viewport,left:0,right:600,width:600,height:viewport});
+    output.getBoundingClientRect=()=>({top:-top,bottom:content()-top,left:0,right:600,width:600,height:content()});
+    const rect=Node.prototype.getBoundingClientRect;Node.prototype.getBoundingClientRect=()=>({top:0,bottom:row,left:0,right:600,width:600,height:row});
+    const numbers=()=>output.children.map(child=>Number(child.textContent.match(/fixture message (\d+)/)?.[1]));
+    const contiguous=list=>list.every((number,index)=>!index||number===list[index-1]+1);
+    await get('clear').click();await settle();
+    for(let i=0;i<12000;i+=1000)api.logs({messages:Array.from({length:1000},(_,j)=>({level:'info',text:`fixture message ${i+j}`,time:0})),dropped:0});
+    await settle();
+    assert.match(get('output-count').textContent,/^12000 entries/);assert.equal(api.state().entries,12000);
+    const drawn=()=>output.children.length<=2+(viewport+1600)/row;assert(drawn(),`only the window is rendered: ${output.children.length}`);
+    assert.equal(numbers().at(-1),11999,'the newest message is in view');assert.equal(top,content()-viewport);assert(contiguous(numbers()));
+    assert.equal(content(),12000*row,'the scroll extent covers every entry');
+    scroll.scrollTop=6000*row;await scroll.emit('scroll');
+    assert(numbers()[0]<=6000&&numbers().at(-1)>=6000+viewport/row,'the window covers the viewport');assert(contiguous(numbers()));assert(drawn());
+    assert.equal(get('latest').hidden,false,'a reader away from the end is offered the latest output');
+    api.logs({messages:[{level:'info',text:'fixture message 12000',time:0}],dropped:0});await settle();
+    assert.equal(top,6000*row,'new output never moves a reader who scrolled up');assert.match(get('latest').textContent,/1 new/);
+    get('filter').value='message 42';await get('filter').emit('input');await settle();
+    assert.match(get('output-count').textContent,/^111 \/ 12001 entries/,'search covers rows that are not rendered');
+    await get('filter-close').click();await settle();
+    scroll.scrollTop=0;await scroll.emit('scroll');assert.equal(numbers()[0],0,'the oldest message is still held');
+    await get('latest').click();await settle();assert.equal(numbers().at(-1),12000);
+    // A very tall entry counts as its own height, while entries never drawn
+    // count as a typical one, so the scroll extent stays true.
+    const tall=10000;
+    Node.prototype.getBoundingClientRect=function(){const height=this.textContent.includes('fixture tall')?tall:row;return {top:0,bottom:height,left:0,right:600,width:600,height};};
+    api.logs({messages:[{level:'info',text:'fixture tall',time:0}],dropped:0});await settle();
+    assert.equal(content(),12001*row+tall,'one tall entry does not stretch the estimate for the others');
+    // Past the layout extent the transcript is drawn compressed into it. A
+    // short scroll moves the content by exactly its distance, a long one maps
+    // onto the whole transcript, both ends stay reachable, and a scroll offset
+    // that nears the top before the reader does moves back under them.
+    const extent=40000,end=12001*row+tall-viewport;api.extent(extent);await get('latest').click();await settle();
+    const atTop=()=>numbers()[Math.floor((top-parseFloat(output.style.paddingTop))/row)];
+    assert.equal(content(),extent,'a compressed transcript fills the extent and no more');
+    assert(output.children.at(-1).textContent.includes('fixture tall'),'following shows the newest entry');
+    scroll.scrollTop=(extent-viewport)/2;await scroll.emit('scroll');
+    let expected=end/2;assert.equal(atTop(),Math.floor(expected/row),'a scrollbar drag maps onto the whole transcript');assert(contiguous(numbers()));
+    let resynced=false;
+    for(let step=0;step<40;step+=1){
+      const before=top;scroll.scrollTop=top-700;expected+=top-before;await scroll.emit('scroll');
+      if(top>Math.max(0,before-700)+1)resynced=true;
+      assert.equal(atTop(),Math.floor(expected/row),`step ${step}: a short scroll moves the content by exactly its distance`);
+      assert(contiguous(numbers()));assert.equal(content(),extent);
+    }
+    assert(resynced&&expected>0,'a scroll offset near the top before the reader moves back under them');
+    scroll.scrollTop=0;await scroll.emit('scroll');assert.equal(atTop(),0,'the oldest entry is reachable');
+    scroll.scrollTop=1e9;await scroll.emit('scroll');
+    assert(output.children.at(-1).textContent.includes('fixture tall'),'the newest entry is reachable');assert.equal(get('latest').hidden,true);
+    api.extent(1<<24);await get('latest').click();await settle();assert.equal(content(),12001*row+tall,'a transcript that fits again is drawn whole');
+    // A scroll the reader makes is never written over. A small scroll up
+    // from the end stays put; rows measured while the reader scrolls move the
+    // space around the drawn rows, not the reader or the extent; the scroll
+    // offset takes that up once the scroll stands still, without moving what
+    // the reader sees; and a scroll to either end of the extent reaches that
+    // end of the transcript. Each step below is one frame of a scroll.
+    const firstVisible=()=>{let y=parseFloat(output.style.paddingTop);for(const child of output.children){const height=child.getBoundingClientRect().height;if(y+height>top)return child.textContent;y+=height;}return null;};
+    const covered=()=>{const start=parseFloat(output.style.paddingTop);return start<=top&&start+output.children.reduce((sum,child)=>sum+child.getBoundingClientRect().height,0)>=top+viewport;};
+    const followed=top;scroll.scrollTop=top-10;await scroll.emit('scroll');
+    assert.equal(top,followed-10,'a small scroll up from the end is not pulled back to it');
+    Node.prototype.getBoundingClientRect=function(){const number=Number(this.textContent.match(/fixture message (\d+)/)?.[1]);const height=this.textContent.includes('fixture tall')?tall:number%97===0?2*row:row;return {top:0,bottom:height,left:0,right:600,width:600,height};};
+    scroll.scrollTop=3000*row;await scroll.emit('scroll');frames();
+    let wanted=top;const held=content();
+    for(let step=0;step<40;step+=1){
+      wanted=top-300;scroll.scrollTop=wanted;await scroll.emit('scroll');frames();
+      assert.equal(top,wanted,`step ${step}: the layout never moves a scroll the reader is making`);
+      assert.equal(content(),held,`step ${step}: nor the extent it scrolls through`);
+      assert(covered(),`step ${step}: the drawn rows cover the viewport`);assert(contiguous(numbers()));
+      // WebKit ends an animation that a newer scroll cancels, as Home cancels
+      // PageDown, once the newer one has begun to move.
+      if(step===20){await scroll.emit('scrollend');frames();assert.equal(top,wanted,'a scrollend while the scroll still moves does not end it');}
+    }
+    const seen=firstVisible();await scroll.emit('scrollend');frames(2);
+    assert(top>wanted,'once the scroll stands still after its scrollend, the scroll offset takes up the rows measured above');
+    assert.equal(firstVisible(),seen,'settling moves the scroll offset, not what the reader sees');
+    while(top>0){scroll.scrollTop=top-300;await scroll.emit('scroll');frames();assert(covered(),'the drawn rows cover the viewport on the way up');}
+    assert.equal(numbers()[0],0,'a scroll to the top reaches the first entry');assert.equal(parseFloat(output.style.paddingTop),0);
+    // Where no scrollend comes, 300 ms without a scroll ends it.
+    const climbed=content();frames(15);assert.equal(content(),climbed,'a scroll still for 240 ms is not over');
+    frames(5);assert(content()>climbed,'a scroll still for 300 ms is over, and the extent takes up the rows measured on the way');
+    // A scroll down to the end of the extent, as End makes, shows the end of
+    // the transcript although rows measured on the way grew it, and lands on
+    // the end once it stands still.
+    const descent=content();
+    while(top<descent-viewport){
+      scroll.scrollTop=top+3000;await scroll.emit('scroll');frames();
+      assert.equal(content(),descent,'the extent stays while the reader scrolls down');assert(covered(),'the drawn rows cover the viewport on the way down');assert(contiguous(numbers()));
+    }
+    assert(output.children.at(-1).textContent.includes('fixture tall'),'the end of the extent shows the end of the transcript');
+    await scroll.emit('scrollend');frames(2);
+    assert(content()>descent,'rows measured on the way down grew the transcript');
+    assert.equal(top,content()-viewport,'a scroll down to the end of the extent lands on the end of the transcript');
+    const quiet=()=>frames(20);
+    scroll.scrollTop=top-2000;await scroll.emit('scroll');quiet();
+    scroll.scrollTop=content()-viewport-20;await scroll.emit('scroll');quiet();
+    assert.equal(top,content()-viewport,'a scroll down that ends within reach of the end lands on it');
+    scroll.scrollTop=top-20;await scroll.emit('scroll');quiet();
+    assert.equal(top,content()-viewport-20,'a scroll up from the end is never pulled back, even once it settles');
+    // Home, End, Command-Up and Command-Down put the transcript at that edge
+    // in one write and ask the engine for no animation. Other keys, and these
+    // with another modifier, are left to the engine. Each step first lets the
+    // edge the key before it holds go.
+    const offset=Object.getOwnPropertyDescriptor(scroll,'scrollTop');let writes=0;
+    Object.defineProperty(scroll,'scrollTop',{get:offset.get,set(value){++writes;offset.set(value);},configurable:true});
+    const engine=async to=>{offset.set(to);await scroll.emit('scroll');await scroll.emit('scrollend');};
+    scroll.scrollTo=()=>assert.fail('an edge key asks the engine for no scroll');
+    const press=async(key,modifiers={})=>{let prevented=false;await scroll.emit('keydown',{key,altKey:false,ctrlKey:false,shiftKey:false,metaKey:false,defaultPrevented:false,...modifiers,preventDefault(){prevented=true;}});return prevented;};
+    for(const [key,modifiers,edge,name] of [['Home',{},()=>0,'Home'],['End',{},()=>content()-viewport,'End'],['ArrowUp',{metaKey:true},()=>0,'Command-Up'],['ArrowDown',{metaKey:true},()=>content()-viewport,'Command-Down']]){
+      frames(20);await engine(content()/2);frames(20);writes=0;
+      assert.equal(await press(key,modifiers),true,`${name} is the transcript's own`);
+      assert.deepEqual([top,writes],[edge(),1],`${name} puts the transcript at that edge in one write`);
+    }
+    frames(20);await engine(content()/2);frames(20);writes=0;
+    for(const [key,modifiers] of [['Home',{shiftKey:true}],['End',{altKey:true}],['End',{ctrlKey:true}],['ArrowUp',{}],['PageDown',{}],['ArrowDown',{metaKey:true,shiftKey:true}],['Home',{defaultPrevented:true}]])
+      assert.equal(await press(key,modifiers),false,`${key} with ${JSON.stringify(modifiers)} is left to the engine`);
+    assert.equal(writes,0,'a key left to the engine moves nothing');
+    // WebKit fires scrollend after each step of its own keyboard scroll, and
+    // takes one more step after a write, on its own path. Home pressed while
+    // one still moves, over rows whose heights the estimate missed, lands on
+    // the first entry in one write, that step goes back to it, and frames
+    // that pass leave it there. The edge is held for 300 ms, or until a key,
+    // wheel, pointer or touch on the transcript, and End follows new entries.
+    Node.prototype.getBoundingClientRect=function(){const height=this.textContent.includes('fixture tall')?tall:row+0.109375;return {top:0,bottom:height,left:0,right:600,width:600,height};};
+    await get('latest').click();await settle();frames(20);
+    for(const step of [240,270,290])await engine(top-step);
+    writes=0;await press('Home');
+    assert.deepEqual([top,writes],[0,1],'Home during a scroll still under way lands on the first entry in one write');
+    await engine(content()/2);frames(40);
+    assert.deepEqual([top,writes,numbers()[0]],[0,2,0],'the step the engine takes after the write goes back to the first entry, and frames leave it there');
+    await engine(500);assert.equal(top,500,'a scroll once the edge has held for 300 ms is the reader\'s');
+    for(const type of ['wheel','pointerdown','touchstart','keydown']){
+      await press('Home');await scroll.emit(type,{key:'ArrowDown',altKey:false,ctrlKey:false,shiftKey:false,metaKey:false,preventDefault(){}});await engine(700);
+      assert.equal(top,700,`a ${type} on the transcript lets the edge go`);
+    }
+    frames(20);for(const step of [240,270,290])await engine(top+step);
+    await press('End');await engine(content()/3);frames(40);
+    assert.equal(top,content()-viewport,'End during a scroll still under way lands on the end, and the step after goes back to it');
+    api.logs({messages:[{level:'info',text:'fixture message after End',time:0}],dropped:0});await settle();frames(4);
+    assert(output.children.at(-1).textContent.includes('fixture message after End')&&top===content()-viewport,'End follows new entries again');assert.equal(get('latest').hidden,true);
+    delete scroll.scrollTo;Object.defineProperty(scroll,'scrollTop',offset);
+    await get('latest').click();await settle();
+    Node.prototype.getBoundingClientRect=rect;delete scroll.getBoundingClientRect;delete output.getBoundingClientRect;
+    Object.defineProperties(scroll,{clientHeight:{value:1e9,writable:true,configurable:true},scrollHeight:{value:100,writable:true,configurable:true},scrollTop:{value:0,writable:true,configurable:true}});
+  }
   get('filter').value='no-such-value';await get('filter').emit('input');assert.equal(get('no-matches').hidden,false);await get('filter-close').click();assert.equal(get('no-matches').hidden,true);
   await get('clear').click();assert.equal(get('output').children.length,0);assert.equal(get('empty').hidden,false);assert.equal(copies,0);
+  // A word of more than 4096 code units is drawn as runs of at most that
+  // many, each ending on a grapheme boundary and the next after a <wbr>, in
+  // a span that breaks anywhere; the message reads as one text. Text with
+  // spaces stays one text node however long, and a short message is one.
+  {
+    const word='a'.repeat(4095)+'\u{1F44D}\u{1F3FD}'+'b'.repeat(4091)+'e\u0301'+'c'.repeat(5000),mixed='lead words '+'d'.repeat(5000)+' tail'+' words'.repeat(1000);
+    api.logs({messages:[{level:'info',text:word,time:0},{level:'info',text:mixed,time:0},{level:'info',text:'short',time:0}],dropped:0});await settle();
+    const [pre,both,short]=get('output').querySelectorAll('pre').slice(-3),[span]=pre.children,runs=span.children.filter(child=>child.tagName==='text').map(child=>child.textContent);
+    assert.equal(pre.textContent,word,'a long word reads as one text');
+    assert(pre.children.length===1&&span.className==='native-console-word','a long word is drawn in a span that breaks anywhere');
+    assert(span.children.every((child,index)=>child.tagName===(index%2?'wbr':'text')),`runs alternate with <wbr>: ${span.children.map(child=>child.tagName)}`);
+    assert(runs.length===4&&runs.every(run=>run.length<=4096),`a long word is drawn in bounded runs: ${runs.map(run=>run.length)}`);
+    assert.equal(runs[0],'a'.repeat(4095),'a run ends before an emoji it would split');
+    assert(runs[1].startsWith('\u{1F44D}\u{1F3FD}')&&runs[2].startsWith('e\u0301'),'a run starts at a grapheme, never inside one');
+    assert.equal(both.textContent,mixed,'a message with a long word among others reads as one text');
+    assert.deepEqual(both.children.map(child=>child.tagName==='text'?child.textContent.length:child.className),[11,'native-console-word',6005],'only the long word is split; the text around it stays whole');
+    assert.equal(short.children.length,1,'a short message is one text');
+    await get('clear').click();
+  }
   get('source').value='reconnect draft';const oldSession=fixture.session;await get('stop').click();await settle();await get('start').click();await settle();assert.notEqual(fixture.session,oldSession);assert.equal(get('source').value,'reconnect draft');assert.equal(get('target').value,'');
   const broken=createConsoleFixture();const request={url:'/api/native-console/actions',async *[Symbol.asyncIterator](){yield '{malformed';}},reply={destroyed:false,writeHead(status){this.status=status;},end(text){this.text=text;}};assert.equal(await broken.handle(request,reply),true);assert.equal(reply.status,500);assert.equal(broken.errors.length,1);
   const wrong={url:'/api/native-console/actions',async *[Symbol.asyncIterator](){yield JSON.stringify({action:'runtime',session_id:'wrong',target_id:'101',command:{operation:'poll'}});}};await broken.handle(wrong,reply);assert.equal(reply.status,500);assert.equal(broken.receipts.at(-1).phase,'failed');assert.equal(broken.errors.length,2);
@@ -401,5 +597,5 @@ export async function checkConsoleDOM(root) {
   opened=prompt({},true);assert.equal(opened.open,true,'Transcript rows hide the empty state, so settings carry Check availability');assert.equal(opened.focus,get('check'));
   opened=prompt({liveAvailable:true},false);assert.equal(opened.open,true,'A live document is chosen in the settings');
   opened=prompt({available:true},false);assert.equal(opened.open,true);assert.equal(opened.focus,get('url'));
-  console.log('PASS Console serialized command/result identity, editable drafts, bounded property paging, shrink/regrowth and focus, held-poll Clear epochs, atomic malformed-poll/timestamp recovery without coercion, inert rendering, retry/reconnect, fixture error receipts, and transcript/filter/history bounds (DOM fixture; not rendered QA)');
+  console.log('PASS Console serialized command/result identity, editable drafts, bounded property paging, shrink/regrowth and focus, held-poll Clear epochs, atomic malformed-poll/timestamp recovery without coercion, inert rendering, retry/reconnect, fixture error receipts, and a windowed transcript that keeps and searches every entry, sizes unseen rows by the median and compresses past the layout extent (DOM fixture; not rendered QA)');
 }

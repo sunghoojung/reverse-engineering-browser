@@ -74,7 +74,7 @@ export async function checkMagicDecoderUI(run) {
   const engine = {protocol_version: 1, available: true, busy: false, limits: {
     input_bytes: 1048576, output_bytes: 1048576, pipeline_steps: 16, retained_bytes: 4194304,
     jwt_bytes: 65536, secret_bytes: 4096, json_depth: 64, json_tokens: 100000,
-    timeout_ms: 2000, operations, jwt_algorithms: ['HS256', 'HS384', 'HS512', 'none'],
+    operations, jwt_algorithms: ['HS256', 'HS384', 'HS512', 'none'],
   }};
   assert(ui.isDecoderEngine(engine));
   for (const changed of [operations.slice(0, -1), [...operations, 'invented'],

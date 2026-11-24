@@ -103,7 +103,28 @@ console.log('PASS native entry-path wiring and actual JS query consumer (Swift h
 const packageUI = runInNewContext(
   (await readFile(join(root, 'apps/research-ui/evidence_package.js'), 'utf8')) +
   ';({evidencePackageKey,evidencePackageKeyText,evidencePackageSelectionKey,evidencePackageUnavailable,evidencePackageReadBytes,evidencePackageValidationResult,evidencePackageView,createEvidencePackageController})',
-  {TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,fetch},
+  {TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,setInterval,clearInterval,fetch},
+);
+// The elapsed-seconds counters of waits with no deadline run on a clock the
+// test advances, so a slow runner cannot leave a counter behind a real sleep.
+function fakeClock() {
+  const timers = new Map();
+  let now = 0, next = 1;
+  return {
+    globals: {Date: {now: () => now}, clearInterval: id => timers.delete(id),
+      setInterval: (fn, ms) => { timers.set(next, {fn, ms, due: now + ms}); return next++; }},
+    advance(ms) {
+      now += ms;
+      for (const [id, timer] of [...timers]) {
+        while (timers.has(id) && timer.due <= now) { timer.due += timer.ms; timer.fn(); }
+      }
+    },
+  };
+}
+const packageClock = fakeClock();
+const packageClockUI = runInNewContext(
+  (await readFile(join(root, 'apps/research-ui/evidence_package.js'), 'utf8')) + ';({createEvidencePackageController})',
+  {TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,fetch,...packageClock.globals},
 );
 const packageGoldenBytes = new Uint8Array(await readFile(join(root,'apps/origin-trace-backend/assets/evidence-packages/golden-v1.json')));
 const packageGolden = JSON.parse(new TextDecoder().decode(packageGoldenBytes));
@@ -134,7 +155,7 @@ let fragmentedCancelled=false;
 await assert.rejects(packageUI.evidencePackageReadBytes(new Response(new ReadableStream({pull(stream){stream.enqueue(new Uint8Array());},cancel(){fragmentedCancelled=true;}})),4),/transport chunk limit/);
 assert.equal(fragmentedCancelled,true);
 // Real streams close pending reads before their producer's cancellation cleanup
-// settles; a never-settling cancel hook must not defeat limits or UI deadlines.
+// settles; a never-settling cancel hook must not defeat limits or Cancel.
 // The deadline only tells a read that never settles from one that does: reading
 // 65536 empty chunks to the chunk limit took up to 4.8 s on a loaded machine.
 const packageWithinDeadline=async promise=>{let timer;try{return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Package reader did not retire within the fixture deadline')),30000);})]);}finally{clearTimeout(timer);}};
@@ -151,11 +172,12 @@ packageAbort.abort();await packageWithinDeadline(assert.rejects(pendingRead,/can
 const packageSharedChunk=new Uint8Array(1024*1024);let packageSharedIndex=0;
 const sharedResponse=new Response(new ReadableStream({pull(stream){if(packageSharedIndex===16)stream.close();else{packageSharedChunk[17]=packageSharedIndex++;stream.enqueue(packageSharedChunk.subarray(17,18));}}},{highWaterMark:0}));
 const sharedBytes=await packageUI.evidencePackageReadBytes(sharedResponse,16);assert.deepEqual([...sharedBytes],Array.from({length:16},(_,i)=>i));assert.equal(sharedBytes.buffer.byteLength,16);
+// With no deadline, an endless fragmented reply still ends at its chunk or byte limit.
 for(const width of [0,1,64]) {
-  let fragmentedTimeoutCancels=0;
-  const fragmentDeadline=packageUI.createEvidencePackageController({getSelection:()=>packageGolden.selection,protocol:'http:',onChange:()=>{},deadline:5,
-    fetcher:async()=>new Response(new ReadableStream({pull(stream){stream.enqueue(new Uint8Array(width));},cancel(){fragmentedTimeoutCancels++;return new Promise(()=>{});}}))});
-  await packageWithinDeadline(fragmentDeadline.export());assert.equal(fragmentDeadline.model.status,'error');assert.match(fragmentDeadline.model.message,/timed out/);assert.equal(fragmentedTimeoutCancels,1);
+  let fragmentedCancels=0;
+  const fragmented=packageUI.createEvidencePackageController({getSelection:()=>packageGolden.selection,protocol:'http:',onChange:()=>{},
+    fetcher:async()=>new Response(new ReadableStream({pull(stream){stream.enqueue(new Uint8Array(width));},cancel(){fragmentedCancels++;return new Promise(()=>{});}}))});
+  await packageWithinDeadline(fragmented.export());assert.equal(fragmented.model.status,'error');assert.match(fragmented.model.message,/limit/);assert.equal(fragmentedCancels,1);
 }
 const packageRequests=[];
 let packageSelection=structuredClone(packageGolden.selection);
@@ -210,10 +232,16 @@ assert.equal(oversizedRead,false,'File size checked before allocation/read');
 const packageWrongSelection=packageUI.createEvidencePackageController({getSelection:()=>({events:packageSelection.events.slice(0,1),artifacts:[]}),protocol:'http:',onChange:()=>{},
   fetcher:async url=>url.endsWith('/export')?new Response(packageGoldenBytes):Response.json(packageValid)});
 await packageWrongSelection.export(); assert.equal(packageWrongSelection.model.status,'error'); assert.equal(packageWrongSelection.model.bytes,null);
-let packageTimeoutChanges=0;
-const packageSlow=packageUI.createEvidencePackageController({getSelection:()=>packageSelection,protocol:'http:',deadline:5,onChange:()=>packageTimeoutChanges++,
-  fetcher:async(_url,{signal})=>new Response(new ReadableStream({start(stream){signal.addEventListener('abort',()=>stream.error(new DOMException('Aborted','AbortError')),{once:true});}}))});
-await packageSlow.export(); assert.equal(packageSlow.model.status,'error'); assert.match(packageSlow.model.message,/timed out/); assert.equal(packageSlow.model.bytes,null); assert(packageTimeoutChanges>=2);
+// A reply that never arrives has no deadline: it waits, counting seconds, until Cancel.
+let packageSlowChanges=0,packageSlowStarted;
+const packageSlow=packageClockUI.createEvidencePackageController({getSelection:()=>packageSelection,protocol:'http:',onChange:()=>packageSlowChanges++,
+  fetcher:async(_url,{signal})=>{packageSlowStarted=true;return new Response(new ReadableStream({start(stream){signal.addEventListener('abort',()=>stream.error(new DOMException('Aborted','AbortError')),{once:true});}}));}});
+const packageSlowRun=packageSlow.export();
+while(!packageSlowStarted)await new Promise(resolve=>setTimeout(resolve,0));
+packageClock.advance(1000);
+assert.equal(packageSlow.model.status,'loading');assert.match(packageSlow.model.message,/ 1 s$/);
+packageSlow.cancel();await packageSlowRun;
+assert.equal(packageSlow.model.status,'cancelled'); assert.match(packageSlow.model.message,/Cancelled/); assert.equal(packageSlow.model.bytes,null); assert(packageSlowChanges>=3);
 console.log('Evidence package exact-byte, selection, bounds and interruption contracts passed');
 // Canonical backend JSON sorts object members; identity is order-independent.
 const reorderedPackage = structuredClone(packageGolden);
@@ -233,18 +261,19 @@ const changedSelectionRun = changingControl.export(); packageSelection = {events
 selectionReply(new Response(packageGoldenBytes)); await changedSelectionRun;
 assert.equal(changingControl.model.bytes,null); assert.equal(changingControl.model.status,'idle');
 packageSelection = structuredClone(packageGolden.selection);
-let timeoutFileResolve, timeoutFileCalls = 0;
-const timeoutFile = packageUI.createEvidencePackageController({getSelection:()=>packageSelection,protocol:'http:',deadline:5,onChange:()=>{},fetcher:()=>{timeoutFileCalls++;}});
-const timeoutFileRun = timeoutFile.validate({size:packageGoldenBytes.length,arrayBuffer:()=>new Promise(resolve=>{timeoutFileResolve=resolve;})});
-await new Promise(resolve=>setTimeout(resolve,15)); assert.equal(timeoutFile.model.status,'error');
-timeoutFileResolve(packageGoldenBytes.buffer); await timeoutFileRun;
-assert.equal(timeoutFileCalls,0,'A file read completing after timeout cannot send original bytes');
+let cancelledFileResolve, cancelledFileCalls = 0;
+const cancelledFile = packageUI.createEvidencePackageController({getSelection:()=>packageSelection,protocol:'http:',onChange:()=>{},fetcher:()=>{cancelledFileCalls++;}});
+const cancelledFileRun = cancelledFile.validate({size:packageGoldenBytes.length,arrayBuffer:()=>new Promise(resolve=>{cancelledFileResolve=resolve;})});
+await new Promise(resolve=>setTimeout(resolve,15)); assert.equal(cancelledFile.model.status,'loading');
+cancelledFile.cancel(); assert.equal(cancelledFile.model.status,'cancelled');
+cancelledFileResolve(packageGoldenBytes.buffer); await cancelledFileRun;
+assert.equal(cancelledFileCalls,0,'A file read completing after Cancel cannot send original bytes');
 for (const status of ['invalid','unsupported']) {
   const control=packageUI.createEvidencePackageController({getSelection:()=>packageSelection,protocol:'http:',onChange:()=>{},fetcher:async()=>Response.json({...packageInvalid,status})});
   await control.validate({size:packageGoldenBytes.length,arrayBuffer:async()=>packageGoldenBytes.buffer});
   assert.equal(control.model.status,status); assert.equal(control.model.bytes,null);
 }
-console.log('PASS package canonical-key order, direct stale selection, unsupported response and non-abortable file deadline');
+console.log('PASS package canonical-key order, direct stale selection, unsupported response and a cancelled non-abortable file read');
 
 const complete = runInNewContext(
   (await readFile(join(root, "apps/research-ui/source_syntax.js"), "utf8")) +
@@ -275,8 +304,13 @@ const middle = complete('"雪"; document.querySelectorAll("main")', 19);
 assert.equal(middle.start, 14);
 assert.equal(middle.end, 30);
 assert.ok(middle.items.some(item => item.name === "querySelector"));
-assert.equal(complete("a".repeat(8193), 8193), null);
-assert.ok(complete("", 0, true).items.length <= 24);
+// Neither the source's length, a chain's length nor the number of matches
+// limits a suggestion.
+const afterLong = "a".repeat(1 << 20) + "; document.que";
+assert.deepEqual(Array.from(suggestions(afterLong)), ["querySelector", "querySelectorAll"]);
+assert.ok(suggestions("document.body" + ".parentElement".repeat(10000) + ".que").includes("querySelector"));
+const everyGlobal = complete("", 0, true).items.map(item => item.name);
+assert.ok(everyGlobal.length > 24 && new Set(everyGlobal).size === everyGlobal.length && everyGlobal.includes("window") && everyGlobal.includes("document"));
 assert.equal(complete("document.", -1), null);
 const completionQuery = runInNewContext(
   (await readFile(join(root, "apps/research-ui/source_syntax.js"), "utf8")) +
@@ -285,10 +319,12 @@ const completionQuery = runInNewContext(
 );
 assert.deepEqual(Array.from(completionQuery("customPageObject.method", 23).path), ["customPageObject"]);
 for (const text of ['"customPageObject.', "// obj.", "/* obj.", "/obj.", "const pattern = /obj.", "obj[pageGetter()].", "obj.method()."]) assert.equal(completionQuery(text, text.length), null, text);
-assert.equal(completionQuery("a".repeat(8193), 8193), null);
+assert.equal(completionQuery("a".repeat(1 << 20), 1 << 20).prefix.length, 1 << 20);
 assert.equal(completionQuery("window.", -1), null);
-assert.equal(completionQuery("a".repeat(129) + ".", 130), null);
-console.log("PASS bounded local console completions, lexical exclusions, property chains and UTF-16 replacement");
+assert.equal(completionQuery("a".repeat(129) + ".", 130).path[0].length, 129);
+const deep = Array.from({length: 10000}, (_, index) => `p${index}`).join(".") + ".x";
+assert.equal(completionQuery(deep, deep.length).path.length, 10000);
+console.log("PASS local console completions of any source, chain or name length, lexical exclusions, property chains and UTF-16 replacement");
 const ui = runInNewContext(
   (await readFile(join(root, "apps/research-ui/evidence_models.js"), "utf8")) +
     ";({isBrokerEvent,isWasmInspection})",
@@ -387,7 +423,7 @@ function packagePanelFixture(native = false) {
   const calls=[];
   const fetcher=async(url,options)=>{calls.push({url,options});if(pending) return new Promise(resolve=>pending.push({resolve,options}));return url.endsWith('/export')?new Response(packageGoldenBytes):Response.json(packageValid);};
   const create = runInNewContext(packageSource+';createEvidencePackagePanel', {document:packageDocument,location:{protocol:'http:'},fetch:fetcher,
-    TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,Blob,
+    TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,setInterval,clearInterval,Blob,
     URL:{createObjectURL:blob=>{downloadBlob=blob;return 'blob:synthetic';},revokeObjectURL(){}},
     navigator:{clipboard:{writeText:()=>{copies++;return new Promise(resolve=>{copyResolve=resolve;});}}}});
   const panel=create({getContext:()=>context}); panel.setVisible(true);
@@ -482,7 +518,7 @@ const comparisonResult = JSON.parse(await readFile(join(root,'apps/origin-trace-
 const comparisonChangedInput = new Uint8Array(await readFile(join(root,'apps/origin-trace-backend/assets/evidence-packages/comparison-changed-input-v1.json')));
 const comparisonChangedResult = JSON.parse(await readFile(join(root,'apps/origin-trace-backend/assets/evidence-packages/comparison-changed-result-v1.json'),'utf8'));
 const comparisonSource = await readFile(join(root,'apps/research-ui/evidence_comparison.js'),'utf8');
-const comparisonUI = runInNewContext(packageSource+'\n'+comparisonSource+'\nRebEvidenceComparison', {TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,fetch});
+const comparisonUI = runInNewContext(packageSource+'\n'+comparisonSource+'\nRebEvidenceComparison', {TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,setInterval,clearInterval,fetch});
 const comparisonFile = raw => { const bytes = new TextEncoder().encode(raw);return {size:bytes.length,arrayBuffer:async()=>bytes.buffer}; };
 const comparisonOriginal = JSON.stringify(packageGolden);
 let comparisonReply = () => Response.json(comparisonResult), comparisonCalls = [];
@@ -508,12 +544,21 @@ comparisonReply=()=>Response.json({...comparisonResult,right_package_id:'reb-pac
 comparisonController.select(0,comparisonFile(comparisonOriginal));comparisonController.select(1,comparisonFile(comparisonOriginal));assert.equal(await comparisonController.compare(),false);assert.equal(comparisonController.model.result,null,'Wrong input identity cannot populate results');
 comparisonReply=()=>new Response(new Uint8Array(524289));assert.equal(await comparisonController.compare(),false);assert.equal(comparisonController.model.result,null);
 comparisonController.dispose();
-let comparisonLateDeadline;
-const comparisonDeadline=comparisonUI.createController({deadline:10,fetcher:()=>new Promise(resolve=>{comparisonLateDeadline=resolve;})});
-comparisonDeadline.select(0,comparisonFile(comparisonOriginal));comparisonDeadline.select(1,comparisonFile(comparisonOriginal));
+// A comparison has no deadline: it counts seconds until it finishes or Cancel retires it.
+const comparisonClock = fakeClock();
+const comparisonClockUI = runInNewContext(packageSource+'\n'+comparisonSource+'\nRebEvidenceComparison',
+  {TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,fetch,...comparisonClock.globals});
+let comparisonLateReply;
+const comparisonSlow=comparisonClockUI.createController({fetcher:()=>new Promise(resolve=>{comparisonLateReply=resolve;})});
+comparisonSlow.select(0,comparisonFile(comparisonOriginal));comparisonSlow.select(1,comparisonFile(comparisonOriginal));
+const comparisonSlowRun=comparisonSlow.compare();
+while(!comparisonLateReply)await new Promise(resolve=>setTimeout(resolve,0));
+comparisonClock.advance(1000);
+assert.equal(comparisonSlow.model.busy,true);assert.match(comparisonSlow.model.message,/ 1 s$/);
+comparisonSlow.close();
 let comparisonWatchdog;
-try {assert.equal(await Promise.race([comparisonDeadline.compare(),new Promise((_,reject)=>{comparisonWatchdog=setTimeout(()=>reject(new Error('Comparison deadline failed to settle')),2000);})]),false);}finally{clearTimeout(comparisonWatchdog);}
-assert.equal(comparisonDeadline.model.busy,false);assert.match(comparisonDeadline.model.message,/timed out/);assert.equal(comparisonDeadline.model.result,null);comparisonLateDeadline(Response.json(comparisonResult));await new Promise(resolve=>setTimeout(resolve,0));assert.equal(comparisonDeadline.model.result,null);comparisonDeadline.dispose();
+try {assert.equal(await Promise.race([comparisonSlowRun,new Promise((_,reject)=>{comparisonWatchdog=setTimeout(()=>reject(new Error('Cancelled comparison failed to settle')),2000);})]),false);}finally{clearTimeout(comparisonWatchdog);}
+assert.equal(comparisonSlow.model.busy,false);assert.match(comparisonSlow.model.message,/closed/);assert.equal(comparisonSlow.model.result,null);comparisonLateReply(Response.json(comparisonResult));await new Promise(resolve=>setTimeout(resolve,0));assert.equal(comparisonSlow.model.result,null);comparisonSlow.dispose();
 
 // Actual mount/event listeners use a small DOM. This is not rendered UI proof.
 class ComparisonNode extends TrafficFixtureNode {
@@ -581,13 +626,14 @@ ambiguityComparison.counts.ambiguous_cross_scope=2;assert.equal(comparisonUI.val
 const wrongHash=structuredClone(changedComparison);wrongHash.rows[0].differences[0]={field:'byte_size',left:{kind:'scalar',value:'0'},right:{kind:'scalar',value:'1'}};assert.equal(comparisonUI.validResult(wrongHash,0,comparisonResult.left_package_id,differentPackageId),false);
 wrongHash.rows[0].declared_content_hash_match=false;assert(comparisonUI.validResult(wrongHash,0,comparisonResult.left_package_id,differentPackageId));
 const fakeEqualScalars=structuredClone(changedComparison);fakeEqualScalars.rows[0].differences[0].right.value='javascript';assert.equal(comparisonUI.validResult(fakeEqualScalars,0,comparisonResult.left_package_id,differentPackageId),false);
-// A file that settles after its deadline cannot advance to more reads or fetch.
+// A file that settles after Cancel cannot advance to more reads or fetch.
 for(const side of [0,1]){
  let finishFile,requests=0,leftReads=0,rightReads=0;
- const c=comparisonUI.createController({deadline:5,fetcher:async()=>{requests++;return Response.json(comparisonResult);}});
+ const c=comparisonUI.createController({fetcher:async()=>{requests++;return Response.json(comparisonResult);}});
  c.select(0,{size:packageGoldenBytes.length,arrayBuffer:()=>{leftReads++;return side===0?new Promise(resolve=>{finishFile=resolve;}):Promise.resolve(packageGoldenBytes.buffer);}});
  c.select(1,{size:packageGoldenBytes.length,arrayBuffer:()=>{rightReads++;return side===1?new Promise(resolve=>{finishFile=resolve;}):Promise.resolve(packageGoldenBytes.buffer);}});
- assert.equal(await c.compare(),false);assert.match(c.model.message,/timed out/);finishFile(packageGoldenBytes.buffer);await new Promise(resolve=>setTimeout(resolve,0));
+ const run=c.compare();while(!finishFile)await new Promise(resolve=>setTimeout(resolve,0));
+ c.close();assert.equal(await run,false);assert.match(c.model.message,/closed/);finishFile(packageGoldenBytes.buffer);await new Promise(resolve=>setTimeout(resolve,0));
  assert.equal(requests,0);assert.equal(leftReads,1);assert.equal(rightReads,side===0?0:1);assert.equal(c.model.result,null);c.dispose();
 }
 // A previously disposed handle has no authority over a replacement mount.
@@ -2822,7 +2868,7 @@ function observationPanelFixture(narrow = false, options = {}) {
   let comparisonFetch=options.fetcher || (async()=>Response.json(comparisonResult));
   nodes['evidence-package-mode'].append(nodes['evidence-package-panel'],nodes['evidence-comparison-section']);
   nodes['evidence-comparison-section'].append(nodes['evidence-comparison-close'],nodes['evidence-comparison-unavailable'],nodes['evidence-comparison-panel']);
-  const create=runInNewContext(observationCode+'\n'+comparisonSource+';createEvidenceWorkspace',{document,Node:ObservationNode,TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,fetch:(...args)=>comparisonFetch(...args),location:{protocol:options.protocol||'http:'},window:{matchMedia:()=>({matches:narrow})}});
+  const create=runInNewContext(observationCode+'\n'+comparisonSource+';createEvidenceWorkspace',{document,Node:ObservationNode,TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,setInterval,clearInterval,fetch:(...args)=>comparisonFetch(...args),location:{protocol:options.protocol||'http:'},window:{matchMedia:()=>({matches:narrow})}});
   const panel=create({getContext:()=>context,packagePanel:{sync(){},setVisible(value){packageVisible=value;if(!value)packageCancels++;}},onTrace(){},onRequest(){},onSource(){sourceCalls++;return true;},canOpenSource:()=>true,
     ...(options.rangeFetch?{fetcher:(...args)=>options.rangeFetch(...args)}:{})});
   panel.setVisible(true);

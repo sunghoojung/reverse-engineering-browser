@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -45,6 +45,11 @@ struct NativeWasmSampleBudgetPolicy final {
   std::uint8_t module_allow_count = 0;
   std::uint8_t function_allow_count = 0;
   std::uint8_t function_deny_count = 0;
+  // Every record: no stream window in the renderer, no browser ceiling and
+  // no per-function or per-site count, so each execution the filters admit
+  // is a full record. Encoded as byte 11, which earlier browsers required to
+  // be 0; it excludes both per-key counts.
+  bool every_record = false;
   std::array<std::array<std::uint8_t, 32>, kNativeWasmModuleAllowlistLimit> module_allow{};
   std::array<std::uint32_t, kNativeWasmFunctionFilterLimit> function_allow{};
   std::array<std::uint32_t, kNativeWasmFunctionFilterLimit> function_deny{};
@@ -61,7 +66,9 @@ static_assert(kNativeWasmSampleBudgetEncodedBytes == 524);
       policy.samples_per_indirect_site > kNativeWasmIndirectSampleBudget ||
       policy.module_allow_count > kNativeWasmModuleAllowlistLimit ||
       policy.function_allow_count > kNativeWasmFunctionFilterLimit ||
-      policy.function_deny_count > kNativeWasmFunctionFilterLimit)
+      policy.function_deny_count > kNativeWasmFunctionFilterLimit ||
+      (policy.every_record &&
+       (policy.samples_per_function != 0 || policy.samples_per_indirect_site != 0)))
     return false;
   for (std::uint8_t index = policy.module_allow_count; index < kNativeWasmModuleAllowlistLimit;
        ++index) {
@@ -107,6 +114,7 @@ EncodeNativeWasmSampleBudgetPolicy(const NativeWasmSampleBudgetPolicy& policy) n
   out[8] = policy.module_allow_count;
   out[9] = policy.function_allow_count;
   out[10] = policy.function_deny_count;
+  out[11] = policy.every_record ? 1 : 0;
   std::size_t offset = 12;
   for (const auto& digest : policy.module_allow) {
     std::copy(digest.begin(), digest.end(), out.begin() + static_cast<std::ptrdiff_t>(offset));
@@ -125,7 +133,7 @@ EncodeNativeWasmSampleBudgetPolicy(const NativeWasmSampleBudgetPolicy& policy) n
   policy = {};
   if (bytes.empty())
     return true;
-  if (bytes.size() != kNativeWasmSampleBudgetEncodedBytes || bytes[11] != 0)
+  if (bytes.size() != kNativeWasmSampleBudgetEncodedBytes || bytes[11] > 1)
     return false;
   const auto get32 = [&bytes](std::size_t offset) {
     std::uint32_t value = 0;
@@ -138,6 +146,7 @@ EncodeNativeWasmSampleBudgetPolicy(const NativeWasmSampleBudgetPolicy& policy) n
   policy.module_allow_count = bytes[8];
   policy.function_allow_count = bytes[9];
   policy.function_deny_count = bytes[10];
+  policy.every_record = bytes[11] == 1;
   std::size_t offset = 12;
   for (auto& digest : policy.module_allow) {
     std::copy_n(bytes.begin() + static_cast<std::ptrdiff_t>(offset), digest.size(), digest.begin());

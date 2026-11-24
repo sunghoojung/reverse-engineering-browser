@@ -583,9 +583,12 @@
       }
 
       // Returns the next token, whitespace included, or null; nothing is retained.
-      function createSourcePrettyLexer(value, language) {
-        let index = 0;
-        let previous = null;
+      // A lexer can resume at a token boundary of an earlier pass over the same
+      // text, given the last token that pass returned other than whitespace or
+      // a block comment: that is all the state it carries between tokens.
+      function createSourcePrettyLexer(value, language, start = 0, last = null) {
+        let index = start;
+        let previous = last;
         const token = (kind, start, end) => {
           const result = {kind, start, end, text: value.slice(start, end)};
           if (kind !== 'whitespace' && kind !== 'comment') previous = result;

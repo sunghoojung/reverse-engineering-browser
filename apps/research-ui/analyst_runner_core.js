@@ -19,31 +19,10 @@ function REBTakeInput() {
 
 async function REBExecuteAnalyst(input, selectedBytes, userFunction) {
   const started = Date.now();
-  const utf8Bytes = value => {
-    let bytes = 0;
-    for (let index = 0; index < value.length;) {
-      const point = value.codePointAt(index);
-      index += point > 0xffff ? 2 : 1;
-      bytes += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
-    }
-    return bytes;
-  };
-  const boundedText = (value, limit) => {
-    let text;
-    try { text = String(value); } catch { text = "<unavailable>"; }
-    if (utf8Bytes(text) <= limit) return text;
-    const parts = [];
-    let bytes = 0;
-    for (let index = 0; index < text.length;) {
-      const point = text.codePointAt(index);
-      const width = point > 0xffff ? 2 : 1;
-      const encoded = point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
-      if (bytes + encoded > limit) break;
-      parts.push(text.slice(index, index + width));
-      bytes += encoded;
-      index += width;
-    }
-    return parts.join("");
+  // Errors, symbol descriptions and function names are kept whole, like
+  // results and logs; only a value that cannot be turned into text is named.
+  const textOf = value => {
+    try { return String(value); } catch { return "<unavailable>"; }
   };
   // Results and logs are kept whole. Only nesting is bounded, because each
   // level is a frame of this recursion and of JSON.stringify.
@@ -55,8 +34,8 @@ async function REBExecuteAnalyst(input, selectedBytes, userFunction) {
       if (typeof candidate === "string") return candidate;
       if (typeof candidate === "bigint") return `${candidate}n`;
       if (typeof candidate === "undefined") return "[undefined]";
-      if (typeof candidate === "symbol") return boundedText(candidate, 256);
-      if (typeof candidate === "function") return `[Function ${boundedText(candidate.name || "anonymous", 128)}]`;
+      if (typeof candidate === "symbol") return textOf(candidate);
+      if (typeof candidate === "function") return `[Function ${textOf(candidate.name || "anonymous")}]`;
       if (depth >= 256) { truncated = true; return "[MaxDepth]"; }
       if (seen.has(candidate)) return "[Circular]";
       seen.add(candidate);
@@ -64,7 +43,7 @@ async function REBExecuteAnalyst(input, selectedBytes, userFunction) {
       try { keys = Reflect.ownKeys(candidate); } catch { return "[Uninspectable]"; }
       const output = Array.isArray(candidate) ? [] : {};
       for (const rawKey of keys) {
-        const key = typeof rawKey === "symbol" ? boundedText(rawKey, 256) : rawKey;
+        const key = typeof rawKey === "symbol" ? textOf(rawKey) : rawKey;
         let descriptor;
         try { descriptor = Object.getOwnPropertyDescriptor(candidate, rawKey); } catch { descriptor = null; }
         if (!descriptor) output[key] = "[Unavailable]";
@@ -108,7 +87,7 @@ async function REBExecuteAnalyst(input, selectedBytes, userFunction) {
     logs: [],
     logs_truncated: false,
     duration_ms: Math.max(0, Date.now() - started),
-    error: boundedText(message, 512)
+    error: textOf(message)
   });
 
   try {

@@ -157,7 +157,7 @@ def verify(run: Run) -> None:
         report.failed(ISSUE, "hot loop page", str(value))
         return
     sampling = (run.api.context().get("capture_options") or {}).get("wasm_sampling")
-    want = {"version": 1, "streams": ["br_table", "call_indirect"], "window_ms": 1000,
+    want = {"version": 1, "streams": ["br_table", "call_indirect"], "window_ms": 1000, "every_record": False,
             "records_per_window": RECORDS_PER_WINDOW, "samples_per_function": None,
             "samples_per_indirect_site": None, "function_allow_count": 0, "function_deny_count": 0,
             "module_allowlist": False, "reset": "available"}
@@ -165,6 +165,8 @@ def verify(run: Run) -> None:
                  [] if sampling == want else [f"capture_options.wasm_sampling {sampling}, expected {want}"],
                  "capture_options.wasm_sampling names both streams, the window and the reset")
 
+    # The paced page cost, beside the wasm-every area's every-record figure.
+    run.notes.append(f"{ISSUE}: page {value:,} calls in {LOOP_MS:,} ms ({value / LOOP_MS * 1000:,.0f} calls/s), paced")
     dispatch = observations(run, "wasm_dispatch_observation")
     problems = paced(dispatch, "br_table", SAMPLES_PER_FUNCTION)
     functions = {row["function_index"] for row in dispatch}

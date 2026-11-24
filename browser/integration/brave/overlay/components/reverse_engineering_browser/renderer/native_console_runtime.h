@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -34,12 +34,8 @@ class NativeConsoleRuntime final {
   NativeConsoleRuntime();
   ~NativeConsoleRuntime();
   void Reset();
-  void Message(const std::string& text,
-               const std::string& source,
-               const std::string& stack,
-               unsigned line,
-               int level,
-               bool truncated = false);
+  // Queues one page message, every field whole.
+  void Message(std::string text, std::string source, std::string stack, unsigned line, int level);
   std::string Run(v8::Isolate* isolate,
                   v8::Local<v8::Context> context,
                   blink::WebLocalFrame* frame,
@@ -79,7 +75,7 @@ class NativeConsoleRuntime final {
   base::DictValue Properties(v8::Isolate* isolate,
                              v8::Local<v8::Context> context,
                              v8::Local<v8::Value> value,
-                             int offset);
+                             std::uint64_t offset);
   base::DictValue Complete(v8::Isolate* isolate,
                            v8::Local<v8::Context> context,
                            const base::DictValue& command);
@@ -95,7 +91,7 @@ class NativeConsoleRuntime final {
   std::map<std::uint64_t, Retained> retained_;
   std::uint64_t next_handle_ = 1;
   std::uint64_t last_ = 0;
-  unsigned next_temp_ = 1;
+  std::uint64_t next_temp_ = 1;
   NativeConsoleMessages messages_;
 };
 

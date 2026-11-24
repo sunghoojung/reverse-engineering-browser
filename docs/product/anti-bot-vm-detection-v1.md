@@ -295,6 +295,11 @@ Producer `1.14.0` expands element tables of any size, so a table past
 rather than counted as a `classification-trace-limit` unknown. The profile
 digest is unchanged.
 
+Producer `1.15.0` adds the classification's `indirect_tables`: each table and
+call type a `call_indirect` site uses, listed once with every matching slot.
+A site still lists the first 32 of those slots, so the document grows with sites
+plus slots rather than sites times slots. The profile digest is unchanged.
+
 The generic JavaScript signal families include:
 
 - a persistent loop with switch, function-array, object-map, or indirect

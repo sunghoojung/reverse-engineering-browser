@@ -45,8 +45,8 @@ const MAX_EXPRESSION_CHARS: usize = 160;
 pub(crate) const MIN_COMPARE_ARMS: usize = 3;
 /// Matching slots listed on each `call_indirect` site; `matching_slot_count`
 /// counts them all. Every site with the same table and type shares one set,
-/// so listing it whole on each site would grow the document with sites times
-/// slots, quadratic in the module.
+/// listed whole once in `indirect_tables`: a whole copy on each site would
+/// grow the document with sites times slots, quadratic in the module.
 const MAX_LISTED_SLOTS: usize = 32;
 /// Alternative reaching sources kept per local, after merging alternatives
 /// that differ only in where a constant or handler value was written.
@@ -229,6 +229,18 @@ pub(crate) struct SiteTable {
 }
 
 impl SiteTable {
+    /// The shared set, whole, for `indirect_tables`.
+    fn whole_json(&self) -> Value {
+        let matching = self.matching.as_deref();
+        json!({
+            "table_index": self.table_index,
+            "type_index": self.type_index,
+            "populated_slot_count": matching.map(|matching| matching.1),
+            "matching_slot_count": matching.map(|matching| matching.0.len()),
+            "matching_slots": matching.map(|matching| matching.0.clone()),
+        })
+    }
+
     fn json(&self) -> Value {
         let matching = self.matching.as_deref();
         json!({
@@ -280,7 +292,9 @@ pub(crate) fn bounded_expression(text: &str) -> String {
 
 /// The versioned classification object. Every classified site is listed, in
 /// byte order. VM detector producers before 1.13.0 listed the 256 strongest
-/// and counted the rest in `omitted_site_count`, which is now always 0.
+/// and counted the rest in `omitted_site_count`, which is now always 0. Since
+/// 1.15.0 each table and call type a site uses is listed once, whole, in
+/// `indirect_tables`.
 pub(crate) fn document(artifact_id: &Value, mut sites: Vec<Site>, omissions: Vec<Value>) -> Value {
     let mut role_counts = BTreeMap::<&str, usize>::new();
     let mut kind_counts = BTreeMap::<&str, usize>::new();
@@ -332,6 +346,12 @@ pub(crate) fn document(artifact_id: &Value, mut sites: Vec<Site>, omissions: Vec
             })
         })
         .collect::<Vec<_>>();
+    let mut tables = BTreeMap::new();
+    for table in sites.iter().filter_map(|site| site.table.as_ref()) {
+        tables
+            .entry((table.table_index, table.type_index))
+            .or_insert(table);
+    }
     json!({
         "classification_version": CLASSIFICATION_VERSION,
         "site_count": total,
@@ -339,6 +359,7 @@ pub(crate) fn document(artifact_id: &Value, mut sites: Vec<Site>, omissions: Vec
         "role_counts": role_counts,
         "kind_counts": kind_counts,
         "sites": listed,
+        "indirect_tables": tables.values().map(|table| table.whole_json()).collect::<Vec<_>>(),
         "omissions": omissions,
     })
 }

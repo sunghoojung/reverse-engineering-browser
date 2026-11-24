@@ -1965,8 +1965,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           const buffer = site.buffer_kind === null ? '' : ` · buffer ${site.buffer_kind}`;
           row.append(textElement('p', 'vm-effect-detail', `Selector ${site.selector.expression} · ${arms} · ${loop}${buffer}`));
           if (site.table) {
+            // A site lists the first 32 slots of the set its table and type share.
+            const more = (site.table.matching_slot_count ?? 0) - (site.table.matching_slots?.length ?? 0);
             const slots = site.table.matching_slots === null ? 'table layout unknown'
-              : `${site.table.matching_slot_count} of ${site.table.populated_slot_count} placed slots match type ${site.table.type_index}: ${site.table.matching_slots.join(', ') || 'none'}`;
+              : `${site.table.matching_slot_count} of ${site.table.populated_slot_count} placed slots match type ${site.table.type_index}: ${site.table.matching_slots.join(', ') || 'none'}${more > 0 ? `, and ${more} more` : ''}`;
             row.append(textElement('p', 'vm-effect-detail', `Table ${site.table.table_index} · ${slots}`));
           }
           return row;

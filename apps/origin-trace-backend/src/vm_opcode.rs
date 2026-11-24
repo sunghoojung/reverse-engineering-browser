@@ -4362,9 +4362,11 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
                 .len(),
             slots
         );
-        // VM detectors before 1.14.0 left this table unexpanded; a site lists
-        // 32 of the slots it shares with every site of its table and type.
-        let site = workspace["dispatch_classification"]["sites"]
+        // VM detectors before 1.14.0 left this table unexpanded. A site lists
+        // 32 of the slots it shares with every site of its table and type,
+        // and the classification lists that set once, whole.
+        let classification = &workspace["dispatch_classification"];
+        let site = classification["sites"]
             .as_array()
             .unwrap()
             .iter()
@@ -4376,6 +4378,10 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             site["table"]["matching_slots"].as_array().unwrap().len(),
             32
         );
+        let table = &classification["indirect_tables"][0];
+        assert_eq!(table["matching_slot_count"], slots);
+        assert_eq!(table["matching_slots"].as_array().unwrap().len(), slots);
+        assert_eq!(table["matching_slots"][slots - 1], slots - 1);
         assert_schema(&document);
         assert_ui_accepts(root.path());
     }
@@ -4502,6 +4508,44 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
                 "{name}"
             );
         }
+    }
+
+    /// Sites that share a table and call type list its matching slots once,
+    /// whole, in `indirect_tables`, so the classification grows with sites
+    /// plus slots. A whole copy on each of these 400 sites would hold two
+    /// million slot indexes.
+    #[test]
+    fn sites_sharing_a_table_list_its_slots_once() {
+        let slots = 5000;
+        let bytes = vm::review_inputs::indirect_sites(slots, 400);
+        let (_, analysis, _) = analyze_artifact(&bytes, "wasm", &[]);
+        let classification = &analysis["results"][0]["frontend"]["dispatch_classification"];
+        let sites = classification["sites"].as_array().unwrap();
+        assert_eq!(sites.len(), 400);
+        for site in sites {
+            assert_eq!(site["table"]["matching_slot_count"], slots);
+            assert_eq!(
+                site["table"]["matching_slots"],
+                json!((0..32).collect::<Vec<_>>())
+            );
+        }
+        let tables = classification["indirect_tables"].as_array().unwrap();
+        assert_eq!(tables.len(), 1);
+        assert_eq!(
+            tables[0]["matching_slots"],
+            json!((0..slots).collect::<Vec<_>>())
+        );
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../protocol/vm-dispatch-classification-v1.schema.json"
+        ))
+        .unwrap();
+        jsonschema::validator_for(&schema)
+            .unwrap()
+            .validate(classification)
+            .unwrap();
+        // Linear: a few hundred bytes a site and a few bytes a slot.
+        let size = classification.to_string().len();
+        assert!(size < 400 * 1024 + slots * 8, "{size}");
     }
 
     /// Every element segment is listed.

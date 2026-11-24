@@ -291,8 +291,8 @@ void PauseRecords() {
 
   // A debugger record is written with no script running, so the frame cannot
   // come from whatever context is entered: it has to be the selected
-  // document's own. Without it the validator refuses the record and the
-  // broker counts it invalid, which is evidence silently lost.
+  // document's own. Without it the validator refuses the record, and the
+  // broker keeps only a broker_refusal in its place.
   auto armed = NoScript();
   armed.stack.reserved1[0] = reb::kDebuggerAttachPhaseAttach;
   auto without_frame = PauseRecord(reb::EventType::kDebuggerAttached, armed);
@@ -306,10 +306,11 @@ void PauseRecords() {
     auto dropped = carried;
     dropped.header.frame_id = 0;
     dropped.header.sequence_number = carried.header.sequence_number + 1;
-    ExpectTrue(broker.IngestAt(dropped, 2) == reb::IngestStatus::kInvalid,
-               "one without a frame is counted invalid instead");
+    ExpectTrue(broker.IngestAt(dropped, 2) == reb::IngestStatus::kRefused,
+               "one without a frame is refused instead");
     const reb::BrokerStats stats = broker.Stats();
-    ExpectTrue(stats.accepted == 1 && stats.invalid == 1, "the broker counts exactly one of each");
+    ExpectTrue(stats.accepted == 1 && stats.invalid == 1 && stats.refusals_recorded == 1,
+               "the broker counts exactly one of each");
   }
 
   auto named = NoScript();

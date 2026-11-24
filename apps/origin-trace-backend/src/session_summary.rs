@@ -895,6 +895,23 @@ fn gap_meaning(reason: &str) -> &'static str {
     }
 }
 
+/// What the first check a refused record failed means
+/// (protocol/broker-refusal-v1.md).
+fn refusal_meaning(reason: &str) -> &'static str {
+    match reason {
+        "protocol_version" => "an event protocol version this broker does not read",
+        "header_size" => "a header size other than 144 bytes",
+        "process_id" => "the process ID the broker reserves for its own records",
+        "payload_size" => "a payload size over 128 bytes",
+        "reserved" => "reserved bytes that are not zero",
+        "category" => "an unknown category",
+        "type" => "an unknown event type, or a broker_refusal a producer sent",
+        "flags" => "unknown flags",
+        "network_class" => "a scheme class or loader kind this record cannot carry",
+        _ => "a payload its type's validator refused",
+    }
+}
+
 /// The stored counts the answer lists, read at one position of the index.
 struct Stored {
     totals: Totals,
@@ -927,6 +944,7 @@ impl Stored {
                 queue_drops: 0,
                 queue_drops_saturated: false,
                 named_gaps: Vec::new(),
+                broker_refusals: Vec::new(),
                 malformed_lines: 0,
             },
             total: 0,
@@ -1131,6 +1149,7 @@ impl Stored {
             "named_gaps": totals.named_gaps.iter().map(|gap| json!({
                 "category": gap.category, "reason": gap.reason, "count": gap.count.to_string()
             })).collect::<Vec<_>>(),
+            "broker_refusals": crate::broker_refusal::counts_json(&totals.broker_refusals),
         })
     }
 }
@@ -1310,6 +1329,25 @@ pub fn build(
             "warning",
             format!("{holes} sequence numbers are absent inside the stored events."),
         ));
+    }
+    // A producer wrote a record the broker refused: a capture bug, and the
+    // record is gone but for the refusal standing in its place.
+    for refusal in &totals.broker_refusals {
+        let mut item = check(
+            "broker_refusal",
+            "error",
+            format!(
+                "The broker refused {} {} record{} at validation ({}); only a broker_refusal record stands in for each.",
+                refusal.count,
+                refusal.category,
+                if refusal.count == 1 { "" } else { "s" },
+                refusal_meaning(refusal.reason)
+            ),
+        );
+        item["category"] = json!(refusal.category);
+        item["reason"] = json!(refusal.reason);
+        item["count"] = json!(refusal.count.to_string());
+        checks.push(item);
     }
     for gap in &totals.named_gaps {
         let mut item = check("named_gap", "warning", gap_meaning(&gap.reason));

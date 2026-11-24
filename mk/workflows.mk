@@ -45,6 +45,7 @@ e2e: native-request-identity-check origin-trace-backend native-vm-fixture produc
 	@mkdir -p $(BUILD_DIR)/sessions
 	python3 tools/check-native-request-identity.py --broker $(BROKER_BINARY) --backend $(ORIGIN_TRACE_BACKEND)
 	python3 tools/check-native-js-invocation.py --broker $(BROKER_BINARY) --backend $(ORIGIN_TRACE_BACKEND)
+	python3 tools/check-broker-refusals.py --broker $(BROKER_BINARY) --backend $(ORIGIN_TRACE_BACKEND)
 	node tools/check-evidence-names.mjs --persistence $(ORIGIN_TRACE_BACKEND)
 	node tools/check-source-search.mjs --backend $(ORIGIN_TRACE_BACKEND)
 	$(PRODUCER_BINARY) | $(BROKER_BINARY) \

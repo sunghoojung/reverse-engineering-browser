@@ -1282,6 +1282,7 @@ impl App {
                     window.queue_drops = totals.queue_drops;
                     window.queue_drops_saturated = totals.queue_drops_saturated;
                     window.named_gaps = totals.named_gaps;
+                    window.broker_refusals = totals.broker_refusals;
                     window.coverage["scope"] = json!("store");
                     window.coverage["scan_start"] = json!("0");
                     window.coverage["malformed_lines"] = json!(totals.malformed_lines);
@@ -1297,6 +1298,7 @@ impl App {
                         "reason": gap.reason,
                         "count": gap.count.to_string()
                     })).collect::<Vec<_>>(),
+                    "broker_refusals": crate::broker_refusal::counts_json(&window.broker_refusals),
                     "event_window": window.coverage
                 });
                 // json! serializes borrowed values; move the retained window instead

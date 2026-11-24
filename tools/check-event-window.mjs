@@ -39,7 +39,7 @@ const context = {state, TextEncoder, TextDecoder, elements, document, window, na
   showCaptureGapsInEvidence() { evidenceShown += 1; }};
 runInNewContext(chipsSource, context);
 const api = runInNewContext(
-  `${failedNoticeHelpers}\n${models}\n${app.slice(start, end)};({isBrokerResponse,isBrokerEvent,decodePayload,acceptEventWindow,captureWideTotal,countSequenceGaps,countReportedQueueDrops,requestsFromEvents,shownSequenceGaps,shownQueueDrops,shownNamedGaps,namedGapsFromEvents,namedGapsIn,captureGapClasses,captureGapClassChip,captureGapStatusChip,eventCountScopeLabel,eventCountScopeTitle,fingerprintCoverageNotice,renderNetworkNotice,fingerprintSignalCategories,vmGapCategories})`,
+  `${failedNoticeHelpers}\n${models}\n${app.slice(start, end)};({isBrokerResponse,isBrokerEvent,decodePayload,acceptEventWindow,captureWideTotal,countSequenceGaps,countReportedQueueDrops,requestsFromEvents,shownSequenceGaps,shownQueueDrops,shownNamedGaps,namedGapsFromEvents,namedGapsIn,captureGapClasses,captureGapClassChip,captureGapStatusChip,eventCountScopeLabel,eventCountScopeTitle,fingerprintCoverageNotice,renderNetworkNotice,fingerprintSignalCategories,vmGapCategories,networkGapCategories,decodeBrokerRefusal,brokerRefusalsFromEvents,shownBrokerRefusals,fingerprintEventsFromEvents})`,
   context
 );
 const chips = context.RebEvidenceChips;
@@ -56,7 +56,8 @@ const notice = () => {
 };
 // The status bar's chip over every class the summaries count.
 const statusChip = () => api.captureGapStatusChip(api.captureGapClasses({sequenceGaps: api.shownSequenceGaps(),
-  queueDrops: api.shownQueueDrops(), malformedLines: state.eventMalformedLines ?? 0, namedGaps: api.shownNamedGaps()}));
+  queueDrops: api.shownQueueDrops(), malformedLines: state.eventMalformedLines ?? 0, namedGaps: api.shownNamedGaps(),
+  brokerRefusals: api.shownBrokerRefusals()}));
 
 const canvas = sequence => ({
   protocol_version: 3,
@@ -472,3 +473,110 @@ assert.equal(api.shownNamedGaps().length, 300);
 assert.equal(api.namedGapsFromEvents(manyPairs.map((pair, index) => ({...liveBudgets[0], sequence_number: String(index + 1),
   payload: Buffer.from(pair.reason).toString('hex'), payload_size: pair.reason.length}))).length, 300);
 console.log('PASS named gap summaries are strict, unique, complete and covered by queue_drops');
+
+// protocol/broker-refusal-v1.md: the broker's record in place of one it
+// refused. Reason 5 (reserved) keeps the refused record's place; reason 1
+// (protocol version) is on the broker's own stream, process 4294967295.
+const refusal = (sequence, reason, category = 'canvas') => {
+  const payload = Buffer.alloc(128);
+  const broker = reason <= 3;
+  const raw = {canvas: 1, webgl: 2, network: 9}[category] ?? 999;
+  payload.writeUInt16LE(1, 0); payload.writeUInt16LE(128, 2); payload.writeUInt16LE(reason, 4);
+  payload.writeUInt16LE(broker ? 2 : 1, 6); payload.writeUInt16LE(reason === 1 ? 2 : 3, 8);
+  payload.writeUInt16LE(144, 10); payload.writeUInt16LE(reason === 6 ? 999 : raw, 12); payload.writeUInt16LE(1, 14);
+  payload.writeBigUInt64LE(77n, 24); payload.writeBigUInt64LE(BigInt(sequence), 32);
+  payload.writeBigUInt64LE(BigInt(sequence) * 10n, 40); payload.writeUInt32LE(7, 48); payload.writeUInt32LE(1, 52);
+  return {...request(sequence, 'broker_refusal'), session_id: '1', category: reason === 6 ? 'unknown' : category,
+    request_id: '0', tab_id: broker ? 0 : 1, resource_type: 0, payload_truncated: false,
+    process_id: broker ? 4294967295 : 7, thread_id: broker ? 0 : 1, sequence_number: broker ? '1' : String(sequence),
+    monotonic_time_ns: broker ? '77' : String(sequence * 10), navigation_id: broker ? '0' : '1', frame_id: broker ? '0' : '1',
+    payload: payload.toString('hex'), payload_size: 128};
+};
+const placed = refusal(2, 5);
+assert.equal(api.isBrokerEvent(placed), true, 'a refusal in its place is a broker event');
+const decoded = api.decodeBrokerRefusal(placed);
+assert.equal(decoded.reason, 'reserved');
+assert.equal(decoded.identity, 'refused');
+assert.equal(decoded.refused.sequence_number, '2');
+assert.equal(decoded.received_monotonic_time_ns, '77');
+const own = refusal(5, 1);
+assert.equal(api.decodeBrokerRefusal(own)?.identity, 'broker', 'an envelope refusal is on the broker stream');
+assert.equal(api.decodeBrokerRefusal(refusal(6, 6))?.reason, 'category');
+assert.equal(api.isBrokerEvent(refusal(6, 6)), true, 'only a refusal files under the unknown category');
+assert.equal(api.isBrokerEvent({...canvas(1), category: 'unknown'}), false);
+for (const [name, broken] of [
+  ['a header sequence other than the refused one', {...placed, sequence_number: '3'}],
+  ['a category other than the refused one', {...placed, category: 'webgl'}],
+  ['network fields', {...placed, status_code: 200}],
+  ['a short payload', {...placed, payload: placed.payload.slice(2), payload_size: 127}],
+  ['a broker stream thread', {...own, thread_id: 4}],
+  ['a trailing payload byte', {...placed, payload: `${placed.payload.slice(0, 254)}01`}],
+  ['a reason the fields disagree with', {...placed, payload: `${placed.payload.slice(0, 8)}0100${placed.payload.slice(12)}`}]
+]) {
+  assert.equal(api.decodeBrokerRefusal(broken), null, name);
+  assert.equal(api.isBrokerEvent(broken), false, name);
+}
+const refusals = [{category: 'canvas', reason: 'reserved', count: '2'}, {category: 'canvas', reason: 'protocol_version', count: '1'}];
+const refusedResponse = {...liveResponse, events: [placed, own], count: 2, named_gaps: [], queue_drops: '0', broker_refusals: refusals};
+assert.equal(api.isBrokerResponse(refusedResponse), true);
+for (const broker_refusals of [
+  [{category: 'canvas', reason: 'reserved', count: '0'}],
+  [{category: 'canvas', reason: 'unlisted', count: '1'}],
+  [{category: 'Canvas', reason: 'reserved', count: '1'}],
+  [{category: 'canvas', reason: 'reserved', count: 1}],
+  [refusals[0], refusals[0]],
+  {category: 'canvas', reason: 'reserved', count: '1'}
+]) assert.equal(api.isBrokerResponse({...refusedResponse, broker_refusals}), false, JSON.stringify(broker_refusals));
+Object.assign(state, {events: [placed, own], requests: []});
+api.acceptEventWindow(refusedResponse);
+assert.equal(api.shownBrokerRefusals().map(entry => `${entry.reason}:${entry.count}`).join(), 'reserved:2,protocol_version:1');
+// The status bar's gap chip counts them as a loss of their category, and
+// its panel lists each reason as a chip with its own meaning.
+{
+  const chip = statusChip();
+  assert.equal(chip.text, '3 refused records (canvas)');
+  assert.equal(chip.name, '3 refused records (canvas) in the stored capture');
+  assert.equal(chip.tone, 'loss');
+  assert.equal(chip.breakdown.title, 'Refused by the broker · canvas');
+  assert.equal(chip.breakdown.reasons.map(entry => `${entry.token}:${entry.count}:${entry.label}`).join(),
+    'reserved:2:Reserved bytes,protocol_version:1:Protocol version');
+  const bar = document.createElement('div');
+  document.body.append(bar);
+  chips.renderChips(bar, [chip]);
+  const button = bar.querySelector('.ev-chip[data-key="gaps"]');
+  assert.equal(button.dataset.tone, 'loss');
+  button.click();
+  const reasons = [...document.getElementById(button.getAttribute('aria-controls')).querySelectorAll('.ev-reason')];
+  assert.equal(reasons.map(reason => `${reason.dataset.reason}:${reason.dataset.kind}:${reason.querySelector('.ev-reason-label').textContent}`).join(),
+    'reserved:loss:Reserved bytes,protocol_version:loss:Protocol version');
+  assert.equal(document.getElementById(reasons[0].getAttribute('aria-describedby')).textContent,
+    'A reserved header field or record byte was not zero. Click to copy reserved.');
+  assert.equal(chips.reason('reserved').meaning, '', 'a refusal reason adds no glossary entry another reason could inherit');
+  bar.remove();
+}
+// With another class the chip totals both, a row each.
+state.sequenceGaps = 1n;
+{
+  const chip = statusChip();
+  assert.equal(chip.text, '4 gaps');
+  assert.deepEqual(Array.from(chip.breakdown.rows, row => `${row.label}:${row.count}:${row.tone}`),
+    ['Sequence gaps:1:loss', 'Refused by the broker · canvas:3:loss']);
+}
+state.sequenceGaps = 0n;
+// The Traffic and VM notices show only the refusals of their categories.
+state.brokerRefusals = [{category: 'canvas', reason: 'reserved', count: 2n}, {category: 'network', reason: 'network_class', count: 1n},
+  {category: 'wasm', reason: 'typed_payload', count: 4n}];
+assert.equal(Array.from(api.captureGapClasses({brokerRefusals: api.namedGapsIn(api.shownBrokerRefusals(), api.vmGapCategories)}),
+  entry => api.captureGapClassChip(entry).text).join(), '4 refused records (wasm)');
+api.renderNetworkNotice();
+assert(notice().chips.includes('1 refused record (network)'), notice().chips.join());
+assert(!notice().chips.some(text => /canvas|wasm/.test(text)), notice().chips.join());
+assert.equal(statusChip().text, '7 gaps', 'the status bar counts every category');
+api.acceptEventWindow({...refusedResponse, broker_refusals: undefined});
+assert.equal(api.shownBrokerRefusals().map(entry => `${entry.category}:${entry.reason}:${entry.count}`).join(),
+  'canvas:reserved:1,canvas:protocol_version:1', 'without the field the visible refusals are counted');
+api.acceptEventWindow({...refusedResponse, broker_refusals: []});
+assert.equal(statusChip(), null, 'no refusal, no chip');
+assert.equal(api.fingerprintEventsFromEvents([placed, canvas(9)]).map(event => event.type).join(), 'api_call',
+  'a refused canvas record is no canvas signal');
+console.log('PASS broker refusals decode strictly, are counted as a loss in the status bar and notices, and stay out of Signals');

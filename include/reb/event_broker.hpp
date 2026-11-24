@@ -17,6 +17,11 @@ namespace reb {
 
 enum class IngestStatus {
   kAccepted,
+  // Refused at validation; a broker_refusal record stands in its place
+  // (protocol/broker-refusal-v1.md).
+  kRefused,
+  // Refused at validation and nothing is stored: the session excludes the
+  // record's category or has expired, so a valid record would leave nothing.
   kInvalid,
   kCategoryRejected,
   kSessionExpired,
@@ -43,7 +48,10 @@ struct SessionPolicy final {
 
 struct BrokerStats final {
   std::uint64_t accepted = 0;
+  // Every record refused at validation; refusals_recorded of them left a
+  // broker_refusal record, the rest a category or session the policy excludes.
   std::uint64_t invalid = 0;
+  std::uint64_t refusals_recorded = 0;
   std::uint64_t category_rejected = 0;
   std::uint64_t expired = 0;
   // Currently absent IDs within observed bounds; late arrivals retract holes.
@@ -65,8 +73,12 @@ class EventBroker final {
   EventBroker(const EventBroker&) = delete;
   EventBroker& operator=(const EventBroker&) = delete;
 
-  [[nodiscard]] IngestStatus Ingest(const EventRecord& event);
-  [[nodiscard]] IngestStatus IngestAt(const EventRecord& event, std::uint64_t monotonic_now_ns);
+  // On kRefused, `refusal` (when given) receives the broker_refusal record
+  // the store keeps in the refused record's place.
+  [[nodiscard]] IngestStatus Ingest(const EventRecord& event, EventRecord* refusal = nullptr);
+  [[nodiscard]] IngestStatus IngestAt(const EventRecord& event,
+                                      std::uint64_t monotonic_now_ns,
+                                      EventRecord* refusal = nullptr);
   [[nodiscard]] std::vector<EventRecord> Snapshot(std::size_t limit) const;
   [[nodiscard]] BrokerStats Stats() const;
   [[nodiscard]] std::size_t Size() const;
@@ -92,6 +104,7 @@ class EventBroker final {
   };
   void EvictSequenceTracker();
   void TrackSequence(const StreamKey& stream, std::uint64_t sequence);
+  void Retain(const EventRecord& event);
 
   const std::size_t capacity_;
   const SessionPolicy policy_;
@@ -100,6 +113,8 @@ class EventBroker final {
   std::vector<EventRecord> events_;
   std::size_t next_event_ = 0;
   BrokerStats stats_;
+  // The broker's own stream: refusals whose header could not be read.
+  std::uint64_t broker_sequence_ = 0;
   std::unordered_map<StreamKey, SequenceTracker, StreamKeyHash> sequence_trackers_;
   std::size_t missing_interval_count_ = 0;
   std::deque<StreamKey> stream_insertion_order_;

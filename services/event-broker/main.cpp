@@ -174,7 +174,20 @@ bool StoreEvent(reb::EventBroker& broker,
                 std::ostream* signal_store,
                 const reb::EventRecord& event,
                 std::string& event_json) {
-  if (broker.Ingest(event) != reb::IngestStatus::kAccepted) {
+  reb::EventRecord refusal;
+  const reb::IngestStatus status = broker.Ingest(event, &refusal);
+  if (status == reb::IngestStatus::kRefused) {
+    // The refusal is evidence of the loss, not an observation, so it feeds
+    // neither cold-path index.
+    reb::WriteEventJson(refusal, event_json);
+    store << event_json << '\n';
+    if (!store) {
+      std::cerr << "Unable to write event store\n";
+      return false;
+    }
+    return true;
+  }
+  if (status != reb::IngestStatus::kAccepted) {
     return true;
   }
   reb::WriteEventJson(event, event_json);
@@ -457,6 +470,7 @@ int AcceptUntil(const int listener, const std::uint64_t deadline_ns) {
 
 void PrintStats(const reb::BrokerStats& stats) {
   std::cerr << "Broker stopped: accepted=" << stats.accepted << " invalid=" << stats.invalid
+            << " refusals_recorded=" << stats.refusals_recorded
             << " category_rejected=" << stats.category_rejected << " expired=" << stats.expired
             << " sequence_gaps=" << stats.sequence_gaps
             << " sequence_gaps_saturated=" << stats.sequence_gaps_saturated

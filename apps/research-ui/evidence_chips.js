@@ -457,7 +457,7 @@
       const list = node('ul', 'ev-panel-reasons');
       for (const entry of entries) {
         const item = node('li', 'ev-panel-reason');
-        item.append(reasonChip(entry.token));
+        item.append(reasonChip(entry.token, {label: entry.label, meaning: entry.meaning, kind: entry.kind}));
         if (entry.count !== undefined) item.append(node('span', 'ev-panel-count', `×${countText(entry.count, entry.atLeast)}`));
         list.append(item);
       }

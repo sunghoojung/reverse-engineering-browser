@@ -2836,6 +2836,20 @@ assert.equal(observationModel.missingParents,1); assert.equal(observationModel.q
 assert.equal(observationModel.namedMarkers,0);
 const namedObservationModel = observationUI.evidenceObservationModel({...observationContext, events:[...observationContext.events, observationEvent(107,'vm','gap','native_wasm_dispatch_budget_incomplete')]});
 assert.equal(namedObservationModel.queueMarkers,1,'a named vm budget is not a queue-drop marker'); assert.equal(namedObservationModel.namedMarkers,1);
+assert.equal(observationModel.refusalRecords,0);
+{
+  // protocol/broker-refusal-v1.md: reason 5 (reserved) in the refused record's place.
+  const refused = observationEvent(108,'canvas','broker_refusal','',{resource_type:0});
+  const payload = Buffer.alloc(128);
+  payload.writeUInt16LE(1,0); payload.writeUInt16LE(128,2); payload.writeUInt16LE(5,4); payload.writeUInt16LE(1,6);
+  payload.writeUInt16LE(3,8); payload.writeUInt16LE(144,10); payload.writeUInt16LE(1,12); payload.writeUInt16LE(1,14);
+  payload.writeBigUInt64LE(1n,24); payload.writeBigUInt64LE(108n,32); payload.writeBigUInt64LE(BigInt(refused.monotonic_time_ns),40);
+  payload.writeUInt32LE(42,48); payload.writeUInt32LE(44,52);
+  Object.assign(refused,{payload:payload.toString('hex'),payload_size:128});
+  const refusalModel = observationUI.evidenceObservationModel({...observationContext, events:[...observationContext.events, refused, refused]});
+  assert.equal(refusalModel.refusalRecords,1,'a refusal record stays a row and is counted once');
+  assert(refusalModel.rows.some(row=>row.key==='7:42:108'));
+}
 assert.equal(observationModel.rows.find(row=>row.key==='7:42:102').outcome,'Outcome not recorded');
 assert.equal(observationModel.rows.find(row=>row.key==='7:42:104').artifact.status,'missing');
 assert.equal(observationModel.linkedArtifacts,1);

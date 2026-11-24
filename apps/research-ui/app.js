@@ -444,7 +444,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const chips = globalThis.RebEvidenceChips;
         if (!chips) { notice.hidden = true; return; }
         const classes = captureGapClasses({sequenceGaps: shownSequenceGaps(), queueDrops: shownQueueDrops(),
-          malformedLines: state.eventMalformedLines ?? 0, namedGaps: namedGapsIn(shownNamedGaps(), networkGapCategories)});
+          malformedLines: state.eventMalformedLines ?? 0, namedGaps: namedGapsIn(shownNamedGaps(), networkGapCategories),
+          brokerRefusals: namedGapsIn(shownBrokerRefusals(), networkGapCategories)});
         // The request index lists the whole session, so window caps do not limit Traffic rows.
         const indexed = state.trafficIndex?.answer?.() ?? null;
         const scope = eventCountScopeTitle();
@@ -1735,7 +1736,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const chips = globalThis.RebEvidenceChips;
         if (!chips || typeof captureGapClasses !== 'function') return;
         const classes = state.sessionMode === 'preview' ? [] : captureGapClasses({sequenceGaps: shownSequenceGaps(), queueDrops: shownQueueDrops(),
-          malformedLines: state.eventMalformedLines ?? 0, namedGaps: shownNamedGaps()});
+          malformedLines: state.eventMalformedLines ?? 0, namedGaps: shownNamedGaps(), brokerRefusals: shownBrokerRefusals()});
         chips.renderChips(elements.gaps, [captureGapStatusChip(classes, [{key: 'evidence', label: 'Show in Evidence', run: showCaptureGapsInEvidence}])]);
         elements.gaps.hidden = classes.length === 0;
       }
@@ -3224,8 +3225,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         renderVmSessionStatus();
         renderVmWasmSampling();
         const gapCount = shownSequenceGaps();
-        const vmNamed = captureGapClasses({namedGaps: namedGapsIn(shownNamedGaps(), vmGapCategories)});
-        const vmClasses = captureGapClasses({sequenceGaps: gapCount, namedGaps: namedGapsIn(shownNamedGaps(), vmGapCategories)});
+        const vmRefusals = namedGapsIn(shownBrokerRefusals(), vmGapCategories);
+        const vmNamed = captureGapClasses({namedGaps: namedGapsIn(shownNamedGaps(), vmGapCategories), brokerRefusals: vmRefusals});
+        const vmClasses = captureGapClasses({sequenceGaps: gapCount, namedGaps: namedGapsIn(shownNamedGaps(), vmGapCategories),
+          brokerRefusals: vmRefusals});
         const failures = state.vmAnalysisStatus === 'ready' ? vmAnalysisFailureNotice(state.vmAnalysisDocument) : '';
         const withFailures = message => failures ? `${message} ${failures}` : message;
         if (state.broker === 'connecting') {
@@ -9986,6 +9989,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         state.sequenceGaps = 0n;
         state.queueDrops = 0n;
         state.namedGaps = [];
+        state.brokerRefusals = [];
         state.eventCountScope = 'rendered_window';
         state.networkEventsAvailable = false;
         state.networkEventsLimited = false;

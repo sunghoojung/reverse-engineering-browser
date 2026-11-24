@@ -537,7 +537,7 @@ function evidenceObservationModel(context) {
   const artifacts = context.artifacts ?? [];
   const artifactIndex = evidenceArtifactIndex(artifacts), artifactReferences = new Map();
   const records = new Map(), sources = new Map(), duplicates = new Set();
-  let omitted = 0, queueMarkers = 0, namedMarkers = 0;
+  let omitted = 0, queueMarkers = 0, namedMarkers = 0, refusalRecords = 0;
   for (const event of window) {
     if (!isBrokerEvent(event) || ![2, 3].includes(event.protocol_version)) { omitted += 1; continue; }
     // A named reason is a capture limit in its own category, not a queue drop.
@@ -547,6 +547,8 @@ function evidenceObservationModel(context) {
     if (records.has(key)) { duplicates.add(key); continue; }
     sources.set(key, event);
     records.set(key, evidenceRecord(event));
+    // A record in place of one the broker refused stays a row, and is counted.
+    if (event.type === 'broker_refusal') refusalRecords += 1;
   }
   // Sequence observations describe the range in view, not records joined from elsewhere.
   const inView = [...records.values()];
@@ -596,7 +598,7 @@ function evidenceObservationModel(context) {
   rows = rows.map(row => row.group === 'request' ? requestRows.shift() : row);
   const related = rows.filter(row => row.group !== 'unlinked');
   return {request: request ? {id: request.id, origin: request.origin, method: request.method, path: String(request.path ?? '').slice(0, 2048), hostOnly: request.hostOnly} : null,
-    requestKey: evidenceRequestKey(request), rows, related, omitted, queueMarkers, namedMarkers, sources,
+    requestKey: evidenceRequestKey(request), rows, related, omitted, queueMarkers, namedMarkers, refusalRecords, sources,
     missingParents: missing.size, duplicates: duplicates.size, parentCycle,
     limited: Boolean(context.eventsLimited || (context.events?.length ?? 0) > evidenceObservationLimit),
     sequence: evidenceSequenceObservations(inView),
@@ -906,8 +908,8 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
     find('evidence-count').textContent = `${model.rows.length.toLocaleString()} observations in view`;
     find('evidence-coverage-summary').textContent = `${model.missingParents} missing parent${model.missingParents === 1 ? '' : 's'} · coverage unknown`;
     // Coverage is always unknown; the warning color is kept for retained loss observations.
-    find('evidence-coverage-summary').dataset.kind = model.missingParents || model.queueMarkers || model.namedMarkers || model.sequence.holes !== '0' || model.duplicates ? 'gap' : 'unknown';
-    find('evidence-gap-details').textContent = `${model.limited ? 'These counts cover the records in view; Oldest, Earlier and Later read the rest of the stored session. ' : 'Every stored record is in view; complete capture is not established. '}${model.queueMarkers} native queue-drop markers; ${model.namedMarkers} named capture-limit markers (sampling budgets, sample-policy exclusions, or reported losses in their own category); ${model.sequence.holes} absent sequence IDs between retained stream endpoints (not proof of capture loss); ${model.sequence.arrivalDiscontinuities} forward-jump observations in arrival order; ${model.sequence.outOfOrderArrivals} later arrivals below a prior high-water ID; ${model.missingParents} missing or ambiguous parent references in view; ${model.duplicates} duplicate identities; ${model.omitted} unsupported or unaddressable records omitted.${model.parentCycle ? ' A repeated parent identity stopped lookup.' : ''} Queue markers, sequence holes and missing references can overlap and are not added into a loss total.`;
+    find('evidence-coverage-summary').dataset.kind = model.missingParents || model.queueMarkers || model.namedMarkers || model.refusalRecords || model.sequence.holes !== '0' || model.duplicates ? 'gap' : 'unknown';
+    find('evidence-gap-details').textContent = `${model.limited ? 'These counts cover the records in view; Oldest, Earlier and Later read the rest of the stored session. ' : 'Every stored record is in view; complete capture is not established. '}${model.queueMarkers} native queue-drop markers; ${model.namedMarkers} named capture-limit markers (sampling budgets, sample-policy exclusions, or reported losses in their own category); ${model.refusalRecords} broker refusal records (each stands in for a record the broker refused at validation); ${model.sequence.holes} absent sequence IDs between retained stream endpoints (not proof of capture loss); ${model.sequence.arrivalDiscontinuities} forward-jump observations in arrival order; ${model.sequence.outOfOrderArrivals} later arrivals below a prior high-water ID; ${model.missingParents} missing or ambiguous parent references in view; ${model.duplicates} duplicate identities; ${model.omitted} unsupported or unaddressable records omitted.${model.parentCycle ? ' A repeated parent identity stopped lookup.' : ''} Queue markers, refusals, sequence holes and missing references can overlap and are not added into a loss total.`;
     find('evidence-trace').disabled = model.request?.origin !== 'live' || !model.related.length;
     find('evidence-trace').title = 'Inspect the selected request’s recorded predecessor chain.';
     refreshNotice = context.error ? `Evidence refresh ${context.error === 'malformed' ? 'returned malformed records' : 'is unavailable'}. Retained observations remain visible.` : '';

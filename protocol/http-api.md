@@ -733,6 +733,7 @@ plain message:
 | `queue_drops` | Records lost to a full queue, beyond named gap markers. |
 | `sequence_gaps` | Sequence numbers missing inside the stored events. |
 | `named_gap` | A producer named why it stopped, with `category`, `reason` and `count`. A reason containing `budget` or `limit` means a sampling budget filled. A Wasm reason ending in `filtered` is a sample-policy exclusion: that execution was not sampled and did not take a slot. |
+| `broker_refusal` | Severity `error`: the broker refused `count` records of `category` at validation, for `reason`, the first check they failed ([broker refusal v1](broker-refusal-v1.md#reasons)). Each is lost except for the `broker_refusal` record in its place. A capture bug. |
 | `browser_internal_excluded` | Capture counted `chrome:`, `devtools:` and other browser-internal requests, requests WebUI renderers sent (`webui_request`), or WebUI renderers, instead of recording them; `count` is the requests. Not a gap. |
 | `no_tab_traffic_excluded` | Capture counted extension-worker requests, DevTools loads, requests of service workers no page used in this browser, and browser-initiated prefetches with no page, instead of recording them; `count` is the requests. Not a gap. `REB_CAPTURE_EXTENSION_TRAFFIC=1` records the extension requests instead. |
 | `memory_cache_reuse_not_recorded` | Renderers from an earlier build counted memory-cache reuses past their 4,096 records per capture configuration instead of recording them; `count` is the reuses. Not a gap. Current renderers record every reuse, so it appears only for such evidence. Reuses in pages that are not ordinary (an SVG image's own document or a page popup), which no tab owns, are the separate `non_ordinary_page_reuse` exclusion. |
@@ -1194,10 +1195,10 @@ offsets (end exclusive) of the summaries' scope, `scan_limit`, separate
 cut-through record prefix is omitted, not parsed as a new record.
 
 The summaries cover the whole store. The event index
-(`events.jsonl.events-v1`, layout `reb-event-index-v1/5`) folds every appended
-record into per-stream sequence bounds, the drop total, every named gap pair
-and the unreadable-line count, so a poll reads them without scanning the
-store. Once the index has caught up, `scope` is `"store"`, `scan_start` is
+(`events.jsonl.events-v1`, layout `reb-event-index-v1/6`) folds every appended
+record into per-stream sequence bounds, the drop total, every named gap pair,
+every broker refusal pair and the unreadable-line count, so a poll reads them
+without scanning the store. Once the index has caught up, `scope` is `"store"`, `scan_start` is
 `"0"` and `scan_end` is where the index ends, which can be far past
 `scan_limit`; both windows then end at that same record boundary, so a record
 counted is a record the windows could show. The index reads only complete
@@ -1225,6 +1226,13 @@ budget is exhausted, rather than freezing speculative losses.
 A canonical positive unsigned decimal gap-marker payload contributes its value
 to queue drops, otherwise the marker weighs one. Drop totals may overlap gaps.
 The respective `_saturated` flags distinguish clamping at u64 maximum.
+
+`broker_refusals` lists every `(category, reason)` pair of the
+[broker refusal](broker-refusal-v1.md) records in the same scope, in
+first-seen order, with a canonical decimal `count`. A filtered read lists them
+in its scan order. A refusal is neither a queue drop nor a named gap. A
+refusal in the refused record's place counts that record's sequence number
+as seen, so it leaves no sequence gap.
 
 Malformed or incomplete JSON in the scanned records fails the refresh; the UI
 retains its last valid data. A complete final record without a newline is valid.
@@ -1273,6 +1281,17 @@ fails. The decode reads that record only. It does not build an opcode
 workspace or open the module, so a module the detector never admits still
 has rows here. It does not recover a
 guest PC or a sample the payload does not store.
+
+A `broker_refusal` record includes `broker_refusal` beside the hex `payload`
+on every read that returns events. `status` `decoded` carries:
+- `reason`, the first check the refused record failed;
+- `identity`: `refused` when the header carries the refused record's place,
+  `broker` when it carries the broker's own stream;
+- `received_monotonic_time_ns`;
+- `refused`, the refused header fields as read.
+
+`status` `invalid` carries no fields and the record is not counted
+([rules](broker-refusal-v1.md#record)).
 
 `js_invocation_start`, `js_invocation_settle` and `js_invocation_request`
 include `js_invocation` beside the hex `payload`, decoded with the rules of

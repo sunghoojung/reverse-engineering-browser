@@ -203,7 +203,10 @@ chips.formatEvidenceTime(ns);   // {text: '+12.345 s', title, exact}; timeElemen
 - **Reasons.** `defineReasons({token: {label, meaning, kind}})` adds glossary
   entries (kind is loss, limit, policy or state). A reason chip shows the label
   and the monospace token, its tooltip is the meaning, and a click copies the
-  token. An undefined token still renders, as its own words.
+  token. An undefined token still renders, as its own words. A breakdown
+  reason may carry its own `label`, `meaning` and `kind`, which that chip uses
+  in place of the glossary's: broker refusal reasons do, because tokens such
+  as `type` and `reserved` are common words another reason could use.
 - **Notices.** `renderNotice` draws one line: a lead, plain text, chips,
   actions at the end and an optional dismiss. It wraps only when its chips do
   not fit, so no count is cut off. Loading, disconnected and malformed states
@@ -1696,6 +1699,14 @@ records are not full observations. Each one-second window has its own ring
 and count, and starts the Wasm budgets again; `reset_wasm_sample_budgets`
 closes the window at once. See
 [overflow identities](../../protocol/native-wasm-dispatch-v1.md#overflow-identities).
+A record the broker refused at validation is stored as a `broker_refusal`
+([broker refusal v1](../../protocol/broker-refusal-v1.md)). The backend counts
+these by category and reason in `broker_refusals`. Each category is a loss
+class of the status bar's gap chip, such as `3 refused records (canvas)`, whose
+breakdown lists each reason as a reason chip with its own label and meaning.
+The Traffic and VM notices show the refusals of their categories, and
+Evidence's Coverage & gaps counts the refusal records in view. Signals does
+not list a refusal as a signal of its category.
 For a live session that records a Wasm stream, VM Lab shows the session
 context's `capture_options.wasm_sampling` under its notice: the streams, the
 records each window keeps, the per-function and per-call-site allowances (an

@@ -1,5 +1,7 @@
 #include "reb/event_broker.hpp"
 
+#include "reb/broker_refusal.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <limits>
@@ -126,15 +128,53 @@ void EventBroker::TrackSequence(const StreamKey& stream, const std::uint64_t seq
     EvictSequenceTracker();
 }
 
-IngestStatus EventBroker::Ingest(const EventRecord& event) {
-  return IngestAt(event, MonotonicTimeNs());
+IngestStatus EventBroker::Ingest(const EventRecord& event, EventRecord* const refusal) {
+  return IngestAt(event, MonotonicTimeNs(), refusal);
 }
 
-IngestStatus EventBroker::IngestAt(const EventRecord& event, const std::uint64_t monotonic_now_ns) {
+void EventBroker::Retain(const EventRecord& event) {
+  if (events_.size() == capacity_) {
+    events_[next_event_] = event;
+    ++stats_.evicted;
+  } else {
+    events_.push_back(event);
+  }
+  if (++next_event_ == capacity_) {
+    next_event_ = 0;
+  }
+}
+
+IngestStatus EventBroker::IngestAt(const EventRecord& event,
+                                   const std::uint64_t monotonic_now_ns,
+                                   EventRecord* const refusal) {
   std::scoped_lock lock(mutex_);
-  if (!IsValidEvent(event)) {
+  if (const EventRefusal reason = EventRefusalOf(event); reason != EventRefusal::kNone) {
     ++stats_.invalid;
-    return IngestStatus::kInvalid;
+    // The policy applies as it would to a valid record: nothing is stored
+    // after expiry or for an excluded category. An unknown category cannot be
+    // matched against the mask, so its refusal is kept.
+    const EventCategory category =
+        BrokerRefusalCategory(static_cast<std::uint16_t>(event.header.category));
+    if (policy_.IsExpired(monotonic_now_ns) ||
+        (category != EventCategory::kUnknown && !policy_.Allows(category))) {
+      return IngestStatus::kInvalid;
+    }
+    const bool envelope = IsEnvelopeRefusal(reason);
+    const EventRecord record =
+        MakeBrokerRefusal(event, reason, monotonic_now_ns, envelope ? broker_sequence_ + 1 : 0);
+    if (envelope) {
+      ++broker_sequence_;
+    }
+    // The refusal takes the refused record's place, so its sequence number is
+    // accounted for rather than left as an unexplained hole.
+    TrackSequence({record.header.session_id, record.header.process_id},
+                  record.header.sequence_number);
+    Retain(record);
+    ++stats_.refusals_recorded;
+    if (refusal) {
+      *refusal = record;
+    }
+    return IngestStatus::kRefused;
   }
   if (policy_.IsExpired(monotonic_now_ns)) {
     ++stats_.expired;
@@ -151,15 +191,7 @@ IngestStatus EventBroker::IngestAt(const EventRecord& event, const std::uint64_t
     SaturateAdd(stats_.queue_drops, stats_.queue_drops_saturated, ReportedQueueDrops(event));
   }
 
-  if (events_.size() == capacity_) {
-    events_[next_event_] = event;
-    ++stats_.evicted;
-  } else {
-    events_.push_back(event);
-  }
-  if (++next_event_ == capacity_) {
-    next_event_ = 0;
-  }
+  Retain(event);
   ++stats_.accepted;
   return IngestStatus::kAccepted;
 }

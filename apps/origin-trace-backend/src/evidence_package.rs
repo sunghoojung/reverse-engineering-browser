@@ -1769,6 +1769,24 @@ mod tests {
         }
     }
     #[test]
+    fn broker_refusals_export_as_metadata_of_their_category() {
+        // protocol/broker-refusal-v1.md: a package keeps the refusal in its
+        // place, under `unknown` when the refused category was not known, and
+        // never its payload.
+        for reason in 1..=10 {
+            let event = crate::broker_refusal::tests::record(5, reason, "canvas");
+            let (_, projected, _, _) = source_event(&event, &Budget::new()).unwrap();
+            assert_eq!(projected["type"], "broker_refusal", "{reason}");
+            assert_eq!(projected["category"], event["category"], "{reason}");
+            assert_eq!(
+                projected["key"]["sequence_number"],
+                event["sequence_number"]
+            );
+            assert_eq!(projected["key"]["process_id"], event["process_id"]);
+            assert!(projected.get("payload").is_none());
+        }
+    }
+    #[test]
     fn a_cancelled_package_operation_stops_without_a_result() {
         let raw = include_bytes!("../assets/evidence-packages/golden-v1.json");
         let cancelled = Arc::new(AtomicBool::new(true));

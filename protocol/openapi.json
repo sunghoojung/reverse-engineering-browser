@@ -2267,7 +2267,7 @@
             "name": "type",
             "in": "query",
             "required": false,
-            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, request_headers, response_headers, cookie_list, response_body, request_initiator_stack, script_identity, capture_exclusion, tab_set, request_tab_link, script_cookie, request_watch_match, listener_dispatch, timer_observation, csp_violation, exception_observation, dom_mutation, navigation_initiator_stack, navigation_initiator_link, async_task_stack, request_extension_link, script_compiled, memory_cache_reuse, gap. An unknown name matches nothing.",
+            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, request_headers, response_headers, cookie_list, response_body, request_initiator_stack, script_identity, capture_exclusion, tab_set, request_tab_link, script_cookie, request_watch_match, listener_dispatch, timer_observation, csp_violation, exception_observation, dom_mutation, navigation_initiator_stack, navigation_initiator_link, async_task_stack, request_extension_link, script_compiled, memory_cache_reuse, broker_refusal, gap. An unknown name matches nothing.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -3117,7 +3117,7 @@
             "name": "type",
             "in": "query",
             "required": false,
-            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, request_headers, response_headers, cookie_list, response_body, request_initiator_stack, script_identity, capture_exclusion, tab_set, request_tab_link, script_cookie, request_watch_match, listener_dispatch, timer_observation, csp_violation, exception_observation, dom_mutation, navigation_initiator_stack, navigation_initiator_link, async_task_stack, request_extension_link, script_compiled, memory_cache_reuse, gap. An unknown name matches nothing.",
+            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, request_headers, response_headers, cookie_list, response_body, request_initiator_stack, script_identity, capture_exclusion, tab_set, request_tab_link, script_cookie, request_watch_match, listener_dispatch, timer_observation, csp_violation, exception_observation, dom_mutation, navigation_initiator_stack, navigation_initiator_link, async_task_stack, request_extension_link, script_compiled, memory_cache_reuse, broker_refusal, gap. An unknown name matches nothing.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -20930,7 +20930,7 @@
       "Event": {
         "type": "object",
         "additionalProperties": true,
-        "description": "Native event record validated before HTTP delivery for protocol version, canonical identifiers, process ID, and bounded hexadecimal payload consistency. Additional native record fields remain extensible; see protocol/README.md. This schema does not yet describe every native event field. wasm_dispatch_observation and wasm_indirect_observation responses from get_events and wait_for_events include wasm_observation, js_invocation_start, js_invocation_settle and js_invocation_request responses include js_invocation, and the six debugger observation types (40 to 45) include debugger_observation. The payload hex remains.",
+        "description": "Native event record validated before HTTP delivery for protocol version, canonical identifiers, process ID, and bounded hexadecimal payload consistency. Additional native record fields remain extensible; see protocol/README.md. This schema does not yet describe every native event field. wasm_dispatch_observation and wasm_indirect_observation responses from get_events and wait_for_events include wasm_observation, js_invocation_start, js_invocation_settle and js_invocation_request responses include js_invocation, the six debugger observation types (40 to 45) include debugger_observation, and every read that returns broker_refusal records includes broker_refusal. The payload hex remains.",
         "properties": {
           "wasm_observation": {
             "$ref": "#/components/schemas/WasmObservationDecode"
@@ -20940,6 +20940,9 @@
           },
           "debugger_observation": {
             "$ref": "#/components/schemas/DebuggerObservationDecode"
+          },
+          "broker_refusal": {
+            "$ref": "#/components/schemas/BrokerRefusalDecode"
           }
         }
       },
@@ -21072,10 +21075,13 @@
               "events_limited",
               "network_events_limited"
             ],
-            "description": "scan_start and scan_end are the half-open complete-record byte scope of the summaries: sequence_gaps, queue_drops, named_gaps and malformed_lines. store is the whole store, counted by the event index, and can exceed scan_limit. bounded_tail is the newest scan_limit bytes while the index catches up, which excludes the older prefix and is not a session-total claim. bounded_range is a filtered read's scanned range, which can start or end inside the store. The events and network_events windows are the newest records of at most scan_limit bytes that end at scan_end; next_before reads older ones."
+            "description": "scan_start and scan_end are the half-open complete-record byte scope of the summaries: sequence_gaps, queue_drops, named_gaps, broker_refusals and malformed_lines. store is the whole store, counted by the event index, and can exceed scan_limit. bounded_tail is the newest scan_limit bytes while the index catches up, which excludes the older prefix and is not a session-total claim. bounded_range is a filtered read's scanned range, which can start or end inside the store. The events and network_events windows are the newest records of at most scan_limit bytes that end at scan_end; next_before reads older ones."
           },
           "named_gaps": {
             "$ref": "#/components/schemas/NamedGaps"
+          },
+          "broker_refusals": {
+            "$ref": "#/components/schemas/BrokerRefusalCounts"
           },
           "query": {
             "$ref": "#/components/schemas/EventQueryPage"
@@ -36371,6 +36377,7 @@
           "category": {
             "type": "string",
             "enum": [
+              "unknown",
               "canvas",
               "webgl",
               "web_audio",
@@ -36437,7 +36444,8 @@
               "async_task_stack",
               "request_extension_link",
               "script_compiled",
-              "memory_cache_reuse"
+              "memory_cache_reuse",
+              "broker_refusal"
             ]
           },
           "status_code": {
@@ -43032,6 +43040,176 @@
           ]
         }
       },
+      "BrokerRefusalCounts": {
+        "type": "array",
+        "description": "Every (category, reason) pair of the broker_refusal records, in first-seen order: records the broker refused at validation and stored a broker_refusal in place of (protocol/broker-refusal-v1.md). category is the refused record's category, or unknown when it was not a known one. reason is the first check that failed. A refusal is not a queue drop or a named gap; when it takes the refused record's place its sequence number is not a sequence gap.",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "category",
+            "reason",
+            "count"
+          ],
+          "properties": {
+            "category": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "protocol_version",
+                "header_size",
+                "process_id",
+                "payload_size",
+                "reserved",
+                "category",
+                "type",
+                "flags",
+                "network_class",
+                "typed_payload"
+              ]
+            },
+            "count": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          }
+        }
+      },
+      "BrokerRefusalDecode": {
+        "description": "Read-path decode of one broker_refusal record (protocol/broker-refusal-v1.md), placed beside the unchanged payload hex by every read that returns events. status invalid means the record was rejected and no field is returned: the envelope is not protocol 3 with flags 0, zero network fields and an untruncated 128-byte hex payload; the payload version is not 1 or its trailing bytes are not zero; the category is not the refused one; the reason does not agree with the refused fields; or the header does not carry the identity the reason calls for. identity refused means the header carries the refused record's identifiers and sequence number as read; broker means the refused header could not name its place, so the record is on the broker's own stream (process 4294967295). refused holds the refused header fields as read; none of them was validated.",
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "const": "invalid"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "reason",
+              "identity",
+              "received_monotonic_time_ns",
+              "refused"
+            ],
+            "properties": {
+              "status": {
+                "const": "decoded"
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "protocol_version",
+                  "header_size",
+                  "process_id",
+                  "payload_size",
+                  "reserved",
+                  "category",
+                  "type",
+                  "flags",
+                  "network_class",
+                  "typed_payload"
+                ]
+              },
+              "identity": {
+                "type": "string",
+                "enum": [
+                  "refused",
+                  "broker"
+                ]
+              },
+              "received_monotonic_time_ns": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "refused": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "protocol_version",
+                  "header_size",
+                  "category",
+                  "type",
+                  "payload_size",
+                  "flags",
+                  "scheme_class",
+                  "loader_kind",
+                  "sequence_number",
+                  "monotonic_time_ns",
+                  "process_id",
+                  "thread_id"
+                ],
+                "properties": {
+                  "protocol_version": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 65535
+                  },
+                  "header_size": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 65535
+                  },
+                  "category": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 65535
+                  },
+                  "type": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 65535
+                  },
+                  "payload_size": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295
+                  },
+                  "flags": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 65535
+                  },
+                  "scheme_class": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 255
+                  },
+                  "loader_kind": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 255
+                  },
+                  "sequence_number": {
+                    "$ref": "#/components/schemas/Uint64String"
+                  },
+                  "monotonic_time_ns": {
+                    "$ref": "#/components/schemas/Uint64String"
+                  },
+                  "process_id": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295
+                  },
+                  "thread_id": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
       "NamedGaps": {
         "type": "array",
         "description": "Every (category, reason) pair of the gap markers whose payload names a producer reason, such as native_guest_sample_limit, in first-seen order. They also count in queue_drops.",
@@ -43608,7 +43786,8 @@
               "sequence_gaps_saturated",
               "queue_drops",
               "queue_drops_saturated",
-              "named_gaps"
+              "named_gaps",
+              "broker_refusals"
             ],
             "properties": {
               "scope": {
@@ -43790,6 +43969,9 @@
               },
               "named_gaps": {
                 "$ref": "#/components/schemas/NamedGaps"
+              },
+              "broker_refusals": {
+                "$ref": "#/components/schemas/BrokerRefusalCounts"
               }
             }
           },
@@ -44125,6 +44307,7 @@
                     "queue_drops",
                     "sequence_gaps",
                     "named_gap",
+                    "broker_refusal",
                     "browser_internal_excluded",
                     "no_tab_traffic_excluded",
                     "memory_cache_reuse_not_recorded",

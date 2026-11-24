@@ -8,7 +8,9 @@ uses the existing sorted-key ASCII canonical JSON, excluding `document_digest`.
 Hashes identify content, not authenticity or authorization.
 
 Only the already admitted, deduplicated VM event stream and retained validated
-workspace samples participate. Each workspace counts the host events sharing
+workspace samples participate. The report has one row for every workspace of
+that document; workspace producers before 2.21.0 kept 256 workspaces, so
+reports bound to them hold at most 256. Each workspace counts the host events sharing
 the interpreter's session, navigation and frame (`frame_host_records`) and
 those naming the interpreter artifact (`attributed_host_records`), and names
 the `get_events` parameters that list them (`events_filter`). It lists the

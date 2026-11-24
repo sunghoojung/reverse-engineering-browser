@@ -22,9 +22,6 @@ use wasmparser::{
     ValType,
 };
 
-/// Tables beyond this many placed slots are not expanded into slot maps.
-pub(crate) const MAX_TABLE_SLOTS: usize = 1_000_000;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Placement {
     /// A constant offset, including through defined immutable globals.
@@ -89,10 +86,10 @@ type SlotGroups = HashMap<(u32, u32), Rc<MatchingSlots>>;
 
 pub(crate) struct Tables {
     pub segments: Vec<Segment>,
-    /// Real table slot to its entry after placed segments are applied in order.
+    /// Real table slot to its entry after placed segments are applied in
+    /// order. Every placed slot is expanded: a segment lists its entries in
+    /// the module, so the map is linear in the module's bytes.
     pub slots: BTreeMap<u32, Vec<(u32, Entry)>>,
-    /// Tables whose placed slots exceeded the bound and were not expanded.
-    pub oversized: Vec<u32>,
     /// Function index (imports first) to type index.
     pub function_types: Vec<u32>,
     /// Type index to function signature; None for non-function types.
@@ -126,7 +123,6 @@ impl Tables {
         let mut tables = Self {
             segments: Vec::new(),
             slots: BTreeMap::new(),
-            oversized: Vec::new(),
             function_types: Vec::new(),
             signatures: Vec::new(),
             minimums: Vec::new(),
@@ -401,17 +397,8 @@ impl Tables {
                 _ => (),
             }
         }
-        for (table, slots) in &mut tables.slots {
+        for slots in tables.slots.values_mut() {
             sort_slots(slots, meter)?;
-            if slots.len() > MAX_TABLE_SLOTS {
-                slots.clear();
-                if !tables.memory.push(&mut tables.oversized, *table) {
-                    return None;
-                }
-            }
-        }
-        for table in &tables.oversized {
-            tables.slots.remove(table);
         }
         let mut signatures = HashMap::new();
         for signature in &tables.signatures {

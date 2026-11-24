@@ -73,8 +73,10 @@ WebAssembly, per function body:
   a fetch at a global or frame-slot position it advances itself, or only
   constants (a halt handler), and at least one fetches. The selector repeats
   when a loop encloses the call. Otherwise its source stays
-  `handler_address`. A table expanded past the slot bound, or with more than
-  1024 such functions, is a counted `classification-trace-limit` unknown.
+  `handler_address`. Every such function of a table of any size is checked.
+  VM detectors before 1.14.0 counted a table of more than 1,000,000 placed
+  slots, or with more than 1024 such functions, as a
+  `classification-trace-limit` unknown.
 - A threaded cycle is a function placed in a table that dispatches that
   table again with a cursor fetch that outlives the call (a global or a
   frame slot it advances), as a `return_call_indirect` or a `call_indirect`.
@@ -253,7 +255,12 @@ the first that does not fit, so every later active segment is `unreached` and
 fills no slot either; earlier placements only matter for an imported table,
 which keeps them. A `ref.null` item empties its slot; any other non-`ref.func`
 item stores a reference whose function is unknown, so it never matches a type
-and never erases knowledge silently.
+and never erases knowledge silently. `matching_slot_count` counts every
+matching slot and `matching_slots` lists the first 32. Every site with the
+same table and type shares that one set, so listing it whole on each site would
+grow the document with sites times slots. VM detectors before 1.14.0 did not
+expand a table of more than 1,000,000 placed slots; their documents stay
+valid.
 
 `populated_slot_count` is the corrected count of placed slots. It is not a
 ranking input: the detector's Wasm ranking keeps its own element fanout, which

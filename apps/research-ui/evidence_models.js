@@ -2398,13 +2398,62 @@
         return known.length && known.every(effect => meaning(effect) === meaning(known[0])) ? known[0] : null;
       }
 
+      // Validation looks rows up by key once per row, handler or claim. These
+      // lookups are built once per workspace on first use, so validation stays
+      // linear however many handlers, sites, rows and claims a workspace lists.
+      // isVmOpcodeWorkspace drops them before and after it runs, so they never
+      // outlive the document state they were built from.
+      const vmWorkspaceIndexes = new WeakMap();
+      function vmIndexed(workspace, name, build) {
+        let index = vmWorkspaceIndexes.get(workspace);
+        if (index === undefined) {
+          index = new Map();
+          vmWorkspaceIndexes.set(workspace, index);
+        }
+        if (!index.has(name)) index.set(name, build());
+        return index.get(name);
+      }
+      // The first row of each key, as Array.find would return it.
+      function vmFirstByKey(rows, key) {
+        const first = new Map();
+        for (const row of rows) {
+          const value = key(row);
+          if (!first.has(value)) first.set(value, row);
+        }
+        return first;
+      }
+      // Every row of each key, in list order.
+      function vmGroupByKey(rows, key) {
+        const groups = new Map();
+        for (const row of rows) {
+          const value = key(row);
+          const group = groups.get(value);
+          if (group) group.push(row);
+          else groups.set(value, [row]);
+        }
+        return groups;
+      }
+      function vmHandlersOfOpcode(workspace, opcode) {
+        return vmIndexed(workspace, 'handlers-by-opcode', () => vmGroupByKey(workspace.handlers, handler => handler.opcode)).get(opcode) ?? [];
+      }
+      function vmInventorySite(workspace, offset) {
+        const candidates = workspace.dispatch_inventory?.candidates;
+        return candidates && vmIndexed(workspace, 'inventory-sites', () => vmFirstByKey(candidates, site => site.byte_offset)).get(offset);
+      }
+      function vmClassifiedSite(workspace, offset) {
+        const sites = workspace.dispatch_classification?.sites;
+        return sites && vmIndexed(workspace, 'classified-sites', () => vmFirstByKey(sites, site => site.location.byte_offset)).get(offset);
+      }
+
       function isVmByteCoverage(coverage, snapshots, handlers, unknowns) {
         if (!vmWorkspaceExact(coverage, ['complete', 'handler_count', 'retained_snapshot_bytes', 'characterized_bytes',
           'uncharacterized_bytes', 'attributions', 'omissions']) || typeof coverage.complete !== 'boolean' ||
           coverage.handler_count !== handlers.length ||
+          // Producers before 2.21.0 counted at most 16 snapshot windows, 4096
+          // attributions and 256 omissions; every one is kept since.
           !['retained_snapshot_bytes', 'characterized_bytes', 'uncharacterized_bytes'].every(key =>
-            isSafeIntegerInRange(coverage[key], 0, 65536)) || !Array.isArray(coverage.attributions) ||
-          coverage.attributions.length > 65536 || !Array.isArray(coverage.omissions) || coverage.omissions.length > 256 ||
+            isSafeIntegerInRange(coverage[key], 0, Number.MAX_SAFE_INTEGER)) || !Array.isArray(coverage.attributions) ||
+          !Array.isArray(coverage.omissions) ||
           !coverage.omissions.every(row => isPlainObject(row) && hasOnlyKeys(row, new Set(['reason', 'detail'])) &&
             isBoundedText(row.reason, 80) && row.reason.length > 0 &&
             (row.detail === undefined || (isBoundedText(row.detail, 240) && row.detail.length > 0)))) return false;
@@ -2419,10 +2468,11 @@
         }
         const starts = new Map(), occupied = new Map();
         const position = (artifact, offset) => `${artifact}:${offset}`;
+        const handlerOf = vmFirstByKey(handlers.filter(row => row.state !== 'unknown'), row => row.opcode);
         for (const range of coverage.attributions) {
           if (!vmWorkspaceExact(range, ['artifact_id', 'byte_offset', 'byte_size', 'opcode', 'kind', 'evidence_class'])) return false;
           const image = previews.get(range.artifact_id);
-          const handler = handlers.find(row => row.opcode === range.opcode && row.state !== 'unknown');
+          const handler = handlerOf.get(range.opcode);
           const effect = handler && vmUniqueWorkspaceEffect(handler);
           if (!image || !effect || !isSafeIntegerInRange(range.byte_offset, 0, 4095) ||
             !isSafeIntegerInRange(range.byte_size, 1, 4096) || range.byte_offset + range.byte_size > image.mask.length ||
@@ -2443,8 +2493,7 @@
         for (const range of coverage.attributions) {
           const image = previews.get(range.artifact_id);
           if (range.kind === 'operand') {
-            const handler = handlers.find(row => row.opcode === range.opcode && row.state !== 'unknown');
-            const effect = vmUniqueWorkspaceEffect(handler);
+            const effect = vmUniqueWorkspaceEffect(handlerOf.get(range.opcode));
             if (!effect.operand_layout.some(operand => operand.byte_size === range.byte_size && operand.byte_offset !== null &&
                 starts.get(position(range.artifact_id, range.byte_offset - operand.byte_offset))?.opcode === range.opcode)) return false;
           }
@@ -2490,19 +2539,19 @@
       }
 
       function isVmInstructionTraversal(traversal, snapshots, handlers) {
+        // Producers before 2.21.0 walked at most 16 snapshots and kept 4096
+        // instructions, 8192 edges and 256 frontier rows; every one is kept since.
         if (!vmWorkspaceExact(traversal, ['entry_offsets', 'instructions', 'edges', 'frontier', 'complete']) ||
-          typeof traversal.complete !== 'boolean' ||
-          !Array.isArray(traversal.entry_offsets) || traversal.entry_offsets.length > 16 ||
-          !Array.isArray(traversal.instructions) || traversal.instructions.length > 4096 ||
-          !Array.isArray(traversal.edges) || traversal.edges.length > 8192 ||
-          !Array.isArray(traversal.frontier) || traversal.frontier.length > 256) return false;
+          typeof traversal.complete !== 'boolean' || !Array.isArray(traversal.entry_offsets) ||
+          !Array.isArray(traversal.instructions) || !Array.isArray(traversal.edges) || !Array.isArray(traversal.frontier)) return false;
         const images = new Map(snapshots.map(snapshot => [snapshot.artifact_id, snapshot.preview_hex]));
         const key = (artifact, offset) => `${artifact}:${offset}`;
         const instructions = new Map(), occupied = new Set(), expectedEdges = new Set();
+        const handlersOf = vmGroupByKey(handlers, handler => handler.opcode);
         for (const row of traversal.instructions) {
           if (!vmWorkspaceExact(row, ['artifact_id', 'byte_offset', 'byte_size', 'opcode', 'effect_id'])) return false;
           const preview = images.get(row.artifact_id);
-          const effect = handlers.filter(handler => handler.opcode === row.opcode)
+          const effect = (handlersOf.get(row.opcode) ?? [])
             .map(vmUniqueWorkspaceEffect).find(candidate => candidate?.effect_id === row.effect_id);
           if (typeof preview !== 'string' || !isSafeIntegerInRange(row.byte_offset, 0, 4095) ||
             !isSafeIntegerInRange(row.byte_size, 1, 65) || row.byte_offset + row.byte_size > preview.length / 2 ||
@@ -2549,10 +2598,10 @@
         if (!traversal.frontier.every(row => vmWorkspaceExact(row, ['artifact_id', 'byte_offset', 'reason']) &&
           (row.artifact_id === null || isCanonicalInteger(row.artifact_id, 0n, uint64Max)) &&
           (row.byte_offset === null || isSafeIntegerInRange(row.byte_offset, 0, 0xffffffff)) && reasons.includes(row.reason))) return false;
+        const entered = new Set(traversal.entry_offsets.map(entry => entry.artifact_id));
         return !traversal.complete || (entries.size > 0 && traversal.frontier.length === 0 &&
           snapshots.every(snapshot => !snapshot.truncated && typeof snapshot.preview_hex === 'string' &&
-            snapshot.byte_count === snapshot.preview_hex.length / 2 &&
-            traversal.entry_offsets.some(entry => entry.artifact_id === snapshot.artifact_id)) &&
+            snapshot.byte_count === snapshot.preview_hex.length / 2 && entered.has(snapshot.artifact_id)) &&
           [...entries].every(entry => instructions.has(entry)) && traversal.edges.every(row =>
             row.to_offset !== null && instructions.has(key(row.artifact_id, row.to_offset))));
       }
@@ -2605,8 +2654,9 @@
           isSafeIntegerInRange(preview.byte_count, 1, Number.MAX_SAFE_INTEGER) &&
           Number.isSafeInteger(preview.byte_offset + preview.byte_count) &&
           workspace.handlers.some(handler => handler.source.byte_offset === preview.byte_offset && handler.source.byte_size === preview.byte_count) &&
+          // The whole instruction since producer 2.21.0; earlier ones kept 4096 bytes.
           typeof preview.preview_hex === 'string' && /^(?:[0-9a-f]{2})+$/.test(preview.preview_hex) &&
-          preview.preview_hex.length <= 8192 && preview.preview_hex.length / 2 <= preview.byte_count &&
+          preview.preview_hex.length / 2 <= preview.byte_count &&
           preview.truncated === (preview.preview_hex.length / 2 < preview.byte_count);
       }
 
@@ -2656,8 +2706,9 @@
       function vmInterpreterArm(workspace, handler) {
         const classification = workspace.runtime === 'webassembly' ? workspace.dispatch_classification : undefined;
         if (classification === undefined) return true;
-        return classification.sites.some(site => site.location.byte_offset === handler.source.byte_offset &&
-          site.role === 'interpreter-candidate');
+        return vmIndexed(workspace, 'interpreter-offsets', () => new Set(classification.sites
+          .filter(site => site.role === 'interpreter-candidate').map(site => site.location.byte_offset)))
+          .has(handler.source.byte_offset);
       }
 
       function vmGuestOpcodeIsaProven(workspace) {
@@ -2668,7 +2719,7 @@
         if (workspace.samples.some(sample =>
           ['instruction-index', 'byte-offset'].includes(sample.instruction_pointer_units) &&
           uses.get(sample.opcode) === 1 &&
-          workspace.handlers.some(handler => handler.opcode === sample.opcode && handler.state === 'observed' &&
+          vmHandlersOfOpcode(workspace, sample.opcode).some(handler => handler.state === 'observed' &&
             handler.sample_count > 0 && vmInterpreterArm(workspace, handler)))) return true;
         return ['stack', 'register'].includes(workspace.model) &&
           workspace.handlers.some(handler => vmUniqueWorkspaceEffect(handler));
@@ -2717,21 +2768,23 @@
         return vmWorkspaceExact(cluster, ['target', 'selector_count', 'selectors']) &&
           isSafeIntegerInRange(cluster.target, 0, 4294967295) &&
           isSafeIntegerInRange(cluster.selector_count, 1, 4294967295) &&
-          Array.isArray(cluster.selectors) && cluster.selectors.length <= 32 &&
-          cluster.selectors.length <= cluster.selector_count &&
+          // Every selector since producer 2.21.0; earlier ones listed 32.
+          Array.isArray(cluster.selectors) && cluster.selectors.length <= cluster.selector_count &&
           cluster.selectors.every(value => isSafeIntegerInRange(value, 0, 4294967295)) &&
           new Set(cluster.selectors).size === cluster.selectors.length;
       }
 
+      // Every ranked table since producer 2.21.0; earlier ones kept 12.
       function isVmHandlerTables(tables) {
-        if (!Array.isArray(tables) || tables.length === 0 || tables.length > 12 || !tables.every(isVmHandlerTable)) return false;
+        if (!Array.isArray(tables) || tables.length === 0 || !tables.every(isVmHandlerTable)) return false;
         return true;
       }
 
       // Element rows from producer 2.9.0 and later list each active segment
-      // with its evaluated placement; older documents omit the field.
+      // with its evaluated placement, every one since 2.21.0 and at most 64
+      // before; older documents omit the field.
       function isVmElementSegments(segments) {
-        return Array.isArray(segments) && segments.length <= 64 && segments.every(segment =>
+        return Array.isArray(segments) && segments.every(segment =>
           vmWorkspaceExact(segment, ['segment_index', 'placement', 'offset', 'global_index', 'entry_count']) &&
           isSafeIntegerInRange(segment.segment_index, 0, 4294967295) &&
           ['placed', 'relative', 'out-of-range', 'unreached', 'unresolved'].includes(segment.placement) &&
@@ -2747,7 +2800,7 @@
         if (isPlainObject(table) && table.segments !== undefined) {
           if (table.kind !== 'element' || !isVmElementSegments(table.segments)) return false;
           keys.push('segments');
-          // Producers that list segments also count the ones past the bound.
+          // Producers before 2.21.0 listed 64 segments and counted the rest.
           if (table.omitted_segment_count !== undefined) {
             if (!isSafeIntegerInRange(table.omitted_segment_count, 0, 4294967295) ||
               (table.omitted_segment_count > 0 && table.segments.length !== 64)) return false;
@@ -2756,8 +2809,8 @@
         }
         if (!vmWorkspaceExact(table, keys) || !['br_table', 'call_indirect', 'element'].includes(table.kind) ||
           !isSafeIntegerInRange(table.omitted_cluster_count, 0, 4294967295) ||
-          !Array.isArray(table.clusters) || table.clusters.length > 1024 ||
-          !table.clusters.every(isVmHandlerCluster)) return false;
+          // Every cluster since producer 2.21.0; earlier ones listed 1024.
+          !Array.isArray(table.clusters) || !table.clusters.every(isVmHandlerCluster)) return false;
         const counted = table.clusters.reduce((sum, cluster) => sum + cluster.selector_count, 0);
         if (table.kind === 'br_table') {
           const expected = table.arm_count >= 32 ? 'handler-table-candidate' : 'cff-helper';
@@ -2960,7 +3013,7 @@
           !isSafeIntegerInRange(row.module_byte_offset,8,WASM_MODULE_OFFSET_LIMIT - 1) || !isSafeIntegerInRange(row.selector,0,0xffffffff) ||
           !isSafeIntegerInRange(row.table_count,0,16777215) || !isSafeIntegerInRange(row.sample_index,0,0xfffffffe) ||
           row.selected_arm !== Math.min(row.selector,row.table_count) || row.is_default !== (row.selector >= row.table_count)) return false;
-        const site = workspace.dispatch_inventory?.candidates.find(site => site.byte_offset === row.module_byte_offset);
+        const site = vmInventorySite(workspace, row.module_byte_offset);
         return site ? site.kind === 'br_table' && site.function_index === row.function_index && site.arm_count === row.table_count
           : (workspace.dispatch_inventory?.omitted_site_count ?? 0) > 0;
       }
@@ -2975,9 +3028,9 @@
           !isSafeIntegerInRange(row.table_index,0,16777215) || !isSafeIntegerInRange(row.slot,0,0xffffffff) ||
           !vmIndirectResolutions.includes(row.resolution) || !isSafeIntegerInRange(row.sample_index,0,0xfffffffe) ||
           (row.resolution === 'resolved' ? !isSafeIntegerInRange(row.callee_function_index,0,16777215) : row.callee_function_index !== null)) return false;
-        const site = workspace.dispatch_inventory?.candidates.find(site => site.byte_offset === row.module_byte_offset);
+        const site = vmInventorySite(workspace, row.module_byte_offset);
         if (site && (site.kind !== 'call_indirect' || row.instruction !== 'call_indirect' || site.function_index !== row.function_index)) return false;
-        const classified = workspace.dispatch_classification?.sites.find(site => site.location.byte_offset === row.module_byte_offset);
+        const classified = vmClassifiedSite(workspace, row.module_byte_offset);
         return !classified || (classified.instruction === row.instruction && classified.location.function_index === row.function_index &&
           (classified.table === null || classified.table.table_index === row.table_index));
       }
@@ -3017,8 +3070,9 @@
       // probe anchor and shape; undefined when no listed site has it.
       function vmNativeJsSite(workspace, anchor, shape) {
         const instruction = shape === 'switch' ? 'switch' : 'indexed call';
-        return workspace.dispatch_classification?.sites.find(site =>
-          site.location.anchor_offset === anchor && site.instruction === instruction);
+        const sites = workspace.dispatch_classification?.sites;
+        return sites && vmIndexed(workspace, 'anchored-sites', () => vmFirstByKey(sites,
+          site => `${site.location.anchor_offset}:${site.instruction}`)).get(`${anchor}:${instruction}`);
       }
       function vmNativeJsHandler(row) {
         if (row.shape === 'switch') return {kind: 'switch-case', case_value: row.selector};
@@ -3100,7 +3154,7 @@
           base + BigInt(row.memory_length) > uint64Max ||
           adjusted - (row.pc_subtract_memory_base ? base : 0n) !== BigInt(row.instruction_pointer) ||
           (row.interpretation === 'verified-dataflow' && row.selector !== row.opcode)) return false;
-        const site = workspace.dispatch_inventory?.candidates.find(s => s.byte_offset === row.module_byte_offset);
+        const site = vmInventorySite(workspace, row.module_byte_offset);
         return site ? site.kind === 'br_table' && site.function_index === row.function_index && site.arm_count === row.table_count
           : (workspace.dispatch_inventory?.omitted_site_count ?? 0) > 0;
       }
@@ -3109,6 +3163,15 @@
         return row.module_byte_offset === handler.source.byte_offset &&
           (row.is_default ? handler.opcode === null && /^br_table(?: f[0-9]+)? default$/.test(handler.label)
             : handler.opcode === row.selector);
+      }
+      // nativeWasmMatchesHandler as keys: a row and a handler match exactly when
+      // their keys are equal, so matches are counted by grouping, not by pairs.
+      function vmNativeRowMatchKey(row) {
+        return `${row.module_byte_offset}:${row.is_default ? 'default' : row.selector}`;
+      }
+      function vmHandlerMatchKey(handler) {
+        if (handler.opcode !== null) return `${handler.source.byte_offset}:${handler.opcode}`;
+        return /^br_table(?: f[0-9]+)? default$/.test(handler.label) ? `${handler.source.byte_offset}:default` : null;
       }
 
       // Producers since 2.12.0 derive observed claims from every qualifying
@@ -3120,7 +3183,7 @@
       function vmObservedInterpreterSite(workspace, offset) {
         const classification = workspace.dispatch_classification;
         if (!classification) return false;
-        const listed = classification.sites.find(site => site.location.byte_offset === offset);
+        const listed = vmClassifiedSite(workspace, offset);
         return listed ? listed.role === 'interpreter-candidate' : classification.omitted_site_count > 0;
       }
       function vmObservedRowKey(stream, row) {
@@ -3154,12 +3217,13 @@
         const inside = (offset, entry) => offset >= entry.location.byte_offset && offset < entry.location.byte_offset + entry.location.byte_size;
         let row;
         if (claim.handler.kind === 'switch-case') {
-          const nested = (workspace.dispatch_classification?.sites ?? []).filter(entry => entry.instruction === 'switch' &&
-            entry.location.byte_offset > site.location.byte_offset && entry.location.byte_offset < site.location.byte_offset + site.location.byte_size);
-          row = workspace.handlers.find(handler => handler.opcode === opcode && handler.handler_index === undefined &&
+          const nested = vmIndexed(workspace, `nested-switches:${site.location.byte_offset}:${site.location.byte_size}`, () =>
+            (workspace.dispatch_classification?.sites ?? []).filter(entry => entry.instruction === 'switch' &&
+              entry.location.byte_offset > site.location.byte_offset && entry.location.byte_offset < site.location.byte_offset + site.location.byte_size));
+          row = vmHandlersOfOpcode(workspace, opcode).find(handler => handler.handler_index === undefined &&
             inside(handler.source.byte_offset, site) && !nested.some(entry => inside(handler.source.byte_offset, entry)));
         } else {
-          row = workspace.handlers.find(handler => handler.opcode === opcode && handler.handler_index !== undefined);
+          row = vmHandlersOfOpcode(workspace, opcode).find(handler => handler.handler_index !== undefined);
         }
         if (row) {
           const span = claim.handler;
@@ -3192,7 +3256,7 @@
             comparison.handler_index === expected.handler_index && comparison.byte_offset === expected.byte_offset;
         }
         if (claim.stream === 'dispatch-sample') {
-          const row = workspace.handlers.find(handler => handler.opcode === claim.opcode);
+          const row = vmHandlersOfOpcode(workspace, claim.opcode)[0];
           if (row) {
             const named = row.handler_index ?? claim.opcode;
             return comparison.state === (named === claim.handler.handler_index ? 'agrees' : 'disagrees') &&
@@ -3204,8 +3268,9 @@
           return empty('absent') && comparison.opcode === null;
         }
         if (claim.stream === 'native-wasm-indirect') return vmIndirectStaticClaimMatches(workspace, claim);
-        const row = claim.handler.is_default ? undefined : workspace.handlers.find(handler =>
-          handler.source.byte_offset === claim.site.byte_offset && handler.opcode === claim.selector);
+        const row = claim.handler.is_default ? undefined : vmIndexed(workspace, 'handlers-at-site', () =>
+          vmFirstByKey(workspace.handlers, handler => `${handler.source.byte_offset}:${handler.opcode}`))
+          .get(`${claim.site.byte_offset}:${claim.selector}`);
         if (!row) return empty('absent') && comparison.opcode === null;
         return comparison.state === (claim.stream === 'native-guest' && claim.opcode !== claim.selector ? 'disagrees' : 'agrees') &&
           comparison.opcode === claim.selector && comparison.handler_index === null && comparison.byte_offset === row.source.byte_offset;
@@ -3216,9 +3281,20 @@
       function vmIndirectStaticClaimMatches(workspace, claim) {
         const comparison = claim.static_claim;
         const slot = claim.selector;
-        const listed = (workspace.handler_tables ?? []).filter(table => table.kind === 'element' &&
-          table.table_index === claim.handler.table_index).flatMap(table => table.clusters)
-          .find(cluster => cluster.selectors.includes(slot));
+        // The first element cluster, in table and cluster order, that lists each slot.
+        const listed = vmIndexed(workspace, 'element-slots', () => {
+          const clusters = new Map();
+          for (const table of workspace.handler_tables ?? []) {
+            if (table.kind !== 'element') continue;
+            for (const cluster of table.clusters) {
+              for (const selector of cluster.selectors) {
+                const key = `${table.table_index}:${selector}`;
+                if (!clusters.has(key)) clusters.set(key, cluster);
+              }
+            }
+          }
+          return clusters;
+        }).get(`${claim.handler.table_index}:${slot}`);
         if (comparison.state === 'absent') return !listed && comparison.opcode === null &&
           comparison.handler_index === null && comparison.byte_offset === null;
         if (comparison.opcode !== slot) return false;
@@ -3252,14 +3328,16 @@
         }
         const limited = workspace.coverage.omissions.some(row => row.reason === 'observed-claim-limit');
         if (claims === undefined) return !complete || rowsByKey.size === 0;
-        if (!Array.isArray(claims) || claims.length < 1 || claims.length > 256 || !workspace.dispatch_classification) return false;
+        // Every claim since producer 2.21.0; earlier ones kept 256 and named the
+        // rest observed-claim-limit.
+        if (!Array.isArray(claims) || claims.length < 1 || !workspace.dispatch_classification) return false;
         const sole = vmObservedSoleSite(workspace);
         const seen = new Set();
         let disagreements = 0;
         for (const claim of claims) {
           if (!vmWorkspaceExact(claim, ['stream', 'confidence', 'site', 'site_attribution', 'selector', 'opcode', 'handler',
             'sample_count', 'events', 'static_claim']) || !Object.hasOwn(streams, claim.stream) || claim.confidence !== 'observed' ||
-            !isSafeIntegerInRange(claim.sample_count, 1, 4096) || !Array.isArray(claim.events) ||
+            !isSafeIntegerInRange(claim.sample_count, 1, Number.MAX_SAFE_INTEGER) || !Array.isArray(claim.events) ||
             claim.events.length !== Math.min(claim.sample_count, 8) || !claim.events.every(event => vmSampleEvent(event))) return false;
           if (claim.stream === 'dispatch-sample') {
             if (workspace.runtime !== 'javascript' || !vmWorkspaceExact(claim.handler, ['kind', 'handler_index']) ||
@@ -3315,6 +3393,32 @@
         if (disagreements > 0 && !workspace.unknowns.some(text => text.startsWith(`${disagreements} observed dispatch claim`))) return false;
         return !complete || limited || [...rowsByKey.keys()].every(key => seen.has(key));
       }
+      // Rows sorted by renderer sequence, with their sequences for binary search.
+      function vmSequenceSorted(rows) {
+        const sorted = rows.map(row => ({row, sequence: BigInt(row.event.sequence_number)}))
+          .sort((left, right) => (left.sequence < right.sequence ? -1 : 1));
+        return {rows: sorted.map(entry => entry.row), sequences: sorted.map(entry => entry.sequence)};
+      }
+      // How many sorted sequences are below value.
+      function vmSequencesBelow(sequences, value) {
+        let low = 0, high = sequences.length;
+        while (low < high) {
+          const middle = (low + high) >> 1;
+          if (sequences[middle] < value) low = middle + 1;
+          else high = middle;
+        }
+        return low;
+      }
+      // An inner guest's opcodes and sample counts, ascending: every one since
+      // producer 2.21.0, and the first 64 with the rest counted before.
+      function vmInnerOpcodesValid(inner, expected) {
+        const listed = inner.observed_opcodes;
+        return Array.isArray(listed) && isSafeIntegerInRange(inner.omitted_opcode_count, 0, Number.MAX_SAFE_INTEGER) &&
+          listed.length + inner.omitted_opcode_count === expected.length &&
+          (inner.omitted_opcode_count === 0 || listed.length === 64) &&
+          listed.every((entry, index) => vmWorkspaceExact(entry, ['opcode', 'sample_count']) &&
+            entry.opcode === expected[index][0] && entry.sample_count === expected[index][1]);
+      }
       // Producer 2.17.0 and later: a native JavaScript activation whose first
       // dispatch named a parent that dispatched first at another
       // interpreter-candidate site, neither site a threaded cycle.
@@ -3322,6 +3426,13 @@
         const rows = workspace.native_js_observations ?? [];
         const byEvent = new Map(rows.map(row => [vmSampleEventKey(row.event), row]));
         const scope = row => `${row.event.session_id}:${row.event.process_id}:${row.thread_id}`;
+        const grouped = vmGroupByKey(rows, row => `${scope(row)}:${row.activation_id}`);
+        const activations = new Map();
+        const activation = (sample, id) => {
+          const key = `${scope(sample)}:${id}`;
+          if (!activations.has(key)) activations.set(key, vmSequenceSorted(grouped.get(key) ?? []));
+          return activations.get(key);
+        };
         const siteMatches = (value, row) => {
           const site = vmNativeJsSite(workspace, row.anchor_offset, row.shape);
           return site && site.role === 'interpreter-candidate' && site.dispatch_kind !== 'threaded' &&
@@ -3345,36 +3456,35 @@
             vmCanonicalJson(outer.handler) !== vmCanonicalJson(driver.selector === null ? null : vmNativeJsHandler(driver)) ||
             scope(driver) !== scope(first) || inner.activation_id !== first.activation_id ||
             first.parent_activation_id !== outer.activation_id || inners.has(`${scope(first)}:${inner.activation_id}`)) return false;
-          const children = rows.filter(sample => scope(sample) === scope(first) && sample.activation_id === inner.activation_id)
-            .sort((left, right) => (BigInt(left.event.sequence_number) < BigInt(right.event.sequence_number) ? -1 : 1));
-          if (children[0] !== first || BigInt(driver.event.sequence_number) >= BigInt(first.event.sequence_number) ||
-            !rows.some(sample => scope(sample) === scope(first) && sample.activation_id === outer.activation_id &&
-              BigInt(sample.event.sequence_number) < BigInt(first.event.sequence_number)) ||
-            rows.some(sample => scope(sample) === scope(first) && sample.activation_id === outer.activation_id &&
-              BigInt(sample.event.sequence_number) > BigInt(driver.event.sequence_number) &&
-              BigInt(sample.event.sequence_number) < BigInt(first.event.sequence_number)) ||
+          const children = activation(first, inner.activation_id).rows;
+          const parent = activation(first, outer.activation_id).sequences;
+          const firstSequence = BigInt(first.event.sequence_number), driverSequence = BigInt(driver.event.sequence_number);
+          // The parent dispatched before the child began, and the driver is
+          // its last dispatch before then.
+          if (children[0] !== first || driverSequence >= firstSequence ||
+            vmSequencesBelow(parent, firstSequence) === 0 ||
+            vmSequencesBelow(parent, firstSequence) !== vmSequencesBelow(parent, driverSequence + 1n) ||
             inner.sample_count !== children.length || !Array.isArray(inner.events) || inner.events.length !== Math.min(children.length, 8) ||
             inner.events.some((event, index) => !vmSampleEvent(event) || vmSampleEventKey(event) !== vmSampleEventKey(children[index].event))) return false;
           inners.add(`${scope(first)}:${inner.activation_id}`);
           const counts = new Map();
           for (const sample of children) if (sample.selector !== null) counts.set(sample.selector, (counts.get(sample.selector) ?? 0) + 1);
-          const expected = [...counts.entries()].sort(([left], [right]) => left - right);
-          if (!Array.isArray(inner.observed_opcodes) || inner.omitted_opcode_count !== Math.max(0, expected.length - 64) ||
-            inner.observed_opcodes.length !== Math.min(expected.length, 64) ||
-            !inner.observed_opcodes.every((entry, index) => vmWorkspaceExact(entry, ['opcode', 'sample_count']) &&
-              entry.opcode === expected[index][0] && entry.sample_count === expected[index][1])) return false;
+          if (!vmInnerOpcodesValid(inner, [...counts.entries()].sort(([left], [right]) => left - right))) return false;
         }
         return true;
       }
+      // Every nested guest since producer 2.21.0; earlier ones kept 64 and named
+      // the rest nested-guest-limit.
       function isVmNestedGuests(workspace) {
         const nested = workspace.nested_guests;
         if (nested === undefined) return true;
-        if (Array.isArray(nested) && nested.length >= 1 && nested.length <= 64 && workspace.runtime === 'javascript') {
+        if (Array.isArray(nested) && nested.length >= 1 && workspace.runtime === 'javascript') {
           return isVmJavaScriptNestedGuests(workspace, nested);
         }
-        if (workspace.runtime !== 'webassembly' || !Array.isArray(nested) || nested.length < 1 || nested.length > 64) return false;
+        if (workspace.runtime !== 'webassembly' || !Array.isArray(nested) || nested.length < 1) return false;
         const guest = workspace.native_guest_samples ?? [];
         const byEvent = new Map(guest.map(row => [vmSampleEventKey(row.event), row]));
+        const invocations = vmGroupByKey(guest, sample => sample.invocation_id);
         const side = ['invocation_id', 'invocation_event', 'function_index', 'module_byte_offset', 'memory_index', 'memory_base',
           'memory_length', 'bytecode_artifact_id'];
         const sameSide = (value, row) => side.every(key => key === 'invocation_event'
@@ -3388,7 +3498,7 @@
             !vmWorkspaceExact(inner, [...side, 'sample_count', 'events', 'observed_opcodes', 'omitted_opcode_count']) ||
             !['exact-parent-dispatch', 'contiguous-sequence', 'nearest-retained'].includes(outer.basis) || !vmSampleEvent(outer.dispatch_event)) return false;
           const driver = byEvent.get(vmSampleEventKey(outer.dispatch_event));
-          const children = guest.filter(sample => sample.invocation_id === inner.invocation_id);
+          const children = invocations.get(inner.invocation_id) ?? [];
           if (!driver || !sameSide(outer, driver) || driver.instance_id !== row.instance_id ||
             !['selector', 'opcode', 'selected_arm', 'is_default', 'instruction_pointer'].every(key => outer[key] === driver[key]) ||
             children.length === 0 || !sameSide(inner, children[0]) || inners.has(inner.invocation_id) ||
@@ -3403,16 +3513,23 @@
           inners.add(inner.invocation_id);
           const counts = new Map();
           for (const sample of children) counts.set(sample.opcode, (counts.get(sample.opcode) ?? 0) + 1);
-          const expected = [...counts.entries()].sort(([left], [right]) => left - right);
-          if (!Array.isArray(inner.observed_opcodes) || inner.omitted_opcode_count !== Math.max(0, expected.length - 64) ||
-            inner.observed_opcodes.length !== Math.min(expected.length, 64) ||
-            !inner.observed_opcodes.every((entry, index) => vmWorkspaceExact(entry, ['opcode', 'sample_count']) &&
-              entry.opcode === expected[index][0] && entry.sample_count === expected[index][1])) return false;
+          if (!vmInnerOpcodesValid(inner, [...counts.entries()].sort(([left], [right]) => left - right))) return false;
         }
         return true;
       }
 
       function isVmOpcodeWorkspace(workspace, summed = false, claims = false) {
+        vmWorkspaceIndexes.delete(workspace);
+        try {
+          return vmOpcodeWorkspaceValid(workspace, summed, claims);
+        } finally {
+          vmWorkspaceIndexes.delete(workspace);
+        }
+      }
+
+      // Producers before 2.21.0 kept 1024 handlers, 16 snapshots and 256
+      // unknowns; every one is kept since.
+      function vmOpcodeWorkspaceValid(workspace, summed, claims) {
         if (!isPlainObject(workspace) || !hasOnlyKeys(workspace, new Set([
           'interpreter_artifact_id', 'bytecode_artifact_id', 'finding_id', 'model', 'handlers', 'snapshots', 'coverage',
           'unknowns', 'runtime', 'source_artifact_sha256', 'capture_mode', 'samples', 'sample_count', 'traversal', 'captured_module_preview', 'dispatch_inventory',
@@ -3424,8 +3541,8 @@
           typeof workspace.finding_id !== 'string' || !/^[0-9a-f]{24}$/.test(workspace.finding_id) ||
           !['stack', 'register', 'unknown'].includes(workspace.model) ||
           !['javascript', 'webassembly'].includes(workspace.runtime) || !vmWorkspaceDigest(workspace.source_artifact_sha256) ||
-          !vmWorkspaceMode(workspace.capture_mode) || !Array.isArray(workspace.handlers) || workspace.handlers.length > 1024 ||
-          !workspace.handlers.every(handler => isVmOpcodeHandler(handler, summed)) || !Array.isArray(workspace.snapshots) || workspace.snapshots.length > 16 ||
+          !vmWorkspaceMode(workspace.capture_mode) || !Array.isArray(workspace.handlers) ||
+          !workspace.handlers.every(handler => isVmOpcodeHandler(handler, summed)) || !Array.isArray(workspace.snapshots) ||
           !workspace.snapshots.every(isVmOpcodeSnapshot) ||
           (workspace.dispatch_inventory !== undefined && (workspace.runtime !== 'webassembly' ||
             !isVmDispatchInventory(workspace.dispatch_inventory))) ||
@@ -3436,7 +3553,7 @@
           !vmMachineStateMatches(workspace) ||
           (workspace.evidence_class ?? null) !== vmWorkspaceEvidenceClass(workspace) ||
           (workspace.captured_module_preview !== undefined && !isVmCapturedModulePreview(workspace.captured_module_preview, workspace)) ||
-          !Array.isArray(workspace.unknowns) || workspace.unknowns.length > 256 ||
+          !Array.isArray(workspace.unknowns) ||
           !workspace.unknowns.every(value => isBoundedText(value, 240) && value.length > 0) ||
           new Set(workspace.unknowns).size !== workspace.unknowns.length ||
           !Array.isArray(workspace.samples) || workspace.samples.length > 4096 ||
@@ -3471,7 +3588,13 @@
           !Array.isArray(nativeRows) || nativeRows.length > 4096 || !nativeRows.every(row => isNativeWasmObservation(row,workspace)) ||
           !isSafeIntegerInRange(nativeCount,nativeRows.length,summed ? workspace.sample_count : Number.MAX_SAFE_INTEGER) ||
           new Set([...workspace.samples,...nativeRows,...guestRows,...jsRows].map(row => vmSampleEventKey(row.event))).size !== workspace.samples.length + nativeRows.length + guestRows.length + jsRows.length) return false;
-        if (nativeRows.some(row => workspace.handlers.filter(handler => nativeWasmMatchesHandler(row,handler)).length > 1)) return false;
+        const keyCounts = keys => {
+          const counts = new Map();
+          for (const key of keys) if (key !== null) counts.set(key, (counts.get(key) ?? 0) + 1);
+          return counts;
+        };
+        const handlersOfKey = keyCounts(workspace.handlers.map(vmHandlerMatchKey));
+        if (nativeRows.some(row => (handlersOfKey.get(vmNativeRowMatchKey(row)) ?? 0) > 1)) return false;
         const indirectRows = workspace.native_wasm_indirect_observations ?? [];
         const indirectCount = workspace.native_wasm_indirect_observation_count ?? 0;
         if ((workspace.native_wasm_indirect_observations === undefined) !== (workspace.native_wasm_indirect_observation_count === undefined) ||
@@ -3495,19 +3618,25 @@
         for (const handler of workspace.handlers) {
           if (handler.opcode !== null) opcodeUses.set(handler.opcode, (opcodeUses.get(handler.opcode) ?? 0) + 1);
         }
+        // The retained rows each handler matches, counted once by key.
+        const samplesOf = keyCounts(workspace.samples.map(sample => sample.opcode));
+        const unreportedOpcodes = new Set(workspace.samples.filter(sample => sample.provenance === undefined).map(sample => sample.opcode));
+        const nativeOf = keyCounts(nativeRows.map(vmNativeRowMatchKey));
+        const guestOf = keyCounts(guestRows.map(vmNativeRowMatchKey));
         const opcodes = new Set();
         let total = 0;
         for (const handler of workspace.handlers) {
           if (workspace.runtime === 'javascript' && handler.opcode !== null && opcodes.has(handler.opcode)) return false;
           if (handler.opcode !== null) opcodes.add(handler.opcode);
-          const retained = workspace.samples.filter(sample => sample.opcode === handler.opcode).length;
+          const retained = samplesOf.get(handler.opcode) ?? 0;
+          const matchKey = vmHandlerMatchKey(handler);
           const repeatedSelector = workspace.runtime === 'webassembly' && handler.opcode !== null &&
             opcodeUses.get(handler.opcode) > 1;
           // A br_table selector index is local to that instruction. One sample does not
           // prove that every site with the same number handled the guest opcode.
-          const nativeRetained = nativeRows.filter(row => nativeWasmMatchesHandler(row,handler)).length;
+          const nativeRetained = nativeOf.get(matchKey) ?? 0;
           const handlerNative = handler.native_wasm_sample_count ?? 0;
-          const guestRetained = guestRows.filter(row => nativeWasmMatchesHandler(row,handler)).length;
+          const guestRetained = guestOf.get(matchKey) ?? 0;
           const handlerGuest = handler.native_guest_sample_count ?? 0;
           if (handlerGuest > guestCount || handlerGuest < guestRetained || (!guestTruncated && handlerGuest !== guestRetained) ||
             (handlerGuest > 0 && (workspace.runtime !== 'webassembly' || handler.state !== 'observed'))) return false;
@@ -3518,7 +3647,7 @@
             if (handlerLegacy !== 0 || (handlerNative === 0 && handlerGuest === 0 && handler.state === 'observed')) return false;
           } else if (handlerLegacy < retained || (!truncated && handlerLegacy !== retained)) return false;
           if (!truncated && handlerNative === 0 && handlerGuest === 0 && handler.state === 'observed' && retained > 0 &&
-            !workspace.samples.some(sample => sample.opcode === handler.opcode && sample.provenance === undefined)) return false;
+            !unreportedOpcodes.has(handler.opcode)) return false;
           total += handler.sample_count;
         }
         if (workspace.samples.some(sample => sample.provenance !== undefined) &&
@@ -3539,7 +3668,8 @@
           !vmWorkspaceDigest(document.analysis_digest) || !vmWorkspaceDigest(document.document_digest) ||
           !vmWorkspaceExact(document.inputs, ['artifact_manifest_digest', 'event_store_digest', 'capture_provenance_digest']) ||
           !Object.values(document.inputs).every(value => value === null || vmWorkspaceDigest(value)) ||
-          !Array.isArray(document.workspaces) || document.workspaces.length > 256 || !document.workspaces.every(workspace => isVmOpcodeWorkspace(workspace, vmProducerSumsNativeCounts(document.producer.version),
+          // Every workspace since producer 2.21.0; earlier ones kept 256.
+          !Array.isArray(document.workspaces) || !document.workspaces.every(workspace => isVmOpcodeWorkspace(workspace, vmProducerSumsNativeCounts(document.producer.version),
             vmProducerEmitsObservedClaims(document.producer.version))) ||
           !vmWorkspaceExact(document.summary, ['workspace_count', 'handler_count', 'snapshot_count', 'sample_count', 'unknown_count'])) return false;
         const counts = {workspace_count: document.workspaces.length, handler_count: 0, snapshot_count: 0, sample_count: 0, unknown_count: 0};
@@ -3630,10 +3760,35 @@
         return Math.max(handler.sample_count, handler.native_wasm_sample_count ?? 0, handler.native_guest_sample_count ?? 0);
       }
 
-      function vmOpcodeHandlerRow(workspace, handler) {
-        const retainedSamples = [...workspace.samples.filter(sample => sample.opcode === handler.opcode),
-          ...(workspace.native_guest_samples ?? []).filter(row => nativeWasmMatchesHandler(row,handler)),
-          ...(workspace.native_wasm_observations ?? []).filter(row => nativeWasmMatchesHandler(row,handler))];
+      // Retained rows by what they match, built once per listing so each listed
+      // row costs its own matches rather than a scan of every retained row.
+      function vmOpcodeRowIndex(workspace) {
+        const positions = (rows, key) => {
+          const groups = new Map();
+          rows.forEach((row, index) => {
+            const value = key(row);
+            const group = groups.get(value);
+            if (group) group.push(index);
+            else groups.set(value, [index]);
+          });
+          return groups;
+        };
+        const guest = workspace.native_guest_samples ?? [], native = workspace.native_wasm_observations ?? [];
+        return {guest, native, samples: positions(workspace.samples, sample => sample.opcode),
+          guestOf: positions(guest, vmNativeRowMatchKey), nativeOf: positions(native, vmNativeRowMatchKey)};
+      }
+      // The rows of every listed key, each once and in list order.
+      function vmRowsOfKeys(rows, groups, keys) {
+        const indexes = [...new Set(keys)].flatMap(key => groups.get(key) ?? []);
+        if (keys.length > 1) indexes.sort((left, right) => left - right);
+        return indexes.map(index => rows[index]);
+      }
+
+      function vmOpcodeHandlerRow(workspace, handler, index = vmOpcodeRowIndex(workspace)) {
+        const matchKey = vmHandlerMatchKey(handler);
+        const retainedSamples = [...vmRowsOfKeys(workspace.samples, index.samples, [handler.opcode]),
+          ...vmRowsOfKeys(index.guest, index.guestOf, [matchKey]),
+          ...vmRowsOfKeys(index.native, index.nativeOf, [matchKey])];
         return {
           key: `${handler.opcode}:${handler.handler_index ?? ''}:${handler.source.byte_offset}`,
           opcode: handler.opcode === null ? 'unknown' : `0x${handler.opcode.toString(16).padStart(2, '0')}`,
@@ -3652,14 +3807,15 @@
 
       // Several WASM selectors can cite one dispatch instruction. The workspace
       // still keeps every selector; only the visible row collapses.
-      function vmSharedDispatchRow(workspace, handlers) {
+      function vmSharedDispatchRow(workspace, handlers, index = vmOpcodeRowIndex(workspace)) {
         const first = handlers[0];
         const offset = first.source.byte_offset;
         const size = first.source.byte_size;
-        const opcodes = new Set(handlers.map(handler => handler.opcode));
-        const retainedSamples = [...workspace.samples.filter(sample => opcodes.has(sample.opcode)),
-          ...(workspace.native_guest_samples ?? []).filter(row => handlers.some(handler => nativeWasmMatchesHandler(row,handler))),
-          ...(workspace.native_wasm_observations ?? []).filter(row => handlers.some(handler => nativeWasmMatchesHandler(row,handler)))];
+        const opcodes = handlers.map(handler => handler.opcode);
+        const matchKeys = handlers.map(vmHandlerMatchKey);
+        const retainedSamples = [...vmRowsOfKeys(workspace.samples, index.samples, opcodes),
+          ...vmRowsOfKeys(index.guest, index.guestOf, matchKeys),
+          ...vmRowsOfKeys(index.native, index.nativeOf, matchKeys)];
         const notes = first.notes || 'No handler notes recorded.';
         const sameWidth = handlers.every(handler => handler.operand_width === first.operand_width);
         const brTable = handlers.every(handler => typeof handler.label === 'string' && handler.label.startsWith('br_table'));
@@ -3683,7 +3839,8 @@
       }
 
       function vmOpcodeRows(workspace) {
-        if (workspace.runtime !== 'webassembly') return workspace.handlers.map(handler => vmOpcodeHandlerRow(workspace, handler));
+        const index = vmOpcodeRowIndex(workspace);
+        if (workspace.runtime !== 'webassembly') return workspace.handlers.map(handler => vmOpcodeHandlerRow(workspace, handler, index));
         const groups = new Map();
         for (const handler of workspace.handlers) {
           const span = `${handler.source.byte_offset}:${handler.source.byte_size}`;
@@ -3692,7 +3849,7 @@
           else groups.set(span, [handler]);
         }
         return [...groups.values()].map(handlers =>
-          handlers.length > 1 ? vmSharedDispatchRow(workspace, handlers) : vmOpcodeHandlerRow(workspace, handlers[0]));
+          handlers.length > 1 ? vmSharedDispatchRow(workspace, handlers, index) : vmOpcodeHandlerRow(workspace, handlers[0], index));
       }
 
       function retainVmOpcodeWorkspaceOnFailure(targetState, status, errorMessage) {
@@ -3769,13 +3926,15 @@
           document.contract_version !== 1 || document.document_kind !== 'vm-host-links' ||
           !vmWorkspaceDigest(document.document_digest) || !vmWorkspaceDigest(document.workspace_document_digest) ||
           document.workspace_document_digest !== workspaceDocument?.document_digest ||
-          !Array.isArray(document.workspaces) || document.workspaces.length > 256) return false;
+          // Every workspace since producer 2.21.0 of the workspace document; earlier ones kept 256.
+          !Array.isArray(document.workspaces)) return false;
         const categories = ['canvas', 'webgl', 'web_audio', 'navigator', 'permissions', 'storage', 'webrtc', 'network', 'runtime'];
         const types = ['api_call', 'property_read', 'request_started', 'request_initiated', 'request_redirected', 'response_started', 'response_completed', 'request_completed', 'request_failed'];
         const omissions = ['dispatch-samples-unavailable', 'dispatch-sample-retention-limit', 'host-events-unavailable'];
         const count = value => isSafeIntegerInRange(value, 0, Number.MAX_SAFE_INTEGER);
         const id = value => isCanonicalInteger(value, 0n, uint64Max);
         const sources = new Set();
+        const workspaces = vmFirstByKey(workspaceDocument.workspaces, item => `${item.interpreter_artifact_id}:${item.source_artifact_sha256}`);
         for (const row of document.workspaces) {
           if (!vmWorkspaceExact(row, ['interpreter_artifact_id', 'source_artifact_sha256', 'links', 'frame_host_records',
             'attributed_host_records', 'events_filter', 'omissions']) ||
@@ -3787,9 +3946,10 @@
             !Array.isArray(row.omissions) || row.omissions.length > 3 || new Set(row.omissions).size !== row.omissions.length ||
             !row.omissions.every(reason => omissions.includes(reason))) return false;
           sources.add(row.interpreter_artifact_id);
-          const workspace = workspaceDocument.workspaces.find(item => item.interpreter_artifact_id === row.interpreter_artifact_id &&
-            item.source_artifact_sha256 === row.source_artifact_sha256);
+          const workspace = workspaces.get(`${row.interpreter_artifact_id}:${row.source_artifact_sha256}`);
           if (!workspace) return false;
+          // The workspace's samples by their own event, which a position names.
+          const samplesAt = vmGroupByKey([...workspace.samples, ...(workspace.native_guest_samples ?? [])], sample => vmSampleEventKey(sample.event));
           const hosts = new Set();
           for (const link of row.links) {
             if (!vmWorkspaceExact(link, ['host_event', 'category', 'type', 'state', 'reason', 'guest_position']) ||
@@ -3810,7 +3970,7 @@
               !isSafeIntegerInRange(position.instruction_pointer, 0, 0xffffffff) ||
               position.sample_event.session_id !== link.host_event.session_id || position.sample_event.process_id !== link.host_event.process_id ||
               BigInt(position.sample_event.sequence_number) >= BigInt(link.host_event.sequence_number) ||
-              ![...workspace.samples,...(workspace.native_guest_samples ?? [])].some(sample => sample.provenance === undefined && (sample.interpretation === undefined || sample.interpretation === 'verified-dataflow') && (sample.host_import_call_offsets === undefined || sample.host_import_call_offsets.length > 0) && vmSampleEventKey(sample.event) === vmSampleEventKey(position.sample_event) &&
+              !(samplesAt.get(vmSampleEventKey(position.sample_event)) ?? []).some(sample => sample.provenance === undefined && (sample.interpretation === undefined || sample.interpretation === 'verified-dataflow') && (sample.host_import_call_offsets === undefined || sample.host_import_call_offsets.length > 0) && vmSampleEventKey(sample.event) === vmSampleEventKey(position.sample_event) &&
                 sample.invocation_event && vmSampleEventKey(sample.invocation_event) === vmSampleEventKey(position.invocation_event) &&
                 sample.invocation_id === position.invocation_id && sample.instruction_pointer === position.instruction_pointer &&
                 sample.instruction_pointer_units === position.instruction_pointer_units)) return false;

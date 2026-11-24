@@ -258,12 +258,14 @@ stack or registers are unproven. `machine_state.register_count` and
 spaces. A null register index does not invent a register file. Spelling in a
 page script does not fill `machine_state`.
 
-`handler_tables` keeps the top 8 ranked dispatch sites and up to 4 element
-tables. Each `br_table` records an exact `arm_count` and clusters selectors
-that share a label depth. `selector_count` is exact. `selectors` lists at most
-32 indexes, so a prefix is not a shorter table. The flat handler list is still
-capped at 1024 and still emits the ranked site first. Element clusters group
-duplicate funcref slots. They are `call-indirect-table`, not opcodes.
+`handler_tables` lists every ranked dispatch site, then every active element
+table. Each `br_table` records an exact `arm_count` and clusters selectors
+that share a label depth. `selector_count` is exact and `selectors` lists
+every index. The flat handler list keeps every arm and emits the ranked site
+first. Element clusters group duplicate funcref slots. They are
+`call-indirect-table`, not opcodes. Producers before 2.21.0 kept 8 ranked
+sites, 4 element tables, 1024 clusters per table, 32 selectors per cluster
+and 1024 handlers; their documents stay valid.
 
 Element selectors are real table slots. Producer 2.9.0 places each active
 segment at its evaluated offset (`i32.const`, a defined immutable constant
@@ -275,13 +277,14 @@ with `placement` `placed`, `relative` (the offset reads an imported global,
 directly or through a defined global, so its slots are unknown and are not
 clustered), `out-of-range` (the segment ends past the table's declared
 minimum, so it is not placed), `unreached` (an earlier segment is out of
-range, so instantiation traps before applying this one) or `unresolved`. At
-most 64 segments are listed; `omitted_segment_count` counts the rest. Passive
+range, so instantiation traps before applying this one) or `unresolved`.
+Every active segment is listed and `omitted_segment_count` is 0. Passive
 and declared segments fill no table and are not listed. `entry_count` counts placed slots whose
 function is statically known; a `ref.null` item empties a slot and any other
-non-`ref.func` item leaves the slot's function unknown. A table whose placed
-slots exceed 1,000,000 is not expanded into a handler table or matching slots;
-the workspace counts such tables in an `element-table-limit` omission.
+non-`ref.func` item leaves the slot's function unknown. Every table is expanded
+into a handler table and matching slots whatever its size. Producers before
+2.21.0 listed 64 segments and counted the rest, and left a table of more than
+1,000,000 placed slots unexpanded under an `element-table-limit` omission.
 
 ## Dispatch classification
 
@@ -347,7 +350,7 @@ event identity they name resolves to a row the viewer already holds. When a
 stream's 4096-row retention limit is reached, claims cover only the retained
 prefix and the existing limit omission names the rest.
 
-`observed_claims` lists at most 256 claims. One claim aggregates the retained
+`observed_claims` lists every claim. One claim aggregates the retained
 rows of one stream that agree on site, selector, opcode and handler. Its
 `confidence` is always `observed`, never `structural`. A claim exists only at
 an interpreter-candidate site of the same metered classification:
@@ -396,6 +399,20 @@ export, so their `omitted_site_count` and `omitted_refused_count` are always 0.
 Earlier producers listed 256 sites and 64 refused sites and counted the rest;
 their documents stay valid.
 
+Producer 2.21.0 keeps every row its static and observed passes derive, so no
+count stands in for a dropped list: every opcode handler, arm cluster,
+selector, ranked handler table, element table and segment, snapshot,
+unknown, observed claim, nested guest and inner opcode, traversal instruction,
+edge and frontier row, and byte-coverage attribution and omission. It no
+longer writes the `handler-limit`, `unknown-limit`, `snapshot-limit`,
+`workspace-limit`, `dispatch-site-limit`, `element-table-limit`,
+`observed-claim-limit` or `nested-guest-limit` omissions, the byte-coverage
+`attribution-limit`, `omission-limit` or `snapshot-limit` omissions, or the
+traversal's `instruction-limit` or `frontier-limit` frontier rows. The captured
+module preview carries the whole dispatch instruction. Earlier documents, with
+those limits and counts, stay valid. Runtime row streams keep their 4096-row
+retention and name the rest as before.
+
 A JavaScript dispatch sample names its interpreter artifact, not a dispatch
 site. Its claims attach only when the artifact has an interpreter-candidate
 site. They name that site only when the complete classification (no omission
@@ -429,8 +446,8 @@ the claim with the unchanged static claim and is recomputed by the viewer:
   unexpanded oversized table, or an entry whose function is not statically
   known, is `withheld` for an unplaced slot. Any other unplaced slot is
   `absent`. The viewer checks the comparison for consistency and against every
-  listed element cluster that holds the slot, since clusters list at most 32
-  slots.
+  listed element cluster that holds the slot, since clusters of producers
+  before 2.21.0 list at most 32 slots.
 
 A disagreement never edits either claim. It adds one residual unknown that
 counts the disagreeing claims, so coverage stays incomplete. Rows that cannot
@@ -438,8 +455,9 @@ supply a claim stay retained and are counted: `observed-claims-not-interpreter`
 for native rows at a site that is not a classified interpreter candidate,
 `observed-claims-unresolved-callee` for `call_indirect` rows whose entry was
 null, out of bounds, from another instance or unresolved,
-`observed-claims-unsited` for dispatch samples without a usable site, and
-`observed-claim-limit` past 256 claims. Native JavaScript rows add
+and `observed-claims-unsited` for dispatch samples without a usable site.
+Producers before 2.21.0 kept 256 claims and named the rest
+`observed-claim-limit`. Native JavaScript rows add
 `native-js-observation-unsited` (no classified switch or indexed call at the
 anchor) and `native-js-selector-not-integer`; malformed records of this text
 are `native-js-observation-invalid`, and retention past 4096 rows is
@@ -450,7 +468,7 @@ analysis input coverage counts records whose script text no analyzed
 JavaScript artifact of their session and frame has as
 `native-js-observation-unmatched`.
 
-`nested_guests` lists at most 64 inner interpreters. For WebAssembly, a
+`nested_guests` lists every inner interpreter. For WebAssembly, a
 native guest activation becomes a nested guest when its invocation marker
 names a nonzero `parent_invocation_id` whose rows are retained here, and both
 activations share session, process, renderer thread and instance, the parent
@@ -467,12 +485,14 @@ back. Version-1 markers, and markers whose renderer could not resolve the
 parent dispatch (it is 0), use sequence order: `basis` is `contiguous-sequence`
 when every renderer sequence number between them is retained and none is a gap
 or another guest dispatch; otherwise it is `nearest-retained`, which does not
-prove the exact driving dispatch. A window longer than 4096, or past 65536
-lookups shared by the workspace, is not scanned and stays `nearest-retained`.
+prove the exact driving dispatch. A window of any length is checked.
 Producers before 2.15.0 never write `exact-parent-dispatch`. The inner side
-lists its own observed opcodes (at most 64, with `omitted_opcode_count`) and its retained samples.
-Other activations that name a parent are counted as `nested-guest-unproven`;
-`nested-guest-limit` counts nested guests past 64.
+lists every observed opcode, with `omitted_opcode_count` 0, and its retained
+samples. Other activations that name a parent are counted as
+`nested-guest-unproven`. Producers before 2.21.0 listed 64 nested guests and
+64 inner opcodes, counted the rest under `nested-guest-limit` and
+`omitted_opcode_count`, and left a window longer than 4096 events, or past
+65536 lookups shared by the workspace, `nearest-retained`.
 
 Live capture names each activation's parent and exact outer dispatch (see
 [native guest observations](native-wasm-guest-v1.md#parent-activation-and-exact-outer-dispatch)).
@@ -551,12 +571,14 @@ a rebuilt browser emitted the records.
 
 ## Captured module instruction preview
 
-A WebAssembly workspace may expose `captured_module_preview`, a bounded slice
-of the dispatch instruction shared by the most selectors (then lowest offset).
-Its `artifact_id` is the interpreter module, `byte_offset` is the original module
-offset, and `byte_count` is the complete instruction size. `preview_hex` retains
-at most 4096 bytes and `truncated` names any omitted suffix. The workspace source
-digest identifies the full captured module, not a digest of this slice.
+A WebAssembly workspace may expose `captured_module_preview`, the bytes of the
+dispatch instruction shared by the most selectors (then lowest offset). Its
+`artifact_id` is the interpreter module, `byte_offset` is the original module
+offset, and `byte_count` is the complete instruction size. `preview_hex` holds
+the whole instruction and `truncated` is false. Producers before 2.21.0 kept
+4096 bytes and set `truncated` when they cut a suffix; those documents stay
+valid. The workspace source digest identifies the full captured module, not a
+digest of this slice.
 
 This is source evidence, not a runtime memory or guest-bytecode snapshot. It does
 not populate `snapshots`, `bytecode_artifact_id`, snapshot counts, byte coverage,
@@ -611,12 +633,13 @@ selectors still do not prove guest opcode binding without samples.
 A WebAssembly workspace keeps static arms from the detector-selected function
 and from a bounded neighborhood of that function: direct calls within three
 hops, either direction, and functions named by element segments of tables those
-functions use with in-loop `call_indirect`. At most 32 functions are retained.
-The extractor retains at most 1024 site metadata records per function, always
-preserving the selected ranked site, and reports `dispatch-site-limit` when that
-bound is reached. It expands arms lazily into the global 1024-handler budget;
-a large table does not allocate one arm array per site or stop module decoding.
-Further in-loop dispatch functions stay out under `dispatch-neighborhood`.
+functions use with in-loop `call_indirect`. Every function of that
+neighborhood and every site of each such function is retained, with the
+selected ranked site first, and each site's arms are expanded lazily; a large
+table does not allocate one arm array per site or stop module decoding. In-loop
+dispatch functions more than three hops away stay out under
+`dispatch-neighborhood`. Producers before 2.21.0 kept 32 functions and 1024
+sites per function (`dispatch-site-limit`) under a global 1024-handler budget.
 Selector numbers remain `inferred` and local to one `br_table`. Default and
 `call_indirect` arms stay `unknown`. An observed sample binds an opcode only
 when that number appears on one static arm; a repeated selector stays unbound.
@@ -633,16 +656,18 @@ apply. Module offsets are not a guest PC, and characterized bytes stay zero.
 `coverage.handler_count` remains a separate table count. The progress fraction is
 `characterized_bytes / retained_snapshot_bytes`, or zero without retained
 bytes. `uncharacterized_bytes` is the remainder. The denominator counts only
-verified snapshot previews, at most 4096 bytes per snapshot and 16 snapshots.
-It is not the original allocation size, opcode count, or runtime execution
-coverage.
+verified snapshot previews, the first 4096 bytes of every snapshot; the
+snapshot artifact itself is stored whole. It is not the original allocation
+size, opcode count, or runtime execution coverage. Producers before 2.21.0
+counted 16 snapshots.
 
 Attributions name their snapshot artifact, byte offset, byte size, opcode,
 opcode/operand role and evidence class. Byte counts are the union of retained
 ranges within each artifact; repeated ranges do not increase coverage. Ranges
 past the preview are rejected and named, never counted as retained bytes.
-The producer retains at most 4096 attribution records; `attribution-limit`
-names further omissions, while the v2 schema's larger envelope remains stable.
+The producer retains every attribution record and every omission. Producers
+before 2.21.0 retained 4096 attributions and 256 omissions and named the rest
+`attribution-limit` and `omission-limit`.
 The UI independently checks opcode bytes, nonoverlapping instruction spans,
 operand boundaries and union counts before accepting a document.
 
@@ -697,14 +722,17 @@ termination. Instruction spans cannot overlap. Unknown opcodes, missing layouts,
 conflicting effects, truncated instructions, unavailable snapshots, out-of-range
 targets, and preview gaps name their frontier reason. All skipped snapshots and
 truncated tails keep the graph partial even when a retained prefix reaches halt.
-Limits are 16 entries, 4096 instructions, 8192 edges, and 256 frontier rows; a
-limit is explicit rather than silently reported complete. A complete graph may
+Every joined snapshot is walked and every instruction, edge and distinct
+frontier row is kept; the walk ends when no position is left, not at a count.
+Producers before 2.21.0 stopped at 16 entries, 4096 instructions, 8192 edges and
+256 frontier rows and named the stop `instruction-limit` or `frontier-limit`;
+those documents stay valid. A complete graph may
 still leave unreachable retained bytes uncharacterized, and sample/analysis
 omissions independently keep byte coverage partial.
 
 The UI renders static instruction positions and outgoing edges, followed by the
 unresolved frontier. Instruction positions use 32-row pages that expose the full
-bounded graph without changing the document. Frontend validation
+graph without changing the document. Frontend validation
 checks opcode bytes, effect identity, exact implied outgoing edges, nonoverlap,
 reachability from entries, complete snapshot entries and resolved destinations.
 

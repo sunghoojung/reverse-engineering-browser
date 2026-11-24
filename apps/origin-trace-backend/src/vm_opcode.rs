@@ -49,12 +49,10 @@ mod observed;
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
-const PRODUCER_VERSION: &str = "2.20.0";
+const PRODUCER_VERSION: &str = "2.21.0";
 const MAX_SAMPLES: usize = 4096;
-const MAX_HANDLERS: usize = 1024;
-const MAX_SNAPSHOTS: usize = 16;
-const MAX_WORKSPACES: usize = 256;
-const MAX_UNKNOWNS: usize = 256;
+/// The inline window of each runtime snapshot. The snapshot artifact itself
+/// is stored whole and Sources reads all of it.
 const SNAPSHOT_PREVIEW_BYTES: usize = 4096;
 
 fn count_label(count: u32, singular: &str) -> String {
@@ -434,6 +432,8 @@ fn operand_width(body: &str) -> (usize, &'static str) {
     )
 }
 
+/// The first handler seen for an opcode is its candidate. Every distinct
+/// opcode is kept; producers before 2.21.0 kept the first 1024.
 fn add_handler(
     handlers: &mut BTreeMap<u32, Value>,
     opcode: u32,
@@ -441,10 +441,7 @@ fn add_handler(
     range: (usize, usize),
     body: &str,
     note: &str,
-) -> bool {
-    if handlers.len() >= MAX_HANDLERS && !handlers.contains_key(&opcode) {
-        return false;
-    }
+) {
     handlers.entry(opcode).or_insert_with(|| {
         let (width, width_note) = operand_width(body);
         let mut value = json!({
@@ -461,7 +458,6 @@ fn add_handler(
         }
         value
     });
-    true
 }
 
 fn function_body(region: &str, header: regex::Match<'_>) -> Option<(usize, usize)> {
@@ -582,7 +578,6 @@ fn object_handlers(
     names: &BTreeSet<String>,
     handlers: &mut BTreeMap<u32, Value>,
     unknowns: &mut Vec<String>,
-    handler_limit_hit: &mut bool,
 ) {
     for name in names {
         let assignment = Regex::new(&format!(r"\b{}\s*=\s*\{{", regex::escape(name)))
@@ -606,16 +601,14 @@ fn object_handlers(
                         continue;
                     };
                     let offset = base + opening + 1;
-                    if !add_handler(
+                    add_handler(
                         handlers,
                         opcode,
                         Some(opcode),
                         (offset + matched.start(), offset + body_end + 1),
                         &object[body_start + 1..body_end],
                         "A numeric object-map handler is statically visible.",
-                    ) {
-                        *handler_limit_hit = true;
-                    }
+                    );
                 }
             }
             if COMPUTED_OBJECT_ENTRY.is_match(&entries) {
@@ -660,7 +653,6 @@ fn array_handlers(
     base: usize,
     names: &BTreeSet<String>,
     handlers: &mut BTreeMap<u32, Value>,
-    handler_limit_hit: &mut bool,
 ) {
     static ELEMENT: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"^(?:function\b[^{]*\{|(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>)")
@@ -709,33 +701,25 @@ fn array_handlers(
                 let Ok(opcode) = u32::try_from(position) else {
                     break;
                 };
-                if !add_handler(
+                add_handler(
                     handlers,
                     opcode,
                     Some(opcode),
                     (base + from, base + to),
                     body,
                     "A function-array handler is statically visible; its opcode is its position.",
-                ) {
-                    *handler_limit_hit = true;
-                }
+                );
             }
         }
     }
 }
 
-fn static_handlers(
-    source: &str,
-    start: usize,
-    end: usize,
-) -> (Vec<Value>, String, Vec<String>, Vec<Value>) {
+fn static_handlers(source: &str, start: usize, end: usize) -> (Vec<Value>, String, Vec<String>) {
     let masked = vm::mask(source);
     let region = masked[start..end].to_owned();
     let outer = without_nested_functions(&region);
     let mut handlers = BTreeMap::new();
     let mut unknowns = Vec::new();
-    let mut omissions = Vec::new();
-    let mut handler_limit_hit = false;
     let mut blocked_tables = BTreeSet::new();
     let mut facts = SelectorFacts::default();
     for captures in INDEXED_DISPATCH.captures_iter(&outer) {
@@ -826,16 +810,14 @@ fn static_handlers(
                 .get(last_label + 1)
                 .map_or(body.len(), |next| next.start());
             let offset = start + opening_brace + 1;
-            if !add_handler(
+            add_handler(
                 &mut handlers,
                 opcode,
                 None,
                 (offset + label.start(), offset + case_end),
                 &body[label.end()..case_end],
                 "An integer switch handler is statically visible.",
-            ) {
-                handler_limit_hit = true;
-            }
+            );
         }
     }
     for captures in INDEXED_HANDLER.captures_iter(&region) {
@@ -849,16 +831,14 @@ fn static_handlers(
         let Some((body_start, body_end)) = function_body(&region, matched) else {
             continue;
         };
-        if !add_handler(
+        add_handler(
             &mut handlers,
             opcode,
             Some(opcode),
             (start + matched.start(), start + body_end + 1),
             &region[body_start + 1..body_end],
             "A numeric indexed handler assignment is statically visible.",
-        ) {
-            handler_limit_hit = true;
-        }
+        );
     }
     for captures in COMPUTED_HANDLER.captures_iter(&region) {
         if integer(captures[1].trim()).is_none() {
@@ -866,25 +846,8 @@ fn static_handlers(
         }
     }
     let names = table_names(&region, &outer, blocked_tables);
-    object_handlers(
-        &region,
-        start,
-        &names,
-        &mut handlers,
-        &mut unknowns,
-        &mut handler_limit_hit,
-    );
-    array_handlers(
-        &region,
-        &outer,
-        start,
-        &names,
-        &mut handlers,
-        &mut handler_limit_hit,
-    );
-    if handler_limit_hit {
-        omissions.push(json!({"reason":"handler-limit","detail":"Only the first 1024 distinct opcode candidates are retained."}));
-    }
+    object_handlers(&region, start, &names, &mut handlers, &mut unknowns);
+    array_handlers(&region, &outer, start, &names, &mut handlers);
     let stack_count = STACK_IDENTIFIER.find_iter(&region).count();
     let register_count = REGISTER_IDENTIFIER.find_iter(&region).count();
     let model = match (stack_count, register_count) {
@@ -904,12 +867,7 @@ fn static_handlers(
     };
     unknowns.sort();
     unknowns.dedup();
-    (
-        handlers.into_values().collect(),
-        model.into(),
-        unknowns,
-        omissions,
-    )
+    (handlers.into_values().collect(), model.into(), unknowns)
 }
 
 /// Why a dispatch site yields no opcode claims. Its arms or constants are
@@ -1227,13 +1185,9 @@ fn snapshots(root: &Path, interpreter: &Value, artifacts: &[Value]) -> (Vec<Valu
                 && artifact["frame_id"] == interpreter["frame_id"]
         })
         .collect::<Vec<_>>();
-    let mut omissions = Vec::new();
-    if linked.len() > MAX_SNAPSHOTS {
-        omissions.push(json!({"reason":"snapshot-limit","detail":"Only the first 16 linked runtime snapshots are retained."}));
-    }
+    // Every linked snapshot is listed; producers before 2.21.0 kept 16.
     let snapshots = linked
         .into_iter()
-        .take(MAX_SNAPSHOTS)
         .map(
             |artifact| match evidence::verified_range(root, artifact, 0, SNAPSHOT_PREVIEW_BYTES) {
                 Ok(bytes) => json!({
@@ -1246,11 +1200,10 @@ fn snapshots(root: &Path, interpreter: &Value, artifacts: &[Value]) -> (Vec<Valu
                     "unavailable_reason": null,
                 }),
                 Err(error) => {
-                    let reason =
-                        format!("Runtime snapshot bytes are unavailable: {}", error.message)
-                            .chars()
-                            .take(240)
-                            .collect::<String>();
+                    let reason = bounded_text(
+                        format!("Runtime snapshot bytes are unavailable: {}", error.message),
+                        240,
+                    );
                     json!({
                         "artifact_id": artifact["artifact_id"],
                         "origin": if artifact["capture_origin"] == "native_wasm_guest" { "native-wasm-guest" } else { "runtime-typed-array" },
@@ -1264,11 +1217,25 @@ fn snapshots(root: &Path, interpreter: &Value, artifacts: &[Value]) -> (Vec<Valu
             },
         )
         .collect();
-    (snapshots, omissions)
+    (snapshots, Vec::new())
 }
 
-/// Bytes of the dispatch instruction shared by the most handlers.
-/// Preserve its module-relative offset separately from runtime bytecode snapshots.
+/// At most `bytes` UTF-8 bytes of `text`, cut on a character boundary: the
+/// bound the viewer checks.
+fn bounded_text(mut text: String, bytes: usize) -> String {
+    if text.len() > bytes {
+        let mut end = bytes;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    text
+}
+
+/// Bytes of the dispatch instruction shared by the most handlers, whole since
+/// producer 2.21.0 (earlier producers kept 4096). Preserve its module-relative
+/// offset separately from runtime bytecode snapshots.
 fn captured_module_preview(artifact: &Value, bytes: &[u8], handlers: &[Value]) -> Option<Value> {
     let mut counts = BTreeMap::<(u64, u64), usize>::new();
     for handler in handlers {
@@ -1291,18 +1258,12 @@ fn captured_module_preview(artifact: &Value, bytes: &[u8], handlers: &[Value]) -
     let full = usize::try_from(*size).ok()?;
     let end = start.checked_add(full)?;
     let slice = bytes.get(start..end)?;
-    let truncated = slice.len() > SNAPSHOT_PREVIEW_BYTES;
-    let preview = if truncated {
-        &slice[..SNAPSHOT_PREVIEW_BYTES]
-    } else {
-        slice
-    };
     Some(json!({
         "artifact_id": artifact["artifact_id"],
         "byte_offset": offset,
         "byte_count": slice.len(),
-        "preview_hex": hex::encode(preview),
-        "truncated": truncated,
+        "preview_hex": hex::encode(slice),
+        "truncated": false,
     }))
 }
 
@@ -1529,8 +1490,8 @@ pub(crate) fn workspace(
                 }
                 // Recovery is the unchanged path that also decides the tier.
                 // The gate only removes claims from its output afterwards.
-                let (handlers, model, mut unknowns, mut omissions) =
-                    static_handlers(source, region.0, end);
+                let (handlers, model, mut unknowns) = static_handlers(source, region.0, end);
+                let mut omissions = Vec::new();
                 let opcodes = |rows: &[Value]| -> BTreeSet<u32> {
                     rows.iter()
                         .filter_map(|row| row["opcode"].as_u64().map(|op| op as u32))
@@ -1815,32 +1776,14 @@ pub(crate) fn workspace(
                 "No runtime snapshot names this captured allocating script in the same session, navigation, and frame. The allocating script may not have been captured."}));
         }
     }
+    // Every distinct unknown is kept; producers before 2.21.0 kept 256.
     unknowns.sort();
     unknowns.dedup();
-    if unknowns.len() > MAX_UNKNOWNS {
-        unknowns.truncate(MAX_UNKNOWNS);
-        omissions.push(json!({
-            "reason": "unknown-limit",
-            "detail": "Only the first 256 residual unknowns are retained."
-        }));
-    }
     let entry = owned
         .as_ref()
         .and_then(|declaration| declaration["entry_offset"].as_u64())
         .and_then(|offset| u32::try_from(offset).ok());
     let mut traversal = crate::vm_reachability::walk(&snapshots, &handlers, entry);
-    if omissions
-        .iter()
-        .any(|omission| omission["reason"] == "snapshot-limit")
-    {
-        traversal["complete"] = json!(false);
-        let frontier = traversal["frontier"]
-            .as_array_mut()
-            .expect("bounded frontier");
-        if frontier.len() < 256 {
-            frontier.push(json!({"artifact_id":null,"byte_offset":null,"reason":"snapshot-gap"}));
-        }
-    }
     // Module bytes are not a guest snapshot. Name that static-only stop
     // instead of an empty snapshot frontier when the dispatch sites exist.
     let static_module = runtime == "webassembly" && snapshots.is_empty() && !handlers.is_empty();
@@ -1957,17 +1900,8 @@ pub(crate) fn workspace(
 
 /// Builds the workspace document. vm::store_documents publishes it with the
 /// analysis it names.
-pub(crate) fn document(analysis: &Value, mut workspaces: Vec<Value>) -> Result<Value> {
-    if workspaces.len() > MAX_WORKSPACES {
-        workspaces.truncate(MAX_WORKSPACES);
-        if let Some(last) = workspaces.last_mut() {
-            last["coverage"]["complete"] = json!(false);
-            last["coverage"]["omissions"]
-                .as_array_mut()
-                .expect("workspace omissions")
-                .push(json!({"reason":"workspace-limit","detail":"Only the first 256 likely-VM workspaces are retained."}));
-        }
-    }
+/// Every workspace is kept; producers before 2.21.0 kept the first 256.
+pub(crate) fn document(analysis: &Value, workspaces: Vec<Value>) -> Result<Value> {
     let handler_count = workspaces
         .iter()
         .map(|workspace| workspace["handlers"].as_array().map_or(0, Vec::len))
@@ -2039,14 +1973,14 @@ mod tests {
         source: &str,
         start: usize,
         end: usize,
-    ) -> (Vec<Value>, String, Vec<String>, Vec<Value>) {
+    ) -> (Vec<Value>, String, Vec<String>) {
         let roles = vm::dispatch_roles("javascript", source.as_bytes()).expect("roles");
-        let (handlers, model, mut unknowns, omissions) = static_handlers(source, start, end);
+        let (handlers, model, mut unknowns) = static_handlers(source, start, end);
         let gated = gate_handlers(source, start, end, handlers, &roles);
         unknowns.extend(gated.unknowns);
         unknowns.sort();
         unknowns.dedup();
-        (gated.handlers, model, unknowns, omissions)
+        (gated.handlers, model, unknowns)
     }
 
     fn fixture(name: &str) -> String {
@@ -2130,6 +2064,33 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rebuilt["workspaces"], json!([]));
+    }
+
+    /// Runs the shipped strict consumer on the document the store wrote, not a
+    /// hand-written fixture that could miss a backend/frontend bound.
+    fn assert_ui_accepts(root: &std::path::Path) {
+        let model =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../research-ui/evidence_models.js");
+        let checked = std::process::Command::new("node")
+            .args([
+                "--eval",
+                r#"
+const fs = require('node:fs');
+const validate = new Function(fs.readFileSync(process.argv[1], 'utf8') +
+  '\nreturn isVmOpcodeWorkspaceDocument;')();
+const document = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+if (!validate(document)) throw new Error('Backend workspace rejected by shipped UI validator');
+"#,
+            ])
+            .arg(model)
+            .arg(root.join("analysis/vm-opcode-workspace-v2.json"))
+            .output()
+            .expect("Node.js is required for the shipped UI contract regression");
+        assert!(
+            checked.status.success(),
+            "{}",
+            String::from_utf8_lossy(&checked.stderr)
+        );
     }
 
     fn budget_gap(sequence: u64, dropped: u64) -> Value {
@@ -2484,11 +2445,12 @@ mod tests {
         assert_eq!(preview["byte_count"], 3);
         assert_eq!(preview["preview_hex"], hex::encode(&bytes[10..13]));
         assert_eq!(preview["truncated"], false);
+        // Producers before 2.21.0 kept the first 4096 bytes and set truncated.
         let preview = captured_module_preview(&artifact, &bytes, &[handler(20, 4500)]).unwrap();
         assert_eq!(preview["byte_offset"], 20);
         assert_eq!(preview["byte_count"], 4500);
-        assert_eq!(preview["preview_hex"], hex::encode(&bytes[20..4116]));
-        assert_eq!(preview["truncated"], true);
+        assert_eq!(preview["preview_hex"], hex::encode(&bytes[20..4520]));
+        assert_eq!(preview["truncated"], false);
         assert!(captured_module_preview(&artifact, &bytes, &[handler(5000, 1)]).is_none());
         assert!(captured_module_preview(&artifact, &bytes, &[handler(0, 0)]).is_none());
         assert!(captured_module_preview(&artifact, &bytes, &[]).is_none());
@@ -2665,12 +2627,10 @@ mod tests {
         assert_eq!(large_table["evidence_class"], "handler-table-candidate");
         assert_eq!(large_table["unique_target_count"], 1);
         assert_eq!(large_table["clusters"][0]["selector_count"], 100);
+        // Producers before 2.21.0 listed the first 32 selectors.
         assert_eq!(
-            large_table["clusters"][0]["selectors"]
-                .as_array()
-                .unwrap()
-                .len(),
-            32
+            large_table["clusters"][0]["selectors"],
+            json!((0..100).collect::<Vec<_>>())
         );
         let small_table = tables
             .iter()
@@ -2939,7 +2899,7 @@ mod tests {
     }
 
     #[test]
-    fn wasm_ranking_is_site_local_and_decodes_past_arm_retention_limit() {
+    fn wasm_ranking_is_site_local_and_keeps_every_arm() {
         for (small, large) in [(8, 200), (2048, 4096)] {
             let mut body = ranked_dispatch_body(small, true);
             body.pop();
@@ -2957,20 +2917,20 @@ mod tests {
                 workspace["handlers"][0]["source"]["byte_offset"],
                 inventory["selected_byte_offset"]
             );
+            // Producers before 2.21.0 kept the first 1024 arms.
             assert_eq!(
                 workspace["handlers"].as_array().unwrap().len(),
-                ((small + large + 2) as usize).min(MAX_HANDLERS)
+                (small + large + 2) as usize
             );
             assert_schema(&document);
         }
     }
 
     #[test]
-    fn wasm_large_site_stress_keeps_selected_after_metadata_cap() {
-        // 128 large tables previously retained 128 * 1024 Arm objects before
-        // imposing the output cap. The lazy emitter constructs at most 1024.
-        // The second case also puts the selected instruction past the site cap.
-        for (sites, arms) in [(128, 2048), (1100, 1)] {
+    fn wasm_large_site_stress_keeps_every_arm_of_every_site() {
+        // Producers before 2.21.0 kept 1024 handlers and 1024 dispatch sites;
+        // the second case put the selected instruction past that site cap.
+        for (sites, arms) in [(128, 64), (1100, 1)] {
             let mut body = ranked_dispatch_body(arms, true);
             body.pop();
             for _ in 1..sites {
@@ -2992,22 +2952,81 @@ mod tests {
             );
             assert_eq!(
                 workspace["handlers"].as_array().unwrap().len(),
-                MAX_HANDLERS
+                (sites * (arms + 1) + 4097) as usize
             );
             assert_eq!(
                 workspace["handlers"][0]["source"]["byte_offset"],
                 workspace["dispatch_inventory"]["selected_byte_offset"]
             );
             let omissions = workspace["coverage"]["omissions"].as_array().unwrap();
-            assert!(omissions.iter().any(|o| o["reason"] == "handler-limit"));
-            assert_eq!(
-                omissions
-                    .iter()
-                    .any(|o| o["reason"] == "dispatch-site-limit"),
-                sites > 1024
-            );
+            assert!(!omissions.iter().any(|o| {
+                o["reason"] == "handler-limit" || o["reason"] == "dispatch-site-limit"
+            }));
             assert_schema(&document);
         }
+    }
+
+    /// A ranked dispatch loop whose `br_table` jumps to `targets` label depths
+    /// through as many nested blocks as the deepest one needs.
+    fn nested_dispatch_body(targets: &[u32], default: u32) -> Vec<u8> {
+        let depth = targets.iter().copied().max().unwrap_or(0).max(default) as usize;
+        let mut body = vec![0x01, 0x01, 0x7f, 0x03, 0x40];
+        body.extend([
+            0x20, 0x00, 0x41, 0x01, 0x6a, 0x21, 0x00, 0x41, 0x00, 0x2d, 0x00, 0x00, 0x1a,
+        ]);
+        body.extend([0x02, 0x40].repeat(depth));
+        body.extend([0x41, 0x00]);
+        body.extend(br_table_targets(targets, default));
+        body.extend([0x0b].repeat(depth + 2));
+        body
+    }
+
+    /// More arm clusters, selectors per cluster, and handler tables than
+    /// producers before 2.21.0 kept (1024, 32, and 8) are kept whole, and the
+    /// schema and shipped viewer accept them.
+    #[test]
+    fn large_wasm_dispatch_keeps_every_cluster_selector_and_table() {
+        let wide = nested_dispatch_body(&(0..1100).collect::<Vec<_>>(), 0);
+        let shared = nested_dispatch_body(&[0; 100], 1);
+        let small = (0..12u32)
+            .map(|k| nested_dispatch_body(&(0..40 + k).map(|n| n % 3).collect::<Vec<_>>(), 0))
+            .collect::<Vec<_>>();
+        let mut bodies = vec![wide.as_slice(), shared.as_slice()];
+        bodies.extend(small.iter().map(Vec::as_slice));
+        let bytes = wasm_module(&bodies, None);
+        wasmparser::Validator::new().validate_all(&bytes).unwrap();
+        let (root, _, document) = analyze_artifact(&bytes, "wasm", &[]);
+        let workspace = &document["workspaces"][0];
+        assert_eq!(workspace["handlers"].as_array().unwrap().len(), 1101);
+        let tables = workspace["handler_tables"].as_array().unwrap();
+        assert_eq!(tables.len(), 14);
+        let widest = tables
+            .iter()
+            .map(|table| table["clusters"].as_array().unwrap().len())
+            .max()
+            .unwrap();
+        assert_eq!(widest, 1100);
+        let selectors = tables
+            .iter()
+            .flat_map(|table| table["clusters"].as_array().unwrap())
+            .map(|cluster| cluster["selectors"].as_array().unwrap().len())
+            .max()
+            .unwrap();
+        assert_eq!(selectors, 100);
+        assert!(
+            tables
+                .iter()
+                .all(|table| table["omitted_cluster_count"] == 0)
+        );
+        let omissions = workspace["coverage"]["omissions"].as_array().unwrap();
+        assert!(
+            !omissions
+                .iter()
+                .any(|row| row["reason"].as_str().unwrap().ends_with("-limit")),
+            "{omissions:?}"
+        );
+        assert_schema(&document);
+        assert_ui_accepts(root.path());
     }
 
     #[test]
@@ -3362,7 +3381,7 @@ mod tests {
     }
 
     #[test]
-    fn wasm_handler_cap_and_selected_function_boundary() {
+    fn wasm_handlers_keep_every_arm_and_selected_function_boundary() {
         let mut bytes = wasm_fixture("br_table");
         let code = bytes.iter().position(|byte| *byte == 0x0a).unwrap();
         let body_start = code + 4;
@@ -3396,12 +3415,10 @@ mod tests {
         wasmparser::Validator::new().validate_all(&bytes).unwrap();
         let (_, _, document) = analyze_artifact(&bytes, "wasm", &[]);
         let workspace = &document["workspaces"][0];
-        assert_eq!(
-            workspace["handlers"].as_array().unwrap().len(),
-            MAX_HANDLERS
-        );
+        // 1025 targets and the default; producers before 2.21.0 kept 1024.
+        assert_eq!(workspace["handlers"].as_array().unwrap().len(), 1026);
         assert!(
-            workspace["coverage"]["omissions"]
+            !workspace["coverage"]["omissions"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -3416,7 +3433,7 @@ mod tests {
     }
 
     #[test]
-    fn wasm_snapshot_cap_is_shared_with_javascript() {
+    fn wasm_and_javascript_list_every_linked_snapshot() {
         let bytes = wasm_fixture("br_table");
         let (root, analysis, _) = analyze_artifact(&bytes, "wasm", &[]);
         let interpreter: Value =
@@ -3450,12 +3467,10 @@ mod tests {
             Losses::default(),
         )
         .unwrap();
-        assert_eq!(
-            workspace["snapshots"].as_array().unwrap().len(),
-            MAX_SNAPSHOTS
-        );
+        // Producers before 2.21.0 listed 16 and named the rest `snapshot-limit`.
+        assert_eq!(workspace["snapshots"].as_array().unwrap().len(), 17);
         assert!(
-            workspace["coverage"]["omissions"]
+            !workspace["coverage"]["omissions"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -3797,30 +3812,7 @@ mod tests {
         assert!(!detail.contains("no guest dispatch emitter"));
         assert!(detail.len() <= 240);
         assert_schema(&document);
-        // Exercise the shipped strict consumer on the actual emitted document,
-        // not a hand-written fixture that could miss a backend/frontend bound.
-        let model =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../research-ui/evidence_models.js");
-        let checked = std::process::Command::new("node")
-            .args([
-                "--eval",
-                r#"
-const fs = require('node:fs');
-const validate = new Function(fs.readFileSync(process.argv[1], 'utf8') +
-  '\nreturn isVmOpcodeWorkspaceDocument;')();
-const document = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
-if (!validate(document)) throw new Error('Backend workspace rejected by shipped UI validator');
-"#,
-            ])
-            .arg(model)
-            .arg(root.path().join("analysis/vm-opcode-workspace-v2.json"))
-            .output()
-            .expect("Node.js is required for the shipped UI contract regression");
-        assert!(
-            checked.status.success(),
-            "{}",
-            String::from_utf8_lossy(&checked.stderr)
-        );
+        assert_ui_accepts(root.path());
     }
 
     #[test]
@@ -3834,7 +3826,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
     #[test]
     fn computed_handler_names_stay_unknown() {
         let source = "while(pc<program.length){handlers[key]=function(){};handlers[7]=function(){};handlers[program[pc++]]();}";
-        let (handlers, _, unknowns, _) = static_handlers(source, 0, source.len());
+        let (handlers, _, unknowns) = static_handlers(source, 0, source.len());
         assert_eq!(handlers.len(), 1);
         assert_eq!(handlers[0]["opcode"], 7);
         assert!(unknowns.iter().any(|unknown| unknown.contains("computed")));
@@ -4035,7 +4027,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
     #[test]
     fn numeric_object_map_entries_are_handler_candidates() {
         let source = "const table={1:function(){},0x2:()=>{}};while(pc<program.length){stack.push(table[program[pc++]]());}";
-        let (handlers, model, _, _) = static_handlers(source, 0, source.len());
+        let (handlers, model, _) = static_handlers(source, 0, source.len());
         assert_eq!(model, "stack");
         assert_eq!(
             handlers
@@ -4054,7 +4046,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
     fn handler_ranges_include_nested_helpers_and_exclude_neighbor_cases() {
         let source = "/*é*/ function setup(){handlers[7]=function(){function helper(){return 5;}stack.push(program[pc++]);};} while(pc<program.length){handlers[program[pc++]]();}";
         let start = source.find("function setup").unwrap();
-        let (handlers, _, _, _) = static_handlers(source, start, source.len());
+        let (handlers, _, _) = static_handlers(source, start, source.len());
         assert_eq!(handlers.len(), 1);
         let handler = &handlers[0];
         let offset = handler["source"]["byte_offset"].as_u64().unwrap() as usize;
@@ -4066,7 +4058,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         assert_eq!(handler["operand_width"], 1);
 
         let source = "while(pc<program.length){switch(program[pc++]){case 1: switch(state){case 99: break;} break; case 2: return; default: throw 0;}}";
-        let (handlers, _, _, _) = static_handlers(source, 0, source.len());
+        let (handlers, _, _) = static_handlers(source, 0, source.len());
         assert_eq!(
             handlers
                 .iter()
@@ -4103,7 +4095,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             let source = format!(
                 "handlers[1]=function(){{{body}}};while(pc<program.length){{handlers[program[pc++]]();}}"
             );
-            let (handlers, _, _, _) = static_handlers(&source, 0, source.len());
+            let (handlers, _, _) = static_handlers(&source, 0, source.len());
             assert_eq!(handlers[0]["operand_width"], expected, "{body}");
             assert!(
                 handlers[0]["notes"]
@@ -4132,7 +4124,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             ] {
                 let source =
                     format!("handlers[7]=function(){{}}; const selector={expression}; {dispatch}");
-                let (handlers, _, unknowns, _) = classified_handlers(&source, 0, source.len());
+                let (handlers, _, unknowns) = classified_handlers(&source, 0, source.len());
                 // A literal table that no interpreter-candidate dispatch uses
                 // supplies no opcodes, whatever the switch beside it does.
                 assert!(handlers.is_empty(), "{source}");
@@ -4304,7 +4296,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
     fn a_table_without_a_dispatch_site_is_withheld_as_unclassified() {
         let source = "function run(code,stack){var pc=0;var handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){var fn=handlers[code[pc++]];fn=fn||handlers[1];fn(stack);}return stack;}";
         let start = source.find('{').unwrap() + 1;
-        let (handlers, _, unknowns, _) = classified_handlers(source, start, source.len() - 1);
+        let (handlers, _, unknowns) = classified_handlers(source, start, source.len() - 1);
         assert!(handlers.is_empty());
         assert!(
             !unknowns
@@ -4320,9 +4312,11 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         );
     }
 
-    /// Third review: an element table too large to expand is counted.
+    /// An element table of more than a million slots is expanded whole.
+    /// Producers before 2.21.0 left one past 1,000,000 slots unexpanded and
+    /// named it `element-table-limit`.
     #[test]
-    fn oversized_element_tables_are_counted() {
+    fn large_element_tables_are_expanded() {
         let slots = 1_000_001;
         let text = format!(
             r#"(module (memory 1)
@@ -4342,10 +4336,10 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             "$h ".repeat(slots)
         );
         let bytes = wat::parse_str(text).unwrap();
-        let (_, _, document) = analyze_artifact(&bytes, "wasm", &[]);
+        let (root, _, document) = analyze_artifact(&bytes, "wasm", &[]);
         let workspace = &document["workspaces"][0];
         assert!(
-            workspace["coverage"]["omissions"]
+            !workspace["coverage"]["omissions"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -4353,6 +4347,37 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             "{}",
             workspace["coverage"]["omissions"]
         );
+        let element = workspace["handler_tables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|table| table["kind"] == "element")
+            .unwrap();
+        assert_eq!(element["entry_count"], slots);
+        assert_eq!(element["clusters"][0]["selector_count"], slots);
+        assert_eq!(
+            element["clusters"][0]["selectors"]
+                .as_array()
+                .unwrap()
+                .len(),
+            slots
+        );
+        // VM detectors before 1.14.0 left this table unexpanded; a site lists
+        // 32 of the slots it shares with every site of its table and type.
+        let site = workspace["dispatch_classification"]["sites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|site| !site["table"].is_null())
+            .unwrap();
+        assert_eq!(site["table"]["populated_slot_count"], slots);
+        assert_eq!(site["table"]["matching_slot_count"], slots);
+        assert_eq!(
+            site["table"]["matching_slots"].as_array().unwrap().len(),
+            32
+        );
+        assert_schema(&document);
+        assert_ui_accepts(root.path());
     }
 
     /// Second review, blockers: tier and score are the unchanged base
@@ -4479,10 +4504,9 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         }
     }
 
-    /// Second review: an element table lists at most 64 segments and counts
-    /// the rest.
+    /// Every element segment is listed.
     #[test]
-    fn element_segments_past_the_listing_bound_are_counted() {
+    fn every_element_segment_is_listed() {
         let elems = (0..70)
             .map(|i| format!("(elem (i32.const {i}) func $h)"))
             .collect::<String>();
@@ -4503,7 +4527,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
                 (local.get $acc)))"#
         ))
         .unwrap();
-        let (_, _, document) = analyze_artifact(&bytes, "wasm", &[]);
+        let (root, _, document) = analyze_artifact(&bytes, "wasm", &[]);
         let element = document["workspaces"][0]["handler_tables"]
             .as_array()
             .unwrap()
@@ -4511,8 +4535,11 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             .find(|table| table["kind"] == "element")
             .unwrap()
             .clone();
-        assert_eq!(element["segments"].as_array().unwrap().len(), 64);
-        assert_eq!(element["omitted_segment_count"], 6);
+        // Producers before 2.21.0 listed 64 and counted 6 as omitted.
+        assert_eq!(element["segments"].as_array().unwrap().len(), 70);
+        assert_eq!(element["omitted_segment_count"], 0);
+        assert_schema(&document);
+        assert_ui_accepts(root.path());
     }
 
     /// Review regression: classification never changes a tier. Where the gate
@@ -4562,7 +4589,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         ] {
             let start = source.find('{').unwrap() + 1;
             let end = source.rfind('}').unwrap();
-            let (handlers, _, _, _) = classified_handlers(source, start, end);
+            let (handlers, _, _) = classified_handlers(source, start, end);
             assert_eq!(handlers, Vec::<Value>::new(), "{source}");
         }
         let (_, analysis, document) = analyze(
@@ -4593,7 +4620,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             ),
         ] {
             let start = source.find('{').unwrap() + 1;
-            let (handlers, _, _, _) = classified_handlers(source, start, source.len() - 1);
+            let (handlers, _, _) = classified_handlers(source, start, source.len() - 1);
             assert_eq!(handlers.len(), expected, "{source}");
         }
     }
@@ -5089,7 +5116,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
     #[test]
     fn loopless_and_router_dispatch_claim_no_opcode_handlers() {
         let source = "let pc=0;switch(program[pc++]){case 1: stack.push(1); break; case 2: break;}";
-        let (handlers, _, unknowns, _) = classified_handlers(source, 0, source.len());
+        let (handlers, _, unknowns) = classified_handlers(source, 0, source.len());
         assert!(handlers.is_empty());
         assert!(
             unknowns
@@ -5100,7 +5127,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         // classification names it a router.
         let source = "function route(k,x){switch(k){case 1: return a(x); case 2: return b(x); case 3: return c(x);}}";
         let start = source.find('{').unwrap() + 1;
-        let (handlers, _, _, _) = classified_handlers(source, start, source.len() - 1);
+        let (handlers, _, _) = classified_handlers(source, start, source.len() - 1);
         assert!(handlers.is_empty());
         assert_eq!(
             vm::javascript_classification(source)["role_counts"]["multiplexer"],
@@ -5113,7 +5140,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
     #[test]
     fn computed_objects_and_expression_arrows_do_not_borrow_other_bodies() {
         let source = "const handlers={[key]:()=>{},7(){return program[pc++];},a8:()=>{},9:()=>{const nested={99:()=>{}};}};while(pc<program.length){handlers[program[pc++]]();}";
-        let (handlers, _, unknowns, _) = static_handlers(source, 0, source.len());
+        let (handlers, _, unknowns) = static_handlers(source, 0, source.len());
         assert_eq!(
             handlers
                 .iter()
@@ -5123,7 +5150,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         );
         assert!(unknowns.iter().any(|s| s.contains("computed")));
         let source = "handlers[1]=x=>x,handlers[2]=()=>{};while(pc<program.length){handlers[program[pc++]]();}";
-        let (handlers, _, _, _) = static_handlers(source, 0, source.len());
+        let (handlers, _, _) = static_handlers(source, 0, source.len());
         assert_eq!(handlers.len(), 1);
         assert_eq!(handlers[0]["opcode"], 2);
         // Without a dispatch that uses the table, it supplies no opcodes.
@@ -5132,20 +5159,64 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
     }
 
     #[test]
-    fn handler_cap_preserves_named_omission() {
-        let mut source = (0..1025)
+    fn every_distinct_opcode_candidate_is_kept() {
+        // Producers before 2.21.0 kept the first 1024 and named the rest
+        // `handler-limit`.
+        let mut source = (0..1500)
             .map(|i| format!("handlers[{i}]=function(){{}};"))
             .collect::<String>();
         source.push_str("while(pc<program.length){handlers[program[pc++]]();}");
-        let (handlers, _, _, omissions) = static_handlers(&source, 0, source.len());
-        assert_eq!(handlers.len(), MAX_HANDLERS);
-        assert_eq!(handlers.last().unwrap()["opcode"], 1023);
-        assert_eq!(
-            omissions,
-            vec![
-                json!({"reason":"handler-limit","detail":"Only the first 1024 distinct opcode candidates are retained."})
-            ]
+        let (handlers, _, _) = static_handlers(&source, 0, source.len());
+        assert_eq!(handlers.len(), 1500);
+        assert_eq!(handlers.last().unwrap()["opcode"], 1499);
+    }
+
+    /// An interpreter with more cases, unreported opcodes, and observed claims
+    /// than producers before 2.21.0 kept (1024 handlers, 256 unknowns, 256
+    /// claims) is kept whole, and the schema and shipped viewer accept it.
+    #[test]
+    fn large_javascript_interpreter_keeps_every_handler_unknown_and_claim() {
+        let cases = (1000..2100)
+            .map(|n| format!("      case {n}:\n        stack.push({n});\n        break;\n"))
+            .collect::<String>();
+        let stack = fixture("stack-vm.js");
+        let source = stack.replacen("      case 83:", &format!("{cases}      case 83:"), 1);
+        assert_ne!(source, stack);
+        let events = (0..300u32)
+            .map(|n| {
+                let mut sample = event(5000 + n);
+                let mut payload = hex::decode(sample["payload"].as_str().unwrap()).unwrap();
+                payload[16..20].copy_from_slice(&(10 + n).to_le_bytes());
+                sample["payload"] = json!(hex::encode(payload));
+                sample["sequence_number"] = json!((10 + n).to_string());
+                sample
+            })
+            .collect::<Vec<_>>();
+        let (root, _, document) = analyze(&source, &events);
+        let workspace = &document["workspaces"][0];
+        assert_eq!(workspace["handlers"].as_array().unwrap().len(), 1104);
+        assert_eq!(workspace["sample_count"], 300);
+        let unknowns = workspace["unknowns"].as_array().unwrap();
+        for n in [5000, 5299] {
+            assert!(
+                unknowns
+                    .iter()
+                    .any(|row| row.as_str().unwrap().contains(&format!("opcode {n} "))),
+                "{unknowns:?}"
+            );
+        }
+        assert!(unknowns.len() >= 300, "{}", unknowns.len());
+        assert_eq!(workspace["observed_claims"].as_array().unwrap().len(), 300);
+        let omissions = workspace["coverage"]["omissions"].as_array().unwrap();
+        assert!(
+            !omissions.iter().any(
+                |row| ["handler-limit", "unknown-limit", "observed-claim-limit"]
+                    .contains(&row["reason"].as_str().unwrap())
+            ),
+            "{omissions:?}"
         );
+        assert_schema(&document);
+        assert_ui_accepts(root.path());
     }
     #[test]
     fn mutable_and_late_selectors_stay_unknown_and_fallthrough_cites_shared_body() {
@@ -5161,7 +5232,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             );
         }
         let source = "let pc=0;while(pc<program.length){switch(program[pc++]){case 1: case 2: stack.push(program[pc++]);break;default:break;}}";
-        let (handlers, _, _, _) = classified_handlers(source, 0, source.len());
+        let (handlers, _, _) = classified_handlers(source, 0, source.len());
         assert_eq!(handlers.len(), 2);
         for handler in handlers {
             let offset = handler["source"]["byte_offset"].as_u64().unwrap() as usize;

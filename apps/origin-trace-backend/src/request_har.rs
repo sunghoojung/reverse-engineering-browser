@@ -621,11 +621,11 @@ impl Sink {
             buffer: Vec::with_capacity(CHUNK),
         }
     }
-    fn write(&mut self, bytes: &[u8]) -> bool {
+    pub(crate) fn write(&mut self, bytes: &[u8]) -> bool {
         self.buffer.extend_from_slice(bytes);
         self.buffer.len() < CHUNK || self.flush()
     }
-    fn flush(&mut self) -> bool {
+    pub(crate) fn flush(&mut self) -> bool {
         if self.buffer.is_empty() {
             return true;
         }

@@ -243,9 +243,12 @@ so opening one closes the other; below a 1,112 px window it overlays the editor
 as Details does. It is phase 1 of [native debugger v1](../../docs/product/native-debugger-v1.md):
 native observation records that never pause the page, read from
 `get_native_debugger` ([native debugger observation v1](../../protocol/native-debugger-observation-v1.md)).
-The header says "Observes, never pauses" and the status line says what the
-sidebar reads and when it last read; only a change of that state is
-announced, not the time of each read or the interval. In a live window, while it is open and
+The header says "Observes, never pauses". One status line below it gives a
+dot and a word for the state (**Live**, **Stored evidence**, **Reading…**,
+**Disconnected:**, **Not answered:** or **Malformed answer:** with the reason,
+or that no backend serves the window) and the time of the last read; its
+tooltip says how often it reads. Only a change of state is announced, never
+the time of each read or the interval. In a live window, while it is open and
 Sources is showing, it reads every 2 seconds, or four times as long as the
 last read took, up to 30 seconds. The stored-evidence window (`reb://`)
 answers the same reads from its fixed store, so it reads once when opened and
@@ -256,25 +259,43 @@ nothing and says it cannot read. Closed or behind another workspace, the
 sidebar runs no timer and sends nothing. One read is in flight at a time: a
 newer read, closing, leaving Sources or a cleared or replaced store aborts it.
 A failed or malformed read keeps the last state, marks each section "last
-read" and dims it, and says why.
+read" and dims it, and the status line says why.
 
-Each section is a collapsible pane:
+The sections scroll as one pane. An open section's title stays at the top of
+the pane while its content scrolls under it, so a list is never seen without
+its title. A list is as tall as its rows up to a cap that follows the
+window's height, and it ends on a whole row: the row edge nearest the cap, or
+its last row when the cap would cut only a few pixels. A thin shade marks the
+edge that more rows lie past, within the rows' padding, never over their
+text. Each section is a collapsible pane:
 
-- **Threads**, the Threads view: Console documents (top, child and
-  out-of-process frames, as the Console listing derives them), observed frames
-  (the session, renderer and frame of the observation records among the
-  newest 2,048 records that are observations or gaps of any kind, within the
-  newest 64 MiB of the store, with the origin of a retained document of that exact frame when there is one)
-  and workers that started requests (from the newest 2,048 request records).
-  Each row gives the origin a line of its own; the selected thread's kind,
-  origin, frame, process and state are listed in full below the list. Arrow
-  keys, Home, End and the Page keys move through the list, and Enter, Space, a
-  click or a double-click selects or clears a thread once. An observed frame scopes
-  Observations and the Sources tree to that exact session and frame, and the
-  tree says so. A Console document scopes only Watch rules, because it carries
-  no native frame ID; a worker scopes nothing, because rules match only a
-  document's main thread and compiled worker scripts carry frame 0.
-- **Watch rules**: what the renderer confirmed armed, rule by rule. When the
+- **Threads**, the Threads view, one line per thread in three groups: Console
+  documents (top, child and out-of-process frames, as the Console listing
+  derives them, tagged `top`, `child` or `OOPIF`), observed frames (the
+  session, renderer and frame of every valid observation record in the event
+  store, from the event index, with the origin of a retained document of that
+  exact frame when there is one) and workers that started requests. A row
+  gives the thread's origin or name, its identifiers (`F` frame, `P` renderer
+  process, `ctx` execution context, `doc` Console document) and its activity:
+  its record count, its request count, or **armed** or **Console**. A long
+  origin is cut before the identifiers are. Its
+  tooltip, and the fields below the list for the selected thread, give its
+  kind, origin, frame, process and state in full. One line below says the
+  Console's state and, while the event index catches up, how much of the store
+  it has indexed. Arrow keys, Home, End and the Page keys move through the
+  list, and Enter, Space, a click or a double-click selects or clears a
+  thread once. An observed frame scopes Observations and the Sources tree to
+  that exact session and frame, and both say so. A Console document scopes
+  only Watch rules, because it carries no native frame ID; a worker scopes
+  nothing, because rules match only a document's main thread and compiled
+  worker scripts carry frame 0.
+- **Watch rules**: what the renderer confirmed armed, rule by rule, with the
+  rules that are off named on one line. With nothing armed it says **No rules
+  armed** and, without a live Console connection, offers **Open Console**,
+  which opens the Console on its connection settings; its tooltip says how
+  rules arm. An armed set's heading names its Console document and says in a
+  few words what it cannot observe (`main thread only`, and whether
+  navigation clears it or it is kept); its tooltip says it in full. When the
   Console is connected to a live capture document, selected and confirmed in
   the Console as before, one form, drawn for that document and naming it on
   its button, arms request rules (an optional method, then URL text), event
@@ -284,45 +305,53 @@ Each section is a collapsible pane:
   is sent, the section says so, and the form is drawn again for the new
   document. Arming replaces the set and keeps the DOM rules the Console armed
   on the same document. A refused set leaves nothing armed, and nothing is
-  retried. Without a live connection the section says how to get one and
-  shows no form. The form and the armed set say what a rule cannot observe,
-  because a wait for it would then find nothing with nothing missing: only
-  the main thread of the documents a rule is armed on records, never their
-  workers or other documents; and this document's navigation clears its
-  rules. **Keep for every later** *origin frame kind* **document**, which
-  names this document's origin and frame kind, also keeps the rules other
-  than DOM ones for every later such document, in any tab: each one is armed
-  from its first script, so a reload is observed
-  while it loads, but documents that are already open are not armed. The
-  armed set names the kept origin and frame kind and lists the kept rules,
-  and Clear rules forgets them, even after this document navigated.
-- **Observations**: the newest records, 128 at a time and up to 4,096 with
-  **Show older records**, filtered by kind. A note says how much of the store
-  the rows were read from: the whole store, or its newest bytes and why the
-  read stopped. An empty list says that no record exists only when the whole
-  store was read. Each row names the kind, what happened, its monotonic time,
-  category, renderer process, frame, sequence and request. Choosing a row
-  (a click, or the arrow keys) marks it at once, brings its details into view,
-  and again once its positions resolve, lists every identifier and resolves its own
-  frame (listener, timer callback or throw site) and its stack with
-  `get_request_stack`. Enter or **Open …** opens that position in Sources; a
-  watched request opens its Traffic row on the Initiator tab through Traffic's
-  own row selection, after locating it in the request index when it is
-  outside the block Traffic holds. Its link says it is working. A newer
-  click, choosing another record, the kind filter, **Show newest**, closing
-  the record's details or the sidebar, and leaving Sources (even when the
-  researcher comes back before the lookup answers) each cancel it, and a
-  cancelled lookup never switches to Traffic. Until the researcher has a place, the
-  list follows the newest page. Once a row is selected, the list is scrolled
-  from its top or older pages are loaded, the rows are kept: each read adds
-  the records written since, reading at most two more pages to reach them,
-  and keeps the scroll position and selection. When more was written than
-  that, the list stays as it is, names the byte span it does not hold, and
-  **Show newest** returns to the newest page. Past 4,096 rows the oldest are
-  dropped, and the list says how many. A failed read changes neither the rows
-  nor their note. Malformed
-  records, an earlier build's `debugger_observation_budget` gap and store sequence
-  gaps are stated above the list, which is as tall as its rows up to a cap.
+  retried. The form says what a rule cannot observe, because a wait for it
+  would then find nothing with nothing missing: only the main thread of armed
+  documents records, never their workers or other documents, and this
+  document's navigation clears its rules. **Keep for every later** *origin
+  frame kind* **document**, which names this document's origin and frame
+  kind, also keeps the rules other than DOM ones for every later such
+  document, in any tab: each one is armed from its first script, so a reload
+  is observed while it loads, but documents that are already open are not
+  armed. The armed set names the kept origin and frame kind and lists the
+  kept rules, and Clear rules forgets them, even after this document
+  navigated.
+- **Observations**: one line of controls, then the newest records, 128 at a
+  time and up to 4,096 with **Show older records**. The kind menu (All kinds,
+  Requests, Listeners, Timers, CSP, Exceptions, DOM) names each kind's record
+  count in scope from the event index, with `+` while the index catches up;
+  while an observed frame is selected, a **Frame** *N* **×** chip beside it
+  lists every frame again. Malformed records, an earlier build's
+  `debugger_observation_budget` gap, store sequence gaps, a read that stopped
+  at its budget, a failed older read and dropped rows are short flags above
+  the list, each with its detail in its tooltip and for assistive readers;
+  none is left out. An empty list says that no record exists only when the
+  whole store was read, and otherwise how much was read. Each row is two
+  lines: the kind and what happened, then its time from its session's first
+  record (`+M:SS.mmm`, from `time_origins`; the exact monotonic time is in the
+  row's tooltip and its details), its category, and its correlation
+  identifiers (`P` renderer process, `F` frame, `#` sequence, `R` request).
+  The row the pointer or the keyboard is on shows **↵ Open**, what Enter does.
+  Choosing a row (a click, or the arrow keys) marks it at once, brings its
+  details into view, and again once its positions resolve, lists every
+  identifier and resolves its own frame (listener, timer callback or throw
+  site) and its stack with `get_request_stack`. Enter or **Open …** opens that
+  position in Sources; a watched request opens its Traffic row on the
+  Initiator tab through Traffic's own row selection, after locating it in the
+  request index when it is outside the block Traffic holds. Its link says it
+  is working. A newer click, choosing another record, the kind menu, **Show
+  newest**, closing the record's details or the sidebar, and leaving Sources
+  (even when the researcher comes back before the lookup answers) each cancel
+  it, and a cancelled lookup never switches to Traffic. Until the researcher
+  has a place, the list follows the newest page. Once a row is selected, the
+  list is scrolled from its top or older pages are loaded, the rows are kept:
+  each read adds the records written since, reading at most two more pages to
+  reach them, and keeps the scroll position and selection. When more was
+  written than that, the list stays as it is, says how much newer data it
+  does not hold (the byte span is in the tooltip), and **Show newest**
+  returns to the newest page. Past 4,096 rows the oldest are dropped, and a
+  flag says how many. A failed read changes neither the rows nor their notes.
+  The list is as tall as its rows up to a cap.
   Traffic's **Show in debugger** on a watched request calls
   `RebDebuggerSidebar.showObservation`: the sidebar opens on the Requests
   kind, clears an observed-frame scope that would hide the record, and once a
@@ -335,11 +364,14 @@ Each section is a collapsible pane:
   leaving Sources or a replaced store. Focus moves to the list only if it is
   still where it was when asked; a file, Find or the Watch form picked
   meanwhile keeps it, and the record is still chosen.
-- **Pausing**: one statement of the availability `get_native_debugger` reports.
-  Today it is unsupported, so the sidebar offers no control to stop, step or
-  inspect a paused frame. When sections registered with `native: 'pausing'`
-  exist, the statement names them: available, their controls are there;
-  unsupported, those controls stay disabled.
+- **Pausing**: one short statement of the availability `get_native_debugger`
+  reports, with the reason, policy, experiment flag, pause lease and whether a
+  page can detect the debugger listed below it. Today it is unsupported, so
+  the sidebar offers no control to stop, step or inspect a paused frame. When
+  sections registered with `native: 'pausing'` exist, the statement names
+  them: available, their controls are there; unsupported, those controls stay
+  disabled, and each of those sections says in one line that no browser
+  serves the pausing debugger.
 
 Threads and Observations mount only the rows in view, and captured names such
 as event types and hosts are inserted as text.
@@ -360,6 +392,9 @@ const remove = globalThis.RebDebuggerSidebar.addSection({
   release(body) { /* optional: drop rows and timers when collapsed or closed */ }
 });
 ```
+
+A registered section's body is padded to the section titles' edge; the
+built-in sections run their lists edge to edge and pad their own lines.
 
 `view` holds `status` (`loading`, `ready`, `disconnected`, `malformed` or
 `unavailable`), `document` (the last valid `get_native_debugger` answer, or
@@ -2602,68 +2637,127 @@ of the height; drag the divider between them like the other pane splits, or
 use **Linear** to hide the linear pane (hidden at first in a window under 600
 px high). Neither pane keeps a control or a scrolled row under the divider
 (see [Pane sizes](#pane-sizes)). The text view's line window and search
-notice are hidden while Graph is active. A graph opens at actual size, centered
-on the entry block (or the whole graph when it fits), and **Fit** or `0` shows
-all of it. Below the zoom where rows are readable, cards keep a screen-size
-label and an overview cue says rows are hidden. The footer is one line: the
-limits, then the edge legend, which folds behind **Key** in a narrow pane. Selecting a block with the pointer or Enter scrolls the disassembly or hex
-to its offset. **Graph** in Static bytecode draws the same view for a decoded
-image. Declared flow and an imported **Observed path** are separate layers,
-never one graph: the observed layer's cards are retained steps, and a sequence
-gap is a card with no edge on either side.
+notice are hidden while Graph is active. A graph opens at actual size with the
+entry block and the successors on its first screen centered in the part of the
+stage the minimap leaves clear (the entry alone when they are wider, the whole
+graph when it fits), and **Fit** or `0` shows all of it in the part the
+minimap and the status line leave clear, the overview cue included when the
+fit is below row zoom. The minimap is smaller on a stage under 600 px wide or
+280 px high, whatever the window's size, and its outline of the view never
+shrinks below about 8 px, so one screen of a long function is still marked.
+Zoom goes out as far as Fit needs, at any size. A drag, a scroll, Shift+Arrow,
+a minimap click, a zoom or a resized pane stops where half the stage on each
+axis still shows the drawing, or all of a drawing smaller than that, so any
+edge of the graph pans as far as the middle and the stage never goes blank. Edges
+are added to the drawing only where they cross the view, so a long dashed
+edge costs its visible length, and each dash keeps its place along the whole
+edge as the view pans. Below the zoom where
+rows are readable, cards keep a screen-size label and an overview cue says
+rows are hidden; further out, cards are filled boxes drawn one path per kind,
+so a graph of any size stays a few fills, and the selection and the shown Find
+match keep a ring of ten pixels. The zoom controls and the cue are shown only
+over a drawing. The footer is one line: the limits, then the key for the edge
+kinds this graph has, which folds behind **Key** in a narrow pane. Selecting
+a block with the pointer or Enter scrolls the disassembly or hex to its
+offset. **Graph** in Static bytecode draws the same view for a decoded image.
+Declared flow and an imported **Observed path** are separate layers, never one
+graph: the observed layer's cards are retained steps, and a sequence gap is a
+card with no edge on either side.
 
 The header gives the name, block count, instruction count and `declared` (or
 `observed`). Each block shows its first byte offset as `loc_<hex>`, an
 instruction-count badge and rows of offset, mnemonic and operands. A run of
 identical `block` openers is one row with a count; the badge still counts every
-instruction. Edge kind is never color alone: taken is solid, false is dashed,
-table arms are dotted with their case numbers, exception edges are long-dashed,
-and an unresolved target is a labeled stub that adds no block. The footer keeps
-the limits on screen: declared reachability is not observed execution, and a
-complete drawing is not a proof. Nothing here sets `cfg.complete`.
+instruction. A block of only `end`, `block`, `loop`, `try`, `try_table`,
+`delegate` or `nop` runs nothing: it is drawn as the first row of the block it
+falls into, on a tinted band that names what it held (`end ×3, block`), and
+the header counts it, as in `120 blocks (60 folded)`. The folded block keeps
+its first offset, where branches land, and every row stays in the document.
+Edge kind is never color alone: true is solid, false is dashed, table arms are
+dotted, exception edges are long-dashed and calls are dotted. A transfer with
+no target in the function (a tail call, an exception that may leave it, a
+label past the decoded frames) adds no block: it is an exit row at the foot of
+its card, under a hairline, such as `→ throw: may escape`, with a short tick
+out of the card's right side at that row, and the card is sized to hold it.
+Exception edges run from each block that may throw to every handler that may
+catch it, named by the clause (`catch 0`, `catch_all`); a call that may throw
+says `call: catch 0`. The selection owns the accent color, which no edge kind
+uses. A label is a chip beside its stroke where the edge arrives, never over
+it: case lists, exception and call labels always, true and false only for the
+selected block's edges, since the stroke already says which. The footer keeps the limits on screen: declared
+reachability is not observed execution, and a complete drawing is not a proof.
+Nothing here sets `cfg.complete`.
 
 Keyboard: arrows move to the nearest block in that direction, `[` and `]` step
 in byte order, Home returns to the entry, Enter shows the block in the
 disassembly and hex, `+`, `-` and `0` zoom and fit, and Shift+arrows pan.
+Alt+Left and Alt+Right pick one of the selected block's edges, which is drawn
+with a halo and named in the status line; Alt+Down follows an outgoing edge to
+its target and Alt+Up an incoming one to its source, and the edge followed
+stays picked, so the opposite key returns. A click on an edge, or its chip,
+goes to its far end: the target when the click was nearer the source, else the
+source. An exit row is picked like an edge, and goes to the block it names
+when it names one.
 
-The layout runs in a Web Worker. When the backend serves
-`POST /api/graph-layout` ([HTTP API](../../protocol/http-api.md#graph-layout)),
-the function is laid out by [Triskel](https://github.com/triskellib/triskel), a
-CFG layout engine built on single-entry single-exit regions. It is vendored in
-the backend and runs in a separate worker process, with no size limit or
-deadline. While it runs, the view counts its seconds and offers **Use the
-region layout**, which stops it. The project-authored region layout in
-`block_graph_layout.js` draws any function, and stays in four cases:
-- Triskel would draw the function more than 1.6 times wider and over 1,400 px.
-  A flattened dispatcher's fan is the usual case: the region layout stacks it
-  into a grid, where Triskel puts every arm in one row.
-- The function has more than 2,000 blocks or 8,000 edges. Triskel is not run
-  unasked there: on structured control flow it takes about 10 s at 8,000
-  blocks and a minute at 16,000, and at this revision it places nodes on top
-  of each other in most functions over about 1,000 blocks. The region layout,
-  close to linear in the block count, is drawn at once and the header offers **Lay
-  out with Triskel**, which runs it on the drawn function with no size limit.
-  The drawing stays while it runs, the header counts its seconds, and the
-  button becomes **Cancel**.
-- Triskel's answer does not match the function.
-- The route is missing or fails, as in the stored-evidence window.
+**Find** (Cmd+F) searches the drawn function's rows while Graph is open, as a
+case-insensitive, single-line literal. Matched blocks are outlined, matched
+rows banded and each match boxed, in the overview and the minimap too. Typing
+shows the first matched block at or after the selection; Enter and
+Shift+Enter step through the matched blocks and wrap. The status line and the
+graph say `3 of 14 blocks · 52 rows match`. A Find typed before a function is
+drawn runs when it is.
 
-The header says `Triskel layout` when Triskel was used, `region layout` with
-the reason otherwise (stopped, failed, wider or taller), and hovering the
-counts says why the region layout stayed. The region layout also stays when
-Triskel's drawing would be more than 1.6 times taller and over 1,600 px
-taller, as nested loops can make it. Both layout workers reach the route
-through `graph_layout_client.js`, which holds the size Triskel runs on unasked,
-the answer check and this acceptance rule, and gives each graph it does not lay
-out a reason code that each view words for itself. It sets no timeout: the
-caller's signal stops a request, and the backend then stops its worker. Triskel's and fmt's licence
-texts ship as `Contents/Resources/GraphLayoutLicenses.txt`.
+Unreached code never changes how reachable code is drawn: dominators come from
+the blocks the declared entries reach. Each set of connected unreached blocks
+is drawn below the reachable graph, and an edge from it into reachable code is
+an exit row of its card that names the block it reaches (`→ loc_1a2`). A set
+with several entries, such as a dead switch whose unchosen arms have no
+predecessor, nests as its text does: each later entry hangs under the set's
+last block before it, so the joins its arms share stay inside the switch
+instead of the whole set laying out flat.
+
+The layout runs in a Web Worker, and the region layout in
+`block_graph_layout.js` is always what is drawn first, at any size. When the
+backend serves `POST /api/graph-layout` ([HTTP
+API](../../protocol/http-api.md#graph-layout)), the header offers **Lay out
+with Triskel** for any drawn graph of two or more blocks.
+[Triskel](https://github.com/triskellib/triskel) is a CFG layout engine built
+on single-entry single-exit regions, vendored in the backend and run in a
+separate worker process with no size limit or deadline: on structured control
+flow it takes about 10 s at 8,000 blocks and a minute at 16,000. The worker
+sends it only the graph's edges and the drawn cards' sizes. The region layout
+stays drawn while it runs, the header counts its seconds, and the button
+becomes **Cancel**. Its answer is drawn whatever its size, with how it compares
+(`Triskel layout · 2.4× as wide, 0.8× as tall`); both drawings are kept, each
+at the view it was left at, and the button switches between them (**Show
+region layout**, **Show Triskel layout**). A stopped run says `Triskel
+stopped`, and a failure says `Triskel failed` with its reason on hover; both
+can be run again. Both layout workers reach the route through
+`graph_layout_client.js`, which checks each answer's shape and gives each graph
+it does not lay out a reason code that each view words for itself; the block
+graph asks it to keep any well-formed drawing (`keep`). It sets no timeout:
+the caller's signal stops a request, and the backend then stops its worker.
+Triskel's and fmt's licence texts ship as
+`Contents/Resources/GraphLayoutLicenses.txt`.
 
 The region layout uses dominator regions: each subtree is entered once, so it
 lays out alone and only its members' sizes reach its parent. A layer of one
-continues the spine. A wider layer becomes side-by-side boxes and wraps into a
-grid past six. Arms with no way out stack on the spine. Edges leaving a box
-share a bottom port, and every back edge to a loop shares one rail.
+continues the spine. When one member of a layer holds four times the blocks of
+the rest, as the rest of a switch ladder or an else-if chain outweighs its
+case, it continues the spine and the rest sit beside it, so a chain of any
+length stays one column. A wider layer becomes side-by-side boxes, ordered by
+where their edges come from so few cross, and wraps into a grid past six; a
+`br_table`'s arms are ordered by case. Arms with no way out stack on the spine. Edges leaving a
+box share a bottom port, and every back edge to a loop shares one rail. Rails
+reuse columns, but a rail inside another's rows always takes a column inside
+it, so nested rails never cross; two that only overlap cross once, whichever
+way they sit. The dominator tree is computed with Semi-NCA in close to linear
+time, so even a function of 100,000 blocks lays out in about a second.
+
+A failure says why. Retry is offered only when trying again can help: the
+evidence service unreachable or busy, or the layout worker stopped. A refused
+read, an invalid document, or a graph past the memory the layout could
+allocate says so without it.
 
 Memory: one function is decoded on demand, layout runs in one worker per view
 that stays between jobs and is terminated when a job is replaced or the view
@@ -2671,7 +2765,6 @@ closes, and laid-out graphs stay in a
 16 MiB least-recently-used cache that is cleared when the view closes, the
 artifact changes or the screen leaves. The canvas is one bounded backing store
 that does not grow with graph size, and only visible cards and edges are drawn.
-A byte budget cuts row text before structure and labels what it cut.
 
 ## Trace value
 
@@ -2915,13 +3008,14 @@ Flow workspace, through the API under [Workspace API](#workspace-api).
 
 ### Reading the graph
 
-The view reads top to bottom like a disassembler's CFG: tall and narrow, with
-a tall minimap.
-- **Realms:** each realm is a full-width band, and the bands are stacked in
-  call order. A realm that calls or posts into another sits above it, so an
-  iframe sits below its parent; an unrelated out-of-process frame comes after
-  the group it is not part of. A call between realms runs down across the band
-  boundary.
+Each realm reads top to bottom like a disassembler's CFG, and the realms are
+packed side by side, so a large session fills a wide pane rather than one
+tall column.
+- **Realms:** each realm is a band of its own width, and the bands are packed
+  into columns in call order, down a column and then on to the next. A realm
+  that calls or posts into another comes before it, so an iframe follows its
+  parent; an unrelated out-of-process frame comes after the group it is not
+  part of. A call between realms runs along the corridor beside its band.
 - **Band label:** each band has a faint tint of its own and names its realm
   in a top corner: the scripts' origin, the realm (execution context), the
   frame its stacks were recorded in and the process. The label takes the
@@ -3000,14 +3094,20 @@ theme, Dawn and the light app palette in the light one.
   runs with rounded corners, the same shape Triskel's waypoints take. Each edge
   is outlined against the canvas, and its width follows how many records
   walked it.
-- A call that skips rows runs straight down between the cards it passes. A
-  back edge inside a band runs up the band's right gutter.
-- A call into a later band drops straight down when no card is in its way,
-  turning once in the gap above the callee's band. Otherwise it runs along the
-  gap under the caller's row to the nearer side gutter, which is outside every
-  band's cards, down the gutter, and into the callee from the gap above its
-  band or above its row.
-- A call back up into an earlier band runs up the right gutter.
+- A call leaves and enters its cards over its own segment, or over the card
+  at its other end, when the order of the card's calls allows, so it runs
+  straight without a jog under or over the card.
+- A call that skips rows runs down between the cards it passes, straight
+  where its neighbours leave room and with a jog where they do not. A back
+  edge inside a band runs up the band's right gutter.
+- Every horizontal run has a line of its own in its gap, so two edges never
+  share a line, touch or merge: where two edges meet, they cross. The lines
+  are ordered to avoid crossings, and a gap grows to fit them.
+- A call into another band runs along the gap under the caller's row to the
+  corridor beside its band, along the corridor, and into the callee along the
+  gap above its row. A call that passes a column runs over the columns on the
+  highway at the top. Each call between bands has its own corridor and
+  highway line.
 - No run crosses a card.
 
 **Key** in the status bar explains the edges, the row colours, the kinds, the
@@ -3100,6 +3200,13 @@ The canvas announces this list through `aria-describedby`.
   wider graph opens at reading size at the top of its first band, with the
   whole width in view when it fits, else centred on the busiest entry of that
   band. It never opens as an unreadable overview; the minimap is the overview.
+- The view keeps to the graph as the block graph's does. A drag, a scroll,
+  Shift+arrows, a minimap press, a zoom or a resized canvas stops where half
+  the canvas on each axis still shows the graph, or all of a graph smaller
+  than that. So any edge pans as far as the middle, and the graph is never
+  lost off the canvas with only Fit to bring it back. Both views take the rule
+  from `graphBoundView` in `block_graph.js`.
+  `tools/check-block-graph-ui.mjs` checks each of those in a DOM model.
 - Rows show from 85% zoom.
 - Below that, cards sketch their rows in their rows' colours and paint their
   names at screen size, and band names sit on plates.
@@ -3205,18 +3312,37 @@ same engine report either way, on card sizes measured from their text.
   cycle between realms takes the best ranked one first, and a call back up
   into an earlier band is a back edge.
 - Inside each band, cycles are broken by a depth-first walk over the realm's
-  own calls, and layers are longest paths, with roots pulled down to their
-  first callee. A call from another realm never pushes a card down.
-- A band holds at most five cards per layer, more in a large band so it stays
-  near square; the rest move down, leaves first. A busy session grows tall,
-  not wide.
-- An edge longer than one layer gets a waypoint in every layer it passes, up to
-  200,000.
-- Each band and layer is ordered by its neighbours' mean position over
-  alternating sweeps, then placed by a weighted isotonic fit that keeps a single
-  chain of calls straight.
-- All bands share one width. Each band is shifted sideways inside it so the
-  calls between bands run as straight as the cards allow.
+  own calls. Cards are scheduled depth first from the heaviest roots, each
+  into the first layer under all its callers that has room, so a chain of
+  calls stays a column. A call from another realm never pushes a card down.
+- A layer holds about as many cards as makes the band near square, never
+  fewer than five; then a card with more callees than callers sinks toward
+  them, and one with more callers rises, while a layer has room, which
+  shortens the calls.
+- A call longer than one layer is one segment with a slot in every layer it
+  passes (Eiglsperger, Siebenhaller and Kaufmann), so ordering and placement
+  cost grows with cards and calls, not with how far the calls reach. Nothing
+  is capped.
+- Each band is ordered by barycentre sweeps, each followed by a transpose
+  pass that swaps side-by-side cards while that removes crossings. Crossings
+  are counted exactly after each sweep (Barth, Jünger and Mutzel), and the
+  order with the fewest is kept. On the benchmark sessions the sweeps remove
+  about a third of the first order's crossings, and the transpose 1 to 3% of
+  the rest.
+- A band's width is bounded at twice its widest layer (`slack`). A call is
+  placed as one node per layer it passes. Where the drawing with every call
+  straight passes the bound, joints are inserted on the chains of spacing
+  that put it there (jog insertion, as in VLSI layout compaction); a deep
+  band stops after a fixed amount of work per node (`jogWork`) and keeps the
+  rest of its width, rather than bending every call. Brandes and Köpf's four
+  alignments are then compacted under the bound and balanced. One round of
+  coordinate descent on the calls' weighted sideways length (Gansner,
+  Koutsofios, North and Vo's objective, each layer solved exactly) moves a
+  card over its callers and callees where its layer has room. Each call is
+  then joined into as few straight runs as its neighbours leave room for.
+- Bands are packed into columns in band order, toward a drawing 1.6 times as
+  wide as it is tall (`aspect`), each band centred in its column at its own
+  width.
 
 **Triskel:** when the backend serves `POST /api/graph-layout`, each realm of 2
 to 2,000 cards and up to 8,000 calls is then sent to
@@ -3233,11 +3359,12 @@ or more than 1.6 times taller and over 1,600 px taller.
 Triskel does not stack a wide fan of calls, and a call tree's breadth would
 otherwise run off to the side. The layered layout also stays when Triskel's
 answer is missing, failed or the wrong shape. Either way the bands keep the
-layered order and are stacked, aligned and routed between the same way. The
+layered order and are packed into columns and routed between the same way. The
 status bar says `Triskel layout`, or how many realms it took, and hovering it
 gives each other realm's reason.
 
-Six thousand cards lay out in well under a second. The canvas is one bounded
+Ten thousand cards lay out in under half a second in Node, fifty thousand in
+under three. The canvas is one bounded
 backing store, released with the minimap while the view is hidden, and only
 visible bands, cards and edges are drawn. Card text is cut to its card once
 per layout, not per frame, and a selection reads per-model path indexes and

@@ -37,8 +37,8 @@ pub const EVENTS_SUFFIX: &str = ".events-v1";
 pub const EDGES_SUFFIX: &str = ".edges-v1";
 pub const PROFILES_SUFFIX: &str = ".profiles-v1";
 /// The second layout adds the gap totals, the third the summary's counts,
-/// the fourth the debugger threads.
-const EVENTS_FORMAT: &str = "reb-event-index-v1/4";
+/// the fourth the debugger threads, the fifth their counts per kind.
+const EVENTS_FORMAT: &str = "reb-event-index-v1/5";
 const EDGES_FORMAT: &str = "reb-edge-index-v1";
 const PROFILES_FORMAT: &str = "reb-signal-profile-index-v1";
 /// The largest event or edge record a trace reads.
@@ -128,6 +128,10 @@ pub(crate) const EVENT_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS observed_frames(session INTEGER NOT NULL, process INTEGER NOT NULL,
         frame INTEGER NOT NULL, records INTEGER NOT NULL, last_sequence INTEGER NOT NULL,
         last_start INTEGER NOT NULL, PRIMARY KEY(session, process, frame)) WITHOUT ROWID;
+    -- `kind` is the record type's place in debugger_observation::TYPES.
+    CREATE TABLE IF NOT EXISTS observed_kinds(session INTEGER NOT NULL, process INTEGER NOT NULL,
+        frame INTEGER NOT NULL, kind INTEGER NOT NULL, records INTEGER NOT NULL,
+        PRIMARY KEY(session, process, frame, kind)) WITHOUT ROWID;
     CREATE TABLE IF NOT EXISTS observation_budget_gaps(start INTEGER PRIMARY KEY,
         session INTEGER NOT NULL, process INTEGER NOT NULL, frame INTEGER NOT NULL,
         sequence INTEGER NOT NULL);
@@ -420,10 +424,23 @@ fn thread_record(transaction: &Transaction<'_>, event: &Value, start: u64) -> Re
         event["process_id"].as_i64().unwrap_or(0),
     );
     let sequence = identifier(&event["sequence_number"]);
-    if crate::debugger_observation::TYPES.contains(&kind) {
+    if let Some(position) = crate::debugger_observation::TYPES
+        .iter()
+        .position(|known| *known == kind)
+    {
         if crate::debugger_observation::decode(event).is_none() {
             return Ok(());
         }
+        let frame = identifier(&event["frame_id"]);
+        transaction
+            .prepare_cached(
+                "INSERT INTO observed_kinds(session, process, frame, kind, records)
+                 VALUES (?1, ?2, ?3, ?4, 1)
+                 ON CONFLICT(session, process, frame, kind) DO UPDATE SET records = records + 1",
+            )
+            .sql()?
+            .execute(params![session, process, frame, position as i64])
+            .sql()?;
         transaction
             .prepare_cached(
                 "INSERT INTO observed_frames(session, process, frame, records, last_sequence, last_start)
@@ -432,7 +449,7 @@ fn thread_record(transaction: &Transaction<'_>, event: &Value, start: u64) -> Re
                      last_sequence = excluded.last_sequence, last_start = excluded.last_start",
             )
             .sql()?
-            .execute(params![session, process, identifier(&event["frame_id"]), sequence, start as i64])
+            .execute(params![session, process, frame, sequence, start as i64])
             .sql()?;
     } else if kind == "request_initiated"
         && let Some(worker @ 17..=19) = event["loader_kind"].as_i64()

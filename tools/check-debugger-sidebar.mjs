@@ -57,7 +57,7 @@ function createStore(count = 0) {
         scope: store.scope ?? (scanStart === 0 && end === store.storeEnd() ? 'store' : 'bounded_range'), direction: 'backward', limit,
         returned: chosen.length, store_end: String(store.storeEnd()), next_after: String(end), next_before: scanStart > 0 ? String(scanStart) : null,
         limited, budget_exhausted: store.budget},
-      observation_budget_gaps: []};
+      observation_budget_gaps: [], time_origins: store.origins ?? []};
   };
   return store;
 }
@@ -124,6 +124,12 @@ const release = async entry => { await until(() => entry?.release, 'a held reque
 const event = (ui, type, init = {}) => Object.assign(new ui.window.Event(type, {bubbles: true, cancelable: true}), init);
 const click = (ui, node, detail = 1) => node.dispatchEvent(event(ui, 'click', {detail}));
 const key = (ui, node, name) => node.dispatchEvent(event(ui, 'keydown', {key: name}));
+// The kind menu, chosen as a change of the select's value.
+const chooseKind = (ui, kind) => {
+  const select = ui.sidebar.querySelector('.debugger-kind-select');
+  [...select.options].find(option => option.value === kind).selected = true;
+  select.dispatchEvent(event(ui, 'change'));
+};
 const results = [];
 const only = process.env.REB_DEBUGGER_CASE ?? null;
 async function check(name, run) {
@@ -147,7 +153,7 @@ await check('one watch form per Console document, stale arming refused', async (
   await until(() => ui.sidebar.querySelector('.debugger-watch-form'), 'the form appears');
   const forms = () => [...ui.sidebar.querySelectorAll('.debugger-watch-form')];
   for (const kind of ['timer_observation', 'all', 'listener_dispatch', 'all']) {
-    click(ui, ui.sidebar.querySelector(`.debugger-kind[data-kind="${kind}"]`));
+    chooseKind(ui, kind);
     await settle();
   }
   assert.equal(forms().length, 1, 'repeated renders keep one form');
@@ -158,7 +164,7 @@ await check('one watch form per Console document, stale arming refused', async (
     pane.dispatchEvent(event(ui, 'toggle'));
     pane.open = true;
     pane.dispatchEvent(event(ui, 'toggle'));
-    click(ui, ui.sidebar.querySelector('.debugger-kind[data-kind="all"]'));
+    chooseKind(ui, 'all');
     await settle();
   }
   assert.equal(forms().length, 1, 'collapsing and expanding keeps one form');
@@ -180,11 +186,11 @@ await check('one watch form per Console document, stale arming refused', async (
   assert.equal(JSON.stringify(calls[0].requests), JSON.stringify([{url_contains: '/collect'}]));
   // Disconnected: no form, and the outcome stays readable.
   live = null;
-  click(ui, ui.sidebar.querySelector('.debugger-kind[data-kind="timer_observation"]'));
+  chooseKind(ui, 'timer_observation');
   await settle();
   assert.equal(forms().length, 0, 'no live document, no form');
   live = {session_id: '5', target_id: '22', label: 'top #22'};
-  click(ui, ui.sidebar.querySelector('.debugger-kind[data-kind="all"]'));
+  chooseKind(ui, 'all');
   await settle();
   assert.equal(forms().length, 1);
   ui.close();
@@ -198,7 +204,10 @@ await check('stored window reads once, no-backend window never reads', async () 
   await until(() => stored.rows('#debugger-observations').length === 5, 'stored rows');
   await sleep(POLL + 600);
   assert.equal(stored.reads().length, 1, 'the stored window does not poll');
-  assert.match(stored.text('.debugger-sidebar-status'), /Stored evidence: read once/);
+  // The state in words, the time beside it, and how often in the tooltip.
+  assert.equal(stored.text('.debugger-status-state'), 'Stored evidence');
+  assert.match(stored.text('.debugger-status-time'), /\d:\d\d/);
+  assert.match(stored.sidebar.querySelector('.debugger-sidebar-status').title, /^Read once at .+: nothing captures in this window\.$/);
   const again = [...stored.sidebar.querySelectorAll('.debugger-sidebar-status button')].find(button => button.textContent === 'Read again');
   assert(again && !again.hidden, 'the stored window offers Read again');
   click(stored, again);
@@ -227,10 +236,10 @@ await check('empty bounded read states how much was read', async () => {
   store.budget = true;
   const ui = mount({store});
   ui.open();
-  await until(() => /event store/.test(ui.text('.debugger-observation-notes')), 'the coverage note');
+  await until(() => /newest/.test(ui.text('.debugger-observation-notes')), 'the coverage note');
   const note = ui.text('.debugger-observation-notes');
   assert.doesNotMatch(note, /^No observation records in the event store/);
-  assert.match(note, /in the newest 1000 bytes of the event store's 5 KiB, where the last read stopped at its 64 MiB budget\. Older bytes were not read/);
+  assert.equal(note, 'No records in the newest 1000 bytes of 5 KiB, where the read stopped at its 64 MiB budget. Older ones may exist.');
   const more = ui.sidebar.querySelector('.debugger-older');
   assert.equal(more.hidden, false, 'the older bytes can be read');
   ui.close();
@@ -273,7 +282,9 @@ await check('older pages, scroll and selection survive new records', async () =>
   store.add(600);
   await until(() => !ui.sidebar.querySelector('.debugger-observation-pinned').hidden, 'the kept list says so', 2 * POLL + 1000);
   assert.equal(size(), 259, 'the loaded pages stay');
-  assert.match(ui.text('.debugger-observation-pinned'), /the 59 KiB written since \(bytes 30300 to 90300\) are more than 2 reads and are not in this list/);
+  assert.equal(ui.text('.debugger-observation-pinned .debugger-note'), '59 KiB of newer records are not in this list.');
+  assert.equal(ui.sidebar.querySelector('.debugger-observation-pinned .debugger-note').title,
+    'Kept where you were: the 59 KiB written since (bytes 30300 to 90300) are more than 2 reads.');
   click(ui, [...ui.sidebar.querySelectorAll('.debugger-show-newest')][0]);
   await until(() => size() === 128 && ui.sidebar.querySelector('.debugger-observation-pinned').hidden, 'Show newest');
   ui.close();
@@ -330,9 +341,9 @@ await check('superseded and closed reads are aborted', async () => {
   ui.open();
   await until(() => ui.rows('#debugger-observations').length > 0, 'the first read');
   holding = true;
-  click(ui, ui.sidebar.querySelector('.debugger-kind[data-kind="timer_observation"]'));
+  chooseKind(ui, 'timer_observation');
   await until(() => ui.reads().length === 2, 'a held read');
-  click(ui, ui.sidebar.querySelector('.debugger-kind[data-kind="all"]'));
+  chooseKind(ui, 'all');
   await until(() => ui.reads().length === 3, 'the newer read');
   assert.equal(ui.reads()[1].signal.aborted, true, 'a newer read aborts the one it replaces');
   ui.close();
@@ -420,11 +431,16 @@ await check('the thread listing says what the event index covered', async () => 
   const store = createStore(1);
   const ui = mount({store});
   ui.open();
-  const notes = () => ui.sidebar.querySelector('.debugger-thread-notes')?.textContent ?? '';
-  await until(() => /Workers and observed frames cover the whole event store\./.test(notes()), 'the whole-store note');
-  assert(!/newest|2,048|64 MiB/.test(notes()), `no window is named: ${notes()}`);
+  const foot = () => ui.sidebar.querySelector('.debugger-thread-foot');
+  // The whole store indexed: the Console's state, and nothing about coverage.
+  await until(() => foot()?.textContent === 'Console idle', 'the Console state');
+  assert.equal(foot().querySelector('.debugger-flag'), null, 'no coverage flag once the index covers the store');
   store.threadsCoverage = {scope: 'bounded_range', complete: false, scan_start: '0', scan_end: String(3 * 1024 * 1024), store_end: String(8 * 1024 * 1024)};
-  await until(() => /cover the first 3\.0 MiB of the event store's 8\.0 MiB, while its index catches up\./.test(notes()), 'the catching-up note');
+  await until(() => foot().querySelector('.debugger-flag'), 'the catching-up flag');
+  const flag = foot().querySelector('.debugger-flag');
+  assert.match(flag.textContent, /^Indexed 3\.0 MiB of 8\.0 MiB\. /);
+  assert.equal(flag.title, 'Workers and observed frames cover the event store\'s indexed part while its index catches up.');
+  assert(!/newest|2,048|64 MiB/.test(foot().textContent), `no window is named: ${foot().textContent}`);
   ui.close();
 });
 
@@ -436,17 +452,17 @@ await check('pausing statement names registered pausing sections', async () => {
   ui.open();
   const statement = () => ui.text('[data-debugger-native="availability"]');
   await until(() => statement(), 'the statement');
-  assert.match(statement(), /its controls are not part of this sidebar yet/);
+  assert.match(statement(), /but this sidebar has no controls for it yet\.$/);
   const remove = ui.context.RebDebuggerSidebar.addSection({id: 'breakpoints', title: 'Breakpoints', order: 45, native: 'pausing', render(body) { body.textContent = 'list'; }});
   await settle();
-  assert.match(statement(), /^Available\. A Brave build serves the pausing debugger\. Its controls are in the Breakpoints section\.$/);
+  assert.match(statement(), /^Available\. A Brave build serves the pausing debugger; its controls are in the Breakpoints section\.$/);
   const more = ['call-stack', 'scope'].map((id, index) => ui.context.RebDebuggerSidebar.addSection({id, title: ['Call stack', 'Scope'][index],
     order: 46 + index, native: 'pausing', render(body) { body.textContent = 'list'; }}));
   await settle();
-  assert.match(statement(), /Its controls are in the Breakpoints, Call stack and Scope sections\.$/, 'the names read as a list');
+  assert.match(statement(), /its controls are in the Breakpoints, Call stack and Scope sections\.$/, 'the names read as a list');
   for (const removal of [remove, ...more]) removal();
   await settle();
-  assert.match(statement(), /not part of this sidebar yet/);
+  assert.match(statement(), /no controls for it yet/);
   ui.close();
 });
 
@@ -580,7 +596,7 @@ await check('the live region ignores how long reads take', async () => {
   const region = ui.sidebar.querySelector('.debugger-sidebar-status [aria-live], .debugger-sidebar-status[aria-live]');
   const first = region.textContent;
   store.delay = 900;
-  await until(() => /every 4 seconds/.test(ui.text('.debugger-sidebar-status')), 'a slower read lengthens the interval', 3 * POLL + 2000);
+  await until(() => /every 4 seconds/.test(ui.sidebar.querySelector('.debugger-sidebar-status').title), 'a slower read lengthens the interval', 3 * POLL + 2000);
   assert.equal(region.textContent, first, 'the interval is outside the live region');
   ui.close();
 });
@@ -861,10 +877,10 @@ await check('moving on in the sidebar cancels a Traffic lookup', async () => {
   await settle();
   assert.equal(first.signal.aborted, true, 'choosing another record cancels the lookup');
   const second = await startLookup(2);
-  click(ui, ui.sidebar.querySelector('.debugger-kind[data-kind="timer_observation"]'));
+  chooseKind(ui, 'timer_observation');
   await settle();
   assert.equal(second.signal.aborted, true, 'the kind filter cancels the lookup');
-  click(ui, ui.sidebar.querySelector('.debugger-kind[data-kind="all"]'));
+  chooseKind(ui, 'all');
   await until(() => ui.rows('#debugger-observations').length === 2, 'all records again');
   const third = await startLookup(3);
   const screen = ui.document.querySelector('#screen-sources');
@@ -913,7 +929,7 @@ await check('arming reads the confirmed set at once', async () => {
   await until(() => ui.sidebar.querySelector('.debugger-watch-form'), 'the form');
   // Slow reads stretch the poll to 6 seconds; arming just after one read ends.
   store.delay = 1500;
-  await until(() => /every 6 seconds/.test(ui.text('.debugger-sidebar-status')), 'a 6 second interval', 4 * POLL);
+  await until(() => /every 6 seconds/.test(ui.sidebar.querySelector('.debugger-sidebar-status').title), 'a 6 second interval', 4 * POLL);
   const form = ui.sidebar.querySelector('.debugger-watch-form');
   form.querySelector('textarea').value = '/collect';
   form.dispatchEvent(event(ui, 'submit'));
@@ -1012,8 +1028,9 @@ await check('showObservation chooses the record Traffic names', async () => {
   // A kind the researcher picks before the read answers drops the request.
   store.delay = 200;
   ui.context.RebDebuggerSidebar.showObservation(target);
-  click(ui, ui.sidebar.querySelector('.debugger-kind[data-kind="timer_observation"]'));
-  await until(() => /^\d+ timers, newest first/.test(ui.text('.debugger-observation-notes')), 'the picked kind is read');
+  chooseKind(ui, 'timer_observation');
+  await until(() => ui.text('.debugger-observation-state') === '' && ui.rows('#debugger-observations').length > 0 &&
+    ui.rows('#debugger-observations').every(row => row.dataset.kind === 'timer_observation'), 'the picked kind is read');
   await settle();
   assert.doesNotMatch(ui.text('.debugger-observation-notes'), /Observation #7/, 'an abandoned request names nothing');
   assert.equal(list().querySelector('[aria-selected="true"]'), null, 'and chooses nothing');
@@ -1029,8 +1046,10 @@ await check('watch rules state what they cannot observe', async () => {
   ui.open();
   await until(() => ui.sidebar.querySelector('.debugger-watch-limits'), 'the arming form');
   const limits = ui.text('.debugger-watch-limits');
-  for (const said of [/main thread of the documents it is armed on/, /never workers or other documents/, /navigation clears its rules/i, /not documents that are already open/]) assert.match(limits, said);
-  assert.match(ui.text('.debugger-watch-state'), /Only its main thread is observed/);
+  for (const said of [/^Main thread of armed documents only/, /never workers or other documents/, /Navigation clears these rules/, /not ones already open\.$/]) assert.match(limits, said);
+  // The armed set's heading says it in a few words, and in full in its tooltip.
+  assert.equal(ui.text('.debugger-watch-head .debugger-watch-limit'), 'main thread only · navigation clears');
+  assert.match(ui.sidebar.querySelector('.debugger-watch-head').title, /Only its main thread is observed/);
   ui.close();
 });
 
@@ -1121,6 +1140,46 @@ await check('showObservation waits for Show older to reach its record', async ()
   await until(() => ui.sidebar.querySelector('#debugger-observations [aria-selected="true"]')?.dataset.key === '1:42:1', 'chosen once its page is read');
   assert.doesNotMatch(ui.text('.debugger-observation-notes'), /is not among these/, 'the note goes once the rows hold it');
   ui.close();
+});
+
+// The compact states: the kind menu names each kind's count from the index,
+// a row's time reads from its session's first record with the exact time in
+// its tooltip, and with nothing armed and no live Console one line offers it.
+await check('kind counts, session times and the Open Console empty state', async () => {
+  const store = createStore(3);
+  store.observed = [{session_id: '1', process_id: 42, frame_id: '200', last_sequence: '3', records: 3, kinds: {timer_observation: 3}}];
+  store.origins = [{session_id: '1', monotonic_time_ns: '0'}];
+  let opened = 0;
+  const ui = mount({store, globals: {RebNativeConsole: {liveDocument: () => null, open: () => { opened += 1; }}}});
+  ui.open();
+  await until(() => ui.rows('#debugger-observations').length === 3, 'rows');
+  const menu = () => [...ui.sidebar.querySelectorAll('.debugger-kind-select option')].map(option => option.textContent);
+  assert.deepEqual(menu(), ['All kinds · 3', 'Requests · 0', 'Listeners · 0', 'Timers · 3', 'CSP · 0', 'Exceptions · 0', 'DOM · 0']);
+  assert.equal(ui.text('[data-debugger-section="observations"] .debugger-section-count'), '3');
+  const row = ui.rows('#debugger-observations')[0];
+  assert.equal(row.querySelector('.debugger-row-time').textContent, '+0:01.000', 'the newest record, 1 s into its session');
+  assert.equal(row.querySelector('.debugger-row-ids').textContent.trim(), 'P42 F200 #3');
+  assert.match(row.title, /\n1\.000000 s monotonic\n/, 'the exact time is in the tooltip');
+  // While the index catches up a count is a lower bound.
+  store.threadsCoverage = {scope: 'bounded_range', complete: false, scan_start: '0', scan_end: '100', store_end: '300'};
+  await until(() => menu()[0] === 'All kinds · 3+', 'a partial count');
+  // A session the index has not folded yet keeps the exact time.
+  store.origins = [];
+  await until(() => ui.rows('#debugger-observations')[0]?.querySelector('.debugger-row-time').textContent === '1.000000 s', 'the exact time without an origin');
+  // Nothing armed, no live Console: one line, and the way to connect.
+  const empty = ui.sidebar.querySelector('.debugger-empty-row');
+  assert.equal(empty.querySelector('.debugger-empty-text').textContent, 'No rules armed');
+  const open = empty.querySelector('.debugger-open-console');
+  assert.equal(open.textContent, 'Open Console');
+  click(ui, open);
+  assert.equal(opened, 1, 'Open Console opens the Console');
+  ui.close();
+  // A Console that cannot be opened from here gets no button.
+  const bare = mount({store: createStore(1), globals: {RebNativeConsole: {liveDocument: () => null}}});
+  bare.open();
+  await until(() => bare.sidebar.querySelector('.debugger-empty-row'), 'the empty state');
+  assert.equal(bare.sidebar.querySelector('.debugger-open-console'), null);
+  bare.close();
 });
 
 console.log(`PASS debugger sidebar: ${results.length} cases with real timers (offline DOM model; no rendered layout claimed)`);

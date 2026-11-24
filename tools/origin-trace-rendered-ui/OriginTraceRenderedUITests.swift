@@ -532,13 +532,15 @@ final class OriginTraceRenderedUITests: XCTestCase {
   }
 
   // The same state in the light theme, set the way the theme toggle sets it,
-  // without a click that could close an overlaid sidebar.
+  // without a click that could close an overlaid sidebar. Frames can stop
+  // (a covered window, a starved machine), so this wait, like settle() and
+  // every in-page wait for two frames here, also ends on a timer.
   @MainActor
   private func lightScreenshot(_ ui: Harness, _ name: String, _ size: String, scope: String = "#debugger-sidebar") async throws {
     _ = try await ui.value("""
       (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null;
         document.documentElement.dataset.theme = 'light';
-        await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
+        await new Promise(done => { requestAnimationFrame(() => requestAnimationFrame(done)); setTimeout(done, 500); }); return true; })()
       """)
     try await assertLayout(ui, scope, "\(size) \(name) light")
     try await ui.screenshot("\(name)-light-\(size)")
@@ -560,6 +562,19 @@ final class OriginTraceRenderedUITests: XCTestCase {
     // Every workspace, Flow, Analyst and Tools included, is a direct sidebar entry.
     try await ui.click(".primary-nav .nav-button[data-screen='\(screen)']")
     try await ui.waitUntil("!document.querySelector('#screen-\(screen)').hidden", "\(screen) screen did not open")
+  }
+
+  // The debugger's Observations kind menu. Its popup is an AppKit menu outside
+  // the page, which the harness does not drive, so the choice is made the way
+  // the menu makes it: the select's value, then its change event.
+  @MainActor
+  private func chooseObservationKind(_ ui: Harness, _ kind: String) async throws {
+    let chosen = try await ui.value("""
+      (() => { const menu = document.querySelector('#debugger-sidebar .debugger-kind-select');
+        if (!menu || ![...menu.options].some(option => option.value === '\(kind)')) return false;
+        menu.focus({preventScroll: true}); menu.value = '\(kind)'; menu.dispatchEvent(new Event('change', {bubbles: true})); return true; })()
+      """) as? Bool
+    XCTAssertEqual(chosen, true, "the Observations kind menu offers \(kind)")
   }
 
   // A Sources toolbar command that did not fit the row sits in More; open
@@ -1633,7 +1648,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
           rows: document.querySelectorAll('#debugger-observations .debugger-list-row').length,
           size: Number(document.querySelector('#debugger-observations .debugger-list-row').getAttribute('aria-setsize')),
           view: Math.ceil(document.querySelector('#debugger-observations').clientHeight / 44),
-          threads: [...document.querySelectorAll('#debugger-threads .debugger-list-group')].map(node => node.innerText.replace(/\\s+/g, ' ')),
+          threads: [...document.querySelectorAll('#debugger-threads .debugger-list-group')].map(node => node.textContent),
           pausing: document.querySelector('#debugger-sidebar [data-debugger-native="availability"]')?.dataset.availability ?? null,
           buttons: [...document.querySelectorAll('#debugger-sidebar button')].filter(button => !button.closest('#debugger-sidebar [data-debugger-native="pausing"]'))
             .map(button => button.innerText).filter(text => /pause|resume|step|breakpoint/i.test(text)),
@@ -1652,6 +1667,56 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertInert(ui, "\(size.name) debugger sidebar")
       try await assertLayout(ui, "#debugger-sidebar", "\(size.name) debugger sidebar")
       try await ui.screenshot("debugger-sidebar-\(size.name)")
+
+      // Threads reads as whole one-line rows at either size: several show
+      // before the list scrolls, none is cut by its top, and each row's name,
+      // identifiers and count sit side by side inside it, with a long name cut
+      // before its identifiers are. Both lists end on a
+      // whole row, never a sliced one. Scrolling the pane keeps the section's
+      // title over the list, never a headless list.
+      let layout = try await ui.json("""
+        (() => { const parts = row => [...row.querySelectorAll(':scope > *, :scope > * > *')].filter(part => part.getBoundingClientRect().width > 0 && !part.children.length);
+          const fits = row => { const box = row.getBoundingClientRect(), all = parts(row);
+            return row.scrollHeight <= row.clientHeight + 0.5 && all.every(part => { const at = part.getBoundingClientRect();
+              return at.left >= box.left - 0.5 && at.right <= box.right + 0.5 && at.top >= box.top - 0.5 && at.bottom <= box.bottom + 0.5; }); };
+          const apart = row => [...row.children].filter(part => part.getBoundingClientRect().width > 0)
+            .every((part, index, all) => !index || all[index - 1].getBoundingClientRect().right <= part.getBoundingClientRect().left + 0.5);
+          const ends = list => Math.abs(list.clientHeight - list.querySelector('.debugger-list-space').offsetHeight) <= 0.5 ? 'whole'
+            : [...list.querySelectorAll('.debugger-list-row')].some(row => Math.abs(row.offsetTop + row.offsetHeight - list.scrollTop - list.clientHeight) <= 0.5) ? 'row' : 'cut';
+          const list = document.querySelector('#debugger-threads'), box = list.getBoundingClientRect();
+          const rows = [...list.querySelectorAll('.debugger-list-row')];
+          const whole = rows.filter(row => { const at = row.getBoundingClientRect(); return at.top >= box.top - 0.5 && at.bottom <= box.bottom + 0.5; });
+          const records = [...document.querySelectorAll('#debugger-observations .debugger-list-row')];
+          const meta = records.map(row => ({time: row.querySelector('.debugger-row-time')?.textContent ?? '', ids: row.querySelector('.debugger-row-ids')?.textContent.trim() ?? ''}));
+          const pane = document.querySelector('#debugger-sidebar .debugger-sidebar-sections'), summary = document.querySelector('#debugger-sidebar [data-debugger-section="threads"] > summary');
+          pane.scrollTop = 0;
+          pane.scrollTop = box.top - pane.getBoundingClientRect().top + 60;
+          const stuck = summary.getBoundingClientRect(), sides = pane.getBoundingClientRect();
+          const over = document.elementFromPoint(stuck.left + 40, stuck.top + stuck.height / 2)?.closest('summary') === summary;
+          const scrolled = pane.scrollTop;
+          pane.scrollTop = 0;
+          const idsWhole = rows.every(row => { const ids = row.querySelector('.debugger-thread-ids'); return !ids || ids.scrollWidth <= ids.clientWidth + 0.5; });
+          return {height: list.clientHeight, whole: whole.length, rows: rows.length, threadsFit: rows.every(fits), threadsApart: rows.every(apart), idsWhole,
+            recordsFit: records.every(fits), headsApart: records.every(row => apart(row.querySelector('.debugger-row-head'))),
+            metaApart: records.every(row => apart(row.querySelector('.debugger-row-meta'))),
+            times: meta.every(item => /^[+-]\\d+:\\d\\d\\.\\d{3}$/.test(item.time)), ids: meta.every(item => /^P\\d+ F\\d+ #\\d+( R\\d+)?$/.test(item.ids)),
+            menu: [...document.querySelectorAll('#debugger-sidebar .debugger-kind-select option')].map(option => option.textContent),
+            threadsEnd: ends(list), recordsEnd: ends(document.querySelector('#debugger-observations')),
+            scrolled, stuck: Math.abs(stuck.top - sides.top) <= 0.5, over}; })()
+        """)
+      print("RENDERED_UI_DEBUGGER_LAYOUT \(size.name) \(layout)")
+      XCTAssertGreaterThanOrEqual(layout["whole"] as? Int ?? 0, 6, "\(size.name): the Threads list shows at least six whole rows: \(layout)")
+      for key in ["threadsFit", "threadsApart", "idsWhole", "recordsFit", "headsApart", "metaApart", "times", "ids", "stuck", "over"] {
+        XCTAssertEqual(layout[key] as? Bool, true, "\(size.name): \(key): \(layout)")
+      }
+      for key in ["threadsEnd", "recordsEnd"] {
+        XCTAssertNotEqual(layout[key] as? String ?? "cut", "cut", "\(size.name): \(key) is a whole row: \(layout)")
+      }
+      XCTAssertGreaterThan(layout["scrolled"] as? Double ?? 0, 0, "\(size.name): the pane scrolled for the sticky-title check: \(layout)")
+      let menu = layout["menu"] as? [String] ?? []
+      XCTAssertEqual(menu.count, 7, "\(size.name): one menu holds every kind: \(layout)")
+      XCTAssertTrue(menu.allSatisfy { $0.range(of: #"^.+ · [0-9][0-9,]*\+?$"#, options: .regularExpression) != nil },
+        "\(size.name): each kind names its record count: \(menu)")
 
       // Keyboard: the next stop is the Threads list, with a visible indicator.
       try await ui.tab()
@@ -1687,7 +1752,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.screenshot("debugger-sidebar-scoped-\(size.name)")
 
       // A listener record opens its own resolved frame in Sources.
-      try await ui.click(".debugger-kind[data-kind='listener_dispatch']")
+      try await chooseObservationKind(ui, "listener_dispatch")
       try await ui.waitUntil("[...document.querySelectorAll('#debugger-observations .debugger-list-row')].every(row => row.dataset.kind === 'listener_dispatch')",
         "\(size.name): the Listeners filter did not apply")
       try await ui.click("#debugger-observations .debugger-list-row", containing: "click listener")
@@ -1724,7 +1789,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
 
       // Keyboard in Observations: an arrow moves the active row and brings
       // its details into view.
-      try await ui.click(".debugger-kind[data-kind='all']")
+      try await chooseObservationKind(ui, "all")
       try await ui.waitUntil("[...document.querySelectorAll('#debugger-observations .debugger-list-row')].some(row => row.dataset.kind !== 'listener_dispatch')",
         "\(size.name): the All filter did not apply")
       try await ui.click("#debugger-observations .debugger-list-row")
@@ -1746,7 +1811,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
           document.querySelector('#screen-traffic .inspector-tab[aria-selected="true"]')?.dataset.inspectorTab === 'initiator'
         """
       for how in ["link", "Enter"] {
-        try await ui.click(".debugger-kind[data-kind='request_watch_match']")
+        try await chooseObservationKind(ui, "request_watch_match")
         try await ui.waitUntil("(() => { const rows = [...document.querySelectorAll('#debugger-observations .debugger-list-row')]; return rows.length === 1 && rows[0].dataset.kind === 'request_watch_match'; })()",
           "\(size.name): the Requests filter did not apply")
         try await ui.click("#debugger-observations .debugger-list-row")
@@ -1767,12 +1832,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
         }
         try await ui.waitUntil("document.querySelectorAll('#debugger-observations .debugger-list-row').length > 0", "\(size.name): the sidebar did not list records again")
       }
-      try await ui.click(".debugger-kind[data-kind='all']")
+      try await chooseObservationKind(ui, "all")
 
       // A failed read and a malformed answer keep the last rows, marked stale;
       // the next good read clears it.
       for (body, status) in [("Promise.reject(new TypeError('Load failed'))", "Disconnected: Load failed"),
-                             ("Promise.resolve(new Response('{\"contract_version\":2}', {status: 200}))", "The last answer was malformed (an unknown contract version)")] {
+                             ("Promise.resolve(new Response('{\"contract_version\":2}', {status: 200}))", "Malformed answer: an unknown contract version")] {
         _ = try await ui.value("""
           (() => { window.__rebDebuggerFetch ??= window.fetch;
             window.fetch = (input, init) => String(input).startsWith('/api/native-debugger') ? \(body) : window.__rebDebuggerFetch(input, init); return true; })()
@@ -1789,12 +1854,38 @@ final class OriginTraceRenderedUITests: XCTestCase {
       }
       _ = try await ui.value("(() => { window.fetch = window.__rebDebuggerFetch; delete window.__rebDebuggerFetch; return true; })()")
       try await ui.waitUntil("""
-        (document.querySelector('#debugger-sidebar .debugger-status-state')?.textContent ?? '').startsWith('Live:') &&
+        document.querySelector('#debugger-sidebar .debugger-status-state')?.textContent === 'Live' &&
           document.querySelector('#debugger-sidebar [data-debugger-section="observations"]').dataset.stale === 'false'
         """, "\(size.name): a good read did not clear the stale state")
 
       // Escape returns to the toggle, or to More while the toggle sits in its
       // menu (a docked sidebar narrows the toolbar); closing stops every read.
+      // Each debugger read from here records when it starts and settles and
+      // its abort signal, and the close time is taken as the sidebar hides.
+      // A read is held until it is aborted, as a loaded backend holds it, so
+      // the thread click's read is always under way when the sidebar closes;
+      // a read nothing aborts goes out after 30 seconds and stays unsettled
+      // here.
+      _ = try await ui.value("""
+        (() => { const sidebar = document.querySelector('#debugger-sidebar'), reads = [];
+          window.__rebDebuggerReads = {reads, fetch: window.fetch, closed: null};
+          window.__rebDebuggerReads.watch = new MutationObserver(() => {
+            if (sidebar.hidden && window.__rebDebuggerReads.closed === null) window.__rebDebuggerReads.closed = performance.now(); });
+          window.__rebDebuggerReads.watch.observe(sidebar, {attributes: true, attributeFilter: ['hidden']});
+          window.fetch = (input, init) => { const send = () => window.__rebDebuggerReads.fetch.call(window, input, init);
+            if (!String(input).startsWith('/api/native-debugger')) return send();
+            const signal = init?.signal ?? null, read = {start: performance.now(), settled: null, signal};
+            reads.push(read);
+            const answer = new Promise((resolve, reject) => {
+              const stop = () => { clearTimeout(timer); reject(signal.reason ?? new DOMException('aborted', 'AbortError')); };
+              const timer = setTimeout(() => { signal?.removeEventListener('abort', stop); send().then(resolve, reject); }, 30000);
+              if (signal?.aborted) stop(); else signal?.addEventListener('abort', stop, {once: true});
+            });
+            const settle = () => { read.settled = performance.now(); };
+            answer.then(settle, settle);
+            return answer; };
+          return true; })()
+        """)
       try await ui.click("#debugger-threads .debugger-list-row[data-key$='\(frameKey)']")
       try await ui.key(53, "\u{1B}")
       try await ui.waitUntil("""
@@ -1804,11 +1895,30 @@ final class OriginTraceRenderedUITests: XCTestCase {
       if try await ui.value("document.querySelector('#debugger-sidebar').hidden") as? Bool == false {
         try await ui.click("#debugger-sidebar .debugger-sidebar-close")
       }
-      let reads = "performance.getEntriesByType('resource').filter(entry => entry.name.includes('/api/native-debugger')).length"
-      let before = try await ui.value(reads) as? Int ?? -1
+      // Closing aborts the read in flight and starts none. A resource entry
+      // is added when its fetch ends, so a read begun before the close and
+      // aborted by it lands after it, and under load that once failed a
+      // count of all entries. Only a read that starts after the close breaks
+      // the contract; one in flight at the close must end aborted.
+      try await ui.waitUntil("document.querySelector('#debugger-sidebar').hidden", "\(size.name): the sidebar did not close")
       try await Task.sleep(nanoseconds: 4_500_000_000)
-      let after = try await ui.value(reads) as? Int ?? -2
-      XCTAssertEqual(after, before, "\(size.name): a closed sidebar must not read")
+      let reads = try await ui.json("""
+        (() => { const {reads, fetch, watch, closed} = window.__rebDebuggerReads;
+          window.fetch = fetch; watch.disconnect(); delete window.__rebDebuggerReads;
+          const flight = reads.filter(read => read.start < closed && (read.settled === null || read.settled >= closed));
+          const entries = performance.getEntriesByType('resource').filter(entry => entry.name.includes('/api/native-debugger'));
+          return {seen: reads.length, started: reads.filter(read => read.start >= closed).length,
+            entriesStarted: entries.filter(entry => entry.startTime >= closed).length,
+            inFlight: flight.length, aborted: flight.filter(read => read.signal?.aborted === true).length,
+            unsettled: flight.filter(read => read.settled === null).length,
+            entriesEndedAfter: entries.filter(entry => entry.startTime < closed && entry.responseEnd >= closed).length}; })()
+        """)
+      print("RENDERED_UI_DEBUGGER_CLOSED \(size.name) \(reads)")
+      XCTAssertGreaterThan(reads["inFlight"] as? Int ?? 0, 0, "\(size.name): the thread click's read was under way at the close: \(reads)")
+      XCTAssertEqual(reads["started"] as? Int, 0, "\(size.name): a closed sidebar must not read: \(reads)")
+      XCTAssertEqual(reads["entriesStarted"] as? Int, 0, "\(size.name): a closed sidebar must not read: \(reads)")
+      XCTAssertEqual(reads["aborted"] as? Int, reads["inFlight"] as? Int, "\(size.name): closing aborts the read in flight: \(reads)")
+      XCTAssertEqual(reads["unsettled"] as? Int, 0, "\(size.name): an aborted read settles: \(reads)")
       let closed = try await ui.value("(document.querySelector('#source-tree')?.innerText ?? '').includes('selected in Debugger Threads')") as? Bool
       XCTAssertEqual(closed, false, "\(size.name): closing the sidebar lifts the tree scope")
     }
@@ -3554,6 +3664,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("!document.querySelector('#source-graph').hidden", "Graph is offered for a captured WASM artifact")
       try await ui.click("#source-graph")
       try await ui.waitUntil("(document.querySelector('#source-graph-host .block-graph-stats')?.textContent ?? '').includes('blocks')", timeout: 30, "the block graph did not finish laying out")
+      // The stage's ResizeObserver sizes the canvas in the next rendering
+      // update, before it paints, so layout is measured as it is first shown.
+      try await ui.settle()
       let evidence = try await ui.value("document.querySelector('#source-graph-host .block-graph-evidence').textContent") as? String ?? ""
       XCTAssertEqual(evidence, "declared", "\(size.name): the header says declared")
       let limits = try await ui.value("(() => { const box = document.querySelector('#source-graph-host .block-graph-limits'); const rect = box.getBoundingClientRect(); return {text: box.textContent, w: rect.width, right: rect.right, windowWidth: innerWidth}; })()") as? [String: Any] ?? [:]
@@ -3580,6 +3693,160 @@ final class OriginTraceRenderedUITests: XCTestCase {
       _ = try await ui.value("(document.documentElement.dataset.theme = 'dark', 1)")
       try await ui.click("#source-graph")
     }
+  }
+
+  // The block graph shapes of artifacts 341 to 345, cold at each size: the
+  // time from the native click on Graph to the frame after the first drawing
+  // (decode, transfer, layout and draw), and frames while Shift+Arrow pans at
+  // the opening zoom and fitted whole: the interval between frames, and the
+  // time a frame spent before this test's callback, which is the graph's
+  // draw. The numbers are printed as RENDERED_UI_GRAPH lines. A median
+  // interval fails past three display frames, or past twice the slower median
+  // of the 25-block exceptions shape at that size where that is longer: a
+  // display without a GPU, as on a CI host, holds even that shape to 30-50 ms
+  // a frame while its draw takes 1 ms, so the floor is the machine's, not the
+  // graph's. A single long frame does not fail, since a hidden or sleeping
+  // display stops frames whatever the page does. Then Shift+Arrow pushes the
+  // fitted view far past the bottom right, where it must stop on the drawing.
+  @MainActor
+  func test25bBlockGraphShapes() async throws {
+    let shapes = [("341", "ladder"), ("342", "dispatch256"), ("343", "loops"), ("344", "exceptions"), ("345", "large")]
+    for size in windowSizes + [("wide", 1440, 900)] {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      var medians: [(context: String, median: Double, result: [String: Any])] = []
+      for (id, name) in shapes {
+        let context = "\(size.name) \(name)"
+        try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"\(id)\"]")
+        try await ui.waitUntil("!document.querySelector('#source-graph').hidden && document.querySelector('#source-graph').getAttribute('aria-pressed') !== 'true'", "\(context): Graph is offered and closed")
+        _ = try await ui.value("""
+          (() => { const host = document.querySelector('#source-graph-host'); window.__rebGraphPaint = null;
+            document.querySelector('#source-graph').addEventListener('click', () => {
+              const started = performance.now();
+              const ready = () => host.querySelector('.block-graph-state').hidden && (host.querySelector('.block-graph-stats')?.textContent ?? '').includes('blocks');
+              const poll = () => requestAnimationFrame(() => {
+                if (!ready()) { if (performance.now() - started < 60000) poll(); return; }
+                requestAnimationFrame(() => { window.__rebGraphPaint = performance.now() - started; });
+              });
+              poll();
+            }, {capture: true, once: true});
+            return true; })()
+          """)
+        try await ui.click("#source-graph")
+        try await ui.waitUntil("typeof window.__rebGraphPaint === 'number'", timeout: 60, "\(context): the graph did not draw")
+        let paint = try await ui.value("window.__rebGraphPaint") as? Double ?? -1
+        let stats = try await ui.value("document.querySelector('#source-graph-host .block-graph-stats').textContent") as? String ?? ""
+        let error = try await ui.value("document.querySelector('#source-graph-host .block-graph-state').dataset.kind") as? String ?? ""
+        XCTAssertNotEqual(error, "error", "\(context): the graph drew without an error")
+        if name == "exceptions" {
+          let key = try await ui.value("document.querySelector('#source-graph-host .block-graph-legend').textContent") as? String ?? ""
+          XCTAssertTrue(key.contains("exception") && key.contains("unresolved"), "\(context): the key names exception and unresolved edges: \(key)")
+        }
+        try await assertLayout(ui, "#screen-sources", context)
+        try await assertInert(ui, context)
+        try await ui.screenshot("block-graph-\(name)-\(size.name)")
+        var frames: [String: Any] = [:]
+        for view in ["open", "fit"] {
+          if view == "fit" {
+            _ = try await ui.value("document.querySelector('#source-graph-host .block-graph-canvas').dispatchEvent(new KeyboardEvent('keydown', {key: '0', bubbles: true, cancelable: true}))")
+            try await ui.settle()
+            // Fit leaves the overlays clear: under the overview cue and the
+            // minimap the graph's canvas holds only its background. The CSS
+            // pixel at each side is skipped, where a card that ends on the
+            // clear area's edge may antialias.
+            let covered = try await ui.json("""
+              (() => { const host = document.querySelector('#source-graph-host'), canvas = host.querySelector('.block-graph-canvas'), box = canvas.getBoundingClientRect();
+                const sx = canvas.width / box.width, sy = canvas.height / box.height, context = canvas.getContext('2d');
+                const drawn = selector => { const element = host.querySelector(selector); if (!element || element.hidden) return -1;
+                  const r = element.getBoundingClientRect(), x = Math.max(0, Math.ceil((r.left - box.left + 1) * sx)), y = Math.max(0, Math.ceil((r.top - box.top + 1) * sy));
+                  const w = Math.min(canvas.width, Math.floor((r.right - box.left - 1) * sx)) - x, h = Math.min(canvas.height, Math.floor((r.bottom - box.top - 1) * sy)) - y;
+                  if (w <= 0 || h <= 0) return -1;
+                  const data = context.getImageData(x, y, w, h).data; let other = 0;
+                  for (let i = 4; i < data.length; i += 4) if (data[i] !== data[0] || data[i + 1] !== data[1] || data[i + 2] !== data[2]) other += 1;
+                  return other; };
+                return {cue: drawn('.block-graph-lod'), minimap: drawn('.block-graph-minimap')}; })()
+              """)
+            XCTAssertLessThanOrEqual(covered["cue"] as? Int ?? 1, 0, "\(context): Fit draws nothing under the overview cue: \(covered)")
+            XCTAssertLessThanOrEqual(covered["minimap"] as? Int ?? 1, 0, "\(context): Fit draws nothing under the minimap: \(covered)")
+            try await assertLayout(ui, "#screen-sources", "\(context) fitted")
+            try await ui.screenshot("block-graph-\(name)-fit-\(size.name)")
+          }
+          // Shift+Arrow is dispatched once a frame, after this callback asks
+          // for the next one, so the graph draws each pan first in the next
+          // frame. It steps right, down, left and up in turn, so every frame
+          // draws a new view and none reaches the edge a pan stops at.
+          let result = try await ui.json("""
+            (async () => { const canvas = document.querySelector('#source-graph-host .block-graph-canvas');
+              const press = key => canvas.dispatchEvent(new KeyboardEvent('keydown', {key, shiftKey: true, bubbles: true, cancelable: true}));
+              const zoom = document.querySelector('#source-graph-host .block-graph-zoom').textContent, intervals = [], draws = [];
+              await new Promise(done => { let last = 0, count = 0;
+                const tick = now => { if (last) { intervals.push(now - last); draws.push(performance.now() - now); } last = now;
+                  if (count++ === 90) { done(); return; } press(['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'][count % 4]); requestAnimationFrame(tick); };
+                requestAnimationFrame(tick); });
+              const stats = list => { list.sort((a, b) => a - b); return {p50: Math.round(list[list.length >> 1]), p95: Math.round(list[Math.floor(list.length * 0.95)]), max: Math.round(list[list.length - 1])}; };
+              return {zoom, interval: stats(intervals), draw: stats(draws)}; })()
+            """)
+          frames[view] = result
+          medians.append(("\(context) \(view)", (result["interval"] as? [String: Any])?["p50"] as? Double ?? .infinity, result))
+        }
+        print("RENDERED_UI_GRAPH \(size.name) \(name) firstPaintMs=\(Int(paint)) stats=\(String(reflecting: stats)) frames=\(frames)")
+        // Fitted whole, Shift+Arrow far past the bottom right stops on the
+        // drawing: the canvas holds more than its background.
+        _ = try await ui.value("""
+          (() => { const canvas = document.querySelector('#source-graph-host .block-graph-canvas');
+            for (const key of ['ArrowRight', 'ArrowDown']) for (let i = 0; i < 400; i += 1) canvas.dispatchEvent(new KeyboardEvent('keydown', {key, shiftKey: true, bubbles: true, cancelable: true}));
+            return true; })()
+          """)
+        try await ui.settle()
+        let colors = try await ui.value("""
+          (() => { const canvas = document.querySelector('#source-graph-host .block-graph-canvas'), data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data, seen = new Set();
+            for (let i = 0; i < data.length && seen.size < 2; i += 4) seen.add((data[i] << 16) | (data[i + 1] << 8) | data[i + 2]);
+            return seen.size; })()
+          """) as? Int ?? 0
+        XCTAssertGreaterThan(colors, 1, "\(context): a pan far past the drawing left the canvas blank")
+        if name == "dispatch256" { try await assertEdgeKey(ui, context) }
+        try await ui.click("#source-graph")
+      }
+      let floor = medians.filter { $0.context.hasPrefix("\(size.name) exceptions ") }.map(\.median).max() ?? .infinity
+      let bound = max(50, 2 * floor)
+      print("RENDERED_UI_GRAPH_BOUND \(size.name) floorMs=\(floor) boundMs=\(bound)")
+      for entry in medians {
+        XCTAssertLessThanOrEqual(entry.median, bound, "\(entry.context): panning is not smooth against this machine's \(floor) ms floor: \(entry.result)")
+      }
+    }
+  }
+
+  // The footer's key names the edge kinds drawn, here the loop's table edges,
+  // beside the graph and linear divider. Where the footer is too narrow to
+  // show it inline, Space on Key opens it whole and Escape returns a visible
+  // focus ring to Key, clear of the divider. A short window opens the graph
+  // without Linear; it is shown for the check and hidden again, so the
+  // shapes after this one draw as before.
+  @MainActor
+  private func assertEdgeKey(_ ui: Harness, _ context: String) async throws {
+    let linearHidden = try await ui.value("document.querySelector('.sources-editor').hasAttribute('data-graph-linear-hidden')") as? Bool == true
+    if linearHidden { try await ui.click("#source-graph-host .block-graph-tool", containing: "Linear") }
+    try await ui.waitUntil("!document.querySelector('#pane-divider-source-graph').hidden", "\(context): the graph and linear split has no divider")
+    let kinds = try await ui.value("document.querySelector('#source-graph-host .block-graph-legend').textContent") as? String ?? ""
+    XCTAssertTrue(kinds.contains("table"), "\(context): the key names table edges: \(kinds)")
+    let key = "#source-graph-host .block-graph-key-toggle"
+    if try await ui.value("getComputedStyle(document.querySelector('\(key)')).display === 'none'") as? Bool == true {
+      try await assertFullyVisible(ui, "#source-graph-host .block-graph-legend", "\(context) inline edge key")
+    } else {
+      _ = try await ui.value("(document.querySelector('\(key)').focus(), 1)")
+      try await ui.key(49, " ")
+      try await ui.waitUntil("document.querySelector('\(key)').getAttribute('aria-expanded') === 'true'", "\(context): Space did not open the edge key")
+      try await assertFullyVisible(ui, "#source-graph-host .block-graph-foot[data-key-open] > .block-graph-legend", "\(context) edge key")
+      try await ui.screenshot("block-graph-edge-key-\(context.replacingOccurrences(of: " ", with: "-"))")
+      try await ui.key(53, "\u{1B}")
+      try await ui.waitUntil("document.querySelector('\(key)').getAttribute('aria-expanded') === 'false' && document.activeElement === document.querySelector('\(key)')",
+        "\(context): Escape did not close the edge key onto Key")
+      let keyFocus = try await ui.json("__rebUiProbe.focusState()")
+      XCTAssertEqual(keyFocus["focusVisible"] as? Bool, true, "\(context): Key shows keyboard focus: \(keyFocus)")
+      XCTAssertNotEqual(keyFocus["indicator"] as? String, "none", "\(context): Key draws a focus ring: \(keyFocus)")
+    }
+    try await assertGraphDividerClear(ui, "\(context) Key beside the divider")
+    if linearHidden { try await ui.click("#source-graph-host .block-graph-tool", containing: "Linear") }
   }
 
   // Run offline: the dialog names the local sandbox above every field, sends
@@ -3665,7 +3932,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     _ = try await ui.value("""
       (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null;
         document.documentElement.dataset.theme = 'light';
-        await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
+        await new Promise(done => { requestAnimationFrame(() => requestAnimationFrame(done)); setTimeout(done, 500); }); return true; })()
       """)
     try await ui.screenshot(name)
     _ = try await ui.value("""
@@ -3740,20 +4007,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("!document.querySelector('#pane-divider-source-graph').hidden", "\(size.name): the graph and linear split has no divider")
       try await assertGraphDividerClear(ui, "\(size.name) wasm identification divider")
       try await ui.screenshot("wasm-identification-divider-\(size.name)")
-      // Key sits in the footer beside the divider. Space opens the edge key
-      // and Escape returns a visible focus ring to Key, clear of the divider.
-      let key = "#source-graph-host .block-graph-key-toggle"
-      _ = try await ui.value("(document.querySelector('\(key)').focus(), 1)")
-      try await ui.key(49, " ")
-      try await ui.waitUntil("document.querySelector('\(key)').getAttribute('aria-expanded') === 'true'", "\(size.name): Space did not open the edge key")
-      try await assertFullyVisible(ui, "#source-graph-host .block-graph-foot[data-key-open] > .block-graph-legend", "\(size.name) edge key")
-      try await ui.key(53, "\u{1B}")
-      try await ui.waitUntil("document.querySelector('\(key)').getAttribute('aria-expanded') === 'false' && document.activeElement === document.querySelector('\(key)')",
-        "\(size.name): Escape did not close the edge key onto Key")
-      let keyFocus = try await ui.json("__rebUiProbe.focusState()")
-      XCTAssertEqual(keyFocus["focusVisible"] as? Bool, true, "\(size.name): Key shows keyboard focus: \(keyFocus)")
-      XCTAssertNotEqual(keyFocus["indicator"] as? String, "none", "\(size.name): Key draws a focus ring: \(keyFocus)")
-      try await assertGraphDividerClear(ui, "\(size.name) Key focused beside the divider")
+      // The key names the edge kinds a drawing has. This module's functions
+      // are single blocks, so with no edge drawn the footer offers no Key
+      // (test25b opens it on the interpreter loop's table edges).
+      let footer = try await ui.json("(() => { const host = document.querySelector('#source-graph-host'); return {key: host.querySelector('.block-graph-key-toggle').hidden, kinds: host.querySelectorAll('.block-graph-legend .block-graph-key').length}; })()")
+      XCTAssertEqual(footer["key"] as? Bool, true, "\(size.name): a drawing without edges offers no Key: \(footer)")
+      XCTAssertEqual(footer["kinds"] as? Int, 0, "\(size.name): a drawing without edges names no edge kind: \(footer)")
       // Drag the divider with the pointer to the graph's minimum, where the
       // Functions menu must still open whole, and then to the linear view's
       // minimum. Home on the divider restores the default split and forgets
@@ -5068,7 +5327,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     let theme = { (light: Bool) in
       _ = try await ui.value(light ? """
         (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null; document.documentElement.dataset.theme = 'light';
-          await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
+          await new Promise(done => { requestAnimationFrame(() => requestAnimationFrame(done)); setTimeout(done, 500); }); return true; })()
         """ : """
         (() => { if (window.__rebDarkTheme === null) delete document.documentElement.dataset.theme;
           else document.documentElement.dataset.theme = window.__rebDarkTheme; delete window.__rebDarkTheme; return true; })()
@@ -5297,7 +5556,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       }
       _ = try await traffic.value("""
         (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null; document.documentElement.dataset.theme = 'light';
-          await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
+          await new Promise(done => { requestAnimationFrame(() => requestAnimationFrame(done)); setTimeout(done, 500); }); return true; })()
         """)
       try await assertLayout(traffic, "#screen-traffic .request-window", "\(size.name) not-kept footer light")
       try await traffic.screenshot("traffic-not-kept-light-\(size.name)")
@@ -5678,7 +5937,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
           (async () => {
             const root = document.documentElement, before = root.dataset.theme ?? null;
             root.dataset.theme = '\(theme)';
-            await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
+            await new Promise(done => { requestAnimationFrame(() => requestAnimationFrame(done)); setTimeout(done, 500); });
             const color = token => { const probe = document.createElement('span'); probe.style.color = `var(${token})`;
               document.body.append(probe); const value = getComputedStyle(probe).color; probe.remove(); return value; };
             const chip = [...document.querySelectorAll('#screen-traffic .request-row')].find(node => node.innerText.includes('\(host)'))
@@ -5693,7 +5952,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       _ = try await ui.value("""
         (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null;
           document.documentElement.dataset.theme = 'light';
-          await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
+          await new Promise(done => { requestAnimationFrame(() => requestAnimationFrame(done)); setTimeout(done, 500); }); return true; })()
         """)
       try await assertLayout(ui, "#screen-traffic", "\(size.name) watched row light")
       try await ui.screenshot("traffic-watched-row-light-\(size.name)")
@@ -5738,7 +5997,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
             const root = document.documentElement;
             window.__rebRevealTheme = root.dataset.theme ?? null;
             root.dataset.theme = '\(theme)';
-            await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
+            await new Promise(done => { requestAnimationFrame(() => requestAnimationFrame(done)); setTimeout(done, 500); });
             const pane = document.querySelector('#debugger-sidebar .debugger-sidebar-sections').getBoundingClientRect();
             const list = document.querySelector('#debugger-observations').getBoundingClientRect();
             const row = document.querySelector('#debugger-observations .debugger-list-row[aria-selected="true"]')?.getBoundingClientRect();
@@ -5769,7 +6028,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
           const pane = document.querySelector('#debugger-sidebar .debugger-sidebar-sections').getBoundingClientRect();
           const list = document.querySelector('#debugger-observations').getBoundingClientRect();
           const row = document.querySelector('#debugger-observations .debugger-list-row[aria-selected="true"]')?.getBoundingClientRect();
-          return {kind: document.querySelector('.debugger-kind[aria-pressed="true"]')?.dataset.kind ?? '',
+          return {kind: document.querySelector('#debugger-sidebar .debugger-kind-select')?.value ?? '',
             detail: detail.innerText.replace(/\\s+/g, ' '), inView: !detail.hidden && box.top < pane.bottom - 24 && box.bottom > pane.top,
             // The focused list and its chosen row are on screen, inside the pane.
             listInPane: list.top >= pane.top - 0.5 && list.top < pane.bottom - 20,
@@ -5804,8 +6063,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
         (() => { const note = document.querySelector('#debugger-sidebar .debugger-watch-limits');
           note.scrollIntoView({block: 'center'}); return note.innerText; })()
         """) as? String ?? ""
-      for said in ["main thread of the documents it is armed on", "never workers or other documents", "navigation clears its rules",
-                   "not documents that are already open"] {
+      for said in ["Main thread of armed documents only", "never workers or other documents", "Navigation clears these rules",
+                   "not ones already open"] {
         XCTAssertTrue(limits.contains(said), "\(size.name): the form says \(said): \(limits)")
       }
       try await assertLayout(ui, "#debugger-sidebar", "\(size.name) watch limits")

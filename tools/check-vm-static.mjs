@@ -63,7 +63,7 @@ for (const mutate of [
 for (const mutate of [
   v => v.extra = true, v => v.format = 'reb-vm-bytecode-v2', v => v.image_id = '',
   v => v.bytes_hex = '0', v => v.bytes_hex = 'FF', v => v.bytes_hex = 'zz',
-  v => v.bytes_hex = '00'.repeat(65537), v => v.entry_offsets = [-1],
+  v => v.entry_offsets = [-1],
   v => v.entry_offsets = [0, 0], v => v.entry_offsets = [9007199254740992],
 ]) { const invalid = clone(stackImage); mutate(invalid); assert.throws(() => staticVm.parseImage(invalid)); }
 
@@ -177,13 +177,21 @@ assert.deepEqual(unknownSemantics.cfg.nodes.map(value => [value.offset, value.re
 const budget = await staticVm.analyze(stack, stackImage, {max_instructions: 2});
 assert.deepEqual(budget.coverage, {decoded_bytes: 6, total_bytes: 13, instruction_count: 2, stop_reason: 'instruction_budget', undecoded_bytes: 7});
 assert.deepEqual(edges(budget), [[0, 3, 'fallthrough', 'resolved'], [3, 6, 'fallthrough', 'undecoded']]);
-const maximal = await staticVm.analyze(stack, image(stack, 'ff'.repeat(65536)));
-assert.deepEqual(maximal.coverage, {decoded_bytes: 4096, total_bytes: 65536, instruction_count: 4096, stop_reason: 'instruction_budget', undecoded_bytes: 61440});
+// No size limit: a 1 MiB image of 1,048,576 one-byte instructions decodes
+// whole, past the 64 KiB and 4,096-instruction caps this model once had.
+const large = await staticVm.analyze(stack, image(stack, 'ff'.repeat(1048576)));
+assert.deepEqual(large.coverage, {decoded_bytes: 1048576, total_bytes: 1048576, instruction_count: 1048576, stop_reason: 'end', undecoded_bytes: 0});
+assert.equal(large.cfg.nodes.length, 1048576); assert.equal(large.instructions.at(-1).offset, 1048575);
+const far = await staticVm.analyze(stack, {...image(stack, 'ff'.repeat(70000)), entry_offsets: [0, 69999]});
+assert.deepEqual(far.cfg.entries, [{offset: 0, status: 'resolved'}, {offset: 69999, status: 'resolved'}], 'an entry past 64 KiB is an ordinary offset');
+const deep = JSON.stringify(stack).replace('"opcodes":', '"nest":' + '['.repeat(20) + ']'.repeat(20) + ',"opcodes":');
+assert.throws(() => staticVm.parseDefinition(deep), /nests deeper/, 'depth stays bounded: no valid document nests past five levels');
 const empty = await staticVm.analyze(stack, image(stack, ''));
 assert.deepEqual(empty.coverage, {decoded_bytes: 0, total_bytes: 0, instruction_count: 0, stop_reason: 'end', undecoded_bytes: 0});
 assert.deepEqual(empty.cfg.entries, [{offset: 0, status: 'out_of_range'}]);
 await assert.rejects(staticVm.analyze(stack, {...stackImage, definition_id: 'other'}));
-for (const options of [{max_instructions: 0}, {max_instructions: 4097}, {max_instructions: -0}, {max_instructions: 1.5}, {extra: true}, []]) {
+assert.equal((await staticVm.analyze(stack, stackImage, {max_instructions: 4097})).coverage.stop_reason, 'end', 'a budget is any positive integer');
+for (const options of [{max_instructions: 0}, {max_instructions: -0}, {max_instructions: 1.5}, {max_instructions: 9007199254740992}, {extra: true}, []]) {
   await assert.rejects(staticVm.analyze(stack, stackImage, options));
 }
 let invoked = false;
@@ -193,4 +201,4 @@ const executable = {...stack, toJSON() { invoked = true; return stack; }};
 assert.throws(() => staticVm.parseDefinition(executable)); assert.equal(invoked, false);
 const cycle = {...stack}; cycle.extra = cycle; assert.throws(() => staticVm.parseDefinition(cycle));
 const sparse = {...stack, opcodes: Array(1)}; assert.throws(() => staticVm.parseDefinition(sparse));
-console.log('PASS independent VM static golden cases: stack/register decode, endian signed operands, exact hashes, declared CFG/pseudocode links, inert data, malformed/unknown/truncated inputs, mid-instruction/overflow targets and bounded incomplete coverage. No imported execution or native/rendered acceptance claimed.');
+console.log('PASS independent VM static golden cases: stack/register decode, endian signed operands, exact hashes, declared CFG/pseudocode links, inert data, malformed/unknown/truncated inputs, mid-instruction/overflow targets, images of any size and an asked-for instruction budget. No imported execution or native/rendered acceptance claimed.');

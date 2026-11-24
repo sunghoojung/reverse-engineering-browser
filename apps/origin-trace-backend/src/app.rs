@@ -538,7 +538,11 @@ impl App {
         }
     }
     /// The graph documents are built as text so one large function never holds
-    /// a parsed JSON tree in this process.
+    /// a parsed JSON tree in this process. A block graph is decoded before its
+    /// answer starts, so a malformed body is an ordinary error answer, and is
+    /// then streamed: the rows of the largest legal body never sit in memory
+    /// whole. A client that goes away stops the decode through the cancel
+    /// flag, or the stream at its next piece.
     async fn wasm_graph_route(&self, path: &str, raw_query: &str) -> Result<Response> {
         let q = Query::new(raw_query);
         if q.0
@@ -552,25 +556,66 @@ impl App {
         let id = q.required("artifact_id")?.to_owned();
         let root = self.options.artifacts.clone();
         let names = self.names_reader();
-        let document = if path == "/api/wasm/functions" {
+        if path == "/api/wasm/functions" {
             if q.one("function")?.is_some() {
                 return Err(Error::bad("The WASM function list takes only artifact_id"));
             }
-            self.cancellable(move |cancelled| {
-                wasm_graph::function_index_named(&root, &id, Some(&names()), cancelled)
-            })
-            .await?
-        } else {
-            let function = q
-                .required("function")?
-                .parse::<u32>()
-                .map_err(|_| Error::bad("A WASM function index is an unsigned 32-bit integer"))?;
-            self.cancellable(move |cancelled| {
-                wasm_graph::function_graph_named(&root, &id, function, Some(&names()), cancelled)
-            })
-            .await?
-        };
-        Ok(([("content-type", "application/json")], document).into_response())
+            let document = self
+                .cancellable(move |cancelled| {
+                    wasm_graph::function_index_named(&root, &id, Some(&names()), cancelled)
+                })
+                .await?;
+            return Ok(([("content-type", "application/json")], document).into_response());
+        }
+        let function = q
+            .required("function")?
+            .parse::<u32>()
+            .map_err(|_| Error::bad("A WASM function index is an unsigned 32-bit integer"))?;
+        let permit = self
+            .io
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| Error::new(503, "Evidence reader is unavailable"))?;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let _cancel = CancelOnDrop(cancelled.clone());
+        let (ready, answer) = tokio::sync::oneshot::channel::<Result<()>>();
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let mut ready = Some(ready);
+            let written = wasm_graph::function_graph_to(
+                &root,
+                &id,
+                function,
+                Some(&names()),
+                &cancelled,
+                || {
+                    if let Some(ready) = ready.take() {
+                        let _ = ready.send(Ok(()));
+                    }
+                    request_har::Sink::new(sender)
+                },
+            );
+            match written {
+                Ok(mut sink) => {
+                    sink.flush();
+                }
+                Err(error) => {
+                    if let Some(ready) = ready.take() {
+                        let _ = ready.send(Err(error));
+                    }
+                }
+            }
+        });
+        answer
+            .await
+            .map_err(|_| Error::new(500, "The WASM graph writer stopped before it answered"))??;
+        let mut response = Response::new(Body::from_stream(request_har::Chunks(receiver)));
+        response
+            .headers_mut()
+            .insert("content-type", HeaderValue::from_static("application/json"));
+        Ok(response)
     }
     /// Reads the researcher Wasm names on a blocking thread: one `stat` while
     /// the library is unchanged, a bounded reread when it changed.
@@ -2989,7 +3034,7 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                     .await
                     .map(|bytes| ([("content-type", "application/json")], bytes).into_response());
             }
-            // Typed parse of up to 8 MiB of numbers, never a generic JSON tree.
+            // Typed parse of up to 64 MiB of numbers, never a generic JSON tree.
             if path == "/api/graph-layout" {
                 return crate::graph_layout::route(Vec::from(bytes))
                     .await

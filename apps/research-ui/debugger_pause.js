@@ -20,8 +20,8 @@ const DEBUGGER_PAUSE_KINDS = Object.freeze({
   line: 'Line', conditional: 'Conditional', logpoint: 'Logpoint'
 });
 const DEBUGGER_PAUSE_UNSUPPORTED = Object.freeze({
-  browser_debugger_unsupported: 'No browser serves the pausing debugger. Nothing is attached and no page is paused.',
-  peer_unavailable: 'The debugger peer did not answer. Nothing is attached and no page is paused.'
+  browser_debugger_unsupported: 'No browser serves the pausing debugger.',
+  peer_unavailable: 'The debugger peer did not answer.'
 });
 
 function pauseNode(tag, className, text) {

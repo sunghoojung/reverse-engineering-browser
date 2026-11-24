@@ -163,20 +163,41 @@ final class CompanionWarningUITests: XCTestCase {
   @MainActor
   @discardableResult
   private func assertFreshStartupFailure(_ app: XCUIApplication, after previous: String) -> XCUIElement {
-    let fresh = app.staticTexts.matching(NSPredicate(
-      format: "(label CONTAINS %@ OR value CONTAINS %@) AND NOT (label == %@ OR value == %@)",
-      stoppedBrowser, stoppedBrowser, previous, previous)).firstMatch
-    XCTAssertTrue(fresh.waitForExistence(timeout: 90),
-                  "Retry must relaunch and report a new session failure: " + app.debugDescription)
+    XCTAssertNotNil(waitForStaticText(in: app, containing: stoppedBrowser, excluding: previous, timeout: 90),
+                    "Retry must relaunch and report a new session failure: " + app.debugDescription)
     return assertStartupFailure(app)
   }
 
   @MainActor
   private func failureDetail(_ scope: XCUIElement) -> String {
-    let detail = scope.staticTexts.matching(NSPredicate(
-      format: "label CONTAINS %@ OR value CONTAINS %@", "Session log:", "Session log:")).firstMatch
-    XCTAssertTrue(detail.exists, "The failure must name its session log")
+    guard let detail = staticText(in: scope, containing: "Session log:") else {
+      XCTFail("The failure must name its session log")
+      return ""
+    }
     return (detail.value as? String).flatMap { $0.isEmpty ? nil : $0 } ?? detail.label
+  }
+
+  /// A static text whose label or string value contains `text`. The start panel
+  /// is web content, where a heading reports its level as a number value that a
+  /// `value CONTAINS` predicate throws on, so the match reads each element here.
+  @MainActor
+  private func staticText(in scope: XCUIElement, containing text: String,
+                          excluding previous: String? = nil) -> XCUIElement? {
+    scope.staticTexts.allElementsBoundByIndex.first { element in
+      let shown = [element.label, element.value as? String].compactMap { $0 }
+      return shown.contains { $0.contains(text) } && !shown.contains { $0 == previous }
+    }
+  }
+
+  @MainActor
+  private func waitForStaticText(in scope: XCUIElement, containing text: String,
+                                 excluding previous: String? = nil, timeout: TimeInterval) -> XCUIElement? {
+    let deadline = Date().addingTimeInterval(timeout)
+    repeat {
+      if let found = staticText(in: scope, containing: text, excluding: previous) { return found }
+      RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+    } while Date() < deadline
+    return nil
   }
 
   @MainActor

@@ -1589,13 +1589,16 @@ nodes 6.6 s, 8,000 nodes 85 s. The UI sends a graph of up to 2,000 nodes and
   worker.
 - A graph has its own budget, 1 s plus 8 µs times the square of its node and
   edge count together. It separates a slow layout from one Triskel never
-  finishes (see below), and it grows with the graph, so it limits no size.
+  finishes (see below), and it grows with the graph, so it limits no size. It
+  runs from when the worker begins that graph, so starting the worker and
+  reading the request count against no graph.
 
 Triskel is third-party C++ fed graphs shaped by captured pages, and this
 revision can loop forever or crash on some inputs, so it never runs in the
 server. Each request starts the backend executable again as a contained
 `--graph-layout-worker` process with no network access (on macOS no file
-access either) and a 2 GiB resident memory limit; at most two run at once and
+access either), a 2 GiB resident memory limit and no core dump, so a crash
+ends it at once and leaves no image of the graphs; at most two run at once and
 later requests wait for a slot. A graph whose budget passes is `timeout`; one
 that crashes the worker or reaches the memory limit is `failed`; either way a
 new worker continues with the graphs after it. A layout with

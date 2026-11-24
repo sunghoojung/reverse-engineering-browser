@@ -34,6 +34,8 @@ const MAX_NODE_SIZE: f64 = 100_000.0;
 const MEMORY_LIMIT: u64 = 2 << 30;
 const MEMORY_EXIT: i32 = 75;
 const REPLY: &[u8] = b"REBGL1 ";
+/// The worker's line as it starts a graph, which starts that graph's budget.
+const BEGIN: &[u8] = b"REBGL1-BEGIN\n";
 const INVALID: &str = "The layout worker returned an invalid result";
 const SHAPE: &str = "The graph layout body must be {\"graphs\": [{\"nodes\": [[width, height], ...], \"edges\": [[from, to], ...]}]} with integer node indexes";
 /// Two layouts at once keep a burst of graph views from taking every core; a
@@ -326,7 +328,6 @@ async fn exchange(jobs: &[Job], outcomes: &mut Vec<Outcome>) -> Stop {
     let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
         return not_started();
     };
-    let mut started = tokio::time::Instant::now();
     // The worker reads its whole request, one JSON array of the graphs,
     // before it replies. One that exits early breaks the pipe, and its exit
     // status says why.
@@ -344,31 +345,42 @@ async fn exchange(jobs: &[Job], outcomes: &mut Vec<Outcome>) -> Stop {
     .await;
     let mut reader = BufReader::new(stdout);
     for job in jobs {
+        // A graph's budget runs from the worker's line that it has begun the
+        // graph, so starting the worker, sending the request and parsing it
+        // count against none, however loaded the machine.
+        match next_line(&mut reader).await {
+            Ok(Some(Line::Begin)) => {}
+            Ok(Some(Line::Reply(_))) | Err(_) => return Stop::Graph(INVALID.to_owned()),
+            Ok(None) => return stopped(child.wait().await),
+        }
         let budget = job.budget();
-        let reply = async {
-            match next_reply(&mut reader).await? {
-                Some(line) => parse_reply(line, job).await.map(Some),
-                None => Ok(None),
-            }
-        };
-        let Ok(reply) = tokio::time::timeout_at(started + budget, reply).await else {
+        let Ok(line) = tokio::time::timeout(budget, next_line(&mut reader)).await else {
             return Stop::Budget(budget);
         };
-        match reply {
-            Ok(Some(outcome)) => outcomes.push(outcome),
+        let line = match line {
+            Ok(Some(Line::Reply(line))) => line,
+            Ok(Some(Line::Begin)) | Err(_) => return Stop::Graph(INVALID.to_owned()),
             Ok(None) => return stopped(child.wait().await),
+        };
+        match parse_reply(line, job).await {
+            Ok(outcome) => outcomes.push(outcome),
             Err(reason) => return Stop::Graph(reason.to_owned()),
         }
-        started = tokio::time::Instant::now();
     }
     Stop::Complete
 }
 
-/// The next reply line, prefix and newline included, or `None` at the end of
-/// the worker's output.
-async fn next_reply(
+/// One line of the worker's output.
+enum Line {
+    Begin,
+    /// A reply, prefix and newline included.
+    Reply(Vec<u8>),
+}
+
+/// The worker's next line, or `None` at the end of its output.
+async fn next_line(
     reader: &mut BufReader<ChildStdout>,
-) -> std::result::Result<Option<Vec<u8>>, &'static str> {
+) -> std::result::Result<Option<Line>, &'static str> {
     let mut line = Vec::new();
     loop {
         line.clear();
@@ -380,8 +392,11 @@ async fn next_reply(
             // End of output, possibly mid-line: the exit status says why.
             return Ok(None);
         }
+        if line == BEGIN {
+            return Ok(Some(Line::Begin));
+        }
         if line.starts_with(REPLY) {
-            return Ok(Some(line));
+            return Ok(Some(Line::Reply(line)));
         }
         // libtest prints this banner before a re-executed test worker runs.
         let text = &line[..line.len() - 1];
@@ -468,6 +483,9 @@ pub(crate) fn worker_main() -> i32 {
     if crate::js_worker_alloc::contain().is_err() {
         return 70;
     }
+    if no_core_dump().is_err() {
+        return 71;
+    }
     // Triskel's debug paths print to stdout. Keep the reply on a private
     // descriptor and send stray output to stderr, which the server discards.
     // SAFETY: dup and dup2 only duplicate descriptors this process owns.
@@ -480,6 +498,8 @@ pub(crate) fn worker_main() -> i32 {
     if watch_memory().is_err() {
         return 71;
     }
+    #[cfg(test)]
+    tests::start_fault();
     let mut input = Vec::new();
     if std::io::stdin().lock().read_to_end(&mut input).is_err() {
         return 72;
@@ -489,6 +509,9 @@ pub(crate) fn worker_main() -> i32 {
     };
     drop(input);
     for graph in &graphs {
+        if reply.write_all(BEGIN).and_then(|()| reply.flush()).is_err() {
+            return 74;
+        }
         #[cfg(test)]
         tests::fault();
         let Ok(json) = serde_json::to_vec(&lay_out(graph)) else {
@@ -504,6 +527,33 @@ pub(crate) fn worker_main() -> i32 {
         }
     }
     0
+}
+
+/// The worker writes no core dump. A crash is this graph's outcome, and a
+/// dump would hold an image of the request's graphs. On Linux a piped
+/// `core_pattern` (Apport, systemd-coredump) ignores `RLIMIT_CORE` and keeps
+/// the crashed process, with its reply pipe open, until the helper returns,
+/// which on a loaded machine outlasts a small graph's budget and turns the
+/// crash into a timeout. A process that is not dumpable is never dumped, so
+/// it ends at once and its signal names the crash.
+fn no_core_dump() -> std::io::Result<()> {
+    let none = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: setrlimit only reads the limit it is given.
+    if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &none) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let off: libc::c_ulong = 0;
+        // SAFETY: PR_SET_DUMPABLE takes one integer and changes only this process.
+        if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, off) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 fn watch_memory() -> std::io::Result<()> {
@@ -1027,6 +1077,14 @@ mod tests {
             const { std::cell::Cell::new(None) };
     }
 
+    /// A test-only fault before the worker reads its request: a worker that
+    /// starts slower than a graph's budget.
+    pub(super) fn start_fault() {
+        if std::env::var(FAULT_VARIABLE).as_deref() == Ok("slow start") {
+            std::thread::sleep(Duration::from_millis(1500));
+        }
+    }
+
     /// Test-only faults in the re-executed worker, after the first graph's
     /// reply so a test sees both a kept result and the missing ones.
     pub(super) fn fault() {
@@ -1308,6 +1366,19 @@ mod tests {
             assert!(reason.contains(words), "{fault}: {reason}");
             // A new worker lays out the graphs after the stopped one.
             assert_sound(&small(), &outcomes[2], fault);
+        }
+    }
+
+    /// A graph's budget starts when the worker begins it, so a worker that is
+    /// slow to start, as on a loaded machine, costs no graph its layout.
+    #[tokio::test]
+    async fn starting_a_worker_counts_against_no_graph() {
+        let small = || graph(&sized(3), &[[0, 1], [1, 2]]);
+        FAULT.set(Some("slow start"));
+        let outcomes = lay_out_all(vec![small(), small()]).await;
+        FAULT.set(None);
+        for (index, outcome) in outcomes.iter().enumerate() {
+            assert_sound(&small(), outcome, &format!("slow start, graph {index}"));
         }
     }
 

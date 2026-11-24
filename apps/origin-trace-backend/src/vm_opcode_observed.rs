@@ -2005,6 +2005,30 @@ mod tests {
         assert_eq!(arming["refused"], json!([]));
     }
 
+    /// A script with more interpreter candidates than one site file arms, as
+    /// Turnstile's 32 do past 4 KiB, reaches the schema and the shipped UI
+    /// with its whole file: the 256 sites the record's slot allows, and the
+    /// rest refused at that limit.
+    #[test]
+    fn a_full_javascript_arming_export_is_accepted_whole() {
+        let source = (0..=crate::vm_opcode::native_js::SITE_LIMIT - 2)
+            .map(|n| format!("function more{n}(p){{var pc=0;while(pc<p.length){{switch(p[pc++]){{case 0:pc+=1;break;case 1:return pc;}}}}}}"))
+            .fold(TWO_LEVEL.to_owned(), |text, more| text + &more);
+        let root = tempfile::tempdir().unwrap();
+        let artifact = artifact(root.path(), 1, "javascript", source.as_bytes(), 0, 0);
+        let workspace = analyze(root.path(), std::slice::from_ref(&artifact), &[]);
+        let arming = &workspace["js_dispatch_arming"];
+        assert_eq!(
+            arming["sites"].as_array().unwrap().len(),
+            crate::vm_opcode::native_js::SITE_LIMIT
+        );
+        let refused = arming["refused"].as_array().unwrap();
+        assert_eq!(refused.len(), 1);
+        assert_eq!(refused[0]["reason"], "js-dispatch-site-limit");
+        let file = arming["file"].as_str().unwrap();
+        assert!((64 * 1024..128 * 1024).contains(&file.len()), "{}", file.len());
+    }
+
     #[test]
     fn native_javascript_nesting_refuses_unknown_parents_threads_and_reentry() {
         let (outer, inner, _) = two_level_sites();

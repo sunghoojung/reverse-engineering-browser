@@ -4497,7 +4497,8 @@
             {
               "type": "string",
               "minLength": 1,
-              "maxLength": 4096
+              "maxLength": 131072,
+              "description": "The canonical rendering of sites. Its size follows from them: 256 sites stay inside the 128 KiB a native-js-dispatch-sites-v1 file holds."
             },
             {
               "type": "null"

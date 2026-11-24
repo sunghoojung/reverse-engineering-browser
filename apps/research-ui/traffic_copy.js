@@ -63,10 +63,14 @@ function trafficFetch(entry) {
 
 // WebKit lets a page write the clipboard only inside the user's action. A
 // ClipboardItem holding a promise starts the write there and fills it when the
-// read answers; without one the text is written once it arrives.
+// read answers; without one the text is written once it arrives. WebKit
+// rejects a write whose text failed with the NotAllowedError it gives a write
+// it refuses, so a text that failed is reported as itself.
 function trafficClipboardWrite(textPromise) {
   if (typeof ClipboardItem === 'function' && navigator.clipboard?.write) {
-    return navigator.clipboard.write([new ClipboardItem({'text/plain': textPromise.then(text => new Blob([text], {type: 'text/plain'}))})]);
+    const failure = textPromise.then(() => null, error => error ?? null);
+    return navigator.clipboard.write([new ClipboardItem({'text/plain': textPromise.then(text => new Blob([text], {type: 'text/plain'}))})])
+      .catch(async refusal => { throw (await failure) ?? refusal; });
   }
   return textPromise.then(text => navigator.clipboard.writeText(text));
 }

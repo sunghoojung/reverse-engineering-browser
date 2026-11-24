@@ -3,9 +3,10 @@
  * builds the model, folds it, sizes the cards and lays them out, sends the
  * layered drawing first and then swaps in each realm Triskel lays out, in the
  * background. It keeps the graph it built, so the page asks it for a refold
- * (a chain expanded, every frame drawn), which lays out again only the bands
- * it changed, for a request's lineage on its own, and for Find. The page runs
- * the same pipeline on its own thread where no worker starts.
+ * (a chain expanded, every frame drawn), which keeps the band order and the
+ * Triskel answers of the bands it left as they were, for a request's lineage
+ * on its own, and for Find. The page runs the same pipeline on its own
+ * thread where no worker starts.
  *
  * Page to pipeline, each with an `id` its answers carry:
  *   {op: 'load', session, measure, collapse, expanded: [node key], triskel, all}
@@ -45,7 +46,7 @@ function flowGraphSendable(layout) {
 
 /** What every realm's band is drawn from, as the Engine label reads it. */
 function flowGraphEngine(state, outcomes, report) {
-  const realms = outcomes.map((outcome, lane) => ({key: state.local.content.bands[lane].key, engine: outcome.result ? 'triskel' : 'layered', reason: outcome.reason ?? null}));
+  const realms = outcomes.map((outcome, lane) => ({key: state.keys[lane], engine: outcome.result ? 'triskel' : 'layered', reason: outcome.reason ?? null}));
   const triskel = realms.some(realm => realm.engine === 'triskel');
   return {name: triskel ? 'triskel' : 'layered', revision: report.revision, triskel, realms, failure: report.failure};
 }
@@ -147,8 +148,9 @@ function createFlowGraphPipeline(post) {
   }
 
   /** Folds the current model, sends the fold and its layered layout, then
-   * asks Triskel for each realm. `again` lays out only the bands the fold
-   * changed. */
+   * asks Triskel for each realm. `again` keeps the band order and the Triskel
+   * answers of the bands the fold left as they were; a band's layered drawing
+   * is its own, so those bands draw as they did. */
   function layOut(id, mine, again) {
     const c = current;
     const display = flowGraphDisplay(c.model, c.expanded, c.collapse);

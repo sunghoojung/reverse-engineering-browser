@@ -44,7 +44,7 @@ The fold reads every record of that session of these types
 | 35 `script_identity` | Script ID to realm, eval flag, start position and source digest |
 | `request_initiated` | The `METHOD host` label of a request stack's sink |
 
-The event index marks these types (`reb-event-index-v1/5`, kind `flow`), so a
+The event index marks these types (`reb-event-index-v1/6`, kind `flow`), so a
 fold reads the session's records of them and nothing else, in store order.
 A record of the session that its decoder refuses counts in
 `coverage.malformed_records`; a `script_cookie` record is checked by the rules

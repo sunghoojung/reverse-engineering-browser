@@ -158,6 +158,53 @@ function dispatcherWasm(arms) {
     ...section(7, [1, 8, ...Buffer.from('dispatch'), 0, 0]), ...section(10, [1, ...leb(body.length), ...body])]);
 }
 
+// test25b: one function per shape the block graph must draw well, as compilers
+// emit them: a sparse switch ladder (a br_if chain into nested case blocks, as
+// LLVM lowers one), an interpreter loop around a 256-arm br_table, and nested
+// loops with a diamond in each. `emit` writes the body; locals 0 to 2 are i32.
+function shapedWasm(name, emit) {
+  const leb = n => { const out = []; do { let b = n & 127; n >>>= 7; out.push(n ? b | 128 : b); } while (n); return out; };
+  const sleb = n => { const out = []; for (;;) { const b = n & 127; n >>= 7; if ((n === 0 && !(b & 64)) || (n === -1 && b & 64)) { out.push(b); return out; } out.push(b | 128); } };
+  const section = (id, data) => [id, ...leb(data.length), ...data];
+  const body = [];
+  const op = (...bytes) => { for (const byte of bytes) body.push(byte); };
+  const shape = {op, leb, constant: value => op(0x41, ...sleb(value)),
+    work: count => { for (let i = 0; i < count; i += 1) { op(0x20, 1); shape.constant(i + 3); op(0x6a, 0x21, 1); } },
+    test: mask => { op(0x20, 0); shape.constant(mask); op(0x71); }};
+  emit(shape);
+  op(0x20, 1);
+  const code = [1, 3, 0x7f, ...body, 0x0b];
+  return Buffer.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, ...section(1, [1, 0x60, 1, 0x7f, 1, 0x7f]), ...section(3, [1, 0]),
+    ...section(7, [1, name.length, ...Buffer.from(name), 0, 0]), ...section(10, [1, ...leb(code.length), ...code])]);
+}
+const ladderWasm = cases => shapedWasm('ladder', ({op, leb, constant, work}) => {
+  op(0x02, 0x40);
+  for (let i = 0; i < cases; i += 1) op(0x02, 0x40);
+  for (let i = 0; i < cases; i += 1) { op(0x20, 0); constant(i * 7 + 3); op(0x46, 0x0d, ...leb(i)); }
+  op(0x0c, ...leb(cases));
+  for (let i = 0; i < cases; i += 1) { op(0x0b); work(2); op(0x0c, ...leb(cases - 1 - i)); }
+  op(0x0b);
+});
+const dispatchLoopWasm = (arms, armWork) => shapedWasm('dispatch', ({op, leb, constant, work, test}) => {
+  op(0x03, 0x40, 0x02, 0x40);
+  for (let i = 0; i < arms; i += 1) op(0x02, 0x40);
+  op(0x20, 0, 0x20, 1, 0x6a); constant(255); op(0x71, 0x0e, ...leb(arms));
+  for (let i = 0; i < arms; i += 1) op(...leb(i));
+  op(...leb(arms));
+  for (let i = 0; i < arms; i += 1) {
+    op(0x0b);
+    for (let w = 0; w < armWork; w += 1) { test(1 << (w % 8)); op(0x04, 0x40); work(1); op(0x05); work(1); op(0x0b); }
+    op(0x20, 1); constant(1); op(0x6a, 0x21, 1, 0x0c, ...leb(arms - i));
+  }
+  op(0x0b, 0x20, 1, 0x0f, 0x0b);
+});
+const loopNestWasm = (depth, repeat) => shapedWasm('loops', ({op, constant, work, test}) => {
+  for (let r = 0; r < repeat; r += 1) {
+    for (let d = 0; d < depth; d += 1) { op(0x02, 0x40, 0x03, 0x40); test(1 << (d % 8)); op(0x04, 0x40); work(1); op(0x05); work(1); op(0x0b); }
+    for (let d = 0; d < depth; d += 1) { op(0x20, 2); constant(1); op(0x6a, 0x22, 2); constant(d + 10); op(0x49, 0x0d, 0); test(2); op(0x0d, 1, 0x0b, 0x0b); }
+  }
+});
+
 // test39: an import (func 0), an unexported helper (func 1) and an export
 // (func 2) that calls it, so a name shows on a header and on a call row.
 export const NAMED_WASM_ARTIFACT_ID = '420';
@@ -937,8 +984,11 @@ export async function debuggerObservations(template, artifactsRoot, {records = N
         'request_initiated', hex(`GET worker-${index}.debugger.test`));
     }
   }
+  // Observations a page's handlers make milliseconds apart, so the sidebar's
+  // times differ; this renderer's records end its session.
   for (let index = 0; index < records; index += 1) {
     const kind = kinds[index % kinds.length];
+    time += 15000000n;
     row({frame_id: frames[index % frames.length]}, kind, observation(tails[kind](index)));
   }
   // Two records the core refuses.
@@ -951,11 +1001,14 @@ export async function debuggerObservations(template, artifactsRoot, {records = N
 }
 
 // Like the browser, each gap takes its renderer's own sequence slot, so the
-// stream has no hole. The payload is the reason text, as the producers write it.
+// stream has no hole, and a time after its session's last record: each
+// session has its own clock, and the golden stores' sessions reach 2^64 - 1.
+// The payload is the reason text, as the producers write it.
 function namedBudgetGaps(template, events) {
   const processId = 4242;
-  assert(!events.some(event => event.session_id === template.session_id && event.process_id === processId), 'budget gap stream must be its own');
-  const time = BigInt(events.at(-1).monotonic_time_ns);
+  const session = events.filter(event => event.session_id === template.session_id);
+  assert(!session.some(event => event.process_id === processId), 'budget gap stream must be its own');
+  const time = session.reduce((latest, event) => BigInt(event.monotonic_time_ns) > latest ? BigInt(event.monotonic_time_ns) : latest, 0n);
   return NAMED_GAP_REASONS.map((reason, index) => ({...template, process_id: processId, thread_id: processId,
     sequence_number: String(index + 1), monotonic_time_ns: String(time + BigInt(index + 1)), artifact_id: '0',
     parent_event_id: '0', request_id: '0', type: 'gap', payload_size: Buffer.byteLength(reason), payload: hex(reason)}));
@@ -1015,6 +1068,15 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const graphWasm = await artifact(artifacts, {artifact_id: '340', session_id: '1', navigation_id: '100', frame_id: '200',
     capture_origin: 'webassembly_compile', kind: 'wasm', mime_type: 'application/wasm', url: 'fixture://graph-dispatcher.wasm'},
   dispatcherWasm(32));
+  // Block graph shapes (test25b): the exception function is the checked-in
+  // tools/fixtures/wasm-block-graph build; the large one has 19,459 blocks.
+  const graphShapes = [];
+  for (const [id, name, bytes] of [['341', 'ladder', () => ladderWasm(1000)], ['342', 'dispatch256', () => dispatchLoopWasm(256, 2)],
+    ['343', 'loops', () => loopNestWasm(8, 2)], ['344', 'exceptions', () => readFile(new URL('../fixtures/wasm-block-graph/exceptions.wasm', import.meta.url))],
+    ['345', 'large', () => dispatchLoopWasm(256, 25)]]) {
+    graphShapes.push(await artifact(artifacts, {artifact_id: id, session_id: '1', navigation_id: '100', frame_id: '200',
+      capture_origin: 'webassembly_compile', kind: 'wasm', mime_type: 'application/wasm', url: `fixture://graph-${name}.wasm`}, await bytes()));
+  }
   const namedWasm = await artifact(artifacts, {artifact_id: NAMED_WASM_ARTIFACT_ID, session_id: '1', navigation_id: '100', frame_id: '200',
     capture_origin: 'webassembly_compile', kind: 'wasm', mime_type: 'application/wasm', url: 'fixture://named-functions.wasm'},
   namedFunctionsWasm());
@@ -1063,7 +1125,7 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
       capture_origin: 'webassembly_compile', kind: 'wasm', execution_context_id: '1', mime_type: 'application/wasm', url: 'https://large.test/module.wasm'},
     await readFile(join(largeDirectory, 'module.wasm'))),
   ] : [];
-  const manifest = [...demoArtifacts, ...large, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, namedWasm, offlineRunner, identified, readable, ...diffBuilds, valueFlowWasm, ...withBodies.artifacts, ...bodyCases.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts, ...debuggerRecords.artifacts];
+  const manifest = [...demoArtifacts, ...large, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, ...graphShapes, namedWasm, offlineRunner, identified, readable, ...diffBuilds, valueFlowWasm, ...withBodies.artifacts, ...bodyCases.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts, ...debuggerRecords.artifacts];
   const retained = [...demoEvents, ...requests, ...guest.events, ...physical.events, ...observed.events];
   for (const process of WORKER_STACK_PROCESSES) {
     assert.equal(retained.filter(event => event.process_id === process).length,
@@ -1072,7 +1134,7 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const vm = demoEvents.find(event => event.category === 'vm');
   assert(vm, 'demo store must contain a native vm event');
   // The debugger renderer's records come first, so its requests list last in Traffic.
-  const events = [...debuggerRecords.events, ...retained, ...namedBudgetGaps(vm, retained)];
+  const events = [...debuggerRecords.events, ...retained, ...namedBudgetGaps(vm, [...debuggerRecords.events, ...retained])];
   await writeFile(join(artifacts, 'manifest.jsonl'), manifest.map(record => JSON.stringify(record) + '\n').join(''));
   await writeFile(join(root, 'events.jsonl'), events.map(event => JSON.stringify(event) + '\n').join(''));
   return {

@@ -1,6 +1,6 @@
 /* Session flow graph (protocol/flow-graph-v2.md): every recorded stack of one
  * session as one graph of functions, read top to bottom like a disassembler's
- * CFG. Realms are full-width bands stacked in call order. A card lists the
+ * CFG. Realms are bands packed into columns in call order. A card lists the
  * calls its function made, one row each, the way a disassembly block lists its
  * instructions; its header is tinted by its kind (JavaScript, Wasm, eval, a
  * request), and edges are coloured by what they are: a call, an await or task,
@@ -366,7 +366,12 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   let view = {x: 0, y: 0, z: 1}, cssW = 0, cssH = 0, dpr = 1, frame = 0, needsStart = false, miniKey = '', miniBase = null, miniHighlightKey = '', miniLit = null, miniFit = null;
   const ROUTE = flowGraphLayout.ROUTE;
 
-  const requestDraw = () => { if (visible && !frame) frame = requestAnimationFrame(() => { frame = 0; draw(); }); };
+  // Every change of view asks for a draw, so the view is kept on the drawing
+  // here, as in the block graph.
+  const requestDraw = () => {
+    if (layout && cssW) view = graphBoundView(view, layout.width, layout.height, cssW, cssH);
+    if (visible && !frame) frame = requestAnimationFrame(() => { frame = 0; draw(); });
+  };
   /** How much of the stage's right Details covers: in a narrow panel it is
    * a drawer over the canvas, beside it otherwise. */
   const drawerWidth = () => detailsOpen && globalThis.getComputedStyle?.(inspector)?.position === 'absolute' ? inspector.offsetWidth ?? 0 : 0;
@@ -836,7 +841,6 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     shownCards.length = 0; shownEdges.length = 0;
     if (!layout || !display || layout.x.length !== display.nodes.length) return;
     host.toggleAttribute('data-minimap-off', !miniShown());
-    clampView();
     ctx.setTransform(dpr * view.z, 0, 0, dpr * view.z, -view.x * view.z * dpr, -view.y * view.z * dpr);
     const lod = lodNow();
     if (lod < 0) drawOverview();
@@ -875,9 +879,9 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
 
   /** Per band of the drawn layout: its cards and the distinct requests they
    * made, and the calls between bands bundled per pair of bands, heaviest
-   * first. A bundle to the band below runs straight down; one further down
-   * runs in the right gutter, and one back up in the left gutter, a track
-   * each. */
+   * first. A bundle to the next band of its column runs straight down; any
+   * other runs along its heaviest call's route, which the layout keeps off
+   * every card and on a line of its own. */
   function bandOverview() {
     if (overview?.layout === layout) return overview;
     const lanes = layout.lanes, at = new Map(lanes.map((lane, index) => [lane.key, index]));
@@ -894,46 +898,21 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       if (layout.routeStart[e] === layout.routeStart[e + 1]) return;
       const a = at.get(display.nodes[edge.from].context), b = at.get(display.nodes[edge.to].context);
       if (a === b || a === undefined || b === undefined) return;
-      const key = a * lanes.length + b, item = pairs.get(key) ?? {from: a, to: b, edges: 0, count: 0};
+      const key = a * lanes.length + b, item = pairs.get(key) ?? {from: a, to: b, edges: 0, count: 0, edge: e, heaviest: -1};
       item.edges += 1; item.count += edge.count;
+      if (edge.count > item.heaviest) { item.heaviest = edge.count; item.edge = e; }
       pairs.set(key, item);
     });
+    // Bands are packed into columns in band order, and columns never share
+    // an x, so the next band of a column is the next band overlapping it.
+    const below = (a, b) => b === a + 1 && lanes[a].x < lanes[b].x + lanes[b].w && lanes[b].x < lanes[a].x + lanes[a].w;
     const bundles = [...pairs.values()].sort((x, y) => y.count - x.count), straight = new Uint32Array(lanes.length);
-    const ports = lanes.map(() => ({left: [], right: []})), sides = {left: [], right: []};
     for (const bundle of bundles) {
-      if (sideways() || bundle.to === bundle.from + 1) straight[bundle.from] += 1;
-      else sides[bundle.to > bundle.from ? 'right' : 'left'].push(bundle);
+      bundle.straight = sideways() || below(bundle.from, bundle.to);
+      if (bundle.straight) straight[bundle.from] += 1;
     }
-    // A gutter's lines nest instead of crossing: a shorter span takes an
-    // inner track, and each block's ends on a side are spread over its height,
-    // those to blocks above first, nearest first, then those to blocks below,
-    // farthest first.
-    for (const [side, list] of Object.entries(sides)) {
-      list.sort((x, y) => Math.abs(x.to - x.from) - Math.abs(y.to - y.from) || y.count - x.count);
-      list.forEach((bundle, track) => {
-        bundle.track = track;
-        ports[bundle.from][side].push({bundle, other: bundle.to, end: 'out'});
-        ports[bundle.to][side].push({bundle, other: bundle.from, end: 'in'});
-      });
-    }
-    ports.forEach((block, index) => {
-      for (const list of [block.left, block.right]) {
-        const order = port => (port.other < index ? index - port.other : lanes.length * 2 - (port.other - index));
-        list.sort((x, y) => order(x) - order(y)).forEach((port, k) => { port.bundle[port.end] = (k + 1) / (list.length + 1); });
-      }
-    });
-    const right = sides.right.length, left = sides.left.length;
-    return (overview = {layout, lanes: counts.map(count => ({cards: count.cards, requests: count.requests.size})), bundles, straight, right, left,
+    return (overview = {layout, lanes: counts.map(count => ({cards: count.cards, requests: count.requests.size})), bundles, straight,
       max: bundles.reduce((most, bundle) => Math.max(most, bundle.count), 1)});
-  }
-  /** Screen pixels from the bands to a gutter's first track, and between
-   * two tracks: six, closer when there are many, so every track fits in 96. */
-  const GUTTER = 16, trackGap = tracks => Math.min(6, 96 / Math.max(1, tracks));
-  /** Screen room the overview's gutters take on each side of the bands. */
-  function overviewGutters() {
-    if (!layout || !display || sideways()) return {left: 0, right: 0};
-    const data = bandOverview();
-    return {left: data.left ? GUTTER + data.left * trackGap(data.left) : 0, right: data.right ? GUTTER + data.right * trackGap(data.right) : 0};
   }
   /** Below the box zoom the session is one block per realm, with its name
    * and counts, and the calls between realms bundled. */
@@ -959,17 +938,20 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
         const forward = b.x > a.x, x0 = forward ? a.x + a.w : a.x, x1 = forward ? b.x : b.x + b.w, y0 = a.y + a.h / 2, y1 = b.y + b.h / 2, mid = (x0 + x1) / 2;
         ctx.moveTo(x0, y0); ctx.bezierCurveTo(mid, y0, mid, y1, x1, y1);
         tip = {x: x1, y: y1, dx: forward ? 1 : -1, dy: 0};
-      } else if (bundle.to === bundle.from + 1) {
-        const x = a.x + a.w * (spread[bundle.from] + 1) / (data.straight[bundle.from] + 1);
+      } else if (bundle.straight) {
+        const lo = Math.max(a.x, b.x), hi = Math.min(a.x + a.w, b.x + b.w), x = lo + (hi - lo) * (spread[bundle.from] + 1) / (data.straight[bundle.from] + 1);
         spread[bundle.from] += 1;
         ctx.moveTo(x, a.y + a.h); ctx.lineTo(x, b.y);
         tip = {x, y: b.y, dx: 0, dy: 1};
       } else {
-        const down = bundle.to > bundle.from, gap = trackGap(down ? data.right : data.left);
-        const gx = down ? right + (GUTTER + bundle.track * gap) * hair : left - (GUTTER + bundle.track * gap) * hair, y0 = a.y + a.h * bundle.out, y1 = b.y + b.h * bundle.in, side = down ? a.x + a.w : a.x, into = down ? b.x + b.w : b.x;
-        const radius = Math.min(8 * hair, Math.abs(gx - side) / 2, Math.abs(gx - into) / 2, Math.abs(y1 - y0) / 2);
-        ctx.moveTo(side, y0); ctx.arcTo(gx, y0, gx, y1, radius); ctx.arcTo(gx, y1, into, y1, radius); ctx.lineTo(into, y1);
-        tip = {x: into, y: y1, dx: down ? -1 : 1, dy: 0};
+        const P = layout.routes, first = layout.routeStart[bundle.edge], last = layout.routeStart[bundle.edge + 1] - 1;
+        ctx.moveTo(P[2 * first], P[2 * first + 1]);
+        for (let i = first + 1; i <= last; i += 1) ctx.lineTo(P[2 * i], P[2 * i + 1]);
+        // The arrowhead follows the last run into the card.
+        let k = last - 1;
+        while (k > first && P[2 * k] === P[2 * last] && P[2 * k + 1] === P[2 * last + 1]) k -= 1;
+        const dx = P[2 * last] - P[2 * k], dy = P[2 * last + 1] - P[2 * k + 1], run = Math.hypot(dx, dy) || 1;
+        tip = {x: P[2 * last], y: P[2 * last + 1], dx: dx / run, dy: dy / run};
       }
       ctx.globalAlpha = 0.7; ctx.lineWidth = width; ctx.stroke();
       const size = (7 + width * view.z) * hair, half = size * 0.5;
@@ -977,12 +959,12 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     }
     ctx.globalAlpha = 1;
     // Names and counts at screen size, kept under the heading: inside a block
-    // wide enough to hold them, else beside the bands past the gutters, top
-    // to bottom, each within its block's height. A label that has no room
-    // left there is the band's hover.
+    // wide enough to hold them, else beside the bands, top to bottom, each
+    // within its block's height. A label that has no room left there is the
+    // band's hover.
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.textBaseline = 'alphabetic';
-    const inset = topInset(), gutters = overviewGutters(), edge = openEdge();
-    const outRight = (right - view.x) * view.z + gutters.right + 14, outLeft = (left - view.x) * view.z - gutters.left - 14;
+    const inset = topInset(), edge = openEdge();
+    const outRight = (right - view.x) * view.z + 14, outLeft = (left - view.x) * view.z - 14;
     const outside = !across && edge - outRight >= 160 ? 'right' : !across && outLeft >= 160 ? 'left' : null;
     let below = inset;
     lanes.forEach((lane, index) => {
@@ -1496,25 +1478,14 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   const topInset = () => Math.max(56, (tools.offsetTop ?? 0) + (tools.offsetHeight ?? 0), (heading.offsetTop ?? 0) + (heading.offsetHeight ?? 0)) + 12;
   /** The zoom and position that show the whole graph under the heading,
    * centred: as small as that takes, since below the box zoom the session
-   * is drawn as one block per realm, with room for the overview's gutters. */
+   * is drawn as one block per realm. */
   function fitted(cap = 1) {
     const inset = topInset(), room = Math.max(40, cssH - inset - 16);
-    let side = {left: 0, right: 0}, z = Math.min(cap, (cssW - 32) / layout.width, room / layout.height);
-    if (z < FLOW_GRAPH_BAND_ZOOM) { side = overviewGutters(); z = Math.min(cap, Math.max(16, cssW - 32 - side.left - side.right) / layout.width, room / layout.height); }
-    return {z, x: (layout.width - (cssW - side.left - side.right) / z) / 2 - side.left / z, y: (layout.height - room / z) / 2 - inset / z};
+    const z = Math.min(cap, (cssW - 32) / layout.width, room / layout.height);
+    return {z, x: (layout.width - cssW / z) / 2, y: (layout.height - room / z) / 2 - inset / z};
   }
   /** The least zoom: the shared floor, or below it what fits the graph. */
   const zoomFloor = () => Math.min(GRAPH_ZOOM.min, layout && cssW > 1 ? fitted().z * 0.8 : GRAPH_ZOOM.min);
-  /** Keeps the graph in view: no more than a margin of blank canvas past
-   * its edges when it is larger than the view, and wholly inside it when it
-   * is smaller. */
-  function clampView() {
-    if (!layout || cssW <= 1) return;
-    const z = view.z, margin = 80, side = lodNow() < 0 ? overviewGutters() : {left: 0, right: 0}, inset = topInset();
-    const clamp = (value, a, b) => Math.min(Math.max(value, Math.min(a, b)), Math.max(a, b));
-    view.x = clamp(view.x, -(margin + side.left) / z, layout.width - (cssW - margin - side.right) / z);
-    view.y = clamp(view.y, -inset / z, layout.height - (cssH - margin) / z);
-  }
   /** The canvas's right edge short of a Details drawer over it, which a
    * label stops at instead of running under. */
   const openEdge = () => freeArea().right + 8;

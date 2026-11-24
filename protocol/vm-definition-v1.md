@@ -1,6 +1,6 @@
 # Declarative static VM analysis v1
 
-This is a bounded offline decoder for explicitly supplied byte layouts and
+This is an offline decoder for explicitly supplied byte layouts and
 semantic declarations. It does not discover an ISA, execute bytecode, validate
 the declarations, install plugins or attach to a process. Imported execution
 traces and their observed-occurrence graphs remain governed by
@@ -12,15 +12,17 @@ CommonJS. All entry points revalidate their arguments and return independent
 JSON data. `parseDefinition(input)` and `parseImage(input)` are synchronous;
 `await analyze(definitionInput, imageInput, options = {})` computes SHA-256 with
 WebCrypto before returning `reb-vm-static-analysis-v1`. `options` accepts only
-`max_instructions`, an integer from 1 through 4096, default 4096.
+`max_instructions`, a positive safe integer the caller asks for; without it the
+whole image decodes.
 
-Input is JSON text or a plain JSON-data object. Text is limited to 1 MiB per
-document and rejects duplicate keys, unknown fields, unpaired surrogates and
-noncanonical integer tokens, including exponents, fractions and negative zero.
-Object inputs reject unsafe numbers, cycles, accessors, serialization hooks,
-non-JSON values, sparse arrays and custom prototypes. The object structure is
-bounded to 50,000 nodes and 16 nested levels. Imported text is never interpreted
-as JavaScript, HTML, an expression, a URL or a module.
+Input is JSON text or a plain JSON-data object of any size. Text rejects
+duplicate keys, unknown fields, unpaired surrogates and noncanonical integer
+tokens, including exponents, fractions and negative zero. Object inputs reject
+unsafe numbers, cycles, accessors, serialization hooks, non-JSON values, sparse
+arrays and custom prototypes. Nesting past 16 levels is refused: no valid
+definition or image nests past five, and the bound keeps a hostile input from
+exhausting the validator's stack. Imported text is never interpreted as
+JavaScript, HTML, an expression, a URL or a module.
 
 The closed JSON Schemas are
 [definition](vm-definition-v1.schema.json),
@@ -42,14 +44,15 @@ JSON Schema alone does not validate raw JSON token spelling or duplicate keys.
   never reverses or numerically reinterprets opcode bytes.
 - `operand_endianness`: `little` or `big`, shared by all integer operands.
 - `register_count`: exactly 0 for stack architecture; 1–64 for register.
-- `opcodes`: 1–256 opcode declarations with unique `code` values.
+- `opcodes`: one or more opcode declarations with unique `code` values, so at
+  most 256 for one-byte opcodes and 65,536 for two-byte ones.
 
 An opcode has exactly `code`, `mnemonic`, `operands`, `semantics`, and `flow`.
 `code` is lowercase hexadecimal of exactly `opcode_bytes` bytes. `mnemonic`
 and operand names are 1–32 ASCII letters/digits/underscores, starting with a
 letter or underscore. Mnemonics are display labels, never executed symbols.
 
-`operands` contains 0–8 ordered fields, each exactly `name`, `width`, `signed`,
+`operands` contains ordered fields, each exactly `name`, `width`, `signed`,
 and `kind`. Names are unique within the instruction. Width is 1, 2 or 4 bytes;
 there are no bitfields, implicit padding, variable-length integers, indirect
 decoder callbacks or alignment guesses. Operands immediately follow the opcode.
@@ -115,8 +118,8 @@ valid flow separately, without upgrading its semantic status to known.
 
 - `format`: `reb-vm-bytecode-v1`.
 - `image_id` and `definition_id`: bounded identifiers as above.
-- `entry_offsets`: 1–64 unique integers from 0 through 65535.
-- `bytes_hex`: lowercase, even-length hex representing 0–65536 bytes.
+- `entry_offsets`: one or more unique safe integers from 0.
+- `bytes_hex`: lowercase, even-length hex of any length.
 
 The image and definition IDs must match. Entries may be outside retained bytes
 or inside an operand; these become explicit unresolved entry diagnostics rather
@@ -211,11 +214,17 @@ Unknown operations render `unknown_semantics(MNEMONIC);` with a separately
 labeled declared-flow line when applicable. All text must be displayed inertly.
 No generated line is executable source, an expression callback or a proof.
 
-The report is bounded to 4096 instructions/nodes, 8192 edges, 8192 pseudocode
-lines, 64 entries, and 8257 diagnostics. Diagnostics cover invalid targets,
-invalid entries and the first decode stop. Warnings describe persistent trust
-and interpretation limits. There is no CFG path enumeration or unbounded
-recursion. `max_instructions` can further reduce work without erasing the image.
+The report grows with the image: one node per decoded instruction, at most two
+edges and two pseudocode lines per instruction, and diagnostics for invalid
+targets, invalid entries and the first decode stop. Warnings describe
+persistent trust and interpretation limits. There is no CFG path enumeration or
+recursion over the image. `max_instructions` can reduce work without erasing
+the image; a stop there is `instruction_budget`.
+
+Version 1 documents and reports are unchanged in shape. Earlier readers capped
+an image at 65,536 bytes, 4,096 instructions, 256 opcodes, eight operands and
+64 entries, and refused text past 1 MiB; this decoder accepts every document
+they accepted and decodes the same report for it.
 
 ## Owned acceptance fixtures and limits
 

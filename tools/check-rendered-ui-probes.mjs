@@ -1,7 +1,8 @@
 // Self-check of the rendered layout probe (tools/origin-trace-rendered-ui/probes.js)
 // against a minimal DOM with fixed boxes: a row its scroller has almost scrolled
 // out is skipped, but a control whose own box has collapsed is still reported,
-// and a scroller clips at its padding box when a divider's reach is measured.
+// a scroller clips at its padding box when a divider's reach is measured, and a
+// title stuck to a scroller's top hides what scrolls under it.
 // Layout, clipping and hit testing are modelled here, not rendered.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -49,13 +50,13 @@ class Element {
   matches(selector) {
     return selector.split(',').some(part => part.trim().toUpperCase() === this.tagName);
   }
-  querySelectorAll() { return this.descendants().filter(node => node.tagName === 'BUTTON'); }
+  querySelectorAll(selector) { return this.descendants().filter(node => selector === '*' || node.tagName === 'BUTTON'); }
   querySelector() { return null; }
 }
 
 const box = (left, top, width, height) => ({left, top, width, height, right: left + width, bottom: top + height});
 
-// Paint order is document order, so a later element is drawn on top.
+// Paint order is z-index, then document order, so a later element is drawn on top.
 function probe(root) {
   const all = () => [root, ...root.descendants()];
   const clipped = element => {
@@ -74,7 +75,9 @@ function probe(root) {
     documentElement: {scrollWidth: 800},
     querySelector: selector => all().find(node => `#${node.id}` === selector) ?? null,
     elementFromPoint(x, y) {
-      return all().reverse().find(node => {
+      const painted = all().map((node, order) => ({node, order, z: Number.parseInt(node.computed.zIndex, 10) || 0}))
+        .sort((a, b) => a.z - b.z || a.order - b.order).map(entry => entry.node);
+      return painted.reverse().find(node => {
         const area = clipped(node);
         return x >= area.left && x < area.right && y >= area.top && y < area.bottom;
       }) ?? null;
@@ -152,6 +155,39 @@ assert.equal(popover('absolute'), 34, 'An absolute box is clipped by its positio
 assert.equal(popover('fixed', {transform: 'translateX(0px)'}), 34, 'A transformed ancestor clips a fixed box');
 assert.equal(popover('static'), 0, 'An in-flow box is clipped by every overflow ancestor');
 
+// A section title stuck to its pane's top, drawn over the controls that scroll
+// under it, hides them as the pane's edge does: the menu half under it is
+// checked at its visible part, and the row wholly under it is scrolled out.
+// The next section's title, not stuck, hides nothing, so a button drawn over
+// it is still a collision.
+const sections = shift => {
+  const pane = new Element('div', {id: `pane-${shift}`, rect: box(0, 100, 300, 200), style: {overflowY: 'auto'},
+    scrollHeight: 600, clientHeight: 200});
+  const section = new Element('details', {rect: box(0, 40, 300, 240)});
+  const title = new Element('summary', {rect: box(0, 100, 300, 32), text: 'Observations', style: {position: 'sticky', top: '0px', zIndex: '2'}});
+  section.append(title, new Element('button', {rect: box(0, 70, 300, 22), text: 'row'}),
+    new Element('button', {id: 'menu', rect: box(12, 116, 120, 24), text: 'Kind'}));
+  const next = new Element('details', {rect: box(0, 280, 300, 100)});
+  next.append(new Element('summary', {rect: box(0, 280, 300, 32), text: 'Pausing', style: {position: 'sticky', top: '0px', zIndex: '2'}}),
+    new Element('button', {rect: box(200, 280 + shift, 80, 20), text: 'over'}));
+  section.open = next.open = true;
+  return pane.append(section, next);
+};
+assert.deepEqual(issues(sections(40)), [], 'Controls scrolled under a stuck title are not covered or overlapping');
+assert.equal(probe(sections(40)).box('#menu').visibleHeight, 8, 'A control half under a stuck title shows below it');
+assert(issues(sections(4)).some(issue => issue.includes('"over"')), 'A control drawn over a title that is not stuck still fails');
+
+// Text kept for assistive readers in a 1 px box shows nothing, so it is not
+// clipped text; a visible box that hides its own lines still is.
+const notes = new Element('div', {id: 'notes', rect: box(0, 0, 300, 100)});
+notes.append(new Element('span', {rect: box(10, 10, 1, 1), text: '. 4 records were malformed and are not shown.',
+  style: {overflowX: 'hidden', overflowY: 'hidden'}, scrollWidth: 260, clientWidth: 1, scrollHeight: 16, clientHeight: 1}),
+new Element('span', {rect: box(10, 40, 200, 16), text: 'A sentence that wraps to three lines.',
+  style: {overflowY: 'hidden'}, scrollHeight: 48, clientHeight: 16}));
+assert.deepEqual([...probe(notes).clippedText('#notes')], ['text clipped vertically: span "A sentence that wraps to three lines."'],
+  'Only visible clipped text is reported');
+
 console.log('PASS rendered layout probe: a scrolled-out row sliver is skipped, a collapsed control and ' +
-  'overlapping rows still fail, a divider reach clips at padding boxes, and only containing ancestors ' +
-  'clip a positioned box (modelled boxes, not rendered QA)');
+  'overlapping rows still fail, a divider reach clips at padding boxes, only containing ancestors ' +
+  'clip a positioned box, a stuck title hides what scrolls under it and 1 px assistive text is not ' +
+  'clipped text (modelled boxes, not rendered QA)');

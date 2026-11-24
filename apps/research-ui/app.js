@@ -5,7 +5,10 @@ const sourceGraphPanel = createSourceGraphPanel({
   button: document.querySelector('#source-graph'),
   // Graph, Readable and Map are alternative views of one artifact; opening one closes the others.
   closeOn: [document.querySelector('#source-map'), document.querySelector('#source-readable')],
-  revealOffset: offset => revealGraphByteOffset(offset)
+  revealOffset: offset => revealGraphByteOffset(offset),
+  // Find carries into Graph, and a Find typed before a function is drawn runs once it is.
+  findQuery: () => elements.sourceSearch.value,
+  onFind: message => { if (elements.sourceSearch.value && message) elements.sourcePosition.textContent = message; }
 });
 // Run offline (wasm_runner.js): one function, only on an explicit confirmed run.
 const wasmRunDialog = typeof createWasmRunDialog === 'function'
@@ -7835,6 +7838,16 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           elements.sourceSearch.title = `${message} Enter for next, Shift+Enter for previous.`;
         };
         globalThis.CSS?.highlights?.delete('source-search-match');
+        // With Graph open, Find searches the drawn function's rows; Enter and
+        // Shift+Enter step through the blocks that hold a match.
+        if (typeof sourceGraphPanel !== 'undefined' && sourceGraphPanel.isOpen()) {
+          const found = sourceGraphPanel.find(query, direction);
+          if (query) {
+            elements.sourcePosition.textContent = found;
+            status(`${found} Find in Graph is a case-insensitive, single-line literal over the drawn function's rows.`);
+            return;
+          }
+        }
         if (!editor || editor.identity !== sourceIdentity(source) || elements.sourceCode.hidden) {
           state.sourceSearchIndex = 0;
           if (query) elements.sourcePosition.textContent = 'Source text unavailable; nothing searched.';

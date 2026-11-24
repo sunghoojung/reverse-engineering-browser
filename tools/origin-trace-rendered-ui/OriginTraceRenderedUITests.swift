@@ -2205,8 +2205,15 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.screenshot("traffic-har-export-\(size.name)")
       _ = try await ui.value("(() => { const field = document.querySelector('[data-export-destination]'); field.value = 'copy'; field.dispatchEvent(new Event('change')); return true; })()")
       pasteboard.clearContents()
+      let cleared = pasteboard.changeCount
       try await ui.click("[data-export-submit]")
-      try await ui.waitUntil("document.querySelector('[data-export-status]').textContent.includes('Copied locally')", "the HAR was not copied")
+      do {
+        try await ui.waitUntil("document.querySelector('[data-export-status]').textContent.includes('Copied locally')", "the HAR was not copied")
+      } catch {
+        // WebKit refuses a write when the pasteboard changes while its text
+        // is read, and says only NotAllowedError; this says whether it did.
+        throw HarnessError("\(error) [pasteboard changes since it was cleared: \(pasteboard.changeCount - cleared), types: \(pasteboard.types?.map(\.rawValue) ?? [])]")
+      }
       let har = try JSONSerialization.jsonObject(with: Data((pasteboard.string(forType: .string) ?? "").utf8)) as? [String: Any]
       let log = har?["log"] as? [String: Any]
       let entries = log?["entries"] as? [[String: Any]] ?? []

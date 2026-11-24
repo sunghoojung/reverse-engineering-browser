@@ -7,10 +7,13 @@
 //! data, never an authority: each use checks the file's device and inode and
 //! the digests of its first and last indexed bytes, and a file that was
 //! rewritten, truncated or replaced is indexed again from byte 0 under a new
-//! epoch. Rows and the indexed position commit in one transaction, so a crash
-//! leaves the position the rows describe. A directory that cannot hold the
-//! database, such as a read-only bundle, gets one in a private temporary
-//! directory that lives as long as the index.
+//! epoch. The anchors a fold commits are those of the bytes it read, and only
+//! while the file still holds them, so a store rewritten in place during a
+//! fold is never described by the rows of the file it replaced. Rows and the
+//! indexed position commit in one transaction, so a crash leaves the position
+//! the rows describe. A directory that cannot hold the database, such as a
+//! read-only bundle, gets one in a private temporary directory that lives as
+//! long as the index.
 use crate::error::{Error, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
@@ -114,11 +117,79 @@ pub fn read_range(file: &mut File, start: u64, end: u64) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Digests of the first and last `ANCHOR_BYTES` before `end`.
-fn anchors(file: &mut File, end: u64) -> Result<(String, String)> {
-    let head = read_range(file, 0, end.min(ANCHOR_BYTES))?;
-    let tail = read_range(file, end.saturating_sub(ANCHOR_BYTES), end)?;
-    Ok((digest(&head), digest(&tail)))
+/// The first and last `ANCHOR_BYTES` before `end`, or None when the file now
+/// ends before `end`, as one truncated since it was measured does.
+fn ends(file: &mut File, end: u64) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    let mut read = |start: u64, end: u64| -> Result<Option<Vec<u8>>> {
+        let mut bytes = vec![0; (end - start) as usize];
+        file.seek(SeekFrom::Start(start))?;
+        match file.read_exact(&mut bytes) {
+            Ok(()) => Ok(Some(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    };
+    let head = read(0, end.min(ANCHOR_BYTES))?;
+    let tail = read(end.saturating_sub(ANCHOR_BYTES), end)?;
+    Ok(head.zip(tail))
+}
+
+/// The anchors of a prefix: digests of its `ends`.
+fn anchors((head, tail): &(Vec<u8>, Vec<u8>)) -> (String, String) {
+    (digest(head), digest(tail))
+}
+
+/// The bytes one fold read that the anchors of its end cover: those before
+/// `ANCHOR_BYTES` and the last `ANCHOR_BYTES`.
+#[derive(Default)]
+struct Folded {
+    head: Vec<u8>,
+    tail: Vec<u8>,
+}
+impl Folded {
+    /// Keeps what `bytes`, read at offset `start`, adds to either end.
+    fn add(&mut self, start: u64, bytes: &[u8]) {
+        if start < ANCHOR_BYTES {
+            let take = ((ANCHOR_BYTES - start) as usize).min(bytes.len());
+            self.head.extend_from_slice(&bytes[..take]);
+        }
+        let keep = ANCHOR_BYTES as usize;
+        if bytes.len() >= keep {
+            self.tail.clear();
+            self.tail.extend_from_slice(&bytes[bytes.len() - keep..]);
+        } else {
+            self.tail.extend_from_slice(bytes);
+            let excess = self.tail.len().saturating_sub(keep);
+            self.tail.drain(..excess);
+        }
+    }
+
+    /// The anchors of `at` for an index that held `from` bytes under `stored`
+    /// and then read these up to `at`. They describe what the index holds,
+    /// never a later read of the file, and only while the file still holds
+    /// it: None when the prefix or the bytes read changed since, as a store
+    /// rewritten in place during the fold does.
+    fn anchors(
+        &self,
+        file: &mut File,
+        stored: &(String, String),
+        from: u64,
+        at: u64,
+    ) -> Result<Option<(String, String)>> {
+        let Some((head, tail)) = ends(file, from)? else {
+            return Ok(None);
+        };
+        if from > 0 && (digest(&head), digest(&tail)) != *stored {
+            return Ok(None);
+        }
+        // Fewer bytes read than an anchor spans: the tail reaches before `from`.
+        let before = at.min(ANCHOR_BYTES) as usize - self.tail.len();
+        let held = (
+            [head.as_slice(), &self.head].concat(),
+            [&tail[tail.len() - before..], &self.tail].concat(),
+        );
+        Ok((ends(file, at)? == Some(held.clone())).then(|| anchors(&held)))
+    }
 }
 
 fn sql(error: rusqlite::Error) -> Error {
@@ -348,8 +419,9 @@ impl Sidecar {
         let identity = identity_of(&metadata);
         let end = metadata.len();
         let (_, stored, indexed_to, head, tail) = self.meta()?;
-        let same =
-            stored == identity && indexed_to <= end && anchors(file, indexed_to)? == (head, tail);
+        let same = stored == identity
+            && indexed_to <= end
+            && ends(file, indexed_to)?.as_ref().map(anchors) == Some((head, tail));
         if !same {
             self.reset(&identity)?;
         }
@@ -384,7 +456,9 @@ impl Sidecar {
     /// every terminated line with its byte range; the bytes after the last
     /// newline wait for a later fold. A partial line longer than
     /// `max_line` fails with `oversized`, since no newline can make it a
-    /// record. Past `deadline` no further chunk is read.
+    /// record. Past `deadline` no further chunk is read. A file that changed
+    /// under the fold commits nothing and is checked again, which rebuilds an
+    /// index whose prefix it no longer holds.
     #[allow(clippy::too_many_arguments)]
     pub fn fold(
         &mut self,
@@ -406,13 +480,21 @@ impl Sidecar {
         let mut at = from;
         let mut pending = Vec::new();
         let mut read_to = from;
+        let mut folded = Folded::default();
+        let mut truncated = false;
         file.seek(SeekFrom::Start(from))?;
         while read_to < limit && Instant::now() < deadline {
             let size = ((limit - read_to) as usize).min(CHUNK);
             let mut chunk = std::mem::take(&mut pending);
             let carried = chunk.len();
             chunk.resize(carried + size, 0);
-            file.read_exact(&mut chunk[carried..])?;
+            match file.read_exact(&mut chunk[carried..]) {
+                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    truncated = true;
+                    break;
+                }
+                read => read?,
+            }
             read_to += size as u64;
             let Some(last) = chunk.iter().rposition(|byte| *byte == b'\n') else {
                 if chunk.len() > max_line {
@@ -421,6 +503,7 @@ impl Sidecar {
                 pending = chunk;
                 continue;
             };
+            folded.add(at, &chunk[..=last]);
             let mut start = 0;
             for line in chunk[..=last].split_inclusive(|byte| *byte == b'\n') {
                 let line_start = at + start as u64;
@@ -439,8 +522,21 @@ impl Sidecar {
             }
         }
         each.finish(&transaction)?;
-        if at > from {
-            let (head, tail) = anchors(file, at)?;
+        if at > from || truncated {
+            let stored = transaction
+                .query_row("SELECT head, tail FROM meta WHERE id = 0", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .sql()?;
+            let held = if truncated {
+                None
+            } else {
+                folded.anchors(file, &stored, from, at)?
+            };
+            let Some((head, tail)) = held else {
+                drop(transaction);
+                return self.check(file);
+            };
             transaction
                 .execute(
                     "UPDATE meta SET indexed_to = ?1, head = ?2, tail = ?3 WHERE id = 0",
@@ -704,6 +800,61 @@ mod tests {
         drop(sidecar);
         remove(&path, ".test-v1").unwrap();
         assert!(!sidecar_path(&path, ".test-v1").exists());
+    }
+
+    /// A store rewritten in place while a fold reads it, as a copy over it
+    /// does, is indexed again rather than left described by the rows of the
+    /// file it replaced: from byte 0 or after an indexed prefix, and whether
+    /// the new file is longer or shorter than what the fold read.
+    #[test]
+    fn a_store_rewritten_during_a_fold_is_indexed_again() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("store.jsonl");
+        for indexed in [&b""[..], b"a\n"] {
+            for replacement in [&b"x\nyy\nzzz\nwwww\n"[..], b"x\n"] {
+                remove(&path, ".test-v1").unwrap();
+                std::fs::write(&path, indexed).unwrap();
+                let mut sidecar = Sidecar::open(&path, ".test-v1", "test-v1", SCHEMA).unwrap();
+                assert_eq!(
+                    fold_all(&mut sidecar, &path).indexed_to,
+                    indexed.len() as u64
+                );
+                std::fs::write(&path, [indexed, b"bb\ncc\n"].concat()).unwrap();
+                let mut file = File::open(&path).unwrap();
+                let position = sidecar.check(&mut file).unwrap();
+                let mut rewritten = false;
+                let after = sidecar
+                    .fold(
+                        &mut file,
+                        &position,
+                        u64::MAX,
+                        Instant::now() + std::time::Duration::from_secs(5),
+                        64,
+                        "oversized",
+                        &mut |tx: &Transaction<'_>, _: &[u8], start: u64, end: u64| {
+                            if !std::mem::replace(&mut rewritten, true) {
+                                std::fs::write(&path, replacement).unwrap();
+                            }
+                            tx.execute(
+                                "INSERT INTO lines VALUES (?1, ?2)",
+                                params![start as i64, end as i64],
+                            )
+                            .sql()?;
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+                assert!(rewritten);
+                assert_ne!(after.epoch, position.epoch, "{indexed:?} {replacement:?}");
+                assert_eq!((after.indexed_to, count(&sidecar)), (0, 0));
+                let rebuilt = fold_all(&mut sidecar, &path);
+                assert_eq!(rebuilt.indexed_to, replacement.len() as u64);
+                assert_eq!(
+                    count(&sidecar) as usize,
+                    replacement.iter().filter(|byte| **byte == b'\n').count()
+                );
+            }
+        }
     }
 
     #[cfg(unix)]

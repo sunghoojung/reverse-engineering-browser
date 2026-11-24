@@ -2111,7 +2111,9 @@ mod tests {
     fn run_untimed(source: &str, extra: Value) -> Value {
         let (request, mut limits) = request(extra);
         limits.deadline_ms = 3_600_000;
-        execute(&request, limits, &module(source), Instant::now()).unwrap()
+        execute(&request, limits, &module(source), Instant::now())
+            .unwrap()
+            .0
     }
     fn fixture(name: &str) -> String {
         std::fs::read_to_string(

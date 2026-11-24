@@ -257,11 +257,38 @@ while the summary steps aside for the graph. With **Linear** shown (pressed at
 narrow, where it starts hidden), no control may meet the graph and linear
 divider while the linear view sweeps one row height of scroll offsets, so a
 row's sliver cannot pass under it at whatever offset the display height leaves.
-Space on the footer's **Key** opens the whole edge key and Escape returns a
-visible focus ring to Key. A native pointer drag then takes the divider to the
+The module's functions are single blocks, so the footer must offer no **Key**
+and name no edge kind. A native pointer drag then takes the divider to the
 graph's minimum, where the Functions menu must open whole, and to the linear
 view's minimum, repeating the sweep at each, and Home on the divider forgets
 the drag.
+
+`test25bBlockGraphShapes` opens the measured
+[block graph shapes](../fixtures/wasm-block-graph/README.md) in Graph, cold at
+both sizes and at 1440 by 900: a 1,000-case switch ladder (341), a 256-arm
+interpreter loop (342), two nests of eight loops (343), the exception fixture (344)
+and a 19,459-block interpreter loop (345). Each must draw without an error state
+and without layout defects or clipped text, the exception function's key must
+name exception and unresolved edges, and the interpreter loop's must name table
+edges. Where the footer folds the key behind **Key**, Space on Key opens it
+whole and Escape returns a visible focus ring to Key, with no control on the
+graph and linear divider (Linear is shown for that check and hidden again where
+the window starts without it). Each shape is photographed at its opening
+zoom and fitted whole with `0`, where the graph's canvas must hold only its
+background under the overview cue and the minimap. It prints a `RENDERED_UI_GRAPH` line per shape
+and size: the time from the native click on Graph to the frame after the first
+drawing, which spans decode, transfer, layout and draw, and, while Shift+Arrow
+pans once a frame at each zoom (right, down, left and up in turn, so every
+frame draws a new view clear of a pan limit), the median, 95th percentile and
+slowest frame interval and the time each frame spends drawing the graph. Then
+Shift+Arrow pushes the fitted view far past the bottom right, where the canvas
+must still draw the graph, not only its background. A median interval
+fails over 50 ms, or over twice the slower median of the 25-block exceptions
+shape at that size where that is longer (a `RENDERED_UI_GRAPH_BOUND` line per
+size). A display without a GPU, as on a CI host, holds even that shape to
+30-50 ms a frame while its draw takes 1 ms, so the bound follows the machine.
+One long frame does not fail, because a hidden window or a sleeping display
+stops frames whatever the page does.
 
 `test35MissingFinalHeaders` opens a content-session request the HTTP cache
 answered, which has only a provisional request block that an older browser's

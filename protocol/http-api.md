@@ -1511,8 +1511,11 @@ back edges it is about the square of the node count: 1,000 nodes 0.6 s, 3,000
 nodes 6.6 s, 8,000 nodes 85 s. The UI sends a graph of up to 2,000 nodes and
 8,000 edges unasked and a larger one when the researcher asks.
 
-- A body is at most 64 MiB, twice the 32 MiB structure budget of a Wasm
-  function's block graph, the largest graph the UI sends. Malformed JSON, an
+- A body is at most 64 MiB, about 5 million nodes and edges at the 13 bytes
+  each a block graph takes. The largest block graph measured, a 7.4 MB
+  function near the engine's body limit, is 1.15 million (14.6 MiB). At
+  Triskel's measured growth a graph near the bound would run for years, so a
+  larger body is refused at once rather than started. Malformed JSON, an
   unknown member, a bad size or an index outside its graph returns 400 with an
   `error` and lays out nothing.
 - A client that closes the connection drops the request, which stops its

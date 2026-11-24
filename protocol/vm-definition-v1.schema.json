@@ -50,8 +50,7 @@
       "items": {
         "$ref": "#/$defs/opcode"
       },
-      "minItems": 1,
-      "maxItems": 256
+      "minItems": 1
     }
   },
   "$defs": {
@@ -607,8 +606,7 @@
           "items": {
             "$ref": "#/$defs/operand"
           },
-          "minItems": 0,
-          "maxItems": 8
+          "minItems": 0
         },
         "semantics": {
           "$ref": "#/$defs/semantics"

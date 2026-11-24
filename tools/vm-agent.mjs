@@ -78,7 +78,7 @@ export function capabilities() {
       runtime_state: 'unknown', live_capture_adapter: {available: false},
       architectures: ['stack', 'register'], opcode_bytes: [1, 2], operand_width_bytes: [1, 2, 4],
       operand_endianness: ['little', 'big'], pc_units: 'byte-offset',
-      limits: {bytecode_bytes: 65536, instructions: 4096, opcode_definitions: 256, operands_per_instruction: 8},
+      limits: {input_file_bytes: INPUT_LIMIT, output_bytes: OUTPUT_LIMIT, model: 'none: an image of any size decodes whole'},
       extension_boundary: 'reviewed declarative definitions using supported model operations; no executable plugin loader'},
     contextual: {commands: ['analyze-contextual', 'link-contextual'], definition_format: 'reb-vm-contextual-definition-v1',
       image_format: 'reb-vm-contextual-image-v1', evidence_format: 'reb-vm-contextual-evidence-v1',

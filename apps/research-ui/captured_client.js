@@ -177,10 +177,13 @@ function capturedClientConfig(config, request) {
   return {transport,timeoutMs,redirectPolicy,cookiePolicy,responseChecks:{statuses,contentType,jsonFields}};
 }
 
-// JSON.parse alone silently accepts duplicate keys. Scan bounded response JSON
-// first, then use its ordinary parser; this scanner never evaluates input.
-function capturedClientJSON(text, numberLexemes = null) {
-  if (typeof text !== 'string' || new TextEncoder().encode(text).length > 1048576) throw new SyntaxError('JSON exceeds 1 MiB.');
+// JSON.parse alone silently accepts duplicate keys. Scan the JSON first, then
+// use its ordinary parser; this scanner never evaluates input and its work is
+// linear in the text. Responses and configs keep the 1 MiB bound; a caller
+// that owns its own input, such as a static VM image, passes Infinity.
+function capturedClientJSON(text, numberLexemes = null, maxBytes = 1048576) {
+  if (typeof text !== 'string' || maxBytes !== Infinity && new TextEncoder().encode(text).length > maxBytes) throw new SyntaxError(`JSON exceeds ${maxBytes === 1048576 ? '1 MiB' : `${maxBytes} bytes`}.`);
+  const scalar = /true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/y;
   let index = 0;
   const fail = () => { throw new SyntaxError('Malformed, duplicate-key or excessively nested JSON.'); };
   const space = () => { while (/[\x20\t\r\n]/.test(text[index] ?? '\0')) index++; };
@@ -208,7 +211,7 @@ function capturedClientJSON(text, numberLexemes = null) {
         if (text[index++] !== ',') fail(); space();
       }
     }
-    const token = /^(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)/.exec(text.slice(index));
+    scalar.lastIndex = index; const token = scalar.exec(text);
     if (!token) fail(); if (numberLexemes && /^-?[0-9]/.test(token[0])) numberLexemes.set(path,token[0]); index += token[0].length;
   };
   value(0); space(); if (index !== text.length) fail(); return JSON.parse(text);

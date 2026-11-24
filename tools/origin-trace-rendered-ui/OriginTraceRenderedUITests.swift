@@ -274,7 +274,9 @@ final class Harness {
   }
 
   // Native pointer input: AppKit routes the event through WKWebView hit testing.
-  func click(_ selector: String, containing text: String? = nil) async throws {
+  // `holding` keeps the button down that long before the release, as a
+  // person's click does, while the app keeps running.
+  func click(_ selector: String, containing text: String? = nil, holding: Duration = .zero) async throws {
     try await activate()
     let point = try await reveal(selector, containing: text)
     try await activate()
@@ -282,6 +284,7 @@ final class Harness {
     let location = NSPoint(x: point.x, y: webView.isFlipped ? point.y : webView.bounds.height - point.y)
     let windowPoint = webView.convert(location, to: nil)
     for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+      if type == .leftMouseUp && holding > .zero { try await Task.sleep(for: holding) }
       guard let event = NSEvent.mouseEvent(
         with: type, location: windowPoint, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
         windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)
@@ -4921,6 +4924,57 @@ final class OriginTraceRenderedUITests: XCTestCase {
     let cliStopped = try await ui.value("webkit.messageHandlers.rebAgent.postMessage({op: 'status'}).then(status => status.engine.cliRunning)") as? Bool
     XCTAssertEqual(cliStopped, false, "turning off ends the CLI")
     try await ui.click("[data-auth=\"key\"]")
+    try await ui.click("#agent-close")
+  }
+
+  // A researcher copies a request while the agent's answer streams in: native
+  // hands the page an event about every 20 ms, some of them between the press
+  // and the click, and the copy still keeps the activation WebKit asks of a
+  // clipboard write. It runs after test0AgentPanel, on the document the app
+  // loaded, which alone reaches the agent bridge.
+  @MainActor
+  func test0bCopyWhileAgentStreams() async throws {
+    let expected = try Expectations.load()
+    let pasteboard = NSPasteboard.general
+    let saved = pasteboard.string(forType: .string)
+    defer { pasteboard.clearContents(); if let saved { pasteboard.setString(saved, forType: .string) } }
+    let ui = try await prepare(windowSizes[0])
+    let on = "['ready', 'running', 'stopped'].includes(document.getElementById('agent-dock').dataset.state)"
+    try await ui.click("#agent-toggle")
+    try await ui.waitUntil("__rebUiProbe.count('#agent-turn-on') === 1 && !document.getElementById('agent-turn-on').disabled", "the setup state did not show")
+    try await ui.click("#agent-turn-on")
+    try await ui.waitUntil("__rebUiProbe.count('#agent-consent-accept') === 1", "the consent step did not show")
+    try await ui.click("#agent-level-read-only")
+    try await ui.click("#agent-consent-accept")
+    try await ui.waitUntil("\(on) && __rebUiProbe.count('#agent-consent-accept') === 0", timeout: 20, "the agent did not turn on")
+    try await ui.click("#screen-traffic .request-row", containing: expected.requestBodyHost)
+    try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
+    // The stand-in provider streams this answer a word at a time until the app hangs up.
+    try await ui.click("#agent-input")
+    try await ui.type("Stream slowly")
+    try await ui.key(36, "\r")
+    let streamed = "(__rebUiProbe.text('#agent-log').match(/streamed-word-/g) ?? []).length"
+    try await ui.waitUntil("\(streamed) > 0", timeout: 20, "the answer did not start streaming")
+    for attempt in 1...5 {
+      try await ui.waitUntil("document.querySelector('#request-copy-url').textContent === 'Copy'", "Copy did not return to its label")
+      try await ui.click("#request-copy-url")
+      try await ui.waitUntil("document.querySelector('.traffic-row-menu') !== null", "the Copy menu did not open")
+      pasteboard.clearContents()
+      let before = try await ui.value(streamed) as? Int ?? 0
+      try await ui.click(".traffic-row-menu [role=menuitem]", containing: "Copy as cURL", holding: .milliseconds(150))
+      try await ui.waitUntil("document.querySelector('#request-copy-url').textContent !== 'Copy'", "Copy as cURL did not finish")
+      let after = try await ui.value(streamed) as? Int ?? 0
+      XCTAssertGreaterThan(after, before, "attempt \(attempt): the answer streamed through the click")
+      let copied = try await ui.json("({label: document.querySelector('#request-copy-url').textContent, notice: document.querySelector('#investigation-notice')?.textContent ?? ''})")
+      XCTAssertEqual(copied["label"] as? String, "Copied", "attempt \(attempt): \(copied)")
+      let curl = pasteboard.string(forType: .string) ?? ""
+      XCTAssertTrue(curl.hasPrefix("curl 'https://\(expected.requestBodyHost)/"), "attempt \(attempt): \(curl)")
+    }
+    let streaming = try await ui.value("document.getElementById('agent-send').getAttribute('aria-label') !== 'Send'") as? Bool
+    XCTAssertEqual(streaming, true, "the answer was still streaming after the last copy")
+    try await ui.screenshot("agent-copy-while-streaming")
+    try await agentTurnOff(ui)
+    try await ui.waitUntil("!\(on)", timeout: 15, "the agent did not turn off")
     try await ui.click("#agent-close")
   }
 

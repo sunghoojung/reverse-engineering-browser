@@ -109,7 +109,8 @@
       "flag": "--allow-content",
       "operations": [
         "run_wasm_function",
-        "get_wasm_runs"
+        "get_wasm_runs",
+        "get_wasm_run_memory"
       ],
       "keys": [
         "value",
@@ -119,7 +120,7 @@
         "match",
         "inputs_digest"
       ],
-      "description": "A second line behind content_reads, which lists both operations only with --allow-content. If either were ever returned to a client without content admission, every value under these keys would be replaced by {\"omitted\":\"content\"} with no length: results, stub values and import arguments (value), memory bytes (hex), memory read digests (sha256), per-entry expectation results (results_match, match) and the inputs digest. This alone does not protect values a run computed: its outcome, fuel, import call count, timing and repeated expectations disclose them too, which is why running captured code is Full access only."
+      "description": "A second line behind content_reads, which lists these operations only with --allow-content. If one were ever returned to a client without content admission, every value under these keys would be replaced by {\"omitted\":\"content\"} with no length: results, stub values and import arguments (value), memory bytes (hex), memory read and snapshot digests (sha256), per-entry expectation results (results_match, match) and the inputs digest. This alone does not protect values a run computed: its outcome, fuel, import call count, timing and repeated expectations disclose them too, which is why running captured code is Full access only."
     },
     "content_reads": {
       "flag": "--allow-content",
@@ -130,9 +131,10 @@
         "search_wasm_inspection",
         "run_wasm_function",
         "get_wasm_runs",
+        "get_wasm_run_memory",
         "export_requests_har"
       ],
-      "description": "Operations whose purpose is captured content (source, bytecode, disassembly and request and response bodies) are listed only with --allow-content. With it, get_source_format also lays out request and response bodies, and no result has content fields omitted below the inline limit. Larger documents still return a structural summary, so content is read in pages: get_artifact_text, get_source_format with start_line and line_count, inspect_wasm with row_offset or byte_offset and row_limit, and get_wasm_pseudocode with line_offset and line_limit. Binary responses are still refused. An analyst_action run_local_analyst_script that names a selected_artifact reads that stored artifact whole, so without --allow-content it is refused before any request."
+      "description": "Operations whose purpose is captured content (source, bytecode, disassembly and request and response bodies) are listed only with --allow-content. With it, get_source_format also lays out request and response bodies, and no result has content fields omitted below the inline limit. Larger documents still return a structural summary, so content is read in pages: get_artifact_text, get_source_format with start_line and line_count, inspect_wasm with row_offset or byte_offset and row_limit, get_wasm_pseudocode with line_offset and line_limit, and get_wasm_run_memory with start and length. Binary responses are still refused. An analyst_action run_local_analyst_script that names a selected_artifact reads that stored artifact whole, so without --allow-content it is refused before any request."
     },
     "session_start": {
       "tool": "start_live_session",
@@ -3320,7 +3322,7 @@
       "get": {
         "operationId": "get_artifacts",
         "summary": "List stored artifacts, optionally filtered and paged",
-        "description": "Lists retained script, Wasm and other artifact records with their sha256, size, frame and session. Without filters it returns the newest records. With any filter or cursor it scans the manifest from the cursor and adds a query object with next_before and next_after cursors. Filters combine with AND. Bytes come from get_artifact_content, which the MCP projection does not inline; inspect_wasm describes a Wasm module, and resolve_js_invocation_site names a function in a javascript artifact. request_body and response_body artifacts are sensitive and exist only when the session retains request content; a response_body record names the artifact for its response. Unknown parameters are rejected.",
+        "description": "Lists retained script, Wasm and other artifact records with their sha256, size, frame and session. Every read is one page of the manifest: without a cursor the newest matches, oldest first, with a query object whose next_before reads older records and next_after later ones. Without filters every record matches; filters combine with AND. Bytes come from get_artifact_content, which the MCP projection does not inline; inspect_wasm describes a Wasm module, and resolve_js_invocation_site names a function in a javascript artifact. request_body and response_body artifacts are sensitive and exist only when the session retains request content; a response_body record names the artifact for its response. Unknown parameters are rejected.",
         "tags": [
           "artifacts"
         ],
@@ -4686,7 +4688,7 @@
         "x-source": "apps/origin-trace-backend/src/app.rs",
         "requestBody": {
           "required": true,
-          "description": "JSON object. Explicit decimal Content-Length required; 1..1572864 encoded bytes. Chunked request bodies are not supported.",
+          "description": "JSON object of any size, parsed as it arrives. Explicit decimal Content-Length required. Chunked request bodies are not supported.",
           "content": {
             "application/json": {
               "schema": {
@@ -4695,7 +4697,7 @@
             }
           }
         },
-        "x-max-body-bytes": 1572864,
+        "x-max-body-bytes": 9007199254740991,
         "x-reb-execution": {
           "kind": "action-dependent",
           "effects": null,
@@ -4815,7 +4817,7 @@
             }
           }
         },
-        "x-max-body-bytes": 2162688,
+        "x-max-body-bytes": 9007199254740991,
         "x-reb-execution": {
           "kind": "operation",
           "effects": [
@@ -6027,7 +6029,7 @@
             "name": "limit",
             "in": "query",
             "required": false,
-            "description": "Runs to return, 1 to 64. Default 1: one record always fits the MCP inline limit, and several large records may come back as a structural summary.",
+            "description": "Runs to return, 1 to 64, default 1. Through reb-api mcp a listing larger than the inline limit is asked for again with half the limit; one record larger than it, such as one that echoes large memory writes, returns a structural summary. Memory a run read is read in pages with get_wasm_run_memory.",
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -6078,6 +6080,11 @@
             }
           }
         },
+        "x-reb-mcp-page": {
+          "parameters": [
+            "limit"
+          ]
+        },
         "x-source": "apps/origin-trace-backend/src/wasm_run.rs",
         "x-reb-execution-schema": {
           "$ref": "#/components/schemas/RebExecutionMetadata"
@@ -6106,7 +6113,7 @@
       "post": {
         "operationId": "run_wasm_function",
         "summary": "Run one function of a captured Wasm module offline",
-        "description": "Explicit, confirmed offline execution of one exported or indexed function of a hash-verified captured core Wasm module in wasmi 2.0.0, a pure-Rust interpreter with fuel metering and no JIT, inside the local backend. Every import is a stub: a function import returns the results the request supplies (results, or one sequence entry per call) and otherwise traps with outcome import_trap; imported memories and tables are fresh and empty, imported globals are zero. No filesystem, network, clock, randomness, browser or page is reachable, so supply every nondeterministic import. Data and element segments initialize as usual; the start function runs only with run_start. memory_writes apply after instantiation (and the start function) and before the call; memory_reads are taken after it, whatever the outcome. Every limit (fuel, memory_pages, table_elements, call_depth, deadline_ms) and every trap is a named outcome.status, with outcome.phase and outcome.trap_kind; wasmi does not report trap byte offsets. Every import call is recorded (first 256, with up to 16 arguments and 16 results each). The memory and table limits are totals across every memory and table of the run. expect compares results and reads exactly, with at most one expected entry per read. The result carries module_sha256, inputs_digest, the interpreter and the limits, and is stored as a derived experiment record, never captured evidence. Running captured code is a content read: through reb-api mcp this tool is listed only at Full access (--allow-content, with --allow-effects), because the outcome, fuel, import calls, timing and repeated expectations of a run can each disclose values the code computed. Requires confirm_offline_execution true; nothing runs without it.",
+        "description": "Explicit, confirmed offline execution of one exported or indexed function of a hash-verified captured core Wasm module in wasmi 2.0.0, a pure-Rust interpreter with fuel metering and no JIT, inside the local backend. Every import is a stub: a function import returns the results the request supplies (results, or one sequence entry per call) and otherwise traps with outcome import_trap; imported memories and tables are fresh and empty, imported globals are zero. No filesystem, network, clock, randomness, browser or page is reachable, so supply every nondeterministic import. Data and element segments initialize as usual; the start function runs only with run_start. memory_writes apply after instantiation (and the start function) and before the call; memory_reads are taken after it, whatever the outcome. Every limit (fuel, memory_pages, table_elements, call_depth, deadline_ms) and every trap is a named outcome.status, with outcome.phase and outcome.trap_kind; wasmi does not report trap byte offsets. Every import call is recorded with every argument and result; the first 256 are kept and import_calls_total counts them all. memory_writes and memory_reads take any number of regions of any size within memory 0; the bytes the reads cover are stored once beside the record and read in pages with get_wasm_run_memory. The memory and table limits are totals across every memory and table of the run. expect compares results and reads exactly, with at most one expected entry per read. The result carries module_sha256, inputs_digest, the interpreter and the limits, and is stored as a derived experiment record, never captured evidence. Running captured code is a content read: through reb-api mcp this tool is listed only at Full access (--allow-content, with --allow-effects), because the outcome, fuel, import calls, timing and repeated expectations of a run can each disclose values the code computed. Requires confirm_offline_execution true; nothing runs without it.",
         "tags": [
           "artifacts"
         ],
@@ -6114,7 +6121,7 @@
         "x-reb-execution-schema": {
           "$ref": "#/components/schemas/RebExecutionMetadata"
         },
-        "x-max-body-bytes": 1048576,
+        "x-max-body-bytes": 9007199254740991,
         "requestBody": {
           "required": true,
           "content": {
@@ -6177,7 +6184,7 @@
             }
           },
           "409": {
-            "description": "The artifact's SHA-256 differs from the request, or another run is in progress.",
+            "description": "The artifact's SHA-256 differs from the request.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6243,11 +6250,146 @@
               "when": {}
             }
           ],
-          "notes": "Runs captured code only on this explicit request, offline, in a pure interpreter with every import stubbed and fuel, memory, table, call depth and deadline limits. Never automatic and never started by analysis. One run at a time per backend. Writes one derived record to artifacts/analysis/wasm-runs-v1.json, evicting the oldest past 64. No automatic retry.",
+          "notes": "Runs captured code only on this explicit request, offline, in a pure interpreter with every import stubbed and fuel, memory, table, call depth and deadline limits. Never automatic and never started by analysis. One run at a time per backend; a later request waits its turn. The request is parsed as it arrives, at any size. Writes one derived record to artifacts/analysis/wasm-runs-v1.json, and the bytes its reads cover to artifacts/analysis/wasm-run-memory/<run_id>.bin, evicting the oldest run and its bytes past 64. No automatic retry.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/wasm_run.rs",
               "symbol": "Runs::run"
+            }
+          ]
+        }
+      }
+    },
+    "/api/wasm/runs/memory": {
+      "get": {
+        "operationId": "get_wasm_run_memory",
+        "summary": "Read the bytes of one memory read of a stored Wasm run, in pages",
+        "description": "Returns length bytes from start within one memory read of a stored run, as hex, with the read's SHA-256 and next_start to continue. A read of any size is read whole this way. Reads the run store and the run's stored memory only: nothing executes. A page is not checked against the SHA-256, which covers the whole read; check it once every page has arrived. Memory a run computed is content, so through reb-api mcp this read is listed only at Full access (--allow-content).",
+        "tags": [
+          "artifacts"
+        ],
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "query",
+            "required": true,
+            "description": "A stored run's run_id.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9-]{1,128}$"
+            }
+          },
+          {
+            "name": "read",
+            "in": "query",
+            "required": true,
+            "description": "Index into the run's memory_reads.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "start",
+            "in": "query",
+            "required": false,
+            "description": "First byte within the read. A start equal to the read's length returns an empty page.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "length",
+            "in": "query",
+            "required": false,
+            "description": "Bytes to return; a page ends early at the end of the read.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 32768
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of the read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WasmRunMemory"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown or missing parameter, an invalid run_id, a zero length, or a start past the end of the read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Local origin rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No stored run has this run_id, the run made no read with this index, or the read was out of bounds and holds no bytes (code target_unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The run store, or the run's stored memory, is unreadable or differs from its record (code artifact_integrity).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-reb-mcp-page": {
+          "parameters": [
+            "length"
+          ]
+        },
+        "x-source": "apps/origin-trace-backend/src/wasm_run.rs",
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads artifacts/analysis/wasm-runs-v1.json and artifacts/analysis/wasm-run-memory/<run_id>.bin. Never executes a module.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/wasm_run.rs",
+              "symbol": "memory"
             }
           ]
         }
@@ -7967,13 +8109,13 @@
       "post": {
         "operationId": "validate_evidence_package",
         "summary": "Validate an inert supplied evidence package",
-        "description": "Checks a caller-supplied metadata package without resolving references or treating it as backend evidence. Any JSON object is accepted for bounded validation; the expected valid document is EvidencePackage. Structurally parseable package failures return HTTP 200 with status invalid or unsupported. Duplicate object members return invalid/duplicate_json_key before materialization. Malformed JSON or a nonobject outer body returns HTTP 400. Unknown member names and raw input are never echoed. There is no export, import, installation, package persistence, source access, or authenticity claim.",
+        "description": "Checks a caller-supplied metadata package of any size without resolving references or treating it as backend evidence. Any JSON object is accepted for validation; the expected valid document is EvidencePackage. Structurally parseable package failures return HTTP 200 with status invalid or unsupported. Duplicate object members return invalid/duplicate_json_key before materialization. Malformed JSON or a nonobject outer body returns HTTP 400. Unknown member names and raw input are never echoed. There is no export, import, installation, package persistence, source access, or authenticity claim.",
         "tags": [
           "evidence"
         ],
         "requestBody": {
           "required": true,
-          "description": "The package document itself, never a path or URL. One decimal Content-Length is required; 1..4194304 bytes. No Transfer-Encoding. The runtime accepts JSON objects outside the expected schema in order to report invalid or unsupported packages.",
+          "description": "The package document itself, of any size, never a path or URL. One decimal Content-Length is required. No Transfer-Encoding. The runtime accepts JSON objects outside the expected schema in order to report invalid or unsupported packages.",
           "content": {
             "application/json": {
               "schema": {
@@ -7984,7 +8126,7 @@
         },
         "responses": {
           "200": {
-            "description": "Bounded validity result. Inspect status and checks; HTTP success does not imply package validity. Parsed shape/node/depth/count limits or the cooperative CPU budget can produce invalid/resource_limit.",
+            "description": "Validity result. Inspect status and checks; HTTP success does not imply package validity. Nesting deeper than 32 levels produces invalid/resource_limit; a package of any size, string length or record count is read whole. The issues list names the first 64 reasons, and issues_truncated says more were found.",
             "content": {
               "application/json": {
                 "schema": {
@@ -8008,7 +8150,7 @@
             }
           },
           "400": {
-            "description": "Invalid request framing, malformed JSON, nonobject body, or transport body-size limit exceeded.",
+            "description": "Invalid request framing, malformed JSON or a nonobject body.",
             "content": {
               "application/json": {
                 "schema": {
@@ -8114,7 +8256,7 @@
             }
           },
           "503": {
-            "description": "Bounded validation admission infrastructure is unavailable.",
+            "description": "Validation admission infrastructure is unavailable.",
             "content": {
               "application/json": {
                 "schema": {
@@ -8139,7 +8281,7 @@
           }
         },
         "x-source": "apps/origin-trace-backend/src/evidence_package.rs",
-        "x-max-body-bytes": 4194304,
+        "x-max-body-bytes": 9007199254740991,
         "x-reb-execution": {
           "kind": "operation",
           "effects": [
@@ -8158,7 +8300,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Inert bounded analysis of supplied untrusted metadata only. Does not read configured stores or blobs, resolve references or URLs, fetch schemas, write evidence or files, access external networks, control a browser, or launch helpers. A matching digest is content integrity, not provenance or authenticity.",
+          "notes": "Inert analysis of supplied untrusted metadata only. Does not read configured stores or blobs, resolve references or URLs, fetch schemas, write evidence or files, access external networks, control a browser, or launch helpers. A matching digest is content integrity, not provenance or authenticity.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/evidence_package.rs",
@@ -8175,7 +8317,7 @@
       "post": {
         "operationId": "export_evidence_package",
         "summary": "Export selected metadata from cooperatively stopped evidence stores",
-        "description": "Reads only explicitly selected configured source sections, under shared nonblocking lifetime guards. Updated broker and artifact receiver writers must have exited. A missing legacy guard is unsupported; socket absence or a stop request is not a snapshot. Full bounded source scans establish exact selections, reference coverage and duplicates; full selected artifact byte hashes are verified. The response omits raw payloads, URLs, paths, headers, bodies and artifact bytes. Advisory leases do not protect against malicious same-user or privileged writers. No source execution, capture control, persistence, network access or retries.",
+        "description": "Reads only explicitly selected configured source sections, under shared nonblocking lifetime guards. Updated broker and artifact receiver writers must have exited. A missing legacy guard is unsupported; socket absence or a stop request is not a snapshot. Full source scans to EOF, of stores of any length, establish exact selections, reference coverage and duplicates; full selected artifact byte hashes are verified. A selection names any number of events and artifacts. The response omits raw payloads, URLs, paths, headers, bodies and artifact bytes. Advisory leases do not protect against malicious same-user or privileged writers. No source execution, capture control, persistence, network access or retries.",
         "tags": [
           "evidence"
         ],
@@ -8394,7 +8536,7 @@
             }
           },
           "413": {
-            "description": "A source, row, record, retained-memory, blob, reference, gap or package resource limit was exceeded.",
+            "description": "A retained source row nests deeper than the 32 levels the package reader parses.",
             "content": {
               "application/json": {
                 "schema": {
@@ -8443,7 +8585,7 @@
           }
         },
         "x-source": "apps/origin-trace-backend/src/evidence_package.rs",
-        "x-max-body-bytes": 262144,
+        "x-max-body-bytes": 9007199254740991,
         "x-reb-execution": {
           "kind": "operation",
           "effects": [
@@ -8466,7 +8608,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Read-only selected-source scan, full selected-blob SHA-256 verification and closed metadata projection under bounded shared advisory leases. Empty selection performs no source read. No target/capture mutation, data write, helper/process launch, outbound network or automatic retry. Guard metadata proves cooperative consistency only; historical builds, capture configuration, origin scope and authorization remain unknown or not attested.",
+          "notes": "Read-only selected-source scan, full selected-blob SHA-256 verification and closed metadata projection under shared advisory leases. Every identity a scan sees is checked for duplicates in a private temporary database that is deleted when the export ends. Empty selection performs no source read. No target/capture mutation, data write, helper/process launch, outbound network or automatic retry. Guard metadata proves cooperative consistency only; historical builds, capture configuration, origin scope and authorization remain unknown or not attested.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/evidence_package.rs",
@@ -9361,12 +9503,12 @@
       "post": {
         "operationId": "compare_float32",
         "summary": "Inspect or compare explicit binary32 buffers",
-        "description": "Version 1 read-only diagnostics. Inputs are exact hex word arrays, canonical base64 bytes, or ID-selected complete verified artifacts. Layout is explicitly interleaved float32-le or float32-be. Omitted/null reference inspects one input. Caller tolerances use absolute OR symmetric relative OR finite representable-step distance; they never establish behavioral equivalence. Full metrics cover all supplied samples; detail is a bounded window. NaN representations remain raw bits, signed zeros are numerically equal, and nonfinite values are excluded from deltas/ULP/tolerances. No native capture, browser/CPU attribution, arbitrary paths/URLs, network, helper, or persistence.",
+        "description": "Read-only diagnostics over complete buffers of any size; requests are version 1 and results version 2. Inputs are exact hex word arrays, canonical base64 bytes, or ID-selected complete verified artifacts. Layout is explicitly interleaved float32-le or float32-be. Omitted/null reference inspects one input. Caller tolerances use absolute OR symmetric relative OR finite representable-step distance; they never establish behavioral equivalence. Full metrics cover all supplied samples; detail is a page of the caller's chosen size. NaN representations remain raw bits, signed zeros are numerically equal, and nonfinite values are excluded from deltas/ULP/tolerances. No native capture, browser/CPU attribution, arbitrary paths/URLs, network, helper, or persistence.",
         "tags": [
           "float32"
         ],
         "x-source": "apps/origin-trace-backend/src/float32.rs",
-        "x-max-body-bytes": 2097152,
+        "x-max-body-bytes": 9007199254740991,
         "requestBody": {
           "required": true,
           "content": {
@@ -9379,7 +9521,7 @@
         },
         "responses": {
           "200": {
-            "description": "Complete bounded binary32 diagnostics. Inspect comparison status; empty or mismatched layouts do not yield full equality. Null finite metrics are unavailable, never nonfinite-to-JSON coercions.",
+            "description": "Complete binary32 diagnostics over every supplied sample. Inspect comparison status; empty or mismatched layouts do not yield full equality. Null finite metrics are unavailable, never nonfinite-to-JSON coercions.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9437,7 +9579,7 @@
             }
           },
           "408": {
-            "description": "The request-body, bounded I/O-admission or cooperative complete-manifest scan deadline expired.",
+            "description": "The request-body or artifact manifest lookup deadline expired.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9485,7 +9627,7 @@
             }
           },
           "503": {
-            "description": "The existing bounded diagnostic I/O admission pool is unavailable.",
+            "description": "The diagnostic I/O pool is unavailable.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9528,8 +9670,8 @@
               }
             }
           },
-          "413": {
-            "description": "Input or manifest resource limit exceeded; no partial equality result.",
+          "422": {
+            "description": "Complete artifact integrity check failed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9538,8 +9680,8 @@
               }
             }
           },
-          "422": {
-            "description": "Complete artifact integrity check failed.",
+          "499": {
+            "description": "The request went away and the comparison stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9592,13 +9734,13 @@
       "post": {
         "operationId": "compare_evidence_packages",
         "summary": "Compare two supplied evidence metadata packages",
-        "description": "Read-only bounded comparison after strict validation of both original package byte tokens. Rejects malformed, duplicate, unsupported, contradictory or oversized input; unsupported observer/profile data cannot be coerced into comparable evidence. Explicit facets and normalization are part of deterministic identity. Exact declared session/process keys may align metadata; coincident IDs across sessions remain unmatched or ambiguous. No raw artifact-byte verification, capture-completeness, behavioral, causal or timing-equivalence claim. Results page deterministic rows and preserve unknown capture settings. No evidence store reads, helpers, browser actions, persistence, automatic export or network access. A shared package permit is reserved with nonblocking admission before comparison-body ingestion and transferred through blocking work, limiting simultaneously retained comparison bodies/work to two. Busy requests receive 503/resource_limit before their bodies are read.",
+        "description": "Read-only comparison after strict validation of both original package byte tokens, of any size. Rejects malformed, duplicate, unsupported or contradictory input; unsupported observer/profile data cannot be coerced into comparable evidence. Explicit facets and normalization are part of deterministic identity. Exact declared session/process keys may align metadata; coincident IDs across sessions remain unmatched or ambiguous. No raw artifact-byte verification, capture-completeness, behavioral, causal or timing-equivalence claim. Results page deterministic rows by offset and preserve unknown capture settings. No evidence store reads, helpers, browser actions, persistence, automatic export or network access. A shared package permit is acquired before the comparison body is read and transferred through blocking work, so at most two comparison bodies are held at a time; a later request waits for one, with no admission deadline.",
         "tags": [
           "evidence"
         ],
         "requestBody": {
           "required": true,
-          "description": "One Content-Length, no Transfer-Encoding, at most 8392704 request bytes; each original nested package token at most 4194304 bytes. Required explicit profile and 1..7 unique facets; offset 0..2181 and limit 1..100.",
+          "description": "One Content-Length, no Transfer-Encoding; the request and each original nested package token are of any size. Required explicit profile and 1..7 unique facets; offset any nonnegative integer and limit 1..100.",
           "content": {
             "application/json": {
               "schema": {
@@ -9609,7 +9751,7 @@
         },
         "responses": {
           "200": {
-            "description": "At most 524288 bytes; full bounded summary plus one deterministic page, at most 100 rows. Unknown observer regimes and missing records never establish unchanged capture or behavior.",
+            "description": "Full summary plus one deterministic page of at most 100 rows. Unknown observer regimes and missing records never establish unchanged capture or behavior.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9633,7 +9775,7 @@
             }
           },
           "400": {
-            "description": "Invalid framing or comparison options, rejected original package (including duplicate keys, digest/reference/profile errors), or resource limits. No input or unrecognized fields are echoed.",
+            "description": "Invalid framing or comparison options, a rejected original package (including duplicate keys, digest/reference/profile errors), or nesting deeper than the package reader parses. No input or unrecognized fields are echoed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9739,7 +9881,7 @@
             }
           },
           "503": {
-            "description": "Comparison capacity is full (resource_limit) before request body ingestion, or package admission infrastructure is closed (dependency_unavailable). At most two package operations may reserve comparison bodies/work; rejection does not read/retain the large body and is not an automatic retry instruction. An HTTP client still uploading after early rejection may instead observe a transport error.",
+            "description": "Package admission infrastructure is closed (dependency_unavailable). A request that finds both package permits in use waits for one instead.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9764,7 +9906,7 @@
           }
         },
         "x-source": "apps/origin-trace-backend/src/evidence_comparison.rs",
-        "x-max-body-bytes": 8392704,
+        "x-max-body-bytes": 9007199254740991,
         "x-reb-execution": {
           "kind": "operation",
           "effects": [
@@ -9783,7 +9925,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Inert bounded local analysis of two supplied untrusted metadata packages only. Reads no configured stores or artifact bytes, writes no files, controls no browser, starts no helper and accesses no external network. Identical profile labels do not establish equivalent observer regimes; matching declared hashes do not reverify absent artifact bytes.",
+          "notes": "Inert local analysis of two supplied untrusted metadata packages only. Reads no configured stores or artifact bytes, writes no files, controls no browser, starts no helper and accesses no external network. Identical profile labels do not establish equivalent observer regimes; matching declared hashes do not reverify absent artifact bytes.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/evidence_comparison.rs",
@@ -10803,7 +10945,7 @@
             }
           },
           "503": {
-            "description": "Bounded pack-analysis capacity unavailable; retry explicitly.",
+            "description": "Pack-analysis admission infrastructure is closed. A request that finds both package permits in use waits for one instead.",
             "content": {
               "application/json": {
                 "schema": {
@@ -10945,7 +11087,7 @@
             }
           },
           "503": {
-            "description": "Bounded pack-analysis capacity unavailable; retry explicitly.",
+            "description": "Pack-analysis admission infrastructure is closed. A request that finds both package permits in use waits for one instead.",
             "content": {
               "application/json": {
                 "schema": {
@@ -14220,23 +14362,20 @@
               },
               "site_count": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 1000000
+                "minimum": 0
               },
               "br_table_count": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 1000000
+                "minimum": 0
               },
               "call_indirect_count": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 1000000
+                "minimum": 0
               },
               "omitted_site_count": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 1000000
+                "description": "Always 0 since VM detector 1.13.0, which lists every decoded site. Earlier producers listed the 256 best ranked and counted the rest here."
               },
               "selected_byte_offset": {
                 "type": [
@@ -14247,7 +14386,6 @@
               },
               "candidates": {
                 "type": "array",
-                "maxItems": 256,
                 "items": {
                   "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/dispatchSite"
                 }
@@ -16634,8 +16772,7 @@
               "omitted_site_count": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 4294967295,
-                "description": "Classified sites not listed: site_count minus the listed sites."
+                "description": "Always 0 since VM detector 1.13.0, which lists every classified site. Earlier producers listed the 256 strongest and counted the rest here."
               },
               "role_counts": {
                 "type": "object",
@@ -16700,7 +16837,6 @@
               },
               "sites": {
                 "type": "array",
-                "maxItems": 256,
                 "items": {
                   "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/dispatchClassificationSite"
                 }
@@ -18474,7 +18610,6 @@
               },
               "refused": {
                 "type": "array",
-                "maxItems": 64,
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -18737,23 +18872,20 @@
               },
               "site_count": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 1000000
+                "minimum": 0
               },
               "br_table_count": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 1000000
+                "minimum": 0
               },
               "call_indirect_count": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 1000000
+                "minimum": 0
               },
               "omitted_site_count": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 1000000
+                "description": "Always 0 since VM detector 1.13.0, which lists every decoded site. Earlier producers listed the 256 best ranked and counted the rest here."
               },
               "selected_byte_offset": {
                 "type": [
@@ -18764,7 +18896,6 @@
               },
               "candidates": {
                 "type": "array",
-                "maxItems": 256,
                 "items": {
                   "$ref": "#/components/schemas/VmAnalysis/$defs/dispatchSite"
                 }
@@ -19917,8 +20048,7 @@
               "omitted_site_count": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 4294967295,
-                "description": "Classified sites not listed: site_count minus the listed sites."
+                "description": "Always 0 since VM detector 1.13.0, which lists every classified site. Earlier producers listed the 256 strongest and counted the rest here."
               },
               "role_counts": {
                 "type": "object",
@@ -19983,7 +20113,6 @@
               },
               "sites": {
                 "type": "array",
-                "maxItems": 256,
                 "items": {
                   "$ref": "#/components/schemas/VmAnalysis/$defs/dispatchClassificationSite"
                 }
@@ -22356,7 +22485,8 @@
           "count",
           "artifacts",
           "artifact_receiver_configured",
-          "artifact_receiver_connected"
+          "artifact_receiver_connected",
+          "query"
         ]
       },
       "Deobfuscation": {
@@ -22421,9 +22551,10 @@
       },
       "DecoderState": {
         "type": "object",
+        "description": "Version 2 dropped the version 1 limits object: inputs, outputs, chains, tokens, secrets and JSON nesting have no fixed size, and a decode runs until it finishes or its request goes away.",
         "properties": {
           "protocol_version": {
-            "const": 1,
+            "const": 2,
             "type": "integer"
           },
           "available": {
@@ -22432,17 +22563,27 @@
           "busy": {
             "type": "boolean"
           },
-          "limits": {
-            "type": "object",
-            "additionalProperties": true
+          "operations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "jwt_algorithms": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         },
         "required": [
           "protocol_version",
           "available",
           "busy",
-          "limits"
-        ]
+          "operations",
+          "jwt_algorithms"
+        ],
+        "additionalProperties": false
       },
       "DecoderAction": {
         "oneOf": [
@@ -22494,7 +22635,7 @@
               "input_base64": {
                 "type": "string",
                 "contentEncoding": "base64",
-                "description": "Canonical Base64, decoded input <= 1048576 bytes."
+                "description": "Canonical Base64 of the input bytes, of any length."
               }
             },
             "required": [
@@ -22527,7 +22668,7 @@
                 }
               ],
               "confirmations": [],
-              "notes": "Runs the bounded native decoder/JWT helper on caller-supplied input; JWT application failure can still be HTTP 200.",
+              "notes": "Runs the native decoder/JWT helper on caller-supplied input until it finishes or the request goes away; JWT application failure can still be HTTP 200.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/decoder.rs",
@@ -22548,8 +22689,7 @@
                 "type": "integer"
               },
               "token": {
-                "type": "string",
-                "x-max-utf8-bytes": 65536
+                "type": "string"
               }
             },
             "required": [
@@ -22580,7 +22720,7 @@
                 }
               ],
               "confirmations": [],
-              "notes": "Runs the bounded native decoder/JWT helper on caller-supplied input; JWT application failure can still be HTTP 200.",
+              "notes": "Runs the native decoder/JWT helper on caller-supplied input until it finishes or the request goes away; JWT application failure can still be HTTP 200.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/decoder.rs",
@@ -22601,12 +22741,10 @@
                 "type": "integer"
               },
               "token": {
-                "type": "string",
-                "x-max-utf8-bytes": 65536
+                "type": "string"
               },
               "secret": {
-                "type": "string",
-                "x-max-utf8-bytes": 4096
+                "type": "string"
               }
             },
             "required": [
@@ -22638,7 +22776,7 @@
                 }
               ],
               "confirmations": [],
-              "notes": "Runs the bounded native decoder/JWT helper on caller-supplied input; JWT application failure can still be HTTP 200.",
+              "notes": "Runs the native decoder/JWT helper on caller-supplied input until it finishes or the request goes away; JWT application failure can still be HTTP 200.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/decoder.rs",
@@ -22659,8 +22797,7 @@
                 "type": "integer"
               },
               "payload_json": {
-                "type": "string",
-                "x-max-utf8-bytes": 57344
+                "type": "string"
               },
               "algorithm": {
                 "type": "string",
@@ -22672,8 +22809,7 @@
                 ]
               },
               "secret": {
-                "type": "string",
-                "x-max-utf8-bytes": 4096
+                "type": "string"
               },
               "expires_in_seconds": {
                 "anyOf": [
@@ -22740,7 +22876,7 @@
                   }
                 }
               ],
-              "notes": "Runs the bounded native decoder/JWT helper on caller-supplied input; JWT application failure can still be HTTP 200.",
+              "notes": "Runs the native decoder/JWT helper on caller-supplied input until it finishes or the request goes away; JWT application failure can still be HTTP 200.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/decoder.rs",
@@ -22827,7 +22963,10 @@
                 "type": "string"
               },
               "error": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "duration_us": {
                 "type": "integer"
@@ -22897,7 +23036,10 @@
                 "type": "integer"
               },
               "error": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "duration_us": {
                 "type": "integer"
@@ -23111,8 +23253,7 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/NameValue"
-            },
-            "maxItems": 32
+            }
           }
         },
         "required": [
@@ -23137,8 +23278,7 @@
             "x-max-utf8-bytes": 128
           },
           "url": {
-            "type": "string",
-            "x-max-utf8-bytes": 8192
+            "type": "string"
           },
           "method": {
             "type": "string",
@@ -23148,12 +23288,10 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/NameValue"
-            },
-            "maxItems": 64
+            }
           },
           "body": {
-            "type": "string",
-            "x-max-utf8-bytes": 65536
+            "type": "string"
           },
           "timeout_ms": {
             "type": "integer",
@@ -23164,8 +23302,7 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/NameValue"
-            },
-            "maxItems": 32
+            }
           }
         },
         "required": [
@@ -23195,8 +23332,7 @@
             "x-max-utf8-bytes": 128
           },
           "url": {
-            "type": "string",
-            "x-max-utf8-bytes": 8192
+            "type": "string"
           },
           "method": {
             "type": "string",
@@ -23206,12 +23342,10 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/NameValue"
-            },
-            "maxItems": 64
+            }
           },
           "body": {
-            "type": "string",
-            "x-max-utf8-bytes": 65536
+            "type": "string"
           },
           "timeout_ms": {
             "type": "integer",
@@ -23222,8 +23356,7 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/NameValue"
-            },
-            "maxItems": 32
+            }
           },
           "created_at_ms": {
             "$ref": "#/components/schemas/SafeInteger"
@@ -23269,15 +23402,13 @@
             "items": {
               "$ref": "#/components/schemas/CollectionFolder"
             },
-            "minItems": 1,
-            "maxItems": 32
+            "minItems": 1
           },
           "requests": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/CollectionRequest"
-            },
-            "maxItems": 128
+            }
           },
           "limits": {
             "type": "object",
@@ -23309,15 +23440,13 @@
             "items": {
               "$ref": "#/components/schemas/CollectionFolder"
             },
-            "minItems": 1,
-            "maxItems": 32
+            "minItems": 1
           },
           "requests": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/CollectionRequestInput"
-            },
-            "maxItems": 128
+            }
           }
         },
         "required": [
@@ -23327,7 +23456,7 @@
           "requests"
         ],
         "additionalProperties": false,
-        "description": "Full replacement, not patch. IDs are positive; root folder id=1/name=API Collection/parent_id=null must remain. Parent references, uniqueness, depth <=4, header restrictions and cumulative UTF-8 budgets are enforced by src/workspace.rs. Stale expected_generation returns 409. This stores templates; it does not execute requests.",
+        "description": "Full replacement, not patch. IDs are positive; root folder id=1/name=API Collection/parent_id=null must remain. Parent references, cycles, uniqueness, name lengths and header restrictions are enforced by src/workspace.rs; counts, folder depth and text sizes have no limit, and the body is parsed as it arrives. Stale expected_generation returns 409. This stores templates; it does not execute requests.",
         "x-reb-execution": {
           "kind": "action",
           "effects": [
@@ -28501,7 +28630,6 @@
           },
           "imports": {
             "type": "array",
-            "maxItems": 256,
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -28527,7 +28655,6 @@
                 "sequence": {
                   "type": "array",
                   "minItems": 1,
-                  "maxItems": 256,
                   "items": {
                     "type": "array",
                     "maxItems": 1000,
@@ -28541,8 +28668,7 @@
           },
           "memory_writes": {
             "type": "array",
-            "maxItems": 16,
-            "description": "Bytes written to memory 0 before the call, 256 KiB in total.",
+            "description": "Bytes written to memory 0 before the call, in order, each within memory 0.",
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -28564,8 +28690,7 @@
           },
           "memory_reads": {
             "type": "array",
-            "maxItems": 16,
-            "description": "Regions of memory 0 read after the call, 32 KiB in total, so the hex and the rest of the record fit the MCP inline limit.",
+            "description": "Regions of memory 0 read after the call, any number and of any length. The record gives each read's SHA-256; get_wasm_run_memory returns its bytes in pages.",
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -28580,8 +28705,7 @@
                 },
                 "length": {
                   "type": "integer",
-                  "minimum": 1,
-                  "maximum": 32768
+                  "minimum": 1
                 }
               }
             }
@@ -28641,7 +28765,6 @@
               },
               "memory": {
                 "type": "array",
-                "maxItems": 16,
                 "description": "At most one entry per memory_reads index.",
                 "items": {
                   "type": "object",
@@ -28920,14 +29043,14 @@
           },
           "memory_reads": {
             "type": "array",
+            "description": "Each requested read: its status and the SHA-256 of the bytes read. get_wasm_run_memory returns the bytes in pages.",
             "items": {
               "type": "object",
               "required": [
                 "offset",
                 "length",
                 "status",
-                "sha256",
-                "hex"
+                "sha256"
               ],
               "properties": {
                 "status": {
@@ -28947,7 +29070,60 @@
                   "type": [
                     "string",
                     "null"
-                  ]
+                  ],
+                  "description": "Only in records stored before memory snapshots, whose reads were at most 32 KiB in total: the bytes read."
+                }
+              }
+            }
+          },
+          "memory_snapshot": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "required": [
+              "sha256",
+              "byte_size",
+              "ranges"
+            ],
+            "description": "The bytes the reads cover, stored once as the merged ranges of memory 0 they span, so overlapping and repeated reads cost their memory once. Null when no read was in bounds. Absent from records stored before snapshots.",
+            "properties": {
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "byte_size": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "ranges": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "offset",
+                    "length",
+                    "at"
+                  ],
+                  "properties": {
+                    "offset": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Where the range starts in memory 0."
+                    },
+                    "length": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "at": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Where the range starts in the stored snapshot."
+                    }
+                  }
                 }
               }
             }
@@ -29002,7 +29178,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Each trimming step that removed something, in order, so the record fits 120 KiB pretty-printed as a one-record get_wasm_runs listing: the request echo, import lists past 32, the function type lists, results past 64, the import calls past the longest prefix that fits, then the import lists to what fits. Each step is sized with this list included. Empty when nothing was trimmed. The store keeps the trimmed record."
+            "description": "Empty: a record is kept whole. Records stored by earlier builds list each step that trimmed them to fit 120 KiB as a one-record get_wasm_runs listing."
           },
           "store_notice": {
             "type": [
@@ -29016,6 +29192,69 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "WasmRunMemory": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema",
+          "run_id",
+          "read",
+          "memory_offset",
+          "sha256",
+          "total",
+          "start",
+          "length",
+          "hex",
+          "next_start"
+        ],
+        "properties": {
+          "schema": {
+            "const": "wasm-run-memory-v1"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "read": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "memory_offset": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Where the read starts in memory 0."
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "SHA-256 of the whole read, not of this page."
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Bytes in the whole read."
+          },
+          "start": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "length": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "hex": {
+            "type": "string",
+            "pattern": "^([0-9a-f]{2})*$"
+          },
+          "next_start": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "description": "The start of the next page, or null after the last."
           }
         }
       },
@@ -35665,24 +35904,19 @@
           },
           "relationships": {
             "type": "array",
-            "maxItems": 4096,
             "items": {
               "$ref": "#/components/schemas/EvidencePackageRelationship"
             }
           },
           "gaps": {
             "type": "array",
-            "maxItems": 4096,
             "items": {
               "$ref": "#/components/schemas/EvidencePackageGap"
             }
           }
         },
         "description": "Version 1 closed metadata-only evidence package. Validity establishes internal consistency of supplied untrusted metadata, not producer authenticity, capture completeness, source availability, or artifact-byte verification. Semantic checks and canonical digest rules are defined in evidence-package-v1.md.",
-        "x-max-body-bytes": 4194304,
-        "x-max-parsed-nodes": 200000,
-        "x-max-depth": 32,
-        "x-max-string-utf8-bytes": 4096
+        "x-max-depth": 32
       },
       "EvidencePackageUint64String": {
         "type": "string",
@@ -35764,14 +35998,12 @@
         "properties": {
           "events": {
             "type": "array",
-            "maxItems": 1024,
             "items": {
               "$ref": "#/components/schemas/EvidencePackageEventKey"
             }
           },
           "artifacts": {
             "type": "array",
-            "maxItems": 64,
             "items": {
               "$ref": "#/components/schemas/EvidencePackageArtifactKey"
             }
@@ -35859,8 +36091,7 @@
           },
           "selected_count": {
             "type": "integer",
-            "minimum": 0,
-            "maximum": 1024
+            "minimum": 0
           },
           "source_scan": {
             "type": "string",
@@ -35907,8 +36138,7 @@
           },
           "selected_count": {
             "type": "integer",
-            "minimum": 0,
-            "maximum": 64
+            "minimum": 0
           },
           "source_scan": {
             "type": "string",
@@ -36464,14 +36694,12 @@
         "properties": {
           "events": {
             "type": "array",
-            "maxItems": 1024,
             "items": {
               "$ref": "#/components/schemas/EvidencePackageEventMetadata"
             }
           },
           "artifacts": {
             "type": "array",
-            "maxItems": 64,
             "items": {
               "$ref": "#/components/schemas/EvidencePackageArtifactMetadata"
             }
@@ -36721,8 +36949,7 @@
           },
           "occurrences": {
             "type": "integer",
-            "minimum": 1,
-            "maximum": 100000
+            "minimum": 1
           }
         },
         "allOf": [
@@ -36988,8 +37215,7 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 4095
+                "minimum": 0
               },
               {
                 "type": "null"
@@ -38624,7 +38850,6 @@
               },
               "words": {
                 "type": "array",
-                "maxItems": 65536,
                 "items": {
                   "type": "string",
                   "pattern": "^[0-9a-f]{8}$"
@@ -38646,7 +38871,6 @@
               },
               "base64": {
                 "type": "string",
-                "maxLength": 349528,
                 "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
               }
             }
@@ -38679,7 +38903,7 @@
               "byte_length": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 262144
+                "maximum": 9007199254740991
               }
             }
           }
@@ -38705,12 +38929,12 @@
           "channels": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 64
+            "maximum": 4294967295
           },
           "frames": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "source": {
             "$ref": "#/components/schemas/Float32Source"
@@ -38977,12 +39201,12 @@
               "start": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 65536
+                "maximum": 9007199254740991
               },
               "limit": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 256
+                "maximum": 9007199254740991
               }
             }
           }
@@ -39014,12 +39238,12 @@
           "channels": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 64
+            "maximum": 4294967295
           },
           "frames": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "origin": {
             "type": "string",
@@ -39036,12 +39260,12 @@
           "byte_length": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 262144
+            "maximum": 9007199254740991
           },
           "sample_count": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "session_id": {
             "anyOf": [
@@ -39087,42 +39311,42 @@
           "positive_zero": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "negative_zero": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "subnormal": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "normal": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "positive_infinity": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "negative_infinity": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "nan": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "finite_count": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "finite_sum_absolute": {
             "type": "number",
@@ -39275,42 +39499,42 @@
           "compared_pairs": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "input_tail": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "reference_tail": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "bit_equal_pairs": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "numeric_equal_pairs": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "finite_pairs": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "excluded_nonfinite_pairs": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "within_tolerance_pairs": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "raw_bytes_equal": {
             "type": "boolean"
@@ -39356,7 +39580,7 @@
               {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 65536
+                "maximum": 9007199254740991
               },
               {
                 "type": "null"
@@ -39422,27 +39646,27 @@
               "zero": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 65536
+                "maximum": 9007199254740991
               },
               "one": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 65536
+                "maximum": 9007199254740991
               },
               "two_to_four": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 65536
+                "maximum": 9007199254740991
               },
               "five_to_sixteen": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 65536
+                "maximum": 9007199254740991
               },
               "over_sixteen": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 65536
+                "maximum": 9007199254740991
               }
             }
           }
@@ -39461,13 +39685,12 @@
           "comparison",
           "tolerances",
           "policies",
-          "limits",
           "detail",
           "source_ids"
         ],
         "properties": {
           "protocol_version": {
-            "const": 1,
+            "const": 2,
             "type": "integer"
           },
           "profile": {
@@ -39556,49 +39779,6 @@
               }
             }
           },
-          "limits": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "samples_per_input",
-              "bytes_per_input",
-              "detail_rows",
-              "request_bytes",
-              "response_bytes",
-              "manifest_bytes",
-              "manifest_records"
-            ],
-            "properties": {
-              "samples_per_input": {
-                "const": 65536,
-                "type": "integer"
-              },
-              "bytes_per_input": {
-                "const": 262144,
-                "type": "integer"
-              },
-              "detail_rows": {
-                "const": 256,
-                "type": "integer"
-              },
-              "request_bytes": {
-                "const": 2097152,
-                "type": "integer"
-              },
-              "response_bytes": {
-                "const": 524288,
-                "type": "integer"
-              },
-              "manifest_bytes": {
-                "const": 8388608,
-                "type": "integer"
-              },
-              "manifest_records": {
-                "const": 8192,
-                "type": "integer"
-              }
-            }
-          },
           "detail": {
             "type": "object",
             "additionalProperties": false,
@@ -39614,29 +39794,29 @@
               "start": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 65536
+                "maximum": 9007199254740991
               },
               "limit": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 256
+                "maximum": 9007199254740991
               },
               "total": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 65536
+                "maximum": 9007199254740991
               },
               "returned": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 256
+                "maximum": 9007199254740991
               },
               "next_start": {
                 "anyOf": [
                   {
                     "type": "integer",
                     "minimum": 0,
-                    "maximum": 65536
+                    "maximum": 9007199254740991
                   },
                   {
                     "type": "null"
@@ -39645,7 +39825,6 @@
               },
               "rows": {
                 "type": "array",
-                "maxItems": 256,
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -39660,12 +39839,12 @@
                     "index": {
                       "type": "integer",
                       "minimum": 0,
-                      "maximum": 65535
+                      "maximum": 9007199254740991
                     },
                     "byte_offset": {
                       "type": "integer",
                       "minimum": 0,
-                      "maximum": 262140
+                      "maximum": 9007199254740991
                     },
                     "input": {
                       "anyOf": [
@@ -39755,7 +39934,6 @@
           "offset": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 2181,
             "default": 0
           },
           "limit": {
@@ -39765,7 +39943,7 @@
             "default": 50
           }
         },
-        "description": "Original nested package JSON tokens, each at most 4194304 bytes, are independently duplicate-rejecting validated before canonicalization. Only exact declared metadata comparison is supported. Facets select full retained sections; no heuristic or URL matching. Outer keys must be unique and supported."
+        "description": "Original nested package JSON tokens, of any size, are independently duplicate-rejecting validated before canonicalization. Only exact declared metadata comparison is supported. Facets select full retained sections; no heuristic or URL matching. Outer keys must be unique and supported."
       },
       "EvidenceComparisonReference": {
         "type": "object",
@@ -39826,8 +40004,7 @@
                   "integer",
                   "boolean",
                   "null"
-                ],
-                "maxLength": 4096
+                ]
               }
             }
           },
@@ -39848,8 +40025,7 @@
               },
               "count": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 4096
+                "minimum": 0
               }
             }
           }
@@ -39950,12 +40126,10 @@
           },
           "cross_scope_candidates": {
             "type": "integer",
-            "minimum": 0,
-            "maximum": 1024
+            "minimum": 0
           },
           "differences": {
             "type": "array",
-            "maxItems": 12,
             "items": {
               "$ref": "#/components/schemas/EvidenceComparisonDifference"
             }
@@ -39963,7 +40137,8 @@
           "differences_omitted": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 64
+            "maximum": 0,
+            "description": "Always 0: every changed field is listed. Revisions before this one listed 12 and counted the rest here."
           },
           "declared_content_hash_match": {
             "type": [
@@ -40116,28 +40291,23 @@
             "properties": {
               "equal_declared_metadata": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 2181
+                "minimum": 0
               },
               "changed_declared_metadata": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 2181
+                "minimum": 0
               },
               "left_only": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 2181
+                "minimum": 0
               },
               "right_only": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 2181
+                "minimum": 0
               },
               "ambiguous_cross_scope": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 2181
+                "minimum": 0
               }
             }
           },
@@ -40153,8 +40323,7 @@
             "properties": {
               "offset": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 2181
+                "minimum": 0
               },
               "limit": {
                 "type": "integer",
@@ -40163,16 +40332,14 @@
               },
               "total": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 2181
+                "minimum": 0
               },
               "next_offset": {
                 "type": [
                   "integer",
                   "null"
                 ],
-                "minimum": 0,
-                "maximum": 2181
+                "minimum": 0
               }
             }
           },
@@ -43119,7 +43286,7 @@
             "$ref": "#/components/schemas/Uint64String"
           }
         },
-        "description": "Present only on filtered or cursor-paged reads. Offsets are in the artifact manifest."
+        "description": "Every read carries it, filtered or not. Offsets are in the artifact manifest."
       },
       "EventWait": {
         "allOf": [

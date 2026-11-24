@@ -3,8 +3,10 @@
 `POST /api/wasm/runs` (`run_wasm_function`) runs one function of a captured core
 WebAssembly module offline and returns a `wasm-run-v1` record.
 `GET /api/wasm/runs` (`get_wasm_runs`) reads stored records without running
-anything. The [OpenAPI schema](openapi.json) defines `WasmRunRequest`,
-`WasmRun`, `WasmRuns` and `WasmTypedValue`. The policy that permits this one
+anything, and `GET /api/wasm/runs/memory` (`get_wasm_run_memory`) reads the
+bytes of one of a stored run's memory reads in pages. The
+[OpenAPI schema](openapi.json) defines `WasmRunRequest`, `WasmRun`, `WasmRuns`,
+`WasmRunMemory` and `WasmTypedValue`. The policy that permits this one
 form of execution is in [SAFETY](../SAFETY.md#observation-and-experiments).
 
 ## Boundary
@@ -28,7 +30,8 @@ form of execution is in [SAFETY](../SAFETY.md#observation-and-experiments).
   size and SHA-256 must match the manifest and the request's `sha256`, or the
   request fails (500 integrity, 409 mismatch). The captured bytes are never
   modified. A run is a derived experiment record in
-  `artifacts/analysis/wasm-runs-v1.json`, never captured evidence.
+  `artifacts/analysis/wasm-runs-v1.json`, with the bytes its reads cover in
+  `artifacts/analysis/wasm-run-memory/<run_id>.bin`, never captured evidence.
 
 ## Execution copy
 
@@ -71,9 +74,9 @@ they can be copied between `args`, stubs, `results` and `expect`:
 `memory_reads` index with the expected bytes; a second entry for the same read
 is refused with 400. The record's `expectation` reports `results_match`, each
 memory `match`, and `all_match` (which also requires the outcome `returned`).
-The one-entry-per-read rule bounds the size of a request and its record. It is
-not a disclosure control: an expectation is answered only to a caller that may
-read the run's values anyway (see below).
+One entry per read is all a test vector needs; a second would only repeat the
+question. It is not a disclosure control: an expectation is answered only to a
+caller that may read the run's values anyway (see below).
 
 ## Limits
 
@@ -85,46 +88,40 @@ read the run's values anyway (see below).
 | `call_depth` | 1,000 | 10,000 |
 | `deadline_ms` (wall clock, from when the run starts reading the module) | 2,000 | 10,000 |
 
-Fixed bounds: a module of any size, a 1 MiB request body, 1,000 arguments, 256
-stubs with up to 256 sequence entries, 16 writes of at most 256 KiB in total,
-16 reads of at most 32 KiB in total, 256 recorded import calls with up to 16
-arguments and 16 results each (`args_truncated`, `results_truncated`), 16
-memories and 16 tables, 64 operators in any constant expression, 262,144
-element segment items, one expected memory entry per read (so at most 16),
-captured import and export names cut to 128 bytes and outcome messages to 1,024
-in the record (measured as JSON, so control characters, quotes and backslashes
-count as their escapes), 64 stored runs and a 16 MiB store. A limit outside its
-range is refused with 400.
+A limit outside its range is refused with 400. The maxima are the sandbox a
+captured module runs in: what it may allocate and how long it may hold the one
+runner.
 
-A record always fits the 128 KiB that `reb-api mcp` returns inline, alone and
-as a one-record `get_wasm_runs` listing, so a Full client gets every byte it
-read rather than a structural summary. Reads are returned as hex, so their 32
-KiB cap is 64 KiB of text. The record is measured as the listing returns it:
-nested in `{"runs": [...]}`, every line gains four spaces of indentation. If
-that pretty-printed listing would exceed 120 KiB, the record is trimmed in this
-order until it fits:
+No size or count is fixed by the record or its transport. The request body is
+parsed as it arrives, at any size: any number of stubs and sequence entries,
+and any number of memory writes and reads of any length within memory 0.
+Arguments and stub results are bounded only by the 1,000 values a Wasm function
+type allows, and a value literal by its 64 characters. Every import call is
+recorded with every argument and result; the first 256 are kept and
+`import_calls_total` counts every attempt, because the record is built in
+memory while the module runs and a loop of import calls can make millions
+within its deadline. Captured names and outcome messages are kept whole.
 
-1. The request echo is replaced by its size (`provenance.inputs_digest` still
-   names it).
-2. `imports` and `other_imports` keep their first 32 entries.
-3. `function.type` becomes its two counts.
-4. `results` keeps its first 64 values.
-5. `import_calls` keeps the longest prefix that fits, and
-   `import_calls_truncated` is set; `import_calls_total` stays. The calls are
-   sized after `results` is cut, so a function with 1000 results keeps the
-   calls that fit beside its first 64.
-6. `imports` and `other_imports` keep only as many entries as fit.
+The bytes a run's reads cover are stored once, beside its record, as the merged
+ranges of memory 0 they span: `memory_snapshot` gives their SHA-256, size and
+ranges, and each read gives the SHA-256 of its own bytes. Overlapping and
+repeated reads cost their memory once, so a request of a few bytes cannot make
+a run hold or store one copy of memory per read. `get_wasm_run_memory` takes
+`run_id`, `read` (an index into `memory_reads`), `start` and `length` (default
+32,768) and returns that page as hex with the read's SHA-256, `total` and
+`next_start`, null after the last page. A page is not checked against the
+digest, which covers the whole read; check it once the last page arrives. A
+read that was out of bounds holds no bytes (404), and a snapshot that is
+missing or whose size differs from its record is a 500 integrity error.
 
-`size_trimmed` lists each step that removed something and is empty otherwise.
-It is part of the measured record: each step is sized with the steps listed
-before it and its own entry.
-Outcomes, counts, memory reads, digests and the expectation are never trimmed;
-the expectation is computed before any trimming. The trimmed record is what the
-HTTP response returns and what the store keeps: trimming happens once, before
-storage, so a later `get_wasm_runs` shows the same record.
-
-A name cut to 128 bytes ends in ` [cut]`. Two names that share their first 128
-bytes then look the same; `function_index` is what tells them apart.
+A record is kept whole, so `size_trimmed` is empty. Through `reb-api mcp` a
+record within 128 KiB returns inline; one past it, such as one that echoes
+large memory writes in `request`, returns a structural summary that keeps its
+`run_id`, outcome and read digests. A memory page past the inline limit is
+asked for again with half its `length`, so an agent reads any read in pages.
+Records stored by earlier builds keep what they were trimmed to, with each
+step in `size_trimmed`, and their reads, at most 32 KiB in total, as `hex`
+inline; `get_wasm_run_memory` pages those too.
 
 The memory and table limits are totals: every memory and every table the run
 creates, imported or defined, and every growth, counts against one budget each.
@@ -136,9 +133,9 @@ recursively, one native stack frame per operator; real modules use one to
 three. Every body is validated when the module is, and each function is
 translated to wasmi's bytecode on its first call (lazy translation).
 Translation costs no fuel, so a large body runs within an ordinary fuel limit.
-Element segments hold at most 262,144 items in total, active or passive,
-because instantiation materializes every one; data segments are bounded by
-the module size.
+At most 16 memories and 16 tables, and 262,144 element segment items in total,
+active or passive, because instantiation materializes every one and cannot be
+interrupted; data segments are bounded by the module size.
 
 Validation, instantiation and one function's translation cannot be
 interrupted. Validation is linear in the module and small in memory;
@@ -159,8 +156,9 @@ between 1,000,000-unit slices let a loop of import calls run three times past
 it. A
 refused `memory.grow` returns -1 to the module, as the specification
 requires, and is counted in `memory_grow_denied` (`table_grow_denied` for
-tables). One run is admitted per backend at a time; a second gets 409. Once
-admitted, a dropped HTTP connection does not cancel the run or its storage.
+tables). One run is admitted per backend at a time, and a later request waits
+its turn; one that goes away while waiting has run nothing. Once admitted, a
+dropped HTTP connection does not cancel the run or its storage.
 
 ## Outcomes
 
@@ -182,8 +180,7 @@ admitted, a dropped HTTP connection does not cancel the run or its storage.
 `byte_offset` is always null: wasmi 2.0.0 does not report the instruction
 offset of a trap, and the record does not invent one. Errors that are not
 outcomes are HTTP errors and store nothing: 400 for request problems, 404 for
-a missing artifact, export or function, 409 for a hash mismatch or a busy
-runner, and 422 for an empty, malformed or component module, or one the
+a missing artifact, export or function, 409 for a hash mismatch, and 422 for an empty, malformed or component module, or one the
 interpreter's validation rejects. Each message names its cause.
 
 ## Record
@@ -195,28 +192,28 @@ attempted call in order: `sequence`, `function_index`, `module`, `field`,
 `args`, `args_truncated`, `outcome`, `results`, `results_truncated`),
 `import_calls_total` and
 `import_calls_truncated`, `memory_pages_after`, `memory_reads` (status `read`,
-`out_of_bounds` or `no_memory`, with `sha256` and `hex`), `expectation`, the
+`out_of_bounds` or `no_memory`, with the `sha256` of the bytes read),
+`memory_snapshot`, `expectation`, the
 `request` as run (without its confirmation) and `provenance`: `artifact_id`,
 `module_sha256`, `module_byte_size`, `run_id_source`, `inputs_digest` (SHA-256 of the request
 without its confirmation), the interpreter and its version, the effective
 limits, and the rewrite. The record is checked against the `WasmRun` contract
 before it is stored; a record that fails is neither stored nor returned, and
 the 500 says so without quoting any value. The POST result adds `stored` and
-`store_error`; the record is already trimmed to fit 120 KiB, so `stored: false`
-means only that storage failed, and the record is still returned with
-`store_error` saying why.
+`store_error`. A record of any size is stored, so `stored: false` means only
+that storage failed, and the record is still returned with `store_error`
+saying why; its reads' bytes were not kept.
 
-The store keeps the newest 64 runs; older ones are evicted and counted in
-`evicted_runs`. An unreadable store is an integrity failure, not a request
+The store keeps the newest 64 runs; older ones are evicted with their stored
+memory and counted in `evicted_runs`. An unreadable store is an integrity failure, not a request
 error: `GET /api/wasm/runs` answers 500 with code `artifact_integrity` and says
 how to recover. The next run moves the file aside as
 `analysis/wasm-runs-v1.json.unreadable-<milliseconds>`, never overwriting or
 deleting it, starts a new store, and names the moved file in its
 `store_notice`. `GET /api/wasm/runs` takes optional `artifact_id` and `limit`
 (1 to 64, default 1) and returns runs newest first with the matching `total`.
-One record always inlines through `reb-api mcp`; ask for more with a larger
-`limit` when the records are small, or larger listings may come back as a
-structural summary.
+Through `reb-api mcp` a listing past the inline limit is asked for again with
+half its `limit`.
 
 ## Content and agent access
 
@@ -229,12 +226,13 @@ count and the fuel of 11 runs, and four bytes from 305 runs of one-byte
 expectations, at a level that omitted every value field. No part of a record is
 safe to show to a caller that may not read content.
 
-So, through `reb-api mcp`, both operations are in `x-reb-mcp.content_reads`:
-`run_wasm_function` and `get_wasm_runs` are listed only with `--allow-content`,
+So, through `reb-api mcp`, all three operations are in
+`x-reb-mcp.content_reads`: `run_wasm_function`, `get_wasm_runs` and
+`get_wasm_run_memory` are listed only with `--allow-content`,
 which only `--permission full` sets, and `run_wasm_function` also needs
 `--allow-effects` (it is effectful: `code-execution`, `filesystem-write`) and
 `confirm_offline_execution`. At Read only, Ask for actions and Auto-approve
-actions neither is listed, and a call is refused before any request is sent. The
+actions none is listed, and a call is refused before any request is sent. The
 in-app agent applies the same rule. `x-reb-mcp.run_values` (every `value`,
 `hex`, `sha256`, `results_match`, `match` and `inputs_digest` replaced by a
 content marker below `--allow-content`) stays as a second line, not as the
@@ -250,16 +248,21 @@ counter. `provenance.run_id_source` says which (`os_random` or
 Rust unit tests in `apps/origin-trace-backend/src/wasm_run.rs` run the
 synthetic fixtures in `tools/fixtures/wasm-runs/` through a return, traps,
 fuel exhaustion, a deadline, a start function that never returns, supplied and
-missing import stubs, a sequence that runs out, memory writes, bounded and
+missing import stubs, a sequence that runs out, memory writes, in-bounds and
 out-of-bounds reads, denied growth, a memory over its limit, and malformed,
 empty, invalid and imported targets. Regression tests cover a 100,000-operator
 global initializer (it aborted the backend), memory and table totals across
 several memories and tables, a function body over 200 KB, float results such
-as `1e300`, exact float spellings, the deadline at an import call, and capped
-import results. `tests/http.rs` covers the confirmation refusal, hash mismatch,
-contract shapes, storage and listing, and that the captured bytes and manifest
-are unchanged after runs. `tests/mcp_stdio.rs` checks that `--permission`
-read-only, ask and auto neither list nor send either operation and that full
-runs, and keeps the review's proofs of concept (repeated expectations, fuel and
-import counts, and a read-only listing of a Full run's inputs digest) as tests
-that those channels are closed below Full access.
+as `1e300`, exact float spellings, the deadline at an import call, import
+results and records kept whole, overlapping and repeated reads stored once and
+read back in pages, an evicted run's memory removed with it, and inline reads
+of earlier records still paged. `tests/http.rs` covers the confirmation
+refusal, hash mismatch, contract shapes, storage and listing, that the captured
+bytes and manifest are unchanged after runs, a 2 MiB write and 7 MiB of reads
+read back whole through HTTP and `reb-api`, and two runs at once, the second
+waiting its turn. `tests/mcp_stdio.rs` checks that `--permission` read-only,
+ask and auto list and send none of the three operations and that full runs and
+reads a 512 KiB read in pages, and keeps the review's proofs of concept
+(repeated expectations, fuel and import counts, and a read-only listing of a
+Full run's inputs digest) as tests that those channels are closed below Full
+access.

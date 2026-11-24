@@ -1947,7 +1947,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           return section;
         }
         const roles = classification.role_counts;
-        section.append(textElement('p', '', `${vmCountText(classification.site_count, 'classified site')}: ${vmCountText(roles['interpreter-candidate'], 'cursor-loop interpreter candidate')}, ${vmCountText(roles.multiplexer, 'router')}, ${roles.other} other. ${classification.sites.length} listed; ${classification.omitted_site_count} omitted from this bounded list.`));
+        section.append(textElement('p', '', `${vmCountText(classification.site_count, 'classified site')}: ${vmCountText(roles['interpreter-candidate'], 'cursor-loop interpreter candidate')}, ${vmCountText(roles.multiplexer, 'router')}, ${roles.other} other. ${classification.omitted_site_count ? `${classification.sites.length} listed; ${classification.omitted_site_count} more were not listed by the earlier detector that produced this document.` : 'Every classified site is listed.'}`));
         for (const omission of classification.omissions) {
           const count = omission.omitted_records === undefined ? '' : ` ${vmCountText(omission.omitted_records, 'record')} omitted.`;
           section.append(textElement('p', 'vm-workspace-notice', `${omission.reason}: ${omission.detail}${count}`));
@@ -2030,7 +2030,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           section.append(textElement('p', '', 'No module-wide dispatch inventory is retained in this document.'));
           return section;
         }
-        section.append(textElement('p', '', `${vmCountText(inventory.site_count, 'module site')}: ${inventory.br_table_count} br_table, ${inventory.call_indirect_count} call_indirect. ${vmCountText(inventory.candidates.length, 'ranked site')} retained; ${inventory.omitted_site_count} omitted from this bounded list.`));
+        section.append(textElement('p', '', `${vmCountText(inventory.site_count, 'module site')}: ${inventory.br_table_count} br_table, ${inventory.call_indirect_count} call_indirect. ${inventory.omitted_site_count ? `${vmCountText(inventory.candidates.length, 'ranked site')} retained; ${inventory.omitted_site_count} more were not listed by the earlier detector that produced this document.` : 'Every site is ranked and listed.'}`));
         section.append(textElement('p', '', 'Candidate dispatchers are ranked by loop shape, then by br_table arm count or call_indirect element fanout. Arm counts exclude the default. Unique branch targets cluster repeated Wasm labels. A small br_table is a CFF/relooper candidate, a large br_table is a handler-table candidate, and call_indirect is an indirect funcref candidate. None of these is a proven guest opcode ISA. This inventory does not invent registers, a stack, or a guest PC.'));
         const retainedRows = vmOpcodeRows(workspace);
         const classificationLabel = classification => classification === 'cff-helper-candidate' ? 'CFF / relooper candidate'
@@ -2049,7 +2049,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
               ? 'Selector index to Wasm branch target. Samples are absent, so this is a handler-table candidate, not a proven guest opcode ISA. No guest PC, register, or stack is inferred.'
               : 'Static CFF or relooper arms. No guest opcode, guest PC, register, or stack is inferred.';
           // Rank and the heuristic label stay in the collapsed summary. Opening
-          // every row is not usable once the bounded list reaches 256 sites.
+          // every row is not usable once a module lists hundreds of sites.
           row.append(textElement('summary', '', `#${rank} · ${selected ? 'Default · ' : ''}f${site.function_index} · ${site.kind} · ${count} · byte ${site.byte_offset} · ${classification}${vmDispatchShapeSuffix(workspace, site.byte_offset)}`));
           if (selected) row.open = true;
           row.append(textElement('p', 'vm-effect-detail', `${classification} · ${vmDispatchEvidenceText(site)} · body ${site.function_body_size} bytes · loop depth ${site.loop_depth} · IP-like read/write pattern ${site.ip_like ? 'present' : 'absent'}. ${honesty}`));
@@ -2691,7 +2691,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         for (const row of arming.refused) {
           panel.append(textElement('p', 'vm-effect-detail', `Not armed: ${row.instruction} at byte ${row.byte_offset} (${row.reason})`));
         }
-        if (arming.omitted_refused_count) panel.append(textElement('p', 'vm-workspace-notice', `${arming.omitted_refused_count} more refused sites are not listed.`));
+        if (arming.omitted_refused_count) panel.append(textElement('p', 'vm-workspace-notice', `${arming.omitted_refused_count} more refused sites were not listed by the earlier detector that produced this document.`));
         if (arming.file !== null) panel.append(textElement('pre', 'vm-effect-detail vm-evidence-audit', arming.file));
       }
 
@@ -5307,12 +5307,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           throw new TypeError(`${label} must map variable names to text values.`);
         }
         const entries = Object.entries(variables).sort(([left], [right]) => left.localeCompare(right));
-        let bytes = 0;
-        if (entries.length > 32 || entries.some(([name, value]) => {
-          bytes += utf8ByteLength(name) + utf8ByteLength(value);
-          return !/^[A-Za-z_][A-Za-z0-9_.-]*$/u.test(name) || utf8ByteLength(name) > 64 ||
-            utf8ByteLength(value) > 4 * 1024 || /[\x00-\x1f\x7f]/u.test(value) || bytes > 32 * 1024;
-        })) throw new TypeError(`${label} exceeds the 32-variable or 32 KiB scope limit.`);
+        if (entries.some(([name, value]) => !/^[A-Za-z_][A-Za-z0-9_.-]*$/u.test(name) ||
+          /[\x00-\x1f\x7f]/u.test(value))) {
+          throw new TypeError(`${label} need names that start with a letter or underscore, and values without control characters.`);
+        }
         return entries.map(([name, value]) => ({name, value}));
       }
 
@@ -5335,11 +5333,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const framing = new Set(['connection', 'content-length', 'host', 'keep-alive', 'proxy-connection',
           'te', 'trailer', 'transfer-encoding', 'upgrade']);
         const entries = Object.entries(headers);
-        if (entries.length > 64 || entries.some(([name, headerValue]) =>
+        if (entries.some(([name, headerValue]) =>
           !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(name) || framing.has(name.toLowerCase()) ||
-            utf8ByteLength(name) > 128 || utf8ByteLength(headerValue) > 64 * 1024 ||
-            /[\x00-\x1f\x7f]/u.test(headerValue)
-        )) throw new TypeError('Request headers must be at most 64 valid names with values of at most 64 KiB; Host, Content-Length, Connection, Transfer-Encoding and hop-by-hop headers belong to the HTTP client.');
+            utf8ByteLength(name) > 128 || /[\x00-\x1f\x7f]/u.test(headerValue)
+        )) throw new TypeError('Request headers need valid names of at most 128 bytes and values without control characters; Host, Content-Length, Connection, Transfer-Encoding and hop-by-hop headers belong to the HTTP client.');
         return entries.map(([name, headerValue]) => ({name, value: headerValue}));
       }
 
@@ -5398,12 +5395,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (state.apiCollectionRefreshing || (state.apiCollectionSaving && !conflictReload) || location.protocol === 'file:') return false;
         state.apiCollectionRefreshing = true;
         const version = state.apiCollectionVersion;
-        const controller = new AbortController();
-        const deadline = setTimeout(() => controller.abort(), 15000);
         if (!state.apiCollectionLoaded) setCollectionNotice('loading', 'Loading your local collection…');
         try {
           const headers = !force && state.apiCollectionEtag ? {'If-None-Match': state.apiCollectionEtag} : {};
-          const response = await fetch('/api/api-collection', {cache: 'no-store', headers, signal: controller.signal});
+          const response = await fetch('/api/api-collection', {cache: 'no-store', headers});
           if (version !== state.apiCollectionVersion) return false;
           if (response.status === 304) return true;
           if (!response.ok) throw new Error(`Collection store returned ${response.status}`);
@@ -5434,10 +5429,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         } catch (error) {
           if (version !== state.apiCollectionVersion) return false;
           state.apiCollectionEtag = null;
-          setCollectionNotice('error', `Collection load failed: ${controller.signal.aborted ? 'timed out' : error.message}. The last valid collection and your edits remain visible.`);
+          setCollectionNotice('error', `Collection load failed: ${error.message}. The last valid collection and your edits remain visible.`);
           return false;
         } finally {
-          clearTimeout(deadline);
           state.apiCollectionRefreshing = false;
           renderApiCollection();
         }
@@ -5450,14 +5444,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         state.apiCollectionSaving = true;
         state.apiCollectionVersion += 1;
-        const controller = new AbortController();
-        const deadline = setTimeout(() => controller.abort(), 15000);
         setCollectionNotice('saving', 'Saving collection changes locally…');
         renderApiCollection();
         try {
           const response = await fetch('/api/api-collection/actions', {
             method: 'POST', cache: 'no-store', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(collectionReplacement(folders, requests)), signal: controller.signal
+            body: JSON.stringify(collectionReplacement(folders, requests))
           });
           const body = await response.json();
           if (response.status === 409) {
@@ -5478,10 +5470,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           return true;
         } catch (error) {
           state.apiCollectionEtag = null;
-          setCollectionNotice('error', `Save could not be confirmed: ${controller.signal.aborted ? 'timed out' : error.message}. Your edits are retained. Retry load before saving again.`);
+          setCollectionNotice('error', `Save could not be confirmed: ${error.message}. Your edits are retained. Retry load before saving again.`);
           return false;
         } finally {
-          clearTimeout(deadline);
           state.apiCollectionSaving = false;
           renderApiCollection();
         }
@@ -6717,7 +6708,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           nodes.push(logs);
         }
         if (run.result_truncated || run.logs_truncated) nodes.push(textElement('p', 'experiment-privacy',
-          `${run.result_truncated ? 'The result' : 'A log entry'} nests deeper than 256 levels or could not be serialized; those values are marked.`));
+          `${run.result_truncated ? 'The result' : 'A log entry'} could not be serialized; those values are marked.`));
         analystElements.result.replaceChildren(...nodes);
       }
 
@@ -6826,29 +6817,25 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           keys.every(key => Object.hasOwn(value, key));
       }
 
+      // Version 2 has no limits: inputs, outputs, chains, tokens and secrets
+      // have no fixed size.
       function isDecoderEngine(value) {
-        if (!decoderHasExactKeys(value, ['protocol_version', 'available', 'busy', 'limits']) ||
-            value.protocol_version !== 1 || typeof value.available !== 'boolean' || typeof value.busy !== 'boolean') return false;
-        const limits = value.limits;
-        if (!decoderHasExactKeys(limits, ['input_bytes', 'output_bytes', 'pipeline_steps', 'retained_bytes',
-          'jwt_bytes', 'secret_bytes', 'json_depth', 'json_tokens', 'operations', 'jwt_algorithms'])) return false;
-        if (limits.input_bytes !== 1048576 || limits.output_bytes !== 1048576 || limits.pipeline_steps !== 16 ||
-            limits.retained_bytes !== 4194304 || limits.jwt_bytes !== 65536 || limits.secret_bytes !== 4096 ||
-            limits.json_depth !== 64 || limits.json_tokens !== 100000) return false;
-        return Array.isArray(limits.operations) && limits.operations.length === decoderNativeOperations.size &&
-          limits.operations.every(operation => decoderNativeOperations.has(operation)) &&
-          new Set(limits.operations).size === decoderNativeOperations.size &&
-          Array.isArray(limits.jwt_algorithms) && limits.jwt_algorithms.length === decoderAlgorithms.size &&
-          limits.jwt_algorithms.every(algorithm => decoderAlgorithms.has(algorithm)) &&
-          new Set(limits.jwt_algorithms).size === decoderAlgorithms.size;
+        if (!decoderHasExactKeys(value, ['protocol_version', 'available', 'busy', 'operations', 'jwt_algorithms']) ||
+            value.protocol_version !== 2 || typeof value.available !== 'boolean' || typeof value.busy !== 'boolean') return false;
+        return Array.isArray(value.operations) && value.operations.length === decoderNativeOperations.size &&
+          value.operations.every(operation => decoderNativeOperations.has(operation)) &&
+          new Set(value.operations).size === decoderNativeOperations.size &&
+          Array.isArray(value.jwt_algorithms) && value.jwt_algorithms.length === decoderAlgorithms.size &&
+          value.jwt_algorithms.every(algorithm => decoderAlgorithms.has(algorithm)) &&
+          new Set(value.jwt_algorithms).size === decoderAlgorithms.size;
       }
 
       function isDecoderTransform(value, request) {
         if (!decoderHasExactKeys(value, ['protocol_version', 'ok', 'operation_id', 'operation', 'input_bytes',
           'output_bytes', 'output_base64', 'utf8_text', 'hex_preview', 'preview_truncated', 'duration_us'])) return false;
         if (value.protocol_version !== 1 || value.ok !== true || value.operation_id !== request.operation_id ||
-            value.operation !== request.operation || !isSafeIntegerInRange(value.input_bytes, 0, 1048576) ||
-            !isSafeIntegerInRange(value.output_bytes, 0, 1048576) ||
+            value.operation !== request.operation || !isSafeIntegerInRange(value.input_bytes, 0, Number.MAX_SAFE_INTEGER) ||
+            !isSafeIntegerInRange(value.output_bytes, 0, Number.MAX_SAFE_INTEGER) ||
             !isSafeIntegerInRange(value.duration_us, 1, Number.MAX_SAFE_INTEGER) ||
             (value.utf8_text !== null && typeof value.utf8_text !== 'string') || typeof value.hex_preview !== 'string' ||
             !/^(?:[0-9a-f]{2})*$/u.test(value.hex_preview) || typeof value.preview_truncated !== 'boolean') return false;
@@ -6864,11 +6851,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       function isJwtInspection(value) {
         return resultHasOptionalReason(value, ['protocol_version', 'ok', 'algorithm', 'signature_status', 'header_json',
           'payload_json', 'token_bytes', 'signature_bytes', 'error', 'duration_us'], 'application_failed') && value.protocol_version === 1 &&
-          typeof value.ok === 'boolean' && typeof value.algorithm === 'string' && value.algorithm.length <= 128 &&
+          typeof value.ok === 'boolean' && typeof value.algorithm === 'string' &&
           ['not_checked', 'verified', 'invalid', 'unsigned', 'unsupported'].includes(value.signature_status) &&
-          typeof value.header_json === 'string' && utf8ByteLength(value.header_json) <= 65536 &&
-          typeof value.payload_json === 'string' && utf8ByteLength(value.payload_json) <= 65536 &&
-          isSafeIntegerInRange(value.token_bytes, 0, 65536) && isSafeIntegerInRange(value.signature_bytes, 0, 65536) &&
+          typeof value.header_json === 'string' && typeof value.payload_json === 'string' &&
+          isSafeIntegerInRange(value.token_bytes, 0, Number.MAX_SAFE_INTEGER) &&
+          isSafeIntegerInRange(value.signature_bytes, 0, Number.MAX_SAFE_INTEGER) &&
           (value.error === null || (typeof value.error === 'string' && utf8ByteLength(value.error) <= 4096)) &&
           isSafeIntegerInRange(value.duration_us, 1, Number.MAX_SAFE_INTEGER);
       }
@@ -6876,7 +6863,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       function isJwtCreation(value) {
         return resultHasOptionalReason(value, ['protocol_version', 'ok', 'token', 'error', 'duration_us'], 'application_failed') &&
           value.protocol_version === 1 && typeof value.ok === 'boolean' && typeof value.token === 'string' &&
-          utf8ByteLength(value.token) <= 65536 &&
           (value.error === null || (typeof value.error === 'string' && utf8ByteLength(value.error) <= 4096)) &&
           isSafeIntegerInRange(value.duration_us, 1, Number.MAX_SAFE_INTEGER);
       }
@@ -6889,8 +6875,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         return btoa(binary);
       }
 
+      // JavaScriptCore stops matching a repeated group past a few million
+      // characters, which refused any step with more than about 4 MiB of
+      // output, so the shape is one character class and the round trip below
+      // proves the padding canonical.
       function decoderBase64ToBytes(value) {
-        if (typeof value !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value)) {
+        if (typeof value !== 'string' || value.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/u.test(value)) {
           throw new TypeError('Base64 input must be canonical and contain no whitespace.');
         }
         let binary;
@@ -6918,7 +6908,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (toolsElements.inputEncoding.value === 'text') bytes = new TextEncoder().encode(toolsElements.input.value);
         else if (toolsElements.inputEncoding.value === 'base64') bytes = decoderBase64ToBytes(toolsElements.input.value.trim());
         else bytes = decoderHexToBytes(toolsElements.input.value);
-        if (bytes.byteLength > 1048576) throw new TypeError('Input exceeds the 1 MiB decoder limit.');
         return bytes;
       }
 
@@ -6994,7 +6983,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             `<textarea>${text.replaceAll('<', '&#60;').replaceAll('>', '&#62;')}</textarea>`, 'text/html'
           ).body.firstElementChild.textContent;
         const output = new TextEncoder().encode(transformed);
-        if (output.byteLength > 1048576) throw new TypeError('HTML entity output exceeds the 1 MiB limit.');
         return {
           protocol_version: 1, ok: true, operation_id: state.decoderNextOperationId,
           operation, input_bytes: input.byteLength, output_bytes: output.byteLength,
@@ -7004,10 +6992,28 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         };
       }
 
+      // A decoder or JWT request runs until it finishes or Cancel aborts it,
+      // which stops the native decoder. Only the notice changes each second,
+      // so focus stays on Cancel.
+      function startToolsOperation(label) {
+        const controller = new AbortController();
+        const started = Date.now();
+        const show = () => {
+          setToolsNotice('running', `${label}… ${Math.floor((Date.now() - started) / 1000)} s. Cancel stops the native decoder.`);
+          toolsElements.notice.dataset.kind = state.decoderStatus;
+          toolsElements.notice.textContent = state.decoderMessage;
+        };
+        show();
+        const ticker = setInterval(show, 1000);
+        return {controller, finish: () => clearInterval(ticker)};
+      }
+
       async function appendDecoderTransform() {
         if (state.decoderPending) return;
+        const operation = toolsElements.operation.value;
+        let run = null;
+        let pinned = false;
         try {
-          if (state.decoderSteps.length >= 16) throw new TypeError('The 16-step chain limit was reached.');
           if (state.decoderInputSnapshot && state.decoderInputSnapshot.key !== decoderCurrentInputKey()) {
             throw new TypeError('Input changed. Reset the chain before using the new bytes.');
           }
@@ -7023,11 +7029,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           }
           if (!state.decoderInputSnapshot) {
             state.decoderInputSnapshot = {key: decoderCurrentInputKey(), base64: decoderBytesToBase64(input), bytes: input.byteLength};
+            pinned = true;
           }
-          const operation = toolsElements.operation.value;
           const operationId = state.decoderNextOperationId;
           state.decoderPending = true;
-          setToolsNotice('running', `${operation.replaceAll('-', ' ')} is running locally…`);
+          run = startToolsOperation(`${operation.replaceAll('-', ' ')} is running locally`);
+          state.decoderController = run.controller;
           renderTools();
           const request = {protocol_version: 1, action: 'transform', operation_id: operationId,
             operation, input_base64: decoderBytesToBase64(input)};
@@ -7036,23 +7043,27 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           else {
             if (!state.decoderEngine.available) throw new TypeError('The native decoder engine is unavailable.');
             const response = await fetch('/api/decoder/actions', {method: 'POST', cache: 'no-store',
-              headers: {'Content-Type': 'application/json'}, body: JSON.stringify(request)});
+              headers: {'Content-Type': 'application/json'}, body: JSON.stringify(request), signal: run.controller.signal});
             const body = await response.json();
             if (!response.ok) throw new Error(body.error || `Decoder service returned ${response.status}`);
             if (!isDecoderTransform(body, request)) throw new TypeError('Decoder service returned a malformed or mismatched result.');
             result = body;
           }
           const prefix = state.decoderSteps.slice(0, branchIndex + 1);
-          const retained = (state.decoderInputSnapshot?.bytes ?? 0) + prefix.reduce((sum, step) => sum + step.output_bytes, 0) + result.output_bytes;
-          if (retained > 4194304) throw new TypeError('This result would exceed the 4 MiB retained-chain limit.');
           const step = {...result, id: operationId};
           state.decoderSteps = [...prefix, step];
           state.decoderNextOperationId += 1;
           state.decoderSelectedStepId = step.id;
           setToolsNotice('ready', `${operation.replaceAll('-', ' ')} completed: ${formatByteSize(result.input_bytes)} to ${formatByteSize(result.output_bytes)}.`);
         } catch (error) {
-          setToolsNotice('error', error.message);
+          // A first step that fails or is cancelled leaves no chain, so the
+          // input it would have rooted stays editable.
+          if (pinned) state.decoderInputSnapshot = null;
+          if (error?.name === 'AbortError') setToolsNotice('ready', `${operation.replaceAll('-', ' ')} was cancelled. The chain is unchanged.`);
+          else setToolsNotice('error', error.message);
         } finally {
+          run?.finish();
+          state.decoderController = null;
           state.decoderPending = false;
           renderTools();
         }
@@ -7087,17 +7098,21 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       function renderDecoder() {
-        toolsElements.engineBadge.textContent = state.decoderEngine.available ? (state.decoderEngine.busy ? 'Engine busy' : 'Native engine ready') : 'Engine unavailable';
-        toolsElements.engineBadge.dataset.kind = state.decoderEngine.available ? state.decoderEngine.busy ? 'busy' : '' : 'offline';
+        // The probe's busy flag is as old as the probe; this page's own
+        // running request keeps the engine busy until it ends.
+        const engineBusy = state.decoderEngine.busy || state.decoderPending || state.jwtPending;
+        toolsElements.engineBadge.textContent = state.decoderEngine.available ? (engineBusy ? 'Engine busy' : 'Native engine ready') : 'Engine unavailable';
+        toolsElements.engineBadge.dataset.kind = state.decoderEngine.available ? engineBusy ? 'busy' : '' : 'offline';
         let parsedInput = null;
         let inputError = null;
         try { parsedInput = state.decoderInputSnapshot ? decoderBase64ToBytes(state.decoderInputSnapshot.base64) : decoderParseInput(); }
         catch (error) { inputError = error.message; }
         toolsElements.inputBadge.textContent = inputError ? 'Invalid input' : formatByteSize(parsedInput.byteLength);
         toolsElements.inputBadge.dataset.kind = inputError ? 'error' : '';
-        toolsElements.pipelineBadge.textContent = `${state.decoderSteps.length} / 16`;
-        toolsElements.append.disabled = state.decoderPending || state.decoderSteps.length >= 16 || Boolean(inputError) ||
+        toolsElements.pipelineBadge.textContent = `${state.decoderSteps.length.toLocaleString()} ${state.decoderSteps.length === 1 ? 'step' : 'steps'}`;
+        toolsElements.append.disabled = state.decoderPending || Boolean(inputError) ||
           (!state.decoderEngine.available && !toolsElements.operation.value.startsWith('html-'));
+        toolsElements.cancel.disabled = !state.decoderController;
         toolsElements.useField.disabled = !state.selectedField || state.decoderPending;
         toolsElements.reset.disabled = state.decoderPending || (!state.decoderInputSnapshot && !state.decoderSteps.length);
         toolsElements.removeAfter.disabled = state.decoderPending || state.decoderSelectedStepId === null;
@@ -7126,7 +7141,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         toolsElements.outputBadge.textContent = selected ? formatByteSize(selected.byteLength) : 'No output';
         toolsElements.outputBadge.dataset.kind = selected ? '' : 'offline';
         toolsElements.selectedBytes.textContent = selected ? formatByteSize(selected.byteLength) : '0 B';
-        toolsElements.retainedBytes.textContent = `${formatByteSize(decoderRetainedBytes())} / 4 MiB`;
+        toolsElements.retainedBytes.textContent = formatByteSize(decoderRetainedBytes());
         toolsElements.duration.textContent = step ? `${step.duration_us.toLocaleString()} µs` : 'Not run';
         toolsElements.copyOutput.disabled = !selected;
         toolsElements.viewButtons.forEach(button => button.setAttribute('aria-pressed', String(button.dataset.decoderView === state.decoderView)));
@@ -7139,6 +7154,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         toolsElements.jwtInspect.disabled = state.jwtPending;
         toolsElements.jwtVerify.disabled = state.jwtPending;
         toolsElements.jwtCreate.disabled = state.jwtPending;
+        toolsElements.jwtCancel.disabled = toolsElements.jwtCreateCancel.disabled = !state.jwtController;
         toolsElements.jwtUnsignedRow.hidden = toolsElements.jwtAlgorithm.value !== 'none';
         toolsElements.jwtCreateSecret.disabled = toolsElements.jwtAlgorithm.value === 'none';
         toolsElements.jwtExpiry.disabled = false;
@@ -7257,20 +7273,22 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
 
       async function runJwtAction(action) {
         if (state.jwtPending) return;
+        let run = null;
         try {
           const token = toolsElements.jwtToken.value.trim();
           if (!token) throw new TypeError('Enter a compact JWT first.');
           state.jwtPending = true;
-          setToolsNotice('running', action === 'jwt_verify' ? 'Verifying the HMAC signature locally…' : 'Decoding the JWT locally…');
-          renderTools();
           if (action === 'jwt_verify' && toolsElements.jwtSecret.value.length === 0) {
             throw new TypeError('HMAC verification needs a secret. The previous inspection is unchanged.');
           }
+          run = startToolsOperation(action === 'jwt_verify' ? 'Verifying the HMAC signature locally' : 'Decoding the JWT locally');
+          state.jwtController = run.controller;
+          renderTools();
           const request = action === 'jwt_verify'
             ? {protocol_version: 1, action, token, secret: toolsElements.jwtSecret.value}
             : {protocol_version: 1, action, token};
           const response = await fetch('/api/decoder/actions', {method: 'POST', cache: 'no-store',
-            headers: {'Content-Type': 'application/json'}, body: JSON.stringify(request)});
+            headers: {'Content-Type': 'application/json'}, body: JSON.stringify(request), signal: run.controller.signal});
           const body = await response.json();
           if (!response.ok) throw new Error(body.error || `Decoder service returned ${response.status}`);
           if (!isJwtInspection(body)) throw new TypeError('Decoder service returned a malformed JWT result.');
@@ -7279,8 +7297,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             ? (action === 'jwt_verify' ? 'JWT signature check completed locally.' : 'JWT decoded without checking its signature.')
             : (body.error || 'JWT inspection failed.'));
         } catch (error) {
-          setToolsNotice('error', error.message);
+          if (error?.name === 'AbortError') setToolsNotice('ready', 'JWT inspection was cancelled. The previous inspection is unchanged.');
+          else setToolsNotice('error', error.message);
         } finally {
+          run?.finish();
+          state.jwtController = null;
           toolsElements.jwtSecret.value = '';
           state.jwtPending = false;
           renderTools();
@@ -7289,6 +7310,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
 
       async function createJwtToken() {
         if (state.jwtPending) return;
+        let run = null;
         try {
           const algorithm = toolsElements.jwtAlgorithm.value;
           let expiration = null;
@@ -7300,10 +7322,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             algorithm, secret: algorithm === 'none' ? '' : toolsElements.jwtCreateSecret.value,
             expires_in_seconds: expiration, allow_unsigned_confirmed: algorithm === 'none' && toolsElements.jwtConfirmUnsigned.checked};
           state.jwtPending = true;
-          setToolsNotice('running', 'Creating the test JWT locally…');
+          run = startToolsOperation('Creating the test JWT locally');
+          state.jwtController = run.controller;
           renderTools();
           const response = await fetch('/api/decoder/actions', {method: 'POST', cache: 'no-store',
-            headers: {'Content-Type': 'application/json'}, body: JSON.stringify(request)});
+            headers: {'Content-Type': 'application/json'}, body: JSON.stringify(request), signal: run.controller.signal});
           const body = await response.json();
           if (!response.ok) throw new Error(body.error || `Decoder service returned ${response.status}`);
           if (!isJwtCreation(body) || !body.ok || !body.token) throw new TypeError(body.error || 'Decoder service returned a malformed created token.');
@@ -7311,12 +7334,17 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           toolsElements.jwtConfirmUnsigned.checked = false;
           setToolsNotice('ready', `${algorithm} test token created locally. Its signature has not been trusted automatically.`);
         } catch (error) {
-          setToolsNotice('error', error.message);
+          if (error?.name === 'AbortError') setToolsNotice('ready', 'Test token creation was cancelled.');
+          else setToolsNotice('error', error.message);
+          run?.finish();
+          state.jwtController = null;
           toolsElements.jwtCreateSecret.value = '';
           state.jwtPending = false;
           renderTools();
           return;
         }
+        run.finish();
+        state.jwtController = null;
         toolsElements.jwtCreateSecret.value = '';
         state.jwtPending = false;
         await runJwtAction('jwt_inspect');
@@ -10675,6 +10703,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         event.preventDefault();
         appendDecoderTransform();
       });
+      toolsElements.cancel.addEventListener('click', () => state.decoderController?.abort());
+      toolsElements.jwtCancel.addEventListener('click', () => state.jwtController?.abort());
+      toolsElements.jwtCreateCancel.addEventListener('click', () => state.jwtController?.abort());
       let decoderInputRenderFrame = 0;
       const scheduleDecoderInputRender = () => {
         if (decoderInputRenderFrame) return;

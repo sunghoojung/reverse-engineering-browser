@@ -727,7 +727,8 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 70, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 71, "Review route coverage when the API changes");
+    assert!(ids.contains("get_wasm_run_memory"));
     assert!(ids.contains("export_requests_har"));
     assert!(ids.contains("get_wasm_pseudocode"));
     assert!(ids.contains("search_wasm_inspection"));
@@ -820,7 +821,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 70);
+    assert_eq!(operation_count, 71);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -2109,8 +2110,11 @@ async fn filtered_artifacts_select_by_kind_frame_host_and_digest() {
     ] {
         assert_eq!(read(bad).await.0, 400, "{bad}");
     }
+    // An unfiltered read is a cursor page as well.
     let (_, unfiltered) = read("/api/artifacts?limit=1").await;
-    assert!(unfiltered.get("query").is_none());
+    assert_eq!(ids(&unfiltered), vec!["6"]);
+    assert_eq!(unfiltered["query"]["filters"], json!({}));
+    assert!(unfiltered["query"]["next_before"].is_string());
 }
 
 #[tokio::test]
@@ -2680,8 +2684,20 @@ async fn capped_event_window_keeps_network_events_and_capture_totals() {
 #[tokio::test]
 async fn artifact_polling_preserves_public_fields_and_validation() {
     let server = Server::start().await;
-    let response = |artifacts: &[Value]| json!({"count":artifacts.len(),"artifacts":artifacts,"artifact_receiver_configured":false,"artifact_receiver_connected":false});
-    assert_poll_response(&server, "/api/artifacts", response(&[])).await;
+    // Records in [start, end) of a store `store_end` bytes long, read backward.
+    let response = |artifacts: &[Value],
+                    limit: usize,
+                    start: usize,
+                    end: usize,
+                    store_end: usize| {
+        json!({"count":artifacts.len(),"artifacts":artifacts,"artifact_receiver_configured":false,"artifact_receiver_connected":false,
+            "query":{"direction":"backward","limit":limit,"returned":artifacts.len(),"store_end":store_end.to_string(),
+                "next_after":end.to_string(),"next_before":(start > 0).then(|| start.to_string()),
+                "limited":artifacts.len() == limit,"budget_exhausted":false,"filters":{},
+                "scope":if start == 0 && end == store_end {"store"} else {"bounded_range"},
+                "scan_start":start.to_string(),"scan_end":end.to_string()}})
+    };
+    assert_poll_response(&server, "/api/artifacts", response(&[], 500, 0, 0, 0)).await;
     let hash = "a".repeat(64);
     let records: Vec<_> = (1..=5001).map(|id| {
         let mut record = json!({"protocol_version":1,"artifact_id":id.to_string(),"session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"javascript","url":format!("http://fixture.local/script-{id}.js"),"mime_type":"text/javascript","byte_size":1024,"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin"),"fixture_private_field":"must-not-be-disclosed"});
@@ -2704,33 +2720,72 @@ async fn artifact_polling_preserves_public_fields_and_validation() {
         })
         .collect();
     server.file("artifacts/manifest.jsonl", &jsonl(&records));
+    let offset = |count: usize| jsonl(&records[..count]).len();
+    let end = offset(records.len());
     assert_poll_response(
         &server,
         "/api/artifacts?limit=2",
-        response(&expected[4999..]),
+        response(&expected[4999..], 2, offset(4999), end, end),
     )
     .await;
     assert_poll_response(
         &server,
         "/api/artifacts?limit=9999",
-        response(&expected[1..]),
+        response(&expected[1..], 5000, offset(1), end, end),
     )
     .await;
+    // The unfiltered read was a window: the newest 500 by default and 5,000
+    // at most, with no cursor to the rest. Its next_before now pages the
+    // whole manifest, oldest record included.
+    let mut path = "/api/artifacts".to_owned();
+    let mut pages = Vec::new();
+    loop {
+        let response = server.get(&path).await;
+        let bytes = assert_contract_response(response, "get", "/api/artifacts", 200).await;
+        let page: Value = serde_json::from_slice(&bytes).unwrap();
+        pages.push(page["artifacts"].as_array().unwrap().clone());
+        match page["query"]["next_before"].as_str() {
+            Some(before) => path = format!("/api/artifacts?before={before}"),
+            None => break,
+        }
+    }
+    assert_eq!(pages.len(), 11);
+    assert!(pages[..10].iter().all(|page| page.len() == 500));
+    assert_eq!(
+        pages.into_iter().rev().flatten().collect::<Vec<_>>(),
+        expected
+    );
     server.file(
         "artifacts/manifest.jsonl",
         &jsonl(&[records[0].clone(), records[0].clone()]),
     );
     assert_eq!(server.get("/api/artifacts").await.status(), 500);
-    for bad in [b"not-json\n".to_vec(), b"[]\n".to_vec(), vec![b'x'; 8193]] {
+    for bad in [
+        b"not-json\n".to_vec(),
+        b"[]\n".to_vec(),
+        [vec![b'x'; 8193], b"\n".to_vec()].concat(),
+    ] {
         server.file("artifacts/manifest.jsonl", &bad);
         assert_eq!(server.get("/api/artifacts").await.status(), 500);
     }
+    // A last record without its newline is still being written and is left
+    // for a later read, as every cursor read of the manifest leaves it.
+    let mut pending = jsonl(&records[..1]);
+    pending.extend_from_slice(&jsonl(&records[1..2])[..100]);
+    server.file("artifacts/manifest.jsonl", &pending);
+    let first = offset(1);
+    assert_poll_response(
+        &server,
+        "/api/artifacts",
+        response(&expected[..1], 500, 0, first, pending.len()),
+    )
+    .await;
     let mut invalid = records[0].clone();
     invalid["sensitive"] = json!(true);
     server.file("artifacts/manifest.jsonl", &jsonl(&[invalid]));
     assert_eq!(server.get("/api/artifacts").await.status(), 500);
     server.file("artifacts/manifest.jsonl", b"");
-    assert_poll_response(&server, "/api/artifacts", response(&[])).await;
+    assert_poll_response(&server, "/api/artifacts", response(&[], 500, 0, 0, 0)).await;
 }
 #[tokio::test]
 async fn locality_static_allowlist_and_malformed_actions() {
@@ -3213,7 +3268,7 @@ fn vm_runtime_audio_is_bounded_relevance_not_vm_structure_or_value_capture() {
                 "events_filter":{"session_id":"1","navigation_id":"2","frame_id":"3"}})
         );
         assert!(!document.to_string().contains("must-not-copy"));
-        assert_eq!(document["producer"]["version"], "1.12.0");
+        assert_eq!(document["producer"]["version"], "1.13.0");
         assert_eq!(
             document["profile"]["runtime_rule_weights"]["antibot.runtime-web-audio"],
             25
@@ -4075,7 +4130,7 @@ async fn vm_lexical_scoring_retains_dispatch_families_and_original_artifacts() {
         .unwrap()
         .validate(&document)
         .unwrap();
-    assert_eq!(document["producer"]["version"], "1.12.0");
+    assert_eq!(document["producer"]["version"], "1.13.0");
     assert_eq!(document["profile"]["javascript_scoring_version"], 3);
     assert_eq!(document["profile"]["runtime_evidence_version"], 2);
     let profile = origin_trace_backend::vm::canonical(&document["profile"]).unwrap();
@@ -5488,11 +5543,15 @@ async fn wasm_runs_need_confirmation_run_offline_and_store_derived_records() {
 }
 
 #[tokio::test]
-async fn wasm_run_reads_are_capped_at_32_kib_in_total() {
-    // The cap was checked only by a unit test against its own constant, so
-    // restoring the old 256 KiB cap passed every test.
+async fn wasm_run_reads_of_any_size_are_read_whole_in_pages() {
+    // Reads were refused past 32 KiB in total and writes past 256 KiB, in a
+    // request body of at most 1 MiB, so that a record fit what reb-api mcp
+    // inlines. A second run while one was in progress got 409.
     let server = Server::start().await;
-    let bytes = wat::parse_str(r#"(module (memory 1) (func (export "run")))"#).unwrap();
+    let bytes = wat::parse_str(
+        r#"(module (memory 64) (func (export "run")) (func (export "spin") (loop $l (br $l))))"#,
+    )
+    .unwrap();
     let hash = hex::encode(Sha256::digest(&bytes));
     let artifact = json!({"protocol_version":1,"artifact_id":"1","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":"https://example.test/module.wasm","mime_type":"application/wasm","byte_size":bytes.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
     server.file(
@@ -5500,25 +5559,18 @@ async fn wasm_run_reads_are_capped_at_32_kib_in_total() {
         format!("{artifact}\n").as_bytes(),
     );
     server.file(&format!("artifacts/blobs/{hash}.bin"), &bytes);
-    let run = |length: u64| {
-        json!({"artifact_id":"1","sha256":hash,"export":"run","confirm_offline_execution":true,
-            "memory_reads":[{"offset":0,"length":length},{"offset":length,"length":length}]})
-    };
-    let body = assert_contract_response(
-        server.action("/api/wasm/runs", run(16_385)).await,
-        "post",
-        "/api/wasm/runs",
-        400,
-    )
-    .await;
-    assert!(
-        String::from_utf8_lossy(&body).contains("32 KiB"),
-        "{}",
-        String::from_utf8_lossy(&body)
-    );
+    let mib = 1usize << 20;
+    let pattern = (0..2 * mib)
+        .map(|i| (i * 13 % 251) as u8)
+        .collect::<Vec<_>>();
+    let run = json!({"artifact_id":"1","sha256":hash,"export":"run","confirm_offline_execution":true,
+        "memory_writes":[{"offset":0,"hex":hex::encode(&pattern)}],
+        "memory_reads":[{"offset":0,"length":2 * mib},{"offset":0,"length":2 * mib},{"offset":mib,"length":3 * mib}],
+        "expect":{"memory":[{"read":0,"hex":hex::encode(&pattern)}]}});
+    let started = std::time::Instant::now();
     let record: Value = serde_json::from_slice(
         &assert_contract_response(
-            server.action("/api/wasm/runs", run(16_384)).await,
+            server.action("/api/wasm/runs", run).await,
             "post",
             "/api/wasm/runs",
             200,
@@ -5526,20 +5578,125 @@ async fn wasm_run_reads_are_capped_at_32_kib_in_total() {
         .await,
     )
     .unwrap();
-    let total: u64 = record["memory_reads"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|read| read["length"].as_u64().unwrap())
-        .sum();
-    assert_eq!(total, 32_768);
+    eprintln!(
+        "a run with a 2 MiB write and 7 MiB of reads took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(record["stored"], true, "{}", record["store_error"]);
+    assert_eq!(record["expectation"]["all_match"], true);
+    assert_eq!(record["size_trimmed"], json!([]));
+    // Three reads of 7 MiB in all cover the first 4 MiB once.
+    assert_eq!(record["memory_snapshot"]["byte_size"], 4 * mib);
     assert!(
         record["memory_reads"]
             .as_array()
             .unwrap()
             .iter()
-            .all(|read| read["status"] == "read")
+            .all(|read| read["status"] == "read" && read.get("hex").is_none())
     );
+    let run_id = record["run_id"].as_str().unwrap().to_owned();
+    let mut whole = Vec::new();
+    let mut start = 0;
+    let mut pages = 0;
+    loop {
+        let route = format!("/api/wasm/runs/memory?run_id={run_id}&read=0&start={start}");
+        let page: Value = serde_json::from_slice(
+            &assert_contract_response(
+                server.get(&route).await,
+                "get",
+                "/api/wasm/runs/memory",
+                200,
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(page["total"], 2 * mib);
+        whole.extend(hex::decode(page["hex"].as_str().unwrap()).unwrap());
+        pages += 1;
+        match page["next_start"].as_u64() {
+            Some(next) => start = next,
+            None => break,
+        }
+    }
+    assert_eq!(pages, 64, "32 KiB pages by default");
+    assert_eq!(whole, pattern);
+    assert_eq!(
+        hex::encode(Sha256::digest(&whole)),
+        record["memory_reads"][0]["sha256"]
+    );
+    // The same bytes through reb-api, as one 3 MiB page.
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "get_wasm_run_memory",
+            "--read-only",
+            "--base-url",
+            &server.url,
+            "--param",
+            &format!("run_id={run_id}"),
+            "--param",
+            "read=2",
+            "--param",
+            &format!("length={}", 3 * mib),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let page: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let shifted = hex::decode(page["hex"].as_str().unwrap()).unwrap();
+    assert_eq!(page["next_start"], Value::Null);
+    assert_eq!(&shifted[..mib], &pattern[mib..]);
+    assert!(shifted[mib..].iter().all(|&byte| byte == 0));
+    assert_eq!(
+        hex::encode(Sha256::digest(&shifted)),
+        record["memory_reads"][2]["sha256"]
+    );
+    for (route, status) in [
+        (format!("/api/wasm/runs/memory?run_id={run_id}&read=3"), 404),
+        (
+            "/api/wasm/runs/memory?run_id=wr-1-00&read=0".to_owned(),
+            404,
+        ),
+        (
+            format!(
+                "/api/wasm/runs/memory?run_id={run_id}&read=0&start={}",
+                2 * mib + 1
+            ),
+            400,
+        ),
+        (
+            format!("/api/wasm/runs/memory?run_id={run_id}&read=0&length=0"),
+            400,
+        ),
+        (format!("/api/wasm/runs/memory?run_id={run_id}"), 400),
+        ("/api/wasm/runs/memory?run_id=..%2Fx&read=0".to_owned(), 400),
+    ] {
+        assert_contract_response(
+            server.get(&route).await,
+            "get",
+            "/api/wasm/runs/memory",
+            status,
+        )
+        .await;
+    }
+    // Two runs at once: the second waits its turn instead of being refused.
+    let spin = json!({"artifact_id":"1","sha256":hash,"export":"spin","confirm_offline_execution":true,
+        "limits":{"deadline_ms":300,"fuel":10_000_000_000u64}});
+    let (first, second) = tokio::join!(
+        server.action("/api/wasm/runs", spin.clone()),
+        server.action("/api/wasm/runs", spin)
+    );
+    for response in [first, second] {
+        let record: Value = serde_json::from_slice(
+            &assert_contract_response(response, "post", "/api/wasm/runs", 200).await,
+        )
+        .unwrap();
+        assert_eq!(record["outcome"]["status"], "deadline_exceeded");
+    }
 }
 
 #[tokio::test]
@@ -6477,6 +6634,52 @@ async fn analyst_runs_read_whole_selected_artifacts_and_evidence_with_no_limits(
     assert!(response.text().await.unwrap().contains("protocol 2"));
 }
 
+/// The real Node runner serializes a result and a log nested 100,000 and
+/// 50,000 levels deep whole, past the 256 levels it once marked [MaxDepth].
+#[tokio::test]
+async fn analyst_results_and_logs_keep_every_nesting_level() {
+    let server = Server::start().await;
+    let source = "let deep = {leaf: 'bottom'}; for (let i = 0; i < 100000; i++) deep = {next: deep};\n\
+        let list = []; for (let i = 0; i < 50000; i++) list = [list];\n\
+        const loop = {name: 'loop'}; loop.self = loop;\n\
+        console.log(list, loop); return deep;";
+    let saved = server.action("/api/local-analyst/actions", json!({"action":"replace_local_analyst_workspace",
+        "expected_generation":0,"folders":[{"id":1,"name":"Analyst Workspace","parent_id":null}],
+        "files":[{"id":1,"folder_id":1,"name":"Deep","kind":"analyst-script","language":"javascript","content":source}]})).await;
+    assert_eq!(saved.status(), 200, "{}", saved.text().await.unwrap());
+    let response = server
+        .action(
+            "/api/local-analyst/actions",
+            json!({"action":"run_local_analyst_script","protocol_version":2,
+            "run_id":1,"script_id":1,"library_generation":1,"source":source,"variables":{},
+            "evidence":{"events":[],"artifacts":[],"trace_edges":[],"signal_profiles":[],"vm_analysis":null,
+                "selected_artifact":null,"summary":{}},"confirmed":true,"confirmed_sensitive":false}),
+        )
+        .await;
+    let bytes = assert_contract_response(response, "post", "/api/local-analyst/actions", 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["outcome"], "completed", "{result}");
+    let text = result["result_text"].as_str().unwrap();
+    let expected = format!(
+        "{}{{\"leaf\":\"bottom\"}}{}",
+        "{\"next\":".repeat(100_000),
+        "}".repeat(100_000)
+    );
+    assert!(text == expected, "every level of the result is written");
+    assert_eq!(result["result_truncated"], false);
+    let log = result["logs"][0]["text"].as_str().unwrap();
+    assert_eq!(
+        log,
+        format!(
+            "{}{} {{\"name\":\"loop\",\"self\":\"[Circular]\"}}",
+            "[".repeat(50_001),
+            "]".repeat(50_001)
+        )
+    );
+    assert_eq!(result["logs_truncated"], false);
+    assert!(!log.contains("[MaxDepth]") && !text.contains("[MaxDepth]"));
+}
+
 /// The library, a run's variables and its error have no shape limits: 40
 /// folders nested 39 deep, 100 files, 64 variables of 8 KiB each and a 4,000
 /// character error all go through, where 32 folders, 4 levels, 64 files, 32
@@ -6550,18 +6753,126 @@ async fn analyst_libraries_variables_and_errors_have_no_shape_limits() {
     assert_eq!(result["error"], "e".repeat(4000), "the error is kept whole");
 }
 
+#[tokio::test]
+async fn api_collections_have_no_count_size_or_depth_limits() {
+    let server = Server::start().await;
+    // A document written under the old limits, which recorded them, reads.
+    let legacy = json!({"contract_version":1,"document_kind":"api-collection","generation":1,"updated_at_ms":5,
+        "folders":[{"id":1,"name":"API Collection","parent_id":null,"variables":[]}],"requests":[],
+        "limits":{"folders":32,"requests":128,"folder_depth":4,"variables_per_scope":32,
+            "variable_bytes_per_scope":32768,"request_body_bytes":65536,"document_bytes":2097152}});
+    std::fs::write(
+        server.root.path().join("collection.json"),
+        serde_json::to_vec(&legacy).unwrap(),
+    )
+    .unwrap();
+    let read: Value = server
+        .get("/api/api-collection")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(read["generation"], 1);
+    assert_eq!(read["limits"], json!({}));
+
+    // Past every old limit: 40 folders 39 levels deep, 200 requests, 100
+    // headers with a 100 KiB credential, 100 variables of 1 KiB, a 20 KiB
+    // URL and a 3 MiB body, so the document is past 2 MiB as well.
+    let mut folders = vec![json!({"id":1,"name":"API Collection","parent_id":null,"variables":[]})];
+    folders.extend((2..=40).map(|id| {
+        json!({"id":id,"name":format!("Level {id}"),"parent_id":id - 1,"variables":if id == 40 {
+            json!((0..100).map(|i| json!({"name":format!("v{i:03}"),"value":"x".repeat(1024)})).collect::<Vec<_>>())
+        } else { json!([]) }})
+    }));
+    let mut headers = vec![
+        json!({"name":"Authorization","value":format!("Bearer {}", "t".repeat(100 * 1024))}),
+        json!({"name":"Cookie","value":"session=1"}),
+    ];
+    headers.extend((0..98).map(|i| json!({"name":format!("x-h{i}"),"value":"v"})));
+    let requests = (1..=200)
+        .map(|id| {
+            json!({"id":id,"folder_id":1 + id % 40,"name":format!("Request {id}"),
+                "url":format!("https://{{{{host}}}}/{}", "q".repeat(20 * 1024)),"method":"POST",
+                "headers":headers,"body":if id == 1 { "b".repeat(3 * 1024 * 1024) } else { "{}".into() },
+                "timeout_ms":15000,"variables":[]})
+        })
+        .collect::<Vec<_>>();
+    let replace = json!({"action":"replace_api_collection","expected_generation":1,"folders":folders,"requests":requests});
+    let route = "/api/api-collection/actions";
+    let response = server.action(route, replace.clone()).await;
+    let bytes = assert_contract_response(response, "post", route, 200).await;
+    assert!(bytes.len() > 2 * 1024 * 1024 + 20 * 1024 * 200);
+    let saved: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(saved["generation"], 2);
+    assert_eq!(saved["limits"], json!({}));
+    assert_eq!(saved["folders"].as_array().unwrap().len(), 40);
+    assert_eq!(saved["requests"].as_array().unwrap().len(), 200);
+    assert_eq!(
+        saved["requests"][0]["body"].as_str().unwrap().len(),
+        3 * 1024 * 1024
+    );
+    assert_eq!(
+        saved["requests"][0]["headers"].as_array().unwrap().len(),
+        100
+    );
+    assert_eq!(saved["requests"][0]["headers"][0]["name"], "Authorization");
+    let loaded: Value = server
+        .get(route.trim_end_matches("/actions"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(loaded, saved, "the collection reads back whole");
+
+    // The same replacement through reb-api: one more generation, unchanged contents.
+    let mut again = replace.clone();
+    again["expected_generation"] = json!(2);
+    let path = server.root.path().join("collection-large.json");
+    std::fs::write(&path, again.to_string()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "replace_api_collection",
+            "--base-url",
+            &server.url,
+            "--body-file",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cli: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(cli, saved, "an unchanged replacement keeps its generation");
+
+    // Structure is still checked: a cycle, a missing parent and a framing header.
+    let mut cyclic = again.clone();
+    cyclic["folders"][1]["parent_id"] = json!(40);
+    let mut orphan = again.clone();
+    orphan["folders"][1]["parent_id"] = json!(99);
+    let mut framing = again.clone();
+    framing["requests"][3]["headers"][5] = json!({"name":"Content-Length","value":"1"});
+    for refused in [cyclic, orphan, framing] {
+        let response = server.action(route, refused).await;
+        assert_contract_response(response, "post", route, 400).await;
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
-async fn decoder_requests_wait_their_turn_and_its_cpu_limit_is_named() {
+async fn decoder_requests_wait_their_turn_and_a_signal_is_named() {
     use std::os::unix::fs::PermissionsExt;
     let helper_root = tempfile::tempdir().unwrap();
     let decoder = helper_root.path().join("decoder-fixture");
     // A transform takes 0.1 s, so the queue below waits well past the two
     // seconds a request once had to reach the decoder. A JWT inspection
-    // ends the way the decoder's CPU-time limit ends it.
+    // ends on a signal.
     std::fs::write(
         &decoder,
-        "#!/bin/sh\n/bin/cat >/dev/null\ncase \"$1\" in\n  transform) /bin/sleep 0.1; printf ok ;;\n  *) ulimit -c 0; kill -XCPU $$ ;;\nesac\n",
+        "#!/bin/sh\n/bin/cat >/dev/null\ncase \"$1\" in\n  transform) /bin/sleep 0.1; printf ok ;;\n  *) kill -KILL $$ ;;\nesac\n",
     )
     .unwrap();
     std::fs::set_permissions(&decoder, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -6599,11 +6910,168 @@ async fn decoder_requests_wait_their_turn_and_its_cpu_limit_is_named() {
         .await;
     let bytes = assert_contract_response(response, "post", "/api/decoder/actions", 422).await;
     let result: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(result["code"], "resource_limit");
+    assert_eq!(result["error"], "The native decoder stopped on signal 9");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn decoder_runs_until_its_request_goes_away() {
+    use std::os::unix::fs::PermissionsExt;
+    let helper_root = tempfile::tempdir().unwrap();
+    let decoder = helper_root.path().join("decoder-fixture");
+    let started = helper_root.path().join("started");
+    // SHA-256 never finishes; SHA-512 answers at once.
+    std::fs::write(
+        &decoder,
+        format!(
+            "#!/bin/sh\n/bin/cat >/dev/null\ncase \"$2\" in\n  sha256) printf $$ > '{}'; exec /bin/sleep 60 ;;\n  *) printf ok ;;\nesac\n",
+            started.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&decoder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let server =
+        Server::start_with_args(&["--decoder".into(), decoder.display().to_string()]).await;
+    let transform = |operation_id: u64, operation: &str| {
+        let (client, url) = (server.client.clone(), server.url.clone());
+        let body = json!({"action":"transform","protocol_version":1,"operation_id":operation_id,"operation":operation,"input_base64":"AA=="});
+        tokio::spawn(async move {
+            client
+                .post(format!("{url}/api/decoder/actions"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+        })
+    };
+    let running = transform(1, "sha256");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let pid = loop {
+        if let Ok(pid) = std::fs::read_to_string(&started)
+            && !pid.is_empty()
+        {
+            break pid;
+        }
+        assert!(Instant::now() < deadline, "The decoder did not start");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    let queued = transform(2, "sha512");
+    // There is no deadline: past the two seconds a decode once had, both
+    // requests are still waiting and the engine reports itself busy.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(!running.is_finished() && !queued.is_finished());
+    let state: Value = server.get("/api/decoder").await.json().await.unwrap();
+    assert_eq!(state["busy"], true);
+    let alive = |pid: &str| {
+        Command::new("/bin/kill")
+            .args(["-0", pid.trim()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert!(alive(&pid));
+    // The request going away stops its decoder and lets the queue move on.
+    running.abort();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while alive(&pid) {
+        assert!(
+            Instant::now() < deadline,
+            "The abandoned decoder kept running"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let response = queued.await.unwrap();
+    assert_eq!(response.status(), 200);
     assert_eq!(
-        result["error"],
-        "The native decoder reached its two-second CPU-time limit"
+        response.json::<Value>().await.unwrap()["output_base64"],
+        "b2s="
     );
+}
+
+#[tokio::test]
+#[ignore = "requires REB_DECODER_TEST_WORKER pointing to the built reb-decoder"]
+async fn decoder_real_worker_holds_inputs_of_any_size_over_http_and_cli() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let worker = std::env::var("REB_DECODER_TEST_WORKER").expect("Set the built reb-decoder path");
+    assert!(Path::new(&worker).is_file(), "Build reb-decoder first");
+    let server = Server::start_with_args(&["--decoder".into(), worker]).await;
+    let state: Value = server.get("/api/decoder").await.json().await.unwrap();
+    assert_eq!(state["protocol_version"], 2);
+    assert!(state.get("limits").is_none());
+    let transform = |operation: &str, input: &[u8]| json!({"action":"transform","protocol_version":1,"operation_id":1,"operation":operation,"input_base64":STANDARD.encode(input)});
+    let output = async |body: Value| {
+        let response = server.action("/api/decoder/actions", body).await;
+        let bytes = assert_contract_response(response, "post", "/api/decoder/actions", 200).await;
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        STANDARD
+            .decode(value["output_base64"].as_str().unwrap())
+            .unwrap()
+    };
+    // 16 MiB in and back out: a 21 MiB request, then 16 MiB inflated.
+    let text = vec![b'a'; 16 << 20];
+    let compressed = output(transform("gzip-compress", &text)).await;
+    assert!(compressed.len() < 1 << 20);
+    assert_eq!(
+        output(transform("gzip-decompress", &compressed)).await,
+        text
+    );
+    assert_eq!(
+        output(transform("sha256", &text)).await,
+        hex::encode(Sha256::digest(&text)).into_bytes()
+    );
+    // 100,000 nesting levels, against a former 64.
+    let deep = format!("{}{}", "[".repeat(100_000), "]".repeat(100_000));
+    let request = transform("json-minify", deep.as_bytes());
+    assert_eq!(output(request.clone()).await, deep.as_bytes());
+    // A 200 KB payload signed with an 8 KiB secret, against a former 64 KiB
+    // token and 4 KiB secret.
+    let secret = "k".repeat(8192);
+    let claim = "c".repeat(200_000);
+    let response = server
+        .action(
+            "/api/decoder/actions",
+            json!({"action":"jwt_create","protocol_version":1,"payload_json":json!({"sub":claim}).to_string(),
+                "algorithm":"HS256","secret":secret,"expires_in_seconds":null,"allow_unsigned_confirmed":false}),
+        )
+        .await;
+    let bytes = assert_contract_response(response, "post", "/api/decoder/actions", 200).await;
+    let created: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(created["ok"], true, "{created}");
+    let token = created["token"].as_str().unwrap().to_owned();
+    assert!(token.len() > 200_000);
+    let response = server
+        .action(
+            "/api/decoder/actions",
+            json!({"action":"jwt_verify","protocol_version":1,"token":token,"secret":secret}),
+        )
+        .await;
+    let bytes = assert_contract_response(response, "post", "/api/decoder/actions", 200).await;
+    let verified: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(verified["signature_status"], "verified", "{verified}");
+    assert_eq!(verified["token_bytes"], token.len());
+
+    let body = server.root.path().join("decoder-request.json");
+    std::fs::write(&body, request.to_string()).unwrap();
+    let cli = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "decoder_action",
+            "--json-errors",
+            "--base-url",
+            &server.url,
+            "--body-file",
+        ])
+        .arg(&body)
+        .output()
+        .unwrap();
+    assert!(
+        cli.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cli.stderr)
+    );
+    let result: Value = serde_json::from_slice(&cli.stdout).unwrap();
+    assert_eq!(result["output_bytes"], deep.len());
 }
 
 #[cfg(unix)]
@@ -7060,7 +7528,7 @@ async fn analysis_catalog_resolves_every_generated_rule_and_preserves_profile_id
     assert_eq!(catalog["current_producer"], document["producer"]);
     assert_eq!(
         catalog["current_producer"],
-        json!({"id":"origin-trace-vm-detector","version":"1.12.0"})
+        json!({"id":"origin-trace-vm-detector","version":"1.13.0"})
     );
     assert_eq!(catalog["compatibility"]["build_identity"], "not-recorded");
     assert_eq!(catalog["current_profile"], document["profile"]);
@@ -7196,6 +7664,7 @@ async fn validate_package_http(server: &Server, bytes: &[u8], status: u16) -> Va
         .post(format!("{}{}", server.url, EVIDENCE_PACKAGE_ROUTE))
         .header("content-type", "application/json")
         .body(bytes.to_vec())
+        .timeout(PACKAGE_WAIT)
         .send()
         .await
         .unwrap();
@@ -7274,7 +7743,7 @@ fn evidence_package_standalone_schema_and_openapi_components_are_identical() {
     );
     let operation = &spec["paths"][EVIDENCE_PACKAGE_ROUTE]["post"];
     assert_eq!(operation["operationId"], "validate_evidence_package");
-    assert_eq!(operation["x-max-body-bytes"], 4 * 1024 * 1024);
+    assert_eq!(operation["x-max-body-bytes"], 9007199254740991u64);
     assert_eq!(operation["x-reb-execution"]["effects"], json!(["analysis"]));
     assert_eq!(
         operation["x-reb-execution"]["state_dependent_effects"],
@@ -7423,7 +7892,7 @@ fn evidence_package_cli_lists_and_describes_the_contract_without_a_server() {
         if command[0] == "describe" {
             assert_eq!(document["method"], "POST");
             assert_eq!(document["path"], EVIDENCE_PACKAGE_ROUTE);
-            assert_eq!(document["x-max-body-bytes"], 4 * 1024 * 1024);
+            assert_eq!(document["x-max-body-bytes"], 9007199254740991u64);
         } else {
             assert_eq!(document, specification());
         }
@@ -7744,7 +8213,7 @@ async fn evidence_package_closed_projection_rejects_rehashed_private_fields_with
 }
 
 #[tokio::test]
-async fn evidence_package_raw_body_bounds_and_local_trust_are_enforced() {
+async fn evidence_package_bodies_of_any_size_validate_and_local_trust_is_enforced() {
     let server = Server::start().await;
     for raw in [
         b"{".as_slice(),
@@ -7761,27 +8230,12 @@ async fn evidence_package_raw_body_bounds_and_local_trust_are_enforced() {
     }
     let invalid = validate_package_http(&server, b"{}", 200).await;
     assert_untrusted_package_result(&invalid, "invalid");
-    let mut maximum = GOLDEN_EVIDENCE_PACKAGE.to_vec();
-    maximum.resize(4 * 1024 * 1024, b' ');
-    assert_untrusted_package_result(
-        &validate_package_http(&server, &maximum, 200).await,
-        "valid",
-    );
-    // Advertise an oversized body without uploading it, to exercise framing
-    // rejection without depending on connection reset timing during an upload.
-    // Close this incomplete exchange instead of reusing its connection for
-    // subsequent validator assertions.
-    let response = server
-        .client
-        .post(format!("{}{}", server.url, EVIDENCE_PACKAGE_ROUTE))
-        .header("content-length", (4 * 1024 * 1024 + 1).to_string())
-        .header("connection", "close")
-        .send()
-        .await
-        .unwrap();
-    assert_contract_response(response, "post", EVIDENCE_PACKAGE_ROUTE, 400).await;
-    maximum.push(b' ');
-    server.file("too-large.json", &maximum);
+    // A body was refused past 4 MiB and a string past 4,096 bytes. Bodies
+    // and strings of any size are read, over HTTP and through the CLI.
+    let mut large = GOLDEN_EVIDENCE_PACKAGE.to_vec();
+    large.resize(5 << 20, b' ');
+    assert_untrusted_package_result(&validate_package_http(&server, &large, 200).await, "valid");
+    server.file("large.json", &large);
     let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
         .args([
             "call",
@@ -7790,19 +8244,26 @@ async fn evidence_package_raw_body_bounds_and_local_trust_are_enforced() {
             &server.url,
         ])
         .arg("--body-file")
-        .arg(server.root.path().join("too-large.json"))
+        .arg(server.root.path().join("large.json"))
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    assert_eq!(
-        String::from_utf8(output.stderr).unwrap(),
-        "reb-api: Request body exceeds its byte limit\n"
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    let oversized_string = serde_json::to_vec(&json!({"unknown":"x".repeat(4097)})).unwrap();
-    let limited = validate_package_http(&server, &oversized_string, 200).await;
-    assert_untrusted_package_result(&limited, "invalid");
-    assert_eq!(limited["issues"][0]["code"], "resource_limit");
+    assert_untrusted_package_result(&serde_json::from_slice(&output.stdout).unwrap(), "valid");
+    let long_string = serde_json::to_vec(&json!({"unknown":"x".repeat(1 << 20)})).unwrap();
+    let invalid = validate_package_http(&server, &long_string, 200).await;
+    assert_untrusted_package_result(&invalid, "invalid");
+    assert!(
+        invalid["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|issue| issue["code"] != "resource_limit"),
+        "{invalid}"
+    );
     for (header, value) in [
         ("Host", "example.test:7319"),
         ("Origin", "https://example.test"),
@@ -8026,6 +8487,176 @@ async fn guarded_export_round_trips_canonical_private_cli_bytes_without_secrets_
             .join("unexpected-helper.sh.invoked")
             .exists()
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn guarded_export_reads_stores_of_any_size_and_packages_past_the_old_counts() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    // An export scanned at most 64 MiB and 100,000 rows of events and 16 MiB
+    // and 10,000 rows of manifest, and a package held at most 1,024 events and
+    // 64 artifacts in 4 MiB. A comparison held two such packages and paged at
+    // most 2,181 rows. This store is past every one of those bounds; it is
+    // generated here and removed with the server's directory.
+    let server = Server::start().await;
+    // The hole is no selected event's: every 12th event is selected.
+    let (rows, hole, artifacts) = (120_000u64, 100_501u64, 12_000u64);
+    let payload = hex::encode("Date.now");
+    let mut events = std::io::BufWriter::new(
+        std::fs::File::create(server.root.path().join("events.jsonl")).unwrap(),
+    );
+    for n in (1..=rows).filter(|n| *n != hole) {
+        writeln!(events, r#"{{"protocol_version":3,"session_id":"7","process_id":42,"sequence_number":"{n}","monotonic_time_ns":"{}","navigation_id":"100","frame_id":"200","thread_id":5,"tab_id":1,"artifact_id":"0","parent_event_id":"0","request_id":"0","browser_context_id_high":"11","browser_context_id_low":"12","initiator_request_id":0,"initiator_process_id":0,"category":"runtime","type":"api_call","status_code":0,"error_code":0,"resource_type":0,"flags":0,"encoded_data_length":"0","decoded_body_length":"0","payload_size":8,"payload_truncated":false,"payload_encoding":"hex","payload":"{payload}","unknown_extension":{{"padding":"{}"}}}}"#, n * 100, "p".repeat(120)).unwrap();
+    }
+    events.into_inner().unwrap().sync_all().unwrap();
+    let store = std::fs::metadata(server.root.path().join("events.jsonl"))
+        .unwrap()
+        .len();
+    assert!(store > 64 << 20, "{store}");
+    let blob = include_bytes!("../assets/evidence-packages/source-v1/javascript.bin");
+    let hash = hex::encode(sha2::Sha256::digest(blob));
+    server.file(&format!("artifacts/blobs/{hash}.bin"), blob);
+    std::fs::set_permissions(
+        server
+            .root
+            .path()
+            .join(format!("artifacts/blobs/{hash}.bin")),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let mut manifest = Vec::new();
+    for n in 1..=artifacts {
+        writeln!(manifest, r#"{{"protocol_version":1,"session_id":"7","artifact_id":"{n}","navigation_id":"100","frame_id":"200","parent_artifact_id":"0","creator_event_id":"0","kind":"javascript","url":"https://example.test/{n}.js","mime_type":"text/javascript","byte_size":{},"sha256":"{hash}","sensitive":false,"content_path":"blobs/{hash}.bin","execution_context_id":"7","capture_origin":"dynamic_javascript"}}"#, blob.len()).unwrap();
+    }
+    server.file("artifacts/manifest.jsonl", &manifest);
+    for name in ["events.jsonl.reb-lock-v1", "artifacts/evidence.reb-lock-v1"] {
+        server.file(name, b"REB_EVIDENCE_GUARD_V1\n");
+        std::fs::set_permissions(
+            server.root.path().join(name),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
+    // Every 12th event, the last of them past the first 64 MiB, and every
+    // 120th artifact, the last of them past the first 10,000 rows.
+    let selected_events: Vec<u64> = (1..=rows).filter(|n| n % 12 == 0).collect();
+    let selected_artifacts: Vec<u64> = (1..=artifacts).filter(|n| n % 120 == 0).collect();
+    let selection = json!({"protocol_version": 1, "selection": {
+        "events": selected_events.iter().map(|n| json!({"session_id": "7", "process_id": 42, "sequence_number": n.to_string()})).collect::<Vec<_>>(),
+        "artifacts": selected_artifacts.iter().map(|n| json!({"session_id": "7", "artifact_id": n.to_string()})).collect::<Vec<_>>()}});
+    assert!(serde_json::to_vec(&selection).unwrap().len() > 256 << 10);
+    let response = server
+        .client
+        .post(format!("{}{EXPORT_PACKAGE_ROUTE}", server.url))
+        .json(&selection)
+        .timeout(PACKAGE_WAIT)
+        .send()
+        .await
+        .unwrap();
+    let bytes = assert_contract_response(response, "post", EXPORT_PACKAGE_ROUTE, 200).await;
+    assert!(bytes.len() > 4 << 20, "{}", bytes.len());
+    let package: Value = serde_json::from_slice(&bytes).unwrap();
+    let records = |section: &str| package["records"][section].as_array().unwrap().len();
+    assert_eq!(records("events"), selected_events.len());
+    assert_eq!(records("artifacts"), selected_artifacts.len());
+    assert_eq!(
+        package["coverage"]["events"]["selected_count"],
+        selected_events.len()
+    );
+    assert_eq!(package["coverage"]["events"]["source_scan"], "complete");
+    assert_eq!(
+        package["records"]["events"][selected_events.len() - 1]["key"]["sequence_number"],
+        rows.to_string()
+    );
+    // The one absent row inside the selected window is named, and no other.
+    assert_eq!(
+        package["gaps"],
+        json!([{"kind": "sequence_discontinuity", "session_id": "7", "process_id": 42,
+            "first_missing_sequence": hole.to_string(), "last_missing_sequence": hole.to_string()}])
+    );
+    assert_eq!(package["coverage"]["events"]["capture_state"], "partial");
+    assert_untrusted_package_result(&validate_package_http(&server, &bytes, 200).await, "valid");
+    // The CLI writes and validates the same bytes.
+    server.file("selection.json", &serde_json::to_vec(&selection).unwrap());
+    let output_path = server.root.path().join("large.reb-evidence.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "export_evidence_package",
+            "--base-url",
+            &server.url,
+            "--timeout",
+            "600",
+        ])
+        .arg("--body-file")
+        .arg(server.root.path().join("selection.json"))
+        .arg("--output")
+        .arg(&output_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read(&output_path).unwrap(), bytes);
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "validate_evidence_package",
+            "--base-url",
+            &server.url,
+            "--timeout",
+            "600",
+        ])
+        .arg("--body-file")
+        .arg(&output_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_untrusted_package_result(&serde_json::from_slice(&output.stdout).unwrap(), "valid");
+    // Two such packages compare, and their last row pages past 2,181.
+    let mut changed = package.clone();
+    changed["records"]["events"][9000]["monotonic_time_ns"] = json!("1");
+    changed["package_id"] =
+        json!(origin_trace_backend::evidence_package::package_id(&changed).unwrap());
+    let mut body = comparison_body(&package, &changed);
+    body["offset"] = json!(9000);
+    body["limit"] = json!(100);
+    let body = serde_json::to_vec(&body).unwrap();
+    assert!(body.len() > (8 << 20) + 4096, "{}", body.len());
+    let result = compare_package_http(&server, &body, 200).await;
+    let total = selected_events.len() + selected_artifacts.len() + 5;
+    assert_eq!(result["page"]["total"], total);
+    assert_eq!(result["counts"]["changed_declared_metadata"], 1);
+    assert_eq!(result["rows"].as_array().unwrap().len(), 100);
+    assert_eq!(result["page"]["next_offset"], 9100);
+    server.file("comparison.json", &body);
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "compare_evidence_packages",
+            "--base-url",
+            &server.url,
+            "--timeout",
+            "600",
+        ])
+        .arg("--body-file")
+        .arg(server.root.path().join("comparison.json"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cli: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(cli["rows"], result["rows"]);
 }
 
 #[cfg(unix)]
@@ -10078,7 +10709,110 @@ async fn float32_verified_artifact_rejects_corruption_stale_identity_and_missing
     assert!(!String::from_utf8_lossy(&refused).contains("0000803f"));
 }
 
+#[tokio::test]
+async fn float32_compares_artifacts_of_any_size_in_one_pass() {
+    const ROUTE: &str = "/api/float32/compare";
+    let server = Server::start().await;
+    // Past the 65,536 samples and 256 KiB a side once held: 4 Mi samples and
+    // three more, 16 MiB per artifact, streamed rather than loaded.
+    let count = 4 * 1024 * 1024 + 3;
+    let mut input = Vec::with_capacity(count * 4);
+    for index in 0..count {
+        let bits = if index == 5 {
+            0x7fc0_0001
+        } else {
+            (index as f32).to_bits()
+        };
+        input.extend_from_slice(&bits.to_le_bytes());
+    }
+    let mut reference = input.clone();
+    let changed = count - 2;
+    let bits = u32::from_le_bytes(reference[changed * 4..changed * 4 + 4].try_into().unwrap());
+    reference[changed * 4..changed * 4 + 4].copy_from_slice(&(bits + 1).to_le_bytes());
+    let mut manifest = String::new();
+    let mut sources = Vec::new();
+    for (id, bytes) in [("7", &input), ("8", &reference)] {
+        let hash = hex::encode(Sha256::digest(bytes));
+        let artifact = json!({
+            "protocol_version":1,"artifact_id":id,"session_id":"11","navigation_id":"13",
+            "frame_id":"17","parent_artifact_id":"0","creator_event_id":"19",
+            "execution_context_id":"23","capture_origin":"unknown","kind":"bytecode_buffer",
+            "url":"https://example.test/samples.bin","mime_type":"application/octet-stream",
+            "byte_size":bytes.len(),"sha256":hash,"sensitive":false,
+            "content_path":format!("blobs/{hash}.bin")
+        });
+        server.file(&format!("artifacts/blobs/{hash}.bin"), bytes);
+        manifest.push_str(&format!("{artifact}\n"));
+        sources.push(json!({"kind":"artifact","session_id":"11","artifact_id":id,"sha256":hash,"byte_length":bytes.len()}));
+    }
+    server.file("artifacts/manifest.jsonl", manifest.as_bytes());
+    let side = |source: &Value| json!({"representation":"float32-le","channels":1,"frames":count,"source":source});
+    let request = json!({"protocol_version":1,"input":side(&sources[0]),"reference":side(&sources[1]),
+        "tolerances":{"absolute":0,"relative":0,"ulps":0},"detail":{"start":count - 3,"limit":3}});
+    let bytes =
+        assert_contract_response(server.action(ROUTE, request).await, "post", ROUTE, 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    let comparison = &result["comparison"];
+    assert_eq!(result["protocol_version"], 2);
+    assert_eq!(comparison["status"], "complete");
+    assert_eq!(comparison["compared_pairs"], count);
+    assert_eq!(comparison["bit_equal_pairs"], count - 1);
+    assert_eq!(comparison["numeric_equal_pairs"], count - 2);
+    assert_eq!(comparison["first_bit_mismatch"], changed);
+    assert_eq!(comparison["maximum_ulp_distance"], 1);
+    assert_eq!(comparison["raw_bytes_equal"], false);
+    assert_eq!(result["input_summary"]["nan"], 1);
+    assert_eq!(result["input"]["sha256"], sources[0]["sha256"]);
+    let rows = result["detail"]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[1]["index"], changed);
+    assert_eq!(rows[1]["difference"]["ulp_distance"], 1);
+    assert!(result["detail"]["next_start"].is_null());
+
+    // A request past the 2 MiB body once refused, through reb-api as well.
+    let words = (0..300_000u32)
+        .map(|n| format!("{:08x}", (n as f32).to_bits()))
+        .collect::<Vec<_>>();
+    let inline = json!({"protocol_version":1,"input":{"representation":"float32-le","channels":3,"frames":100_000,
+        "source":{"kind":"bits","words":words}},"reference":null,
+        "tolerances":{"absolute":0,"relative":0,"ulps":0},"detail":{"start":299_000,"limit":1000}});
+    let body = inline.to_string();
+    assert!(body.len() > 2 * 1024 * 1024);
+    let http: Value = serde_json::from_slice(
+        &assert_contract_response(server.action(ROUTE, inline).await, "post", ROUTE, 200).await,
+    )
+    .unwrap();
+    assert_eq!(http["input"]["sample_count"], 300_000);
+    assert_eq!(http["detail"]["returned"], 1000);
+    assert_eq!(http["detail"]["rows"][999]["input"]["value"], 299_999.0);
+    let path = server.root.path().join("float32-large.json");
+    std::fs::write(&path, body).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "compare_float32",
+            "--base-url",
+            &server.url,
+            "--body-file",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        http
+    );
+}
+
 const EVIDENCE_COMPARISON_ROUTE: &str = "/api/evidence/packages/compare";
+/// Package validation, export and comparison have no deadline, so a test of a
+/// large case waits longer than the client's 30 seconds on a loaded machine.
+const PACKAGE_WAIT: Duration = Duration::from_secs(600);
 fn comparison_body(left: &Value, right: &Value) -> Value {
     json!({"left":left,"right":right,"normalization_profile":"reb-declared-metadata-v1","facets":["events","artifacts","coverage","gaps","relationships","provenance","selection"]})
 }
@@ -10088,6 +10822,7 @@ async fn compare_package_http(server: &Server, bytes: &[u8], status: u16) -> Val
         .post(format!("{}{}", server.url, EVIDENCE_COMPARISON_ROUTE))
         .header("content-type", "application/json")
         .body(bytes.to_vec())
+        .timeout(PACKAGE_WAIT)
         .send()
         .await
         .unwrap();
@@ -10216,7 +10951,7 @@ async fn evidence_comparison_rejects_original_duplicate_profile_and_private_fiel
     );
     for (field, value) in [
         ("facets", json!(["events", "events"])),
-        ("offset", json!(2182)),
+        ("offset", json!(-1)),
         ("limit", json!(101)),
         ("limit", Value::Null),
         ("offset", Value::Null),
@@ -10245,43 +10980,35 @@ fn evidence_comparison_cli_offline_discovery_includes_closed_contract_and_effect
     assert!(output.status.success());
     let operation: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(operation["operationId"], "compare_evidence_packages");
-    assert_eq!(
-        operation["x-max-body-bytes"],
-        origin_trace_backend::evidence_comparison::MAX_REQUEST_BYTES
-    );
+    assert_eq!(operation["x-max-body-bytes"], 9007199254740991u64);
     assert_eq!(operation["x-reb-execution"]["effects"], json!(["analysis"]));
     assert!(operation["components"]["schemas"]["EvidenceComparisonResult"].is_object());
 }
 
 #[tokio::test]
-async fn evidence_comparison_outer_and_original_byte_bounds_are_independent() {
+async fn evidence_comparison_originals_of_any_size_compare_and_escapes_stay_strict() {
     let server = Server::start().await;
     let package = serde_json::to_vec(&golden_evidence_package()).unwrap();
-    let padded = |maximum: usize| {
-        let mut p = Vec::with_capacity(maximum);
+    // Each original was refused past 4 MiB and the request past 8 MiB and
+    // 4 KiB. Whitespace inside an original is part of its bytes.
+    let padded = |size: usize| {
+        let mut p = Vec::with_capacity(size);
         p.push(b'{');
-        p.resize(maximum - package.len() + 1, b' ');
+        p.resize(size - package.len() + 1, b' ');
         p.extend_from_slice(&package[1..]);
-        assert_eq!(p.len(), maximum);
         p
     };
-    let max = origin_trace_backend::evidence_package::MAX_BYTES;
     let mut bytes = b"{\"left\":".to_vec();
-    bytes.extend(padded(max));
+    bytes.extend(padded(5 << 20));
     bytes.extend_from_slice(b",\"right\":");
-    bytes.extend(padded(max));
+    bytes.extend(padded(5 << 20));
     bytes.extend_from_slice(
         b",\"normalization_profile\":\"reb-declared-metadata-v1\",\"facets\":[\"events\"]}",
     );
-    assert!(bytes.len() <= origin_trace_backend::evidence_comparison::MAX_REQUEST_BYTES);
     assert_eq!(
         compare_package_http(&server, &bytes, 200).await["selected_metadata_equal"],
         true
     );
-    // One-over original token cannot be rescued by normalized or compact JSON.
-    bytes.insert(10, b' ');
-    let response = compare_package_http(&server, &bytes, 400).await;
-    assert_eq!(response["code"], "resource_limit");
     let raw = serde_json::to_string(&comparison_body(
         &golden_evidence_package(),
         &golden_evidence_package(),
@@ -10298,20 +11025,6 @@ async fn evidence_comparison_outer_and_original_byte_bounds_are_independent() {
     let mut invalid = raw.as_bytes().to_vec();
     invalid[20] = 255;
     compare_package_http(&server, &invalid, 400).await;
-    // Reject framing before uploading the impossible body; avoid depending on
-    // TCP reset timing when the server refuses an oversized Content-Length.
-    let response = server
-        .client
-        .post(format!("{}{}", server.url, EVIDENCE_COMPARISON_ROUTE))
-        .header(
-            "content-length",
-            (origin_trace_backend::evidence_comparison::MAX_REQUEST_BYTES + 1).to_string(),
-        )
-        .header("connection", "close")
-        .send()
-        .await
-        .unwrap();
-    assert_contract_response(response, "post", EVIDENCE_COMPARISON_ROUTE, 400).await;
 }
 
 #[tokio::test]
@@ -13005,18 +13718,33 @@ async fn cookie_provenance_reads_every_list_and_script_call_of_the_session() {
     cookie_list(&mut events, &mut manifest, 6_002, "2", true);
     server.file("artifacts/manifest.jsonl", &jsonl(&manifest));
     server.file("events.jsonl", &jsonl(&events));
-    let document: Value = server
-        .get("/api/cookie-provenance?session_id=1&name=sid")
-        .await
-        .json()
-        .await
-        .unwrap();
-    assert_schema(
-        &spec,
-        &json!({"$ref": "#/components/schemas/CookieProvenance"}),
-        &document,
-        "provenance",
-    );
+    // The request index folds a long store in steps; until it reaches the
+    // end an answer says it covered a bounded range, not the store.
+    let mut answers = 0;
+    let document: Value = loop {
+        let document: Value = server
+            .get("/api/cookie-provenance?session_id=1&name=sid")
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert_schema(
+            &spec,
+            &json!({"$ref": "#/components/schemas/CookieProvenance"}),
+            &document,
+            "provenance",
+        );
+        if document["coverage"]["complete"] == true {
+            break document;
+        }
+        assert_eq!(document["coverage"]["scope"], "bounded_range", "{document}");
+        answers += 1;
+        assert!(
+            answers < 240,
+            "provenance never covered the store: {document}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
     assert_eq!(document["coverage"]["scope"], "store", "{document}");
     assert_eq!(document["coverage"]["complete"], true);
     assert_eq!(document["coverage"]["limited"], false);

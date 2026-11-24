@@ -17,9 +17,6 @@
 
 namespace {
 
-constexpr std::size_t kMaximumFramedInput =
-    reb::kDecoderMaxJwtBytes + reb::kDecoderMaxSecretBytes + 8;
-
 bool SetProcessLimit(const int resource, const rlimit& limit, const std::string_view label) {
   if (setrlimit(resource, &limit) == 0) {
     return true;
@@ -28,42 +25,28 @@ bool SetProcessLimit(const int resource, const rlimit& limit, const std::string_
   return false;
 }
 
+// No CPU-time, memory or output-size limit: a decode runs as long as its
+// input needs, and the caller stops it by terminating the process when its
+// request goes away. Captured bytes never reach a core file, and the decoder
+// needs no descriptors beyond its standard streams.
 bool ApplyProcessLimits() {
   const rlimit no_core{.rlim_cur = 0, .rlim_max = 0};
-#if !defined(__APPLE__)
-  const rlimit address_space{.rlim_cur = 128U << 20U, .rlim_max = 128U << 20U};
-#endif
-  const rlimit cpu_time{.rlim_cur = 2, .rlim_max = 2};
-  const rlimit file_size{.rlim_cur = 2U << 20U, .rlim_max = 2U << 20U};
   const rlimit open_files{.rlim_cur = 32, .rlim_max = 32};
-  const bool memory_limited =
-#if defined(__APPLE__)
-      true;
-#else
-      SetProcessLimit(RLIMIT_AS, address_space, "address-space");
-#endif
-  return memory_limited && SetProcessLimit(RLIMIT_CORE, no_core, "core") &&
-         SetProcessLimit(RLIMIT_CPU, cpu_time, "CPU") &&
-         SetProcessLimit(RLIMIT_FSIZE, file_size, "output-file") &&
+  return SetProcessLimit(RLIMIT_CORE, no_core, "core") &&
          SetProcessLimit(RLIMIT_NOFILE, open_files, "open-file");
 }
 
-std::optional<std::vector<std::uint8_t>> ReadStandardInput(const std::size_t maximum_bytes) {
+std::vector<std::uint8_t> ReadStandardInput() {
   std::vector<std::uint8_t> input;
-  input.reserve(std::min(maximum_bytes, static_cast<std::size_t>(64U << 10U)));
-  std::array<char, 32U << 10U> chunk{};
+  std::array<char, 64U << 10U> chunk{};
   while (std::cin.good()) {
     std::cin.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
     const std::streamsize count = std::cin.gcount();
     if (count <= 0) {
       break;
     }
-    const std::size_t added = static_cast<std::size_t>(count);
-    if (added > maximum_bytes - std::min(input.size(), maximum_bytes)) {
-      return std::nullopt;
-    }
     input.insert(input.end(), reinterpret_cast<const std::uint8_t*>(chunk.data()),
-                 reinterpret_cast<const std::uint8_t*>(chunk.data()) + added);
+                 reinterpret_cast<const std::uint8_t*>(chunk.data()) + count);
   }
   return input;
 }
@@ -76,29 +59,29 @@ bool WriteStandardOutput(const std::span<const std::uint8_t> output) {
   return std::cout.good();
 }
 
-std::optional<std::uint32_t> ReadFrameSize(const std::span<const std::uint8_t> input,
+// A frame is an 8-byte big-endian length and that many bytes.
+std::optional<std::uint64_t> ReadFrameSize(const std::span<const std::uint8_t> input,
                                            std::size_t& position) {
-  if (position + 4 > input.size()) {
+  if (input.size() - position < 8) {
     return std::nullopt;
   }
-  std::uint32_t value = 0;
-  for (std::size_t offset = 0; offset < 4; ++offset) {
+  std::uint64_t value = 0;
+  for (std::size_t offset = 0; offset < 8; ++offset) {
     value = (value << 8U) | input[position + offset];
   }
-  position += 4;
+  position += 8;
   return value;
 }
 
 bool ReadFrame(const std::span<const std::uint8_t> input,
                std::size_t& position,
-               const std::size_t maximum_bytes,
                std::span<const std::uint8_t>& frame) {
-  const std::optional<std::uint32_t> size = ReadFrameSize(input, position);
-  if (!size.has_value() || *size > maximum_bytes || *size > input.size() - position) {
+  const std::optional<std::uint64_t> size = ReadFrameSize(input, position);
+  if (!size.has_value() || *size > input.size() - position) {
     return false;
   }
-  frame = input.subspan(position, *size);
-  position += *size;
+  frame = input.subspan(position, static_cast<std::size_t>(*size));
+  position += static_cast<std::size_t>(*size);
   return true;
 }
 
@@ -154,15 +137,11 @@ int Transform(const std::string_view operation_name) {
     std::cerr << "Unknown decoder operation\n";
     return 2;
   }
-  const auto input = ReadStandardInput(reb::kDecoderMaxInputBytes);
-  if (!input.has_value()) {
-    std::cerr << "Decoder input exceeds 1 MiB\n";
-    return 2;
-  }
-  reb::DecoderResult result = reb::TransformBytes(*operation, *input);
+  const auto input = ReadStandardInput();
+  reb::DecoderResult result = reb::TransformBytes(*operation, input);
   if (result.status != reb::DecoderStatus::kOk) {
     std::cerr << result.error << '\n';
-    return result.status == reb::DecoderStatus::kOutputLimit ? 3 : 2;
+    return 2;
   }
   if (!WriteStandardOutput(result.output)) {
     std::cerr << "Decoder output could not be written\n";
@@ -172,29 +151,19 @@ int Transform(const std::string_view operation_name) {
 }
 
 int InspectJwt() {
-  const auto input = ReadStandardInput(reb::kDecoderMaxJwtBytes);
-  if (!input.has_value()) {
-    std::cout << reb::JwtInspectionToJson(JwtInspectionError("JWT exceeds 64 KiB"));
-    return 0;
-  }
-  const std::string_view token(reinterpret_cast<const char*>(input->data()), input->size());
+  const auto input = ReadStandardInput();
+  const std::string_view token(reinterpret_cast<const char*>(input.data()), input.size());
   std::cout << reb::JwtInspectionToJson(reb::InspectJwt(token));
   return std::cout.good() ? 0 : 4;
 }
 
 int VerifyJwt() {
-  const auto input = ReadStandardInput(kMaximumFramedInput);
-  if (!input.has_value()) {
-    std::cout << reb::JwtInspectionToJson(
-        JwtInspectionError("JWT verification input is oversized"));
-    return 0;
-  }
+  const auto input = ReadStandardInput();
   std::size_t position = 0;
   std::span<const std::uint8_t> token;
   std::span<const std::uint8_t> secret;
-  if (!ReadFrame(*input, position, reb::kDecoderMaxJwtBytes, token) ||
-      !ReadFrame(*input, position, reb::kDecoderMaxSecretBytes, secret) ||
-      position != input->size()) {
+  if (!ReadFrame(input, position, token) || !ReadFrame(input, position, secret) ||
+      position != input.size()) {
     std::cout << reb::JwtInspectionToJson(
         JwtInspectionError("JWT verification frame is malformed"));
     return 0;
@@ -213,13 +182,12 @@ int CreateJwt(const std::string_view algorithm_name, const std::string_view expi
     std::cout << reb::JwtCreationToJson(JwtCreationError("JWT creation arguments are invalid"));
     return 0;
   }
-  const auto input = ReadStandardInput(kMaximumFramedInput);
+  const auto input = ReadStandardInput();
   std::size_t position = 0;
   std::span<const std::uint8_t> payload;
   std::span<const std::uint8_t> secret;
-  if (!input.has_value() || !ReadFrame(*input, position, 56U << 10U, payload) ||
-      !ReadFrame(*input, position, reb::kDecoderMaxSecretBytes, secret) ||
-      position != input->size()) {
+  if (!ReadFrame(input, position, payload) || !ReadFrame(input, position, secret) ||
+      position != input.size()) {
     std::cout << reb::JwtCreationToJson(JwtCreationError("JWT creation frame is malformed"));
     return 0;
   }

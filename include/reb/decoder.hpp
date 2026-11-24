@@ -10,12 +10,10 @@
 
 namespace reb {
 
-inline constexpr std::size_t kDecoderMaxInputBytes = 1U << 20U;
-inline constexpr std::size_t kDecoderMaxOutputBytes = 1U << 20U;
-inline constexpr std::size_t kDecoderMaxJwtBytes = 64U << 10U;
-inline constexpr std::size_t kDecoderMaxSecretBytes = 4U << 10U;
-inline constexpr std::size_t kDecoderMaxJsonDepth = 64;
-inline constexpr std::size_t kDecoderMaxJsonTokens = 100'000;
+// Inputs, outputs, tokens, secrets and JSON nesting have no fixed size: a
+// transform holds what its input needs, and JSON is parsed with an explicit
+// stack, so depth costs heap rather than the call stack. A caller that must
+// stop long work runs these in a process it can terminate.
 
 enum class DecoderOperation : std::uint8_t {
   kBase64Encode,
@@ -48,7 +46,6 @@ enum class DecoderOperation : std::uint8_t {
 enum class DecoderStatus : std::uint8_t {
   kOk,
   kInvalidInput,
-  kOutputLimit,
   kUnsupported,
   kInternalError,
 };
@@ -63,8 +60,7 @@ struct DecoderResult final {
     std::string_view name) noexcept;
 [[nodiscard]] std::string_view DecoderOperationName(DecoderOperation operation) noexcept;
 [[nodiscard]] DecoderResult TransformBytes(DecoderOperation operation,
-                                           std::span<const std::uint8_t> input,
-                                           std::size_t output_limit = kDecoderMaxOutputBytes);
+                                           std::span<const std::uint8_t> input);
 
 enum class JwtAlgorithm : std::uint8_t {
   kNone,

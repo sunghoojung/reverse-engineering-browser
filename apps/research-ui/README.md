@@ -275,7 +275,7 @@ process and sequence identity. Reused IDs in other sessions cannot supply its
 trace; unsafe numeric identities and ambiguous rows are rejected. **Open retained source** uses
 that step's session and artifact identity. A Facts **Original bytes** link
 verifies complete retained UTF-8 bytes and SHA-256; **Decode range** copies those
-exact bytes, up to 64 KiB, into Decoder. **Open original evidence** retains the
+exact bytes, of any length, into Decoder. **Open original evidence** retains the
 source identity and half-open byte range. Evidence field handoffs distinguish
 selected string bytes from unavailable raw HTTP offsets.
 Evidence source links use the selected native record’s exact retained artifact
@@ -686,7 +686,7 @@ client connected through `scripts/reb-api-mcp.sh` can run at the same level
 | **Read only** (default) | Structural reads | Nothing | Question, pins, structural results |
 | **Ask for actions** | Reads and actions | **Allow once** per action | The same |
 | **Auto-approve actions** | Reads and actions | Nothing; every call and result is in the transcript | The same |
-| **Full access** | Also content reads (`get_artifact_text`, `search_artifact_text`, `search_wasm_inspection`, `export_requests_har`), offline runs of captured Wasm (`run_wasm_function`, `get_wasm_runs`), store-path and draft reads, and its own live sessions (`start_live_session`, `session_action`) | Nothing | Also source, Wasm bytes and disassembly, VM bytecode, request and response bodies, cookie values and credential headers, and every content field of results |
+| **Full access** | Also content reads (`get_artifact_text`, `search_artifact_text`, `search_wasm_inspection`, `export_requests_har`), offline runs of captured Wasm (`run_wasm_function`, `get_wasm_runs`, `get_wasm_run_memory`), store-path and draft reads, and its own live sessions (`start_live_session`, `session_action`) | Nothing | Also source, Wasm bytes and disassembly, VM bytecode, request and response bodies, cookie values and credential headers, and every content field of results |
 
 Below Full access the tool server omits captured content from every result,
 and reads that return local store paths (`get_health`) or the researcher's own
@@ -915,7 +915,11 @@ still as text.
 The transcript is written to
 `~/Library/Application Support/Origin Trace/agent-transcripts/`, user-only, one
 file per session, and is separate from the evidence store. Earlier rows are
-shown when the agent is turned back on and are not resent to the model.
+shown when the agent is turned back on and are not resent to the model. The
+file keeps every row, whatever its size or the length of the conversation; a
+row that could not be written, or a torn line that cannot be read back, is a
+visible notice. A turn has no size cap of its own: what the model's context
+window cannot take, the provider refuses, and its error ends the turn.
 
 The web view keeps 6 MiB of transcript rows and mounts only rows near the
 viewport once there are many; older rows leave with a visible label and **Load
@@ -1716,7 +1720,9 @@ build does not know, is counted as reported lost evidence, and its reason chip
 shows the raw token.
 Stored-evidence native mode forwards the event poll to the bundled Rust
 backend, so its windows and whole-store counts are the same answer; the app
-adds only its own broker state and capture mode.
+adds only its own broker state and capture mode. Every artifact list read goes
+there too, so a bare list is a cursor page of the whole manifest, as it is in a
+live workspace.
 A response that omits those fields is still labeled visible-window-only, and
 no whole-capture count is inferred for it. Filtering
 and sorting cover the whole session through the index. Rows and capture-tab controls are
@@ -1750,8 +1756,9 @@ output. **Show inactive surfaces** reveals the rest of the supported families.
 Surface chips open filtered Activity. Each Canvas card keeps replay comparison,
 drawing calls, and evidence identifiers in expandable sections; open sections
 and summary focus survive evidence refreshes. Activity opens its details pane
-when an event is selected, or with **Details**. Decoder processing limits and
-result statistics are likewise available in expanders beside their controls.
+when an event is selected, or with **Details**. How Decoder processes a
+transformation and its result statistics are likewise available in expanders
+beside their controls.
 
 Flow, Analyst and Tools keep the primary task visible and secondary
 information in expandable sections. Flow's Lineage groups correlation identifiers separately from
@@ -3614,15 +3621,16 @@ mode retires pending package ownership, just as leaving Evidence does.
 Choose individual native event identities
 (session, process and sequence) or artifact identities (session and artifact).
 The selected-request view uses only that request's attached native records;
-synthetic gap rows are not export identities. The other
-views expose the current retained windows, at most 5,000 events or 500 artifacts,
-with 50 candidates per page. They are not an exhaustive store inventory. The
-pager stays above the viewport-bounded list. **Limits & privacy** holds the
+synthetic gap rows are not export identities. **Retained events** lists the
+stored range the investigation view shows: the newest records, or the older
+range **Earlier** and **Oldest** read by cursor. **Retained artifacts** lists
+every descriptor of the loaded artifact catalog. Each view shows 50 candidates
+per page. The pager stays above the viewport-bounded list. **Limits & privacy** holds the
 longer coverage and disclosure explanation without crowding the selection view.
 
-Nothing is selected automatically. Selection spans pages and views, with limits
-of 1,024 events and 64 artifacts. **Selected identities** keeps the exact keys
-inspectable if their rows leave the window. **Clear selection** removes all keys;
+Nothing is selected automatically. Selection spans pages, ranges and views, and
+holds any number of events and artifacts. **Selected identities** keeps the
+exact keys inspectable if their rows leave the view. **Clear selection** removes all keys;
 changing the selected request also clears the selection and any prior result.
 Refresh does not silently choose a replacement. A missing selected identity
 fails export rather than substituting a neighboring record.
@@ -3630,20 +3638,22 @@ fails export rather than substituting a neighboring record.
 **Export selected metadata** explicitly calls the local guarded exporter and
 then validates the returned original bytes. It never stops a writer, changes
 capture settings, creates a guard for a legacy store, or retries automatically.
-An active writer, changed source, unsupported store, failed integrity check or
-bounded-scan limit has a visible error. Supported stores must be quiescent under
+An active writer, changed source, unsupported store or failed integrity check
+has a visible error. The export reads the whole of both stores, however large;
+it shows its elapsed seconds and stops when **Cancel** is clicked. Supported stores must be quiescent under
 the existing cooperative leases; see the [package contract](../../protocol/evidence-package-v1.md).
 
-Alternatively, choose a metadata JSON file up to 4 MiB and click **Validate
+Alternatively, choose a metadata JSON file of any size and click **Validate
 original bytes**. Duplicate members, invalid UTF-8, BOMs and whitespace reach the
 Rust validator unchanged. The UI parses only an accepted document for display.
 Validation neither imports evidence nor runs code, fetches references or uploads
-data outside the local service. The 15-second UI deadline includes body and file
-reads. Response reads retain one buffer (at most 4 MiB for a package, 64 KiB
-for a validation result) and reject more than 65,536 transport chunks. Reads yield
-every 256 chunks so cancellation/deadline tasks run; cancellation does not wait
-for an underlying producer's cleanup. Cancel, Escape, a changed selection/request or leaving Evidence retires
-the pending result. An already started bounded server operation may finish.
+data outside the local service. An operation has no deadline. A package
+response is read whole; a validation result is read into one 64 KiB buffer,
+which its 64-issue list fits, and more than 65,536 transport chunks are
+refused. Reads yield every 256 chunks so cancellation tasks run; cancellation
+does not wait for an underlying producer's cleanup. Cancel, Escape, a changed
+selection/request or leaving Evidence retires the pending result and stops the
+local service's work.
 
 A valid package is internally consistent, untrusted metadata, not authenticated
 evidence. A supplied file's provenance and export-time verification remain
@@ -3786,6 +3796,8 @@ base64 bytes, or a selected retained artifact. Declare byte order, channels and
 frames; optionally enable a reference. Inspect / compare is explicit. Raw bits,
 signed zero, NaN/Infinity counts, input digests, finite deltas/ULP and caller
 tolerances remain distinct. Sample pages do not narrow full-buffer metrics.
+Buffers and artifacts of any size are compared whole: the notice counts the
+seconds a comparison runs, and **Cancel** stops it, in the backend too.
 Edits, cancellation and failures keep the last report visibly stale.
 
 This uses the local Rust backend, including live native sessions. Stored-evidence

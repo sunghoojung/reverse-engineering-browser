@@ -99,7 +99,7 @@ $(BUILD_DIR)/apps/native-console/main.o: CPPFLAGS += -Ibrowser/integration/brave
 $(DECODER_BINARY): LDLIBS += $(ZLIB_LIBS)
 
 # Authored sanitizer fixtures call the same parser through a test-only process.
-# Never package this driver or relax the production decoder's process limits.
+# Never package this driver.
 $(BUILD_DIR)/reb-decoder-test: $(BUILD_DIR)/tools/decoder-test-driver.o $(BUILD_DIR)/src/analysis/decoder.o mk/native.mk
 	@mkdir -p $(@D)
 	$(CXX) $(filter %.o,$^) $(LDFLAGS) $(LDLIBS) $(ZLIB_LIBS) -o $@
@@ -136,15 +136,15 @@ NATIVE_OBJECTS := $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(NATIVE_CPP_SOURCES)) \
 	$(NATIVE_CONSOLE_MESSAGES_OBJECT) $(NATIVE_PROBE_QUEUE_OBJECT) $(NATIVE_CONSOLE_IO_OBJECT) $(NATIVE_WORKER_SOURCE_OBJECT) $(NATIVE_WORKER_OBSERVATION_OBJECT) $(NATIVE_WORKER_TRANSFER_OBJECT) $(NATIVE_WORKER_AUTHORITY_OBJECT) $(NATIVE_WORKER_TRANSFER_GATE_OBJECT) \
 	$(NATIVE_PROXY_POLICY_OBJECT) $(BUILD_DIR)/tools/check-native-proxy-policy.o $(BUILD_DIR)/tools/check-native-console-document-start.o $(BUILD_DIR)/tools/decoder-test-driver.o $(BUILD_DIR)/tools/check-owned-vm-fixture.o
 
-$(NATIVE_OBJECTS) $(BUILD_DIR)/tools/check-magic-decoder-limits.o: mk/config.mk mk/native.mk $(MACOS_INFO_PLIST)
+$(NATIVE_OBJECTS) $(BUILD_DIR)/tools/check-decoder-scale.o: mk/config.mk mk/native.mk $(MACOS_INFO_PLIST)
 $(APP_BINARIES) $(NATIVE_PROXY_POLICY_TEST) $(OWNED_VM_FIXTURE_TEST) $(NATIVE_TEST_BINARIES): mk/native.mk
 
 -include $(NATIVE_OBJECTS:.o=.d)
 
-$(BUILD_DIR)/check-magic-decoder-limits: $(BUILD_DIR)/tools/check-magic-decoder-limits.o $(BUILD_DIR)/src/analysis/decoder.o
+$(BUILD_DIR)/check-decoder-scale: $(BUILD_DIR)/tools/check-decoder-scale.o $(BUILD_DIR)/src/analysis/decoder.o
 	@mkdir -p $(@D)
 	$(CXX) $(filter %.o,$^) $(LDFLAGS) $(LDLIBS) $(ZLIB_LIBS) -o $@
--include $(BUILD_DIR)/tools/check-magic-decoder-limits.d
+-include $(BUILD_DIR)/tools/check-decoder-scale.d
 
 # Test-only ABI producer. No authored JSON substitute for cross-language checks.
 NATIVE_WASM_DISPATCH_GOLDEN := $(BUILD_DIR)/reb-native-wasm-dispatch-golden
@@ -209,4 +209,4 @@ $(NATIVE_JS_DISPATCH_GOLDEN): $(BUILD_DIR)/tools/native-js-dispatch-golden.o $(B
 .PHONY: cpp-build
 cpp-build: $(APP_BINARIES) $(NATIVE_TEST_BINARIES) $(NATIVE_PROXY_POLICY_TEST) $(OWNED_VM_FIXTURE_TEST) \
 	$(NATIVE_WASM_DISPATCH_GOLDEN) $(NATIVE_WASM_GUEST_GOLDEN) $(NATIVE_JS_DISPATCH_GOLDEN) \
-	$(BUILD_DIR)/check-magic-decoder-limits $(NATIVE_PROBE_QUEUE_OBJECT)
+	$(BUILD_DIR)/check-decoder-scale $(NATIVE_PROBE_QUEUE_OBJECT)

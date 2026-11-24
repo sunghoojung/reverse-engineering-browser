@@ -306,6 +306,11 @@ const inventory = {ranking_version: 1, site_count: 3, br_table_count: 2, call_in
 const inventoryDocument = structuredClone(fixture);
 inventoryDocument.workspaces[0].dispatch_inventory = inventory;
 assert(validateModule(inventoryDocument));
+// Every site is listed since VM detector 1.13.0; documents listed at most 256 before.
+const everySite = structuredClone(inventoryDocument);
+everySite.workspaces[0].dispatch_inventory = {...inventory, site_count: 300, br_table_count: 300, call_indirect_count: 0,
+  candidates: Array.from({length: 300}, (_, index) => ({...site(45 + index * 600, 200, index), function_body_offset: 40 + index * 600}))};
+assert(validateModule(everySite), 'an inventory of 300 listed sites validates');
 for (const mutate of [
   value => { value.site_count = 4; }, value => { value.omitted_site_count = 1; },
   value => { value.selected_byte_offset = 49; }, value => { value.ranking_version = 2; },
@@ -393,6 +398,14 @@ shapedWorkspace.handler_tables = [...tables, {kind: 'element', evidence_class: '
     {segment_index: 1, placement: 'relative', offset: null, global_index: 0, entry_count: 2}]}];
 const shapedDocument = {...inventoryDocument, workspaces: [shapedWorkspace]};
 assert(validateModule(shapedDocument), 'classified workspace with element segments');
+// Every classified site is listed since VM detector 1.13.0, which listed 256 before.
+const everyClassified = structuredClone(shapedDocument);
+everyClassified.workspaces[0].dispatch_classification = {...classification, site_count: 304,
+  role_counts: {...classification.role_counts, other: 301},
+  kind_counts: {...classification.kind_counts, switch_on_value: 302},
+  sites: [...classification.sites, ...Array.from({length: 300}, (_, index) =>
+    shape(100 + index, 'switch_on_value', 'call_argument', 'unknown', 'other'))].sort((a, b) => a.location.byte_offset - b.location.byte_offset)};
+assert(validateModule(everyClassified), 'a classification of 304 listed sites validates');
 for (const mutate of [
   value => { value.dispatch_classification.sites[2].role = 'interpreter-candidate'; },
   value => { value.dispatch_classification.sites[3].role = 'other'; },
@@ -580,12 +593,15 @@ assert.equal(enter.defaultPrevented, true, 'Enter is handled by the button, not 
 assert.equal(retainedFilter.value, '', 'Enter on Select retained site clears an excluding filter');
 assert.equal(filteredRows[0].hidden, false);
 assert.equal(renderApiState.selectedVmHandlerKey, '0::45');
+// Every site is listed now; a document an earlier detector truncated says so.
 const boundedInventory = structuredClone(inventory);
 boundedInventory.candidates = Array.from({length: 65}, (_, index) => site(45 + index * 6, 200, index));
 boundedInventory.site_count = 70; boundedInventory.br_table_count = 70; boundedInventory.call_indirect_count = 0;
 boundedInventory.omitted_site_count = 5;
 const pagedInventory = renderApi.renderVmDispatchInventory({...workspace, dispatch_inventory: boundedInventory});
-assert(pagedInventory.textContent.includes('5 omitted'));
+assert(pagedInventory.textContent.includes('65 ranked sites retained; 5 more were not listed by the earlier detector that produced this document.'));
+const completeInventory = {...boundedInventory, site_count: 65, br_table_count: 65, omitted_site_count: 0};
+assert(renderApi.renderVmDispatchInventory({...workspace, dispatch_inventory: completeInventory}).textContent.includes('Every site is ranked and listed.'));
 findButton(pagedInventory, 'Next dispatch candidates').click(); findButton(pagedInventory, 'Next dispatch candidates').click();
 assert(pagedInventory.textContent.includes('f64')); assert(findButton(pagedInventory, 'Next dispatch candidates').disabled);
 console.log('PASS ranked module inventory counts, bounded paging, malformed metadata, default-vs-explicit selection and static inference labels');

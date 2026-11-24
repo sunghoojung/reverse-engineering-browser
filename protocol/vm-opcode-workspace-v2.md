@@ -303,7 +303,7 @@ claims:
   binding that cannot be resolved with certainty, or a site not classified
   because of the work limit.
 - The gate reads the full classification from the same metered run that
-  produced the analysis, not the 256 listed sites and not a second pass.
+  produced the analysis, not the listed sites and not a second pass.
 - When the gate removes handlers, the workspace records the `handler-withheld`
   omission with their count instead of `handler-unavailable`, and the analysis
   keeps the tier recovery decided.
@@ -389,6 +389,12 @@ configuration's ordinal for that stream, from 0 to 4294967294, because the
 browser now paces each stream per one-second window instead of keeping its
 first 16 samples. Documents from earlier producers keep indexes below 16 and
 stay valid.
+
+Producer 2.20.0 lists every site of its `dispatch_inventory` and
+`dispatch_classification` and every refused site of its JavaScript arming
+export, so their `omitted_site_count` and `omitted_refused_count` are always 0.
+Earlier producers listed 256 sites and 64 refused sites and counted the rest;
+their documents stay valid.
 
 A JavaScript dispatch sample names its interpreter artifact, not a dispatch
 site. Its claims attach only when the artifact has an interpreter-candidate
@@ -502,16 +508,17 @@ counted as `nested-guest-unproven`.
 
 A JavaScript workspace with at least one interpreter-candidate site carries
 `js_dispatch_arming`: the `native-js-dispatch-sites-v1` site file for its
-`switch` and `indexed call` interpreter candidates, at most 8 in source order,
+`switch` and `indexed call` interpreter candidates, at most 256 in source order,
 from the full classification. Each site names the artifact, its raw digest and
 static `byte_offset`, the shape, the decoded text's UTF-16LE SHA-256 and length,
 and the UTF-16 anchor. `file` is the exact canonical file text (sorted keys, no
 whitespace, as base::JSONWriter writes it), or null when nothing can be armed.
-Every interpreter candidate that is not armed is listed in `refused` (at most
-64, with `omitted_refused_count`) with `js-dispatch-shape-unobservable`
-(aliased call, self call, if ladder, optional chain),
-`js-dispatch-anchor-unresolved`, `js-dispatch-site-limit` past 8, or
-`js-dispatch-source-not-utf8`. The file is served by `get_vm_opcode_workspace`;
+Every interpreter candidate that is not armed is listed in `refused` with
+`js-dispatch-shape-unobservable` (aliased call, self call, if ladder, optional
+chain), `js-dispatch-anchor-unresolved`, `js-dispatch-site-limit` past the 256
+sites a site file can arm (the record's one-byte slot), or
+`js-dispatch-source-not-utf8`. `omitted_refused_count` is always 0; earlier
+revisions listed 64 refused sites and counted the rest there. The file is served by `get_vm_opcode_workspace`;
 for example `reb-api get_vm_opcode_workspace` piped to
 `jq -r '.workspaces[] | select(.interpreter_artifact_id == "12") | .js_dispatch_arming.file'`
 writes it for `REB_NATIVE_JS_DISPATCH_SITES`. Exporting arms nothing.
@@ -556,9 +563,10 @@ when the module instruction preview is visible.
 
 The optional `dispatch_inventory` is the same static inventory exposed in the
 VM detector's `frontend`. It counts all decoded `br_table` and `call_indirect`
-sites, including those outside loops, and retains at most 256 ranked metadata
-records. `site_count` is the complete decoded count; `omitted_site_count` counts
-unlisted records, not missing module traversal. A truncated inventory also adds
+sites, including those outside loops, and lists every one of them, ranked.
+`site_count` is the complete decoded count and `omitted_site_count` is always
+0. VM detector producers before 1.13.0 retained at most 256 ranked metadata
+records, counted the unlisted ones in `omitted_site_count` and added
 `dispatch-inventory-limit` to coverage omissions. `arm_count` is the number of
 explicit `br_table` targets, excluding the default, and is null for
 `call_indirect`. `unique_target_count` is the number of distinct Wasm label

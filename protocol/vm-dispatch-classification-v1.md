@@ -260,11 +260,11 @@ ranking input: the detector's Wasm ranking keeps its own element fanout, which
 sums segment entries, so classification never moves a tier or score. A ranking
 change needs its own ranking version.
 
-The object lists at most 256 sites. Interpreter candidates and multiplexers
-are listed before other sites. Within a role, structural scheduling strength
-breaks ties before source order. A JavaScript loop bounding the selector cursor
-against the fetched buffer's length precedes otherwise similar cursor sites. `site_count`, `role_counts` and `kind_counts` cover every classified
-site, and `omitted_site_count` names the classified sites that are not listed.
+The object lists every classified site, in byte order, and `site_count`,
+`role_counts` and `kind_counts` cover them all. `omitted_site_count` is always
+0. Producers before VM detector 1.13.0 listed at most 256 sites, interpreter
+candidates and multiplexers before other sites and stronger sites first within
+a role, and counted the classified sites they did not list there.
 
 ## Work bounds
 
@@ -441,8 +441,8 @@ classification is never an input to handler recovery, tier or score:
   handlers. Exact AST case/property spans connect proof records to unchanged
   recovery; workspace extraction never parses the artifact a second time.
 - The gate reads the roles of every classified site from the same metered
-  classification run that produced the analysis, never the bounded listed
-  document and never a second classification pass.
+  classification run that produced the analysis, never the listed document
+  and never a second classification pass.
 - When the gate removes handlers, the workspace records `handler-withheld`
   with their count instead of `handler-unavailable`, and the tier stays what
   recovery decided. A differential test runs every owned input with and

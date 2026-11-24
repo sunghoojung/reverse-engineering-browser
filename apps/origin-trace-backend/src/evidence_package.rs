@@ -13,14 +13,11 @@ use std::{
     },
 };
 
-pub const MAX_BYTES: usize = 4 * 1024 * 1024;
-pub const MAX_NODES: usize = 200_000;
+/// A package, an export request and a source row are parsed recursively, one
+/// native stack frame per level; the contract nests at most six levels, so
+/// anything deeper is refused before it can exhaust the stack. No size, node,
+/// string or record count is bounded: a package is as large as its selection.
 pub const MAX_DEPTH: usize = 32;
-pub const MAX_STRING_BYTES: usize = 4096;
-pub const MAX_EVENTS: usize = 1024;
-pub const MAX_ARTIFACTS: usize = 64;
-pub const MAX_RELATIONSHIPS: usize = 4096;
-pub const MAX_GAPS: usize = 4096;
 pub const SERIALIZATION_PROFILE: &str = "reb-json-semantic-v1";
 pub const REDACTION_PROFILE: &str = "reb-metadata-only-v1";
 pub const SEMANTICS_PROFILE: &str = "reb-api-marker-v1";
@@ -79,9 +76,9 @@ impl fmt::Display for ParseError {
 }
 impl std::error::Error for ParseError {}
 
-/// Stops a package operation whose request went away. There is no deadline:
-/// a package is bounded by its own size, node and record limits, so a valid
-/// one is validated, exported or compared however long the machine needs.
+/// Stops a package operation whose request went away. There is no deadline,
+/// so a package of any size is validated, exported or compared however long
+/// the machine needs.
 struct Budget {
     cancelled: Arc<AtomicBool>,
 }
@@ -105,7 +102,6 @@ impl Budget {
 }
 struct Parser<'a> {
     budget: &'a Budget,
-    nodes: usize,
     fault: Option<ParseError>,
 }
 impl Parser<'_> {
@@ -114,18 +110,10 @@ impl Parser<'_> {
         E::custom("Invalid bounded package JSON")
     }
     fn node<E: de::Error>(&mut self, depth: usize) -> std::result::Result<(), E> {
-        if depth > MAX_DEPTH || self.nodes >= MAX_NODES || self.budget.check().is_err() {
+        if depth > MAX_DEPTH || self.budget.check().is_err() {
             return Err(self.fail(ParseError::ResourceLimit));
         }
-        self.nodes += 1;
         Ok(())
-    }
-    fn string<E: de::Error>(&mut self, value: &str) -> std::result::Result<(), E> {
-        if value.len() > MAX_STRING_BYTES {
-            Err(self.fail(ParseError::ResourceLimit))
-        } else {
-            Ok(())
-        }
     }
 }
 struct Seed<'a, 'b> {
@@ -163,11 +151,9 @@ impl<'de> Visitor<'de> for Seed<'_, '_> {
         Err(self.parser.fail(ParseError::InvalidNumber))
     }
     fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<Value, E> {
-        self.parser.string(v)?;
         Ok(Value::String(v.into()))
     }
     fn visit_string<E: de::Error>(self, v: String) -> std::result::Result<Value, E> {
-        self.parser.string(&v)?;
         Ok(Value::String(v))
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<Value, A::Error> {
@@ -184,7 +170,6 @@ impl<'de> Visitor<'de> for Seed<'_, '_> {
         let mut values = Map::new();
         while let Some(key) = map.next_key::<String>()? {
             self.parser.node(self.depth + 1)?;
-            self.parser.string(&key)?;
             if values.contains_key(&key) {
                 return Err(self.parser.fail(ParseError::DuplicateKey));
             }
@@ -198,36 +183,9 @@ impl<'de> Visitor<'de> for Seed<'_, '_> {
     }
 }
 fn parse(raw: &[u8], budget: &Budget) -> std::result::Result<Value, ParseError> {
-    if raw.len() > MAX_BYTES {
-        return Err(ParseError::ResourceLimit);
-    }
     budget.check()?;
-    // A decoded 4096-byte string needs at most six JSON source bytes per byte.
-    // Bound serde's temporary string/key allocation before it decodes a token.
-    let (mut in_string, mut escaped, mut length) = (false, false, 0usize);
-    for chunk in raw.chunks(64 * 1024) {
-        budget.check()?;
-        for byte in chunk {
-            if in_string {
-                if !escaped && *byte == b'"' {
-                    in_string = false;
-                    continue;
-                }
-                length += 1;
-                if length > 6 * MAX_STRING_BYTES {
-                    return Err(ParseError::ResourceLimit);
-                }
-                escaped = !escaped && *byte == b'\\';
-            } else if *byte == b'"' {
-                in_string = true;
-                escaped = false;
-                length = 0;
-            }
-        }
-    }
     let mut parser = Parser {
         budget,
-        nodes: 0,
         fault: None,
     };
     let mut deserializer = serde_json::Deserializer::from_slice(raw);
@@ -276,7 +234,7 @@ impl Report {
     fn issue(&mut self, code: &'static str, section: &'static str, index: Option<usize>) {
         let issues = self.value["issues"].as_array_mut().unwrap();
         if issues.len() < 64 {
-            issues.push(json!({"code":code,"section":section,"index":index.filter(|i| *i < 4096)}));
+            issues.push(json!({"code":code,"section":section,"index":index}));
         } else {
             self.value["issues_truncated"] = json!(true);
         }
@@ -899,15 +857,15 @@ fn normalized(package: &Value, budget: &Budget) -> std::result::Result<Value, Pa
     }
     Ok(value)
 }
-struct BoundedWriter<'a> {
+/// Serializes a package, stopping once its request goes away.
+struct CancellableWriter<'a> {
     bytes: Vec<u8>,
     budget: &'a Budget,
 }
-impl std::io::Write for BoundedWriter<'_> {
+impl std::io::Write for CancellableWriter<'_> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if self.bytes.len().saturating_add(bytes.len()) > MAX_BYTES || self.budget.check().is_err()
-        {
-            return Err(std::io::Error::other("Package resource limit"));
+        if self.budget.check().is_err() {
+            return Err(std::io::Error::other("Package operation cancelled"));
         }
         self.bytes.extend_from_slice(bytes);
         Ok(bytes.len())
@@ -918,7 +876,7 @@ impl std::io::Write for BoundedWriter<'_> {
 }
 fn canonical(package: &Value, budget: &Budget) -> std::result::Result<Vec<u8>, ParseError> {
     let value = normalized(package, budget)?;
-    let mut writer = BoundedWriter {
+    let mut writer = CancellableWriter {
         bytes: Vec::new(),
         budget,
     };
@@ -941,7 +899,7 @@ fn digest(bytes: &[u8], budget: &Budget) -> std::result::Result<String, ParseErr
 pub fn package_id(package: &Value) -> std::result::Result<String, ParseError> {
     let budget = Budget::new();
     // Bound programmatically created values through the same parser before work.
-    let mut writer = BoundedWriter {
+    let mut writer = CancellableWriter {
         bytes: Vec::new(),
         budget: &budget,
     };
@@ -1083,8 +1041,6 @@ pub(crate) fn validated_normalized_bytes(raw: &[u8], cancelled: Arc<AtomicBool>)
     Ok(value)
 }
 
-pub const MAX_EXPORT_REQUEST_BYTES: usize = 256 * 1024;
-
 /// Returns response bytes constructed under all requested shared store leases.
 /// It never starts/stops capture, fetches content, or executes captured code.
 pub fn export_bytes(
@@ -1115,9 +1071,6 @@ fn export_failure(error: ParseError, budget: &Budget) -> Error {
     }
 }
 fn export_request(raw: &[u8], budget: &Budget) -> Result<Value> {
-    if raw.len() > MAX_EXPORT_REQUEST_BYTES {
-        return Err(Error::bad("The export request exceeds its byte limit"));
-    }
     let value = parse(raw, budget).map_err(|error| {
         if budget.check().is_err() {
             export_failure(error, budget)
@@ -1137,16 +1090,10 @@ fn export_request(raw: &[u8], budget: &Budget) -> Result<Value> {
     {
         return Err(Error::bad("The export request is invalid"));
     }
-    for (section, kind, maximum) in [
-        ("events", "event", MAX_EVENTS),
-        ("artifacts", "artifact", MAX_ARTIFACTS),
-    ] {
+    for (section, kind) in [("events", "event"), ("artifacts", "artifact")] {
         let values = value["selection"][section]
             .as_array()
             .ok_or_else(|| Error::bad("The export selection is invalid"))?;
-        if values.len() > maximum {
-            return Err(Error::bad("The export selection exceeds its count limit"));
-        }
         let mut seen = BTreeSet::new();
         for item in values {
             budget.check().map_err(|e| export_failure(e, budget))?;
@@ -1201,7 +1148,7 @@ fn finish_export(mut package: Value, budget: &Budget) -> Result<Vec<u8>> {
         )
         .map_err(|e| export_failure(e, budget))?
     );
-    let mut writer = BoundedWriter {
+    let mut writer = CancellableWriter {
         bytes: Vec::new(),
         budget,
     };
@@ -1412,19 +1359,91 @@ fn source_artifact(value: &mut Value) -> Result<(Key, Value)> {
     }
     Ok((k, projected))
 }
+/// Every identity an export's source scans saw, with the SHA-256 of its
+/// record, in a private temporary SQLite database that SQLite deletes when it
+/// closes. A store of any length is checked for duplicate and conflicting
+/// identities this way, in the memory of SQLite's page cache rather than one
+/// entry per row.
 #[cfg(unix)]
-struct ExportMemory {
-    retained: usize,
+struct Seen {
+    connection: rusqlite::Connection,
 }
 #[cfg(unix)]
-impl ExportMemory {
-    fn charge(&mut self, bytes: usize) -> Result<()> {
-        self.retained = self
-            .retained
-            .checked_add(bytes)
-            .ok_or_else(crate::evidence::frozen::limit)?;
-        if self.retained > 32 * 1024 * 1024 {
-            return Err(crate::evidence::frozen::limit());
+impl Seen {
+    fn new() -> Result<Self> {
+        let failed = |_| Error::new(500, "The export's temporary identity index is unavailable");
+        // An empty name is a temporary database on disk, removed on close.
+        let connection = rusqlite::Connection::open("").map_err(failed)?;
+        connection
+            .execute_batch(
+                "PRAGMA synchronous=OFF; PRAGMA cache_size=-16384;
+                 CREATE TABLE seen (kind INTEGER NOT NULL, a INTEGER NOT NULL, b INTEGER NOT NULL,
+                     c INTEGER NOT NULL, digest BLOB NOT NULL, PRIMARY KEY (kind, a, b, c)) WITHOUT ROWID;
+                 BEGIN;",
+            )
+            .map_err(failed)?;
+        Ok(Self { connection })
+    }
+    /// Unsigned identifiers keep their order as SQLite's signed integers.
+    fn columns(key: Key) -> [i64; 4] {
+        let ordered = |value: u64| (value ^ (1 << 63)) as i64;
+        match key {
+            Key::Event(s, p, n) => [0, ordered(s), i64::from(p), ordered(n)],
+            Key::Artifact(s, a) => [1, ordered(s), ordered(a), 0],
+        }
+    }
+    fn failed(_: rusqlite::Error) -> Error {
+        Error::new(500, "The export's temporary identity index failed")
+    }
+    /// Records `key`, or returns the digest it was first seen with.
+    fn insert(&self, key: Key, digest: &[u8; 32]) -> Result<Option<[u8; 32]>> {
+        let [kind, a, b, c] = Self::columns(key);
+        let inserted = self
+            .connection
+            .prepare_cached("INSERT OR IGNORE INTO seen VALUES (?1, ?2, ?3, ?4, ?5)")
+            .and_then(|mut insert| insert.execute(rusqlite::params![kind, a, b, c, &digest[..]]))
+            .map_err(Self::failed)?;
+        if inserted == 1 {
+            return Ok(None);
+        }
+        let previous: Vec<u8> = self
+            .connection
+            .prepare_cached("SELECT digest FROM seen WHERE kind=?1 AND a=?2 AND b=?3 AND c=?4")
+            .and_then(|mut select| {
+                select.query_row(rusqlite::params![kind, a, b, c], |row| row.get(0))
+            })
+            .map_err(Self::failed)?;
+        Ok(Some(previous.try_into().unwrap_or([0; 32])))
+    }
+    fn contains(&self, key: Key) -> Result<bool> {
+        let [kind, a, b, c] = Self::columns(key);
+        self.connection
+            .prepare_cached("SELECT 1 FROM seen WHERE kind=?1 AND a=?2 AND b=?3 AND c=?4")
+            .and_then(|mut select| select.exists(rusqlite::params![kind, a, b, c]))
+            .map_err(Self::failed)
+    }
+    /// The sequence numbers seen for one process from `low` to `high`, in order.
+    fn sequences(
+        &self,
+        session: u64,
+        process: u32,
+        (low, high): (u64, u64),
+        cancelled: &AtomicBool,
+        mut each: impl FnMut(u64) -> Result<()>,
+    ) -> Result<()> {
+        let [_, a, b, low] = Self::columns(Key::Event(session, process, low));
+        let [.., high] = Self::columns(Key::Event(session, process, high));
+        let mut select = self
+            .connection
+            .prepare_cached("SELECT c FROM seen WHERE kind=0 AND a=?1 AND b=?2 AND c BETWEEN ?3 AND ?4 ORDER BY c")
+            .map_err(Self::failed)?;
+        let mut rows = select
+            .query(rusqlite::params![a, b, low, high])
+            .map_err(Self::failed)?;
+        while let Some(row) = rows.next().map_err(Self::failed)? {
+            crate::evidence::frozen::check(cancelled)?;
+            let ordered: i64 = row.get(0).map_err(Self::failed)?;
+            each((ordered as u64) ^ (1 << 63))?;
         }
         Ok(())
     }
@@ -1457,12 +1476,7 @@ fn stored_export(
     } else {
         Some(Store::artifacts(artifacts)?)
     };
-    // Reserve fixed overhead for bounded selector/window trees and their roots
-    // before charging each retained source identity, projection and reference.
-    let mut memory = ExportMemory {
-        retained: 1024 * 1024,
-    };
-    let mut seen: BTreeMap<Key, [u8; 32]> = BTreeMap::new();
+    let seen = Seen::new()?;
     let mut windows: BTreeMap<(u64, u32), (u64, u64)> = BTreeMap::new();
     for k in &events_selected {
         if let Key::Event(s, p, n) = *k {
@@ -1479,7 +1493,9 @@ fn stored_export(
     let mut event_file = None;
     if let Some((store, basename)) = &events_store {
         let mut file = store.root.file(basename, false)?;
-        file.lines(64 * 1024 * 1024, 4096, 100_000, &budget.cancelled, |line| {
+        // Every row, to EOF, at any length: 4,096 bytes is the event record
+        // contract, not a scan bound.
+        file.lines(u64::MAX, 4096, usize::MAX, &budget.cancelled, |line| {
             let value = parse(line, budget).map_err(|e| export_failure(e, budget))?;
             let (k, projected, payload, gap) = source_event(&value, budget)?;
             if gap {
@@ -1504,30 +1520,19 @@ fn stored_export(
                         unsigned(&projected["monotonic_time_ns"], false).unwrap(),
                         count,
                     );
-                    if !markers.contains_key(&marker) {
-                        if markers.len() >= MAX_GAPS {
-                            return Err(frozen::limit());
-                        }
-                        memory.charge(512)?;
-                    }
                     *markers.entry(marker).or_default() += 1;
                 }
             } else {
                 let digest: [u8; 32] =
                     Sha256::digest(serde_json::to_vec(&value).map_err(|_| frozen::limit())?).into();
-                if let Some(previous) = seen.get(&k) {
-                    return Err(Error::conflict(if *previous == digest {
+                if let Some(previous) = seen.insert(k, &digest)? {
+                    return Err(Error::conflict(if previous == digest {
                         "The evidence source contains a duplicate identity"
                     } else {
                         "The evidence source contains a conflicting identity"
                     }));
                 }
-                // Conservative allocation allowance includes map nodes, keys,
-                // digests and selected Value trees, before retained growth.
-                memory.charge(256)?;
-                seen.insert(k, digest);
                 if events_selected.contains(&k) {
-                    memory.charge(16 * 1024)?;
                     package["records"]["events"]
                         .as_array_mut()
                         .unwrap()
@@ -1541,43 +1546,36 @@ fn stored_export(
     let mut artifact_file = None;
     if let Some(store) = &artifacts_store {
         let mut file = store.root.file("manifest.jsonl", false)?;
+        // The manifest's record contract, its 2 MiB URL included, not a scan bound.
         let record = crate::artifact_query::MANIFEST_RECORD_BYTES;
-        file.lines(
-            16 * 1024 * 1024,
-            record,
-            10_000,
-            &budget.cancelled,
-            |line| {
-                let mut value = parse(line, budget).map_err(|e| export_failure(e, budget))?;
-                let digest: [u8; 32] =
-                    Sha256::digest(serde_json::to_vec(&value).map_err(|_| frozen::limit())?).into();
-                let (k, projected) = source_artifact(&mut value)?;
-                if let Some(previous) = seen.get(&k) {
-                    return Err(Error::conflict(if *previous == digest {
-                        "The evidence source contains a duplicate identity"
-                    } else {
-                        "The evidence source contains a conflicting identity"
-                    }));
-                }
-                memory.charge(256)?;
-                seen.insert(k, digest);
-                if artifacts_selected.contains(&k) {
-                    memory.charge(8 * 1024)?;
-                    package["records"]["artifacts"]
-                        .as_array_mut()
-                        .unwrap()
-                        .push(projected);
-                }
-                Ok(())
-            },
-        )?;
+        file.lines(u64::MAX, record, usize::MAX, &budget.cancelled, |line| {
+            let mut value = parse(line, budget).map_err(|e| export_failure(e, budget))?;
+            let digest: [u8; 32] =
+                Sha256::digest(serde_json::to_vec(&value).map_err(|_| frozen::limit())?).into();
+            let (k, projected) = source_artifact(&mut value)?;
+            if let Some(previous) = seen.insert(k, &digest)? {
+                return Err(Error::conflict(if previous == digest {
+                    "The evidence source contains a duplicate identity"
+                } else {
+                    "The evidence source contains a conflicting identity"
+                }));
+            }
+            if artifacts_selected.contains(&k) {
+                package["records"]["artifacts"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(projected);
+            }
+            Ok(())
+        })?;
         artifact_file = Some(file);
     }
-    if events_selected
-        .iter()
-        .chain(artifacts_selected.iter())
-        .any(|k| !seen.contains_key(k))
-    {
+    let mut missing = false;
+    for k in events_selected.iter().chain(artifacts_selected.iter()) {
+        frozen::check(&budget.cancelled)?;
+        missing |= !seen.contains(*k)?;
+    }
+    if missing {
         return Err(
             Error::new(404, "An exact selected evidence identity was not found")
                 .with_code(crate::error::Code::TargetUnavailable),
@@ -1610,31 +1608,24 @@ fn stored_export(
         push_gap(
             &mut package,
             json!({"kind":"queue_drop_marker","session_id":s.to_string(),"process_id":p,"anchor_sequence":n.to_string(),"monotonic_time_ns":time.to_string(),"reported_dropped_count":count.map(|c| c.to_string()),"count_state":if count.is_some(){"reported"}else{"count_unknown"},"occurrences":occurrences}),
-            &mut memory,
-        )?;
+        );
     }
-    let mut previous: Option<(u64, u32, u64)> = None;
-    for k in seen.keys() {
-        frozen::check(&budget.cancelled)?;
-        if let Key::Event(s, p, n) = *k
-            && windows
-                .get(&(s, p))
-                .is_some_and(|(lo, hi)| *lo <= n && n <= *hi)
-        {
-            if let Some((ps, pp, pn)) = previous
-                && (ps, pp) == (s, p)
+    for (&(s, p), &window) in &windows {
+        let mut previous: Option<u64> = None;
+        seen.sequences(s, p, window, &budget.cancelled, |n| {
+            if let Some(pn) = previous
                 && n > pn + 1
             {
                 push_gap(
                     &mut package,
                     json!({"kind":"sequence_discontinuity","session_id":s.to_string(),"process_id":p,"first_missing_sequence":(pn+1).to_string(),"last_missing_sequence":(n-1).to_string()}),
-                    &mut memory,
-                )?;
+                );
             }
-            previous = Some((s, p, n));
-        }
+            previous = Some(n);
+            Ok(())
+        })?;
     }
-    let mut relationships = Vec::new();
+    let (mut relationships, mut gaps) = (Vec::new(), Vec::new());
     for (section, kind) in [("events", "event"), ("artifacts", "artifact")] {
         for value in records(&package, section) {
             frozen::check(&budget.cancelled)?;
@@ -1680,37 +1671,27 @@ fn stored_export(
                     {
                         "not_inspected"
                     }
-                    Some(k) if seen.contains_key(&k) => "outside_selection",
+                    Some(k) if seen.contains(k)? => "outside_selection",
                     Some(_) => "missing_in_retained_source",
                 };
-                if relationships.len() >= MAX_RELATIONSHIPS {
-                    return Err(frozen::limit());
+                let relationship = json!({"from_kind":kind,"from_key":key_value(from),"relation":relation,"to_kind":to_kind,"to_key":to.map(key_value),"resolution":resolution});
+                // Each relationship's gap is found from its own record, so
+                // the pass stays linear in the selection.
+                match resolution {
+                    "missing_in_retained_source" => gaps.push(
+                        json!({"kind":"missing_reference","from_kind":kind,"from_key":relationship["from_key"],"relation":relation,"to_kind":to_kind,"to_key":relationship["to_key"]}),
+                    ),
+                    "insufficient_identity" => gaps.push(
+                        json!({"kind":"creator_identity_incomplete","artifact_key":relationship["from_key"],"creator_event_id":value["creator_event_id"]}),
+                    ),
+                    _ => (),
                 }
-                memory.charge(4096)?;
-                relationships.push(json!({"from_kind":kind,"from_key":key_value(from),"relation":relation,"to_kind":to_kind,"to_key":to.map(key_value),"resolution":resolution}));
+                relationships.push(relationship);
             }
         }
     }
-    for relation in &relationships {
-        if relation["resolution"] == "missing_in_retained_source" {
-            push_gap(
-                &mut package,
-                json!({"kind":"missing_reference","from_kind":relation["from_kind"],"from_key":relation["from_key"],"relation":relation["relation"],"to_kind":relation["to_kind"],"to_key":relation["to_key"]}),
-                &mut memory,
-            )?;
-        } else if relation["resolution"] == "insufficient_identity" {
-            let from = key("artifact", &relation["from_key"]).unwrap();
-            let creator = records(&package, "artifacts")
-                .iter()
-                .find(|v| key("artifact", &v["key"]) == Some(from))
-                .unwrap()["creator_event_id"]
-                .clone();
-            push_gap(
-                &mut package,
-                json!({"kind":"creator_identity_incomplete","artifact_key":relation["from_key"],"creator_event_id":creator}),
-                &mut memory,
-            )?;
-        }
+    for gap in gaps {
+        push_gap(&mut package, gap);
     }
     package["relationships"] = json!(relationships);
     let bytes = finish_export(package, budget)?;
@@ -1737,14 +1718,8 @@ fn stored_export(
     Ok(bytes)
 }
 #[cfg(unix)]
-fn push_gap(package: &mut Value, gap: Value, memory: &mut ExportMemory) -> Result<()> {
-    let gaps = package["gaps"].as_array_mut().unwrap();
-    if gaps.len() >= MAX_GAPS {
-        return Err(crate::evidence::frozen::limit());
-    }
-    memory.charge(4096)?;
-    gaps.push(gap);
-    Ok(())
+fn push_gap(package: &mut Value, gap: Value) {
+    package["gaps"].as_array_mut().unwrap().push(gap);
 }
 
 #[cfg(test)]
@@ -1993,27 +1968,17 @@ mod tests {
             parse_bytes(br#"{"a":18446744073709551616}"#).unwrap_err(),
             ParseError::InvalidNumber
         );
-        let string = format!("{{\"a\":\"{}\"}}", "a".repeat(MAX_STRING_BYTES));
-        assert!(parse_bytes(string.as_bytes()).is_ok());
-        assert_eq!(
-            parse_bytes(
-                string
-                    .replace(
-                        &"a".repeat(MAX_STRING_BYTES),
-                        &"a".repeat(MAX_STRING_BYTES + 1)
-                    )
-                    .as_bytes()
-            )
-            .unwrap_err(),
-            ParseError::ResourceLimit
-        );
-        let escaped = format!("{{\"a\":\"{}\"}}", "\\u0061".repeat(MAX_STRING_BYTES));
-        assert!(parse_bytes(escaped.as_bytes()).is_ok());
-        let string = format!("{{\"a\":\"{}\"}}", "é".repeat(MAX_STRING_BYTES / 2 + 1));
-        assert_eq!(
-            parse_bytes(string.as_bytes()).unwrap_err(),
-            ParseError::ResourceLimit
-        );
+        // Strings were cut at 4,096 bytes, documents at 4 MiB and 200,000
+        // parsed nodes. A string, a document and a node count of any size
+        // parse; only nesting is bounded, by the recursion of the parser.
+        for string in [
+            "a".repeat(1 << 20),
+            "é".repeat(1 << 19),
+            "\\u0061".repeat(1 << 18),
+        ] {
+            let raw = format!("{{\"a\":\"{string}\"}}");
+            assert!(parse_bytes(raw.as_bytes()).is_ok());
+        }
         let raw = format!(
             "{{\"a\":{}0{}}}",
             "[".repeat(MAX_DEPTH - 2),
@@ -2030,18 +1995,10 @@ mod tests {
             ParseError::ResourceLimit
         );
         let mut raw = b"{}".to_vec();
-        raw.resize(MAX_BYTES, b' ');
+        raw.resize(5 << 20, b' ');
         assert!(parse_bytes(&raw).is_ok());
-        raw.push(b' ');
-        assert_eq!(parse_bytes(&raw).unwrap_err(), ParseError::ResourceLimit);
-        // Root, member key and array consume three nodes; each scalar one.
-        let raw = format!("{{\"a\":[{}]}}", vec!["0"; MAX_NODES - 3].join(","));
+        let raw = format!("{{\"a\":[{}]}}", vec!["0"; 300_000].join(","));
         assert!(parse_bytes(raw.as_bytes()).is_ok());
-        let raw = raw.replacen("]", ",0]", 1);
-        assert_eq!(
-            parse_bytes(raw.as_bytes()).unwrap_err(),
-            ParseError::ResourceLimit
-        );
         let budget = Budget::cancellable(Arc::new(AtomicBool::new(true)));
         assert_eq!(
             parse(b"{}", &budget).unwrap_err(),
@@ -2369,26 +2326,18 @@ mod tests {
             assert_eq!(check(&value)["status"], "invalid");
             assert!(package_id(&value).is_err());
         }
-        for (section, max) in [("events", MAX_EVENTS), ("artifacts", MAX_ARTIFACTS)] {
-            let mut value = golden();
-            let record = value["records"][section][0].clone();
-            value["records"][section] = json!(vec![record; max + 1]);
-            assert_eq!(check(&value)["status"], "invalid");
-        }
-        for (section, max) in [("relationships", MAX_RELATIONSHIPS), ("gaps", MAX_GAPS)] {
-            let mut value = golden();
-            value[section] = json!(vec![value[section][0].clone(); max + 1]);
-            assert_eq!(check(&value)["status"], "invalid");
-        }
+        // The verdict covers every record; the report names the first 64
+        // reasons, so a validation result stays small at any package size.
         let mut value = golden();
-        value["records"]["events"] = json!(vec![json!({}); MAX_EVENTS]);
+        value["records"]["events"] = json!(vec![json!({}); 5000]);
         let result = check(&value);
+        assert_eq!(result["status"], "invalid");
         assert_eq!(array(&result, "issues").len(), 64);
         assert_eq!(result["issues_truncated"], true);
         assert!(serde_json::to_vec(&result).unwrap().len() < 64 * 1024);
         for issue in array(&result, "issues") {
             assert_eq!(issue.as_object().unwrap().len(), 3);
-            assert!(issue["index"].is_null() || issue["index"].as_u64().unwrap() < 4096);
+            assert!(issue["index"].is_null() || issue["index"].is_u64());
         }
     }
     #[test]
@@ -2460,10 +2409,12 @@ mod tests {
         assert!(issue(&check(&value), "duplicate_identity"));
     }
     #[test]
-    fn exact_record_and_collection_limits_are_reachable() {
+    fn records_and_collections_of_any_count_validate() {
+        // Packages held at most 1,024 events, 64 artifacts and 4,096
+        // relationships and gaps.
         let mut value = empty();
         let fixture = golden();
-        for (section, count) in [("events", MAX_EVENTS), ("artifacts", MAX_ARTIFACTS)] {
+        for (section, count) in [("events", 5000), ("artifacts", 300)] {
             let mut values = Vec::new();
             for n in 1..=count {
                 let mut record = fixture["records"][section][0].clone();
@@ -2487,14 +2438,13 @@ mod tests {
         value["provenance"]["consistency"] = json!("cooperative_stopped_store_v1");
         seal(&mut value);
         assert_eq!(check(&value)["status"], "valid", "{}", check(&value));
-        for (section, maximum) in [("relationships", MAX_RELATIONSHIPS), ("gaps", MAX_GAPS)] {
+        for section in ["relationships", "gaps"] {
             let mut value = golden();
-            value[section] = json!(vec![value[section][0].clone(); maximum]);
+            value[section] = json!(vec![value[section][0].clone(); 5000]);
             seal(&mut value);
-            assert!(!issue(&check(&value), "resource_limit"));
-            let next = value[section][0].clone();
-            value[section].as_array_mut().unwrap().push(next);
-            assert!(issue(&check(&value), "resource_limit"));
+            let result = check(&value);
+            assert!(issue(&result, "duplicate_identity"), "{result}");
+            assert!(!issue(&result, "resource_limit"), "{result}");
         }
     }
     #[test]
@@ -2540,7 +2490,7 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
-    fn export_request_memory_and_cancellation_bounds_are_exact() {
+    fn export_requests_of_any_size_parse_and_cancellation_stops_them() {
         let empty = json!({"protocol_version":1,"selection":{"events":[],"artifacts":[]}});
         let raw = serde_json::to_vec(&empty).unwrap();
         let path = std::path::Path::new("/nonexistent-source-that-empty-selection-must-not-read");
@@ -2557,18 +2507,13 @@ mod tests {
                 .status,
             499
         );
-        let mut exact = raw.clone();
-        exact.resize(MAX_EXPORT_REQUEST_BYTES, b' ');
-        assert!(export_request(&exact, &Budget::new()).is_ok());
-        exact.push(b' ');
-        assert_eq!(
-            export_request(&exact, &Budget::new()).unwrap_err().status,
-            400
-        );
-        for (section, kind, count) in [
-            ("events", "event", MAX_EVENTS),
-            ("artifacts", "artifact", MAX_ARTIFACTS),
-        ] {
+        // A request was at most 256 KiB, naming at most 1,024 events and
+        // 64 artifacts. Requests of any size and count are read.
+        let mut spaced = raw.clone();
+        spaced.resize(1 << 20, b' ');
+        assert!(export_request(&spaced, &Budget::new()).is_ok());
+        for (section, kind, count) in [("events", "event", 20_000), ("artifacts", "artifact", 5000)]
+        {
             let mut request = empty.clone();
             request["selection"][section] = json!(
                 (1..=count)
@@ -2580,14 +2525,11 @@ mod tests {
                     .collect::<Vec<_>>()
             );
             assert!(export_request(&serde_json::to_vec(&request).unwrap(), &Budget::new()).is_ok());
+            let duplicate = request["selection"][section][0].clone();
             request["selection"][section]
                 .as_array_mut()
                 .unwrap()
-                .push(key_value(if kind == "event" {
-                    Key::Event(1, 1, (count + 1) as u64)
-                } else {
-                    Key::Artifact(1, (count + 1) as u64)
-                }));
+                .push(duplicate);
             assert_eq!(
                 export_request(&serde_json::to_vec(&request).unwrap(), &Budget::new())
                     .unwrap_err()
@@ -2595,13 +2537,6 @@ mod tests {
                 400
             );
         }
-        // Reserve fixed overhead for bounded selector/window trees and their roots
-        // before charging each retained source identity, projection and reference.
-        let mut memory = ExportMemory {
-            retained: 1024 * 1024,
-        };
-        memory.charge(31 * 1024 * 1024).unwrap();
-        assert_eq!(memory.charge(1).unwrap_err().status, 413);
     }
     #[cfg(unix)]
     #[test]

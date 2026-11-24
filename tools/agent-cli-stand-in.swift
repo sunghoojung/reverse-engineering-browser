@@ -149,7 +149,9 @@ enum AgentCLIStandIn {
       guard message["type"] as? String == "user" else { continue }
       let content = ((message["message"] as? [String: Any])?["content"] as? [[String: Any]]) ?? []
       let text = content.compactMap { $0["text"] as? String }.joined()
-      let scenario = ["init-foreign", "api-key", "foreign", "action", "malformed", "hold"].first { text.contains("SCENARIO:\($0)") } ?? "read"
+      let scenario = ["init-foreign", "api-key", "foreign", "action", "malformed", "hold", "echo"].first { text.contains("SCENARIO:\($0)") } ?? "read"
+      // As --replay-user-messages does: the turn comes back as one line.
+      if scenario == "echo" { emit(["type": "user", "message": message["message"] ?? [:], "isReplay": true]) }
       var tools = ["mcp__reb__get_session_summary", "mcp__reb__get_events"]
       if scenario == "init-foreign" { tools.append("Bash") }
       emit(["type": "system", "subtype": "init", "tools": tools, "mcp_servers": [["name": "reb", "status": "connected"]],

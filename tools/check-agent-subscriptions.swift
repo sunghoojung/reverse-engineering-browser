@@ -550,6 +550,16 @@ enum AgentSubscriptionChecks {
           check(!driver.isRunning, "\(label): \(scenario) leaves no CLI running")
         }
         if provider == .claude {
+          // A turn past the 2 MiB the driver once refused, echoed back as a
+          // line past the 16 MiB it once stopped the CLI for. Reading that
+          // line rescanned it per 64 KiB chunk, about 18 s of CPU; read once,
+          // the round trip takes about 4 s, so the wait leaves room for load.
+          let large = "Repeat SCENARIO:echo " + String(repeating: "x", count: 20 * 1024 * 1024)
+          try! await driver.send(turnId: "e\(tag)", text: large)
+          await waitFor("Claude large turn", timeout: 60) { events.ended("e\(tag)") }
+          check(events.of("error", turn: "e\(tag)").isEmpty && driver.isRunning, "Claude: a 20 MiB turn and its 20 MiB echo complete")
+          check(events.of("text", turn: "e\(tag)").map { $0["delta"] as? String ?? "" }.joined().contains("Looking at the session."),
+            "Claude: and its answer streams")
           try! await driver.send(turnId: "m\(tag)", text: "Noise SCENARIO:malformed")
           await waitFor("Claude malformed") { events.ended("m\(tag)") }
           check(events.of("error", turn: "m\(tag)").contains { ($0["message"] as? String ?? "").contains("could not read") },

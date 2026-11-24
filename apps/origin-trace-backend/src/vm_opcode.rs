@@ -49,7 +49,7 @@ mod observed;
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
-const PRODUCER_VERSION: &str = "2.19.0";
+const PRODUCER_VERSION: &str = "2.20.0";
 const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;
@@ -1502,8 +1502,8 @@ pub(crate) fn workspace(
     }
     let runtime = result["runtime"].as_str()?;
     // Roles of every classified site from the same metered classification
-    // that produced the analysis: the gate never reads the bounded listed
-    // document and never runs a second classification pass.
+    // that produced the analysis: the gate never reads the listed document
+    // and never runs a second classification pass.
     let roles = roles.filter(|_| gate_enabled());
     let mut withheld_opcodes = BTreeSet::new();
     let mut layout = None;
@@ -1570,13 +1570,6 @@ pub(crate) fn workspace(
             }
             _ => return None,
         };
-    if result["frontend"]["dispatch_inventory"]["omitted_site_count"]
-        .as_u64()
-        .unwrap_or(0)
-        > 0
-    {
-        omissions.push(json!({"reason":"dispatch-inventory-limit","detail":"The module-wide count includes every decoded dispatch site; only the top 256 ranked sites are listed."}));
-    }
     // Withheld handlers are named separately: recovery did find them.
     if handlers.is_empty()
         && !omissions
@@ -3056,19 +3049,21 @@ mod tests {
     }
 
     #[test]
-    fn wasm_inventory_counts_all_sites_but_bounds_ranked_metadata() {
+    fn wasm_inventory_ranks_and_lists_every_site() {
+        // Producers before 1.13.0 listed 256 of these 300 sites, counted 44
+        // as omitted and marked the coverage incomplete.
         let body = ranked_dispatch_body(8, true);
         let bytes = wasm_module(&vec![body.as_slice(); 300], None);
         wasmparser::Validator::new().validate_all(&bytes).unwrap();
         let (_, analysis, document) = analyze_artifact(&bytes, "wasm", &[]);
         let inventory = &document["workspaces"][0]["dispatch_inventory"];
         assert_eq!(inventory["site_count"], 300);
-        assert_eq!(inventory["candidates"].as_array().unwrap().len(), 256);
-        assert_eq!(inventory["omitted_site_count"], 44);
+        assert_eq!(inventory["candidates"].as_array().unwrap().len(), 300);
+        assert_eq!(inventory["omitted_site_count"], 0);
         assert_eq!(inventory["candidates"][0]["function_index"], 0);
-        assert_eq!(analysis["results"][0]["coverage"]["complete"], false);
+        assert_eq!(analysis["results"][0]["coverage"]["complete"], true);
         assert!(
-            document["workspaces"][0]["coverage"]["omissions"]
+            !document["workspaces"][0]["coverage"]["omissions"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -4614,7 +4609,9 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         let (_, analysis, document) = analyze(&source, &[]);
         let classification = &analysis["results"][0]["frontend"]["dispatch_classification"];
         assert_eq!(classification["site_count"], 301);
-        assert_eq!(classification["omitted_site_count"], 301 - 256);
+        // Producers before 1.13.0 listed 256 of them.
+        assert_eq!(classification["sites"].as_array().unwrap().len(), 301);
+        assert_eq!(classification["omitted_site_count"], 0);
         assert_eq!(classification["role_counts"]["interpreter-candidate"], 1);
         assert!(
             classification["sites"]

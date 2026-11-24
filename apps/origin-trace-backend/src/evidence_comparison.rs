@@ -15,10 +15,7 @@ use std::{
     },
 };
 
-pub const MAX_REQUEST_BYTES: usize = 2 * evidence_package::MAX_BYTES + 4096;
-pub const MAX_RESULT_BYTES: usize = 512 * 1024;
-pub const MAX_ROWS: usize =
-    2 * (evidence_package::MAX_EVENTS + evidence_package::MAX_ARTIFACTS) + 5;
+/// Rows per page; `offset` continues a comparison of any number of rows.
 pub const MAX_PAGE_SIZE: usize = 100;
 pub const PROFILE: &str = "reb-declared-metadata-v1";
 const FACETS: [&str; 7] = [
@@ -84,11 +81,9 @@ fn check(cancelled: &AtomicBool) -> Result<()> {
     }
 }
 // RawValue borrows the original package tokens. Before serde scans them, bound
-// nesting without interpreting keys, allocating strings, or erasing duplicates.
+// nesting without interpreting keys, allocating strings, or erasing duplicates:
+// the package reader recurses once per level, and no package nests deeper.
 fn framing(raw: &[u8]) -> Result<()> {
-    if raw.len() > MAX_REQUEST_BYTES {
-        return Err(exhausted());
-    }
     let (mut depth, mut quoted, mut escape) = (0usize, false, false);
     for byte in raw {
         if quoted {
@@ -120,11 +115,6 @@ fn framing(raw: &[u8]) -> Result<()> {
 fn request(raw: &[u8]) -> Result<Request<'_>> {
     framing(raw)?;
     let envelope: Envelope<'_> = serde_json::from_slice(raw).map_err(|_| invalid())?;
-    if envelope.left.get().len() > evidence_package::MAX_BYTES
-        || envelope.right.get().len() > evidence_package::MAX_BYTES
-    {
-        return Err(exhausted());
-    }
     if envelope.normalization_profile.get().len() > 128 || envelope.facets.get().len() > 512 {
         return Err(invalid());
     }
@@ -145,15 +135,13 @@ fn request(raw: &[u8]) -> Result<Request<'_>> {
         return Err(invalid());
     }
     let number = |raw: Option<&RawValue>, default: usize| -> Result<usize> {
-        match raw {
-            None => Ok(default),
-            Some(v) if v.get().len() <= 5 => serde_json::from_str(v.get()).map_err(|_| invalid()),
-            _ => Err(invalid()),
-        }
+        raw.map_or(Ok(default), |v| {
+            serde_json::from_str(v.get()).map_err(|_| invalid())
+        })
     };
     let offset = number(envelope.offset, 0)?;
     let limit = number(envelope.limit, 50)?;
-    if offset > MAX_ROWS || limit == 0 || limit > MAX_PAGE_SIZE {
+    if limit == 0 || limit > MAX_PAGE_SIZE {
         return Err(invalid());
     }
     Ok(Request {
@@ -214,9 +202,9 @@ fn differences(left: &Value, right: &Value) -> (Vec<Value>, usize) {
             json!({"field":"selected_facet","left":summarize(left),"right":summarize(right)}),
         );
     }
-    let omitted = result.len().saturating_sub(12);
-    result.truncate(12);
-    (result, omitted)
+    // Every changed field is listed: a record has the fields its schema
+    // names. Earlier revisions listed 12 and counted the rest as omitted.
+    (result, 0)
 }
 fn row(
     facet: &str,
@@ -383,10 +371,8 @@ fn serialize_result(result: &Value, cancelled: &AtomicBool) -> Result<Vec<u8>> {
     }
     impl std::io::Write for Output<'_> {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            if self.bytes.len().saturating_add(bytes.len()) > MAX_RESULT_BYTES
-                || self.cancelled.load(Ordering::Relaxed)
-            {
-                return Err(std::io::Error::other("Comparison output bound"));
+            if self.cancelled.load(Ordering::Relaxed) {
+                return Err(std::io::Error::other("Comparison cancelled"));
             }
             self.bytes.extend_from_slice(bytes);
             Ok(bytes.len())
@@ -410,7 +396,7 @@ fn serialize_result(result: &Value, cancelled: &AtomicBool) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     #[test]
-    fn serialization_cancellation_keeps_cancelled_and_byte_exhaustion_keeps_resource_limit() {
+    fn serialization_cancellation_keeps_cancelled_and_a_result_of_any_size_is_written() {
         // Exercise the writer failure mapping directly, beyond the comparison's
         // preflight cancellation check. No successful partial output escapes.
         let cancelled = serialize_result(&json!(null), &AtomicBool::new(true)).unwrap_err();
@@ -419,13 +405,10 @@ mod tests {
             serde_json::to_value(cancelled).unwrap()["code"],
             "cancelled"
         );
-        let oversized = json!("x".repeat(MAX_RESULT_BYTES));
-        let limit = serialize_result(&oversized, &AtomicBool::new(false)).unwrap_err();
-        assert_eq!(limit.status, 400);
-        assert_eq!(
-            serde_json::to_value(limit).unwrap()["code"],
-            "resource_limit"
-        );
+        // A page was refused past 512 KiB.
+        let large = json!("x".repeat(1 << 20));
+        let bytes = serialize_result(&large, &AtomicBool::new(false)).unwrap();
+        assert_eq!(bytes.len(), (1 << 20) + 2);
     }
     fn golden() -> Value {
         serde_json::from_slice(include_bytes!("../assets/evidence-packages/golden-v1.json"))
@@ -515,7 +498,7 @@ mod tests {
         assert!(compare_bytes(&serde_json::to_vec(&q).unwrap()).is_err());
     }
     #[test]
-    fn malformed_unsupported_duplicate_secret_and_oversized_originals_fail() {
+    fn malformed_unsupported_duplicate_and_secret_originals_fail() {
         let p = golden();
         let q = body(&p, &p);
         let raw = serde_json::to_string(&q).unwrap();
@@ -536,13 +519,14 @@ mod tests {
         rehash(&mut q["left"]);
         let err = compare_bytes(&serde_json::to_vec(&q).unwrap()).unwrap_err();
         assert!(!format!("{err:?}").contains("SECRET"));
-        let oversized = format!(
-            "{{\"left\":{{{}\"x\":1}},\"right\":{},\"normalization_profile\":\"{}\",\"facets\":[\"events\"]}}",
-            " ".repeat(evidence_package::MAX_BYTES),
-            p,
-            PROFILE
+        // An original was refused past 4 MiB; whitespace of any length is
+        // part of the original bytes and compares.
+        let spaced = format!(
+            "{{\"left\":{}{p},\"right\":{p},\"normalization_profile\":\"{PROFILE}\",\"facets\":[\"events\"]}}",
+            " ".repeat(5 << 20)
         );
-        assert!(compare_bytes(oversized.as_bytes()).is_err());
+        let r: Value = serde_json::from_slice(&compare_bytes(spaced.as_bytes()).unwrap()).unwrap();
+        assert_eq!(r["package_metadata_equal"], true);
         assert!(
             compare_bytes_cancellable(raw.as_bytes(), Arc::new(AtomicBool::new(true))).is_err()
         );
@@ -605,22 +589,33 @@ mod tests {
         p
     }
     #[test]
-    fn maximal_records_preserve_page_budget_and_ambiguous_candidates() {
-        let a = sized_package(MAX_EVENTS_FOR_TEST, 64, "7");
-        let b = sized_package(MAX_EVENTS_FOR_TEST, 64, "77");
+    fn packages_past_the_old_counts_page_every_row_and_ambiguous_candidate() {
+        // Packages held at most 1,024 events and 64 artifacts, so a
+        // comparison had at most 2,181 rows and an offset no larger.
+        let (events, artifacts) = (3000, 200);
+        let a = sized_package(events, artifacts, "7");
+        let b = sized_package(events, artifacts, "77");
         let mut q = body(&a, &b);
         q["limit"] = json!(100);
         let r = run(&q);
-        assert_eq!(r["page"]["total"], MAX_ROWS);
-        assert_eq!(r["counts"]["ambiguous_cross_scope"], 2176);
+        let total = 2 * (events + artifacts) + 5;
+        assert_eq!(r["page"]["total"], total);
+        assert_eq!(
+            r["counts"]["ambiguous_cross_scope"],
+            2 * (events + artifacts)
+        );
         assert_eq!(r["rows"].as_array().unwrap().len(), 100);
-        assert!(serde_json::to_vec(&r).unwrap().len() < MAX_RESULT_BYTES);
-        q["offset"] = json!(MAX_ROWS);
+        q["offset"] = json!(total - 1);
+        let last = run(&q);
+        assert_eq!(last["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(last["page"]["next_offset"], Value::Null);
+        q["offset"] = json!(total);
         let end = run(&q);
         assert_eq!(end["rows"], json!([]));
         assert_eq!(end["page"]["next_offset"], Value::Null);
+        q["offset"] = json!(u64::MAX);
+        assert_eq!(run(&q)["rows"], json!([]));
     }
-    const MAX_EVENTS_FOR_TEST: usize = evidence_package::MAX_EVENTS;
     #[test]
     fn absent_records_are_never_unchanged_evidence() {
         let a = sized_package(0, 0, "7");
@@ -674,7 +669,7 @@ mod tests {
         assert_eq!(r["counts"]["right_only"], 1);
     }
     #[test]
-    fn changed_field_details_are_bounded_without_hiding_omissions() {
+    fn every_changed_field_is_listed() {
         let a: Value = (0..40)
             .map(|i| (format!("field_{i:02}"), json!(0)))
             .collect::<serde_json::Map<_, _>>()
@@ -684,10 +679,11 @@ mod tests {
             .collect::<serde_json::Map<_, _>>()
             .into();
         let (details, omitted) = differences(&a, &b);
-        assert_eq!(details.len(), 12);
-        assert_eq!(omitted, 28);
+        // Earlier revisions listed 12 of these and counted 28 as omitted.
+        assert_eq!(details.len(), 40);
+        assert_eq!(omitted, 0);
         assert_eq!(details[0]["field"], "field_00");
-        assert_eq!(details[11]["field"], "field_11");
+        assert_eq!(details[39]["field"], "field_39");
     }
     #[test]
     fn captured_synthetic_golden_response_remains_exact() {

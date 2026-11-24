@@ -97,7 +97,7 @@ static ANTI: LazyLock<Vec<(&str, u64, Regex)>> = LazyLock::new(|| {
 ].into_iter().map(|(id,weight,p)|(id,weight,Regex::new(p).expect("Anti-bot rule"))).collect()
 });
 pub(crate) fn current_producer() -> Value {
-    json!({"id":"origin-trace-vm-detector","version":"1.12.0"})
+    json!({"id":"origin-trace-vm-detector","version":"1.13.0"})
 }
 
 // The catalog and generated documents share this exact profile projection.
@@ -1206,15 +1206,7 @@ fn analyze_content(
         (obs, json!({"replacement_character_count":0}), omissions)
     } else {
         let (obs, frontend) = wasm(bytes).map_err(|e| e.message)?;
-        let omitted = frontend["dispatch_inventory"]["omitted_site_count"]
-            .as_u64()
-            .unwrap_or(0);
-        let omissions = if omitted > 0 {
-            vec![json!({"reason":"dispatch-inventory-limit","omitted_records":omitted})]
-        } else {
-            Vec::new()
-        };
-        (obs, frontend, omissions)
+        (obs, frontend, Vec::new())
     };
     // Classification is interpretation over the same bytes, metered on its
     // own and never an input to the observations, score or tier above. Its
@@ -1907,7 +1899,7 @@ mod profile_tests {
     #[test]
     fn handler_recovery_requirement_has_distinct_profile_and_accepts_older_profiles() {
         let current = current_profile();
-        assert_eq!(current_producer()["version"], "1.12.0");
+        assert_eq!(current_producer()["version"], "1.13.0");
         assert_eq!(current["javascript_likely_vm_requires_handlers"], true);
         let mut historical = current.clone();
         historical

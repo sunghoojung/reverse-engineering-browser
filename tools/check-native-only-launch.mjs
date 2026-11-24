@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {readFile, access, mkdir, mkdtemp, realpath, writeFile, rm, symlink} from 'node:fs/promises';
+import {readFile, readdir, access, mkdir, mkdtemp, realpath, writeFile, rm, symlink} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {execFileSync, spawn, spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
@@ -73,6 +73,17 @@ printf '%s\\n' "${'${brave_arguments[@]}'}"`], {encoding:'utf8'});
     '--reb-wasm-module-allowlist=/tmp/mods.txt',
     '--reb-wasm-budget-reset-file=/tmp/reset']);
 }
+{
+  // Every record replaces the pacing; filters still apply.
+  const result = spawnSync(shell, ['-c', `set -eu; brave_arguments=(); native_quiet_mode=0; native_wasm_dispatch=1; native_wasm_call_indirect=1; native_guest_adapter=""; native_wasm_every_record=1; native_wasm_function_deny=9; wasm_budget_reset_file=/tmp/reset; ${flagsCode}
+printf '%s\\n' "${'${brave_arguments[@]}'}"`], {encoding:'utf8'});
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.stdout.trimEnd().split('\n'), [
+    '--js-flags=--reb-wasm-br-table-dispatch --reb-wasm-call-indirect-dispatch',
+    '--reb-wasm-every-record',
+    '--reb-wasm-function-deny=9',
+    '--reb-wasm-budget-reset-file=/tmp/reset']);
+}
 for (const [variable, options] of [['REB_NATIVE_WASM_DISPATCH', {REB_NATIVE_WASM_DISPATCH:'invalid'}],
   ['REB_NATIVE_WASM_DISPATCH', {REB_NATIVE_WASM_DISPATCH:'1',REB_CAPTURE_CATEGORY_MASK:'1'}],
   ['REB_NATIVE_WASM_CALL_INDIRECT', {REB_NATIVE_WASM_CALL_INDIRECT:'invalid'}],
@@ -82,11 +93,15 @@ for (const [variable, options] of [['REB_NATIVE_WASM_DISPATCH', {REB_NATIVE_WASM
   assert.match(result.stderr,new RegExp(variable));
 }
 for (const [options, pattern] of [
-  [{REB_NATIVE_WASM_SAMPLES_PER_FUNCTION:'99', REB_NATIVE_WASM_DISPATCH:'1'}, /must be from 1 to 16/],
+  [{REB_NATIVE_WASM_SAMPLES_PER_FUNCTION:'1025', REB_NATIVE_WASM_DISPATCH:'1'}, /must be from 1 to 1024/],
   [{REB_NATIVE_WASM_SAMPLES_PER_FUNCTION:'2'}, /require REB_NATIVE_WASM_DISPATCH/],
   [{REB_NATIVE_WASM_FUNCTION_ALLOW:'1,1', REB_NATIVE_WASM_DISPATCH:'1'}, /unique/],
   [{REB_NATIVE_WASM_FUNCTION_ALLOW:'16777216', REB_NATIVE_WASM_DISPATCH:'1'}, /16777216/],
   [{REB_NATIVE_WASM_MODULE_ALLOWLIST:'relative.txt', REB_NATIVE_WASM_DISPATCH:'1'}, /REB_NATIVE_WASM_MODULE_ALLOWLIST/],
+  [{REB_NATIVE_WASM_EVERY_RECORD:'2', REB_NATIVE_WASM_DISPATCH:'1'}, /REB_NATIVE_WASM_EVERY_RECORD must be 0 or 1/],
+  [{REB_NATIVE_WASM_EVERY_RECORD:'1'}, /require REB_NATIVE_WASM_DISPATCH/],
+  [{REB_NATIVE_WASM_EVERY_RECORD:'1', REB_NATIVE_WASM_SAMPLES_PER_FUNCTION:'2', REB_NATIVE_WASM_DISPATCH:'1'},
+    /takes no REB_NATIVE_WASM_SAMPLES_PER_FUNCTION/],
 ]) {
   const result = spawnSync(shell, [join(root,'scripts/run-live-session.sh')], {env:{...process.env, REB_NATIVE_WASM_DISPATCH:'0', REB_NATIVE_WASM_CALL_INDIRECT:'0', ...options}, encoding:'utf8'});
   assert.equal(result.status, 2, result.stderr);
@@ -99,13 +114,28 @@ console.log('PASS native Wasm launch is explicit opt-in, category-gated, and com
 {
   const labels = section('# Labels for the session context; they enable nothing in the backend.', '# The session header says');
   const run = variables => {
-    const result = spawnSync(shell, ['-c', `set -eu; ui_arguments=(); capture_canvas_images=0; console_document_start=0; request_stacks_state=off; ${variables}; ${labels}
+    const result = spawnSync(shell, ['-c', `set -eu; ui_arguments=(); capture_canvas_images=0; console_document_start=0; request_stacks_state=off;
+      native_wasm_dispatch=0; native_wasm_call_indirect=0; native_wasm_samples_per_function=; native_wasm_samples_per_indirect_site=;
+      native_wasm_function_allow=; native_wasm_function_deny=; native_wasm_module_allowlist=; native_wasm_every_record=0; ${variables}; ${labels}
 printf '%s\\n' "${'${ui_arguments[@]-}'}"`], {encoding:'utf8'});
     assert.equal(result.status, 0, result.stderr);
     return result.stdout.trimEnd().split('\n').filter(Boolean);
   };
   assert.deepEqual(run('capture_request_content=1'), ['--session-request-content']);
   assert.deepEqual(run('capture_request_content=0'), [], 'a metadata session names no content');
+  // The Wasm sampling labels name the streams and the allowances and filters
+  // the launcher passes Brave, counted rather than listed.
+  const quiet = 'capture_request_content=0';
+  assert.deepEqual(run(`${quiet}; native_wasm_dispatch=1; native_wasm_call_indirect=1; native_wasm_samples_per_function=064;
+    native_wasm_samples_per_indirect_site=16; native_wasm_function_allow=1,2,3; native_wasm_function_deny=9; native_wasm_module_allowlist=/tmp/mods.txt`),
+    ['--session-wasm-dispatch', '--session-wasm-call-indirect', '--session-wasm-samples-per-function', '64',
+      '--session-wasm-samples-per-indirect-site', '16', '--session-wasm-function-allow-count', '3',
+      '--session-wasm-function-deny-count', '1', '--session-wasm-module-allowlist']);
+  assert.deepEqual(run(`${quiet}; native_wasm_dispatch=1`), ['--session-wasm-dispatch'], 'unnamed allowances are not labeled');
+  assert.deepEqual(run(`${quiet}; native_wasm_dispatch=1; native_wasm_call_indirect=1; native_wasm_every_record=1`),
+    ['--session-wasm-dispatch', '--session-wasm-call-indirect', '--session-wasm-every-record']);
+  assert.deepEqual(run(`${quiet}; native_wasm_samples_per_function=64; native_wasm_function_allow=1`), [],
+    'a session without a Wasm stream names no sampling policy');
   // No content budget, media switch or store size is read or passed on.
   for (const removed of [/REB_REQUEST_CONTENT_BUDGET_MIB/, /REB_RESPONSE_BODY_BUDGET_MIB/, /REB_CAPTURE_RESPONSE_MEDIA/,
     /--reb-request-content-budget-bytes/, /--reb-response-body-budget-bytes/, /--reb-capture-response-media/,
@@ -131,7 +161,7 @@ printf '%s\\n' "${'${ui_arguments[@]-}'}"`], {encoding:'utf8'});
     'Request content budget', 'Response body budget']) {
     assert(!safety.includes(removed), `SAFETY.md no longer names ${removed}`);
   }
-  console.log('PASS content sessions without limits: the launcher labels request content and no limit, names no removed budget, media switch or store size, and refuses an unreadable disk reserve; SAFETY.md says so');
+  console.log('PASS content sessions without limits: the launcher labels request content and no limit, names no removed budget, media switch or store size, and refuses an unreadable disk reserve; the Wasm sampling labels count allowances and filters; SAFETY.md says so');
 }
 
 const adapterDirectory = await mkdtemp(join(tmpdir(), 'reb-native-adapter-'));
@@ -178,11 +208,11 @@ try {
     assert.equal(result.status, 2, result.stderr);
     assert.match(result.stderr, /REB_NATIVE_JS_DISPATCH_SITES/);
   }
-  for (const size of [0,4097]) {
+  for (const size of [0,131073]) {
     await writeFile(sitesPath, Buffer.alloc(size,32));
     const result = spawnSync(shell, [join(root,'scripts/run-live-session.sh')], {env:{...process.env,REB_NATIVE_WASM_DISPATCH:'0',REB_NATIVE_JS_DISPATCH_SITES:sitesPath},encoding:'utf8'});
     assert.equal(result.status,2,result.stderr);
-    assert.match(result.stderr,/between 1 and 4096/);
+    assert.match(result.stderr,/between 1 and 131072/);
   }
   // Native browser code owns canonical site-file validation; the shell gates
   // the opt-in and file bounds and passes the path as one argument.
@@ -219,11 +249,11 @@ try {
     assert.equal(result.status, 2, result.stderr);
     assert.match(result.stderr, message);
   }
-  for (const size of [0, 4097]) {
+  for (const size of [0, 131073]) {
     await writeFile(invocationPath, Buffer.alloc(size, 32));
     const result = spawnSync(shell, [join(root,'scripts/run-live-session.sh')], {env:{...process.env,REB_NATIVE_WASM_DISPATCH:'0',REB_NATIVE_JS_INVOCATION_SITES:invocationPath},encoding:'utf8'});
     assert.equal(result.status, 2, result.stderr);
-    assert.match(result.stderr, /between 1 and 4096/);
+    assert.match(result.stderr, /between 1 and 131072/);
   }
   await writeFile(invocationPath, '{}');
   for (const [digests, tail] of [[0, []], [1, ['--reb-js-invocation-digests']]]) {
@@ -265,7 +295,11 @@ console.log('PASS native JS invocation sites opt-in, VM-category gate, sensitive
 // A session started as another ends waits for that session's Brave to close
 // instead of refusing the profile it still holds. The holder is a stand-in
 // whose command line names the profile, as a running Brave's does; the shell
-// starts it so the shell, not this check, reaps it when it exits.
+// starts it so the shell, not this check, reaps it when it exits. Until perl
+// replaces the forked shell, that command line is the shell's and names no
+// profile, so the launch code runs only once it names one, as a Brave that is
+// already running does. The closing one outlives a slow first look by a second
+// and still ends well inside the release wait.
 {
   const holderCode = section('# Only one browser can hold a profile', '# The project V8 flags');
   const quick = holderCode.replace('profile_release_wait_seconds=10', 'profile_release_wait_seconds=4');
@@ -276,7 +310,9 @@ console.log('PASS native JS invocation sites opt-in, VM-category gate, sensitive
       const profile = join(profiles, `${kind}-${hold}`);
       await mkdir(profile);
       const holder = hold === 'none' ? 'holder=""' :
-        `perl -e 'sleep shift' ${hold === 'closing' ? 1 : 30} "--user-data-dir=$1" & holder=$!; ln -s "test-host-$holder" "$1/SingletonLock"`;
+        `perl -e 'sleep shift' ${hold === 'closing' ? 2 : 30} "--user-data-dir=$1" & holder=$!; ln -s "test-host-$holder" "$1/SingletonLock"
+waited=0; until /bin/ps -ww -o command= -p "$holder" | grep -q -F -e "--user-data-dir=$1"; do
+  ((waited++ < 500)) || { echo "The stand-in holder never ran"; exit 3; }; sleep 0.01; done`;
       return spawnSync(shell, ['-c', `set -eu; fail_live_session() { shift; printf '%s' "$*"; exit 2; }
 trap '[[ -z "$holder" ]] || kill "$holder" 2>/dev/null || true' EXIT
 profile_kind=${kind}; profile_path="$1"; ${holder}
@@ -528,6 +564,67 @@ exec ${quote(systemGrep)} "$@"
   assert.equal(badSwitch.status, 2);
   assert.match(badSwitch.stderr, /REB_NATIVE_JS_INVOCATION_IF_SUPPORTED must be 0 or 1/);
   console.log('PASS saved invocation sites start without invocation capture on a Brave that lacks it; explicit sites and other flags stay strict');
+
+  // A following session needs a Brave whose invocation flag help says its
+  // armed sites are revisable; only then does the launcher write the
+  // generation Brave polls. An older Brave keeps the startup sites, and the
+  // app's empty slot table, which it would refuse, then arms nothing.
+  const revisionText = 'armed sites revisable while running';
+  const generations = async () => {
+    const found = [];
+    const entries = await readdir(at('sessions')).catch(error => {
+      if (error.code === 'ENOENT') return [];
+      throw error;
+    });
+    for (const entry of entries) {
+      try { found.push(await readFile(join(at('sessions'), entry, 'js-invocation-sites-generation'), 'utf8')); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    return found;
+  };
+  const following = {...savedSites, REB_NATIVE_JS_INVOCATION_IF_SUPPORTED:'1', REB_NATIVE_JS_INVOCATION_LIVE:'1'};
+  const revisable = await braveApp({framework: [...allNames, 'reb_js_invocation_capture', revisionText]});
+  await rm(at('sessions'), {recursive:true, force:true});
+  const live = await launchWith(revisable.executable, following);
+  accepted(live, [...packaged, '--reb-js-invocation-capture', '--reb-js-invocation-capture'], revisable.framework);
+  assert(live.allScans.includes(`-a -q -F -e ${revisionText} ${revisable.framework}`), live.allScans.join('\n'));
+  assert.deepEqual(await generations(), ['0\n']);
+  await rm(at('sessions'), {recursive:true, force:true});
+  const fixedSites = await launchWith(withInvocation.executable, following);
+  accepted(fixedSites, [...packaged, '--reb-js-invocation-capture', '--reb-js-invocation-capture'], withInvocation.framework);
+  assert.deepEqual(await generations(), [], 'a Brave that cannot follow revisions gets no generation');
+  const emptyTable = at('empty-slot-table.json');
+  await writeFile(emptyTable, '{"sites":[],"version":2}');
+  accepted(await launchWith(withInvocation.executable, {...following, REB_NATIVE_JS_INVOCATION_SITES:emptyTable}),
+    [...packaged, '--reb-js-invocation-capture'], withInvocation.framework);
+  // Without the request, a revisable Brave is not asked for its revision text.
+  const notFollowing = await launchWith(revisable.executable, {...savedSites, REB_NATIVE_JS_INVOCATION_IF_SUPPORTED:'1'});
+  accepted(notFollowing, [...packaged, '--reb-js-invocation-capture', '--reb-js-invocation-capture'], revisable.framework);
+  assert(!notFollowing.allScans.some(line => line.includes(revisionText)));
+  for (const [options, message] of [[{...following, REB_NATIVE_JS_INVOCATION_LIVE:'yes'}, /REB_NATIVE_JS_INVOCATION_LIVE must be 0 or 1/],
+    [{...switches.packaged, REB_NATIVE_JS_INVOCATION_LIVE:'1'}, /REB_NATIVE_JS_INVOCATION_LIVE=1 requires REB_NATIVE_JS_INVOCATION_SITES/]]) {
+    const result = await launchWith(revisable.executable, options);
+    assert.equal(result.status, 2, result.stderr);
+    assert.match(result.stderr, message);
+  }
+  console.log('PASS a following session writes the revision generation only for a Brave that follows revisions; an empty slot table arms nothing on an older one');
+
+  // The packaged app's request stacks with promise stacks chosen in its start
+  // panel: a Brave without promise registration stacks starts with request
+  // stacks alone, and one with both arms both. An explicit request stays strict.
+  const stackDefaults = {...switches.packaged, REB_NATIVE_REQUEST_STACKS:'1', REB_NATIVE_PROMISE_STACKS:'1',
+    REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED:'1'};
+  const prePromise = await braveApp({framework: [...allNames, 'reb_request_stacks']});
+  accepted(await launchWith(prePromise.executable, stackDefaults),
+    [...packaged, '--reb-request-stacks', '--reb-request-stacks', '--reb-promise-stacks'], prePromise.framework);
+  const withPromise = await braveApp({framework: [...allNames, 'reb_request_stacks', 'reb_promise_stacks']});
+  accepted(await launchWith(withPromise.executable, stackDefaults),
+    [...packaged, '--reb-request-stacks', '--reb-request-stacks', '--reb-promise-stacks', '--reb-promise-stacks'],
+    withPromise.framework);
+  const strictPromise = await launchWith(prePromise.executable, {...stackDefaults, REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED:'0'});
+  assert.equal(strictPromise.status, 1, strictPromise.stderr);
+  assert.match(strictPromise.stderr, /does not define the requested V8 flag --reb-promise-stacks \(from REB_NATIVE_PROMISE_STACKS=1\)/);
+  console.log('PASS packaged request stacks with promise stacks chosen drop promise stacks from a Brave that lacks them; an explicit request stays strict');
 
   // Request stacks default on, as in the app, when the mask holds Network and
   // Artifact. The default looks for the flag once: a Brave without it starts

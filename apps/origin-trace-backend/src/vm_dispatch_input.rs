@@ -9,10 +9,6 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-const MAX_INPUT_BYTES: usize = 2 * 1024 * 1024;
-const MAX_SAMPLES: usize = 4096;
-const MAX_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Input {
@@ -90,7 +86,7 @@ pub(crate) fn report_reference(event: &Value) -> Option<(String, u32, String)> {
 /// Validate all input before atomically publishing a new private JSONL file.
 /// No browser, live store, native event identity, or invocation is modified.
 pub fn write(root: &Path, input: &Path, output: &Path) -> Result<usize> {
-    let bytes = durable::read_private(input, MAX_INPUT_BYTES)?
+    let bytes = durable::read_private(input, usize::MAX)?
         .ok_or_else(|| Error::bad("Caller sample input was not found"))?;
     let document: Input = serde_json::from_slice(&bytes).map_err(|_| {
         Error::bad("Invalid caller sample document; expected the closed v1 contract")
@@ -98,10 +94,9 @@ pub fn write(root: &Path, input: &Path, output: &Path) -> Result<usize> {
     if document.contract_version != 1
         || document.source != "caller-supplied"
         || document.samples.is_empty()
-        || document.samples.len() > MAX_SAMPLES
     {
         return Err(Error::bad(
-            "Caller sample input requires v1, caller-supplied source, and 1..4096 samples",
+            "Caller sample input requires v1, caller-supplied source, and at least one sample",
         ));
     }
     let interpreter = nonzero_id(&document.interpreter_artifact_id)?;
@@ -125,11 +120,7 @@ pub fn write(root: &Path, input: &Path, output: &Path) -> Result<usize> {
             "Caller samples do not match the captured Wasm artifact digest and scope",
         ));
     }
-    if artifact["byte_size"].as_u64().unwrap_or(u64::MAX) > MAX_ARTIFACT_BYTES {
-        return Err(Error::bad(
-            "Caller sample artifact exceeds the 64 MiB verification limit",
-        ));
-    }
+    // The whole artifact is hashed in blocks, so its size costs only time.
     let header = evidence::verified_range(root, &artifact, 0, 8)?;
     if header != b"\0asm\x01\0\0\0" {
         return Err(Error::bad(
@@ -140,7 +131,7 @@ pub fn write(root: &Path, input: &Path, output: &Path) -> Result<usize> {
     let mut encoded = Vec::new();
     let input_digest = Sha256::digest(&bytes);
     let sequence_base = u64::from_le_bytes(input_digest[..8].try_into().expect("digest prefix"))
-        % (u64::MAX - MAX_SAMPLES as u64);
+        % (u64::MAX - document.samples.len() as u64);
     let provenance = json!({"source":"caller-supplied", "source_artifact_sha256":document.source_artifact_sha256,
         "input_sha256":hex::encode(input_digest)});
     for (index, sample) in document.samples.iter().enumerate() {
@@ -356,23 +347,10 @@ mod tests {
         assert!(!root.path().join("reports.jsonl").exists());
     }
     #[test]
-    fn bounds_and_tampered_artifacts_fail_closed() {
+    fn empty_and_tampered_inputs_fail_closed() {
         let (root, mut input) = fixture();
-        input["samples"] = json!(vec![input["samples"][0].clone(); MAX_SAMPLES + 1]);
+        input["samples"] = json!([]);
         assert!(import(root.path(), &input).is_err());
-        fs::write(
-            root.path().join("input.json"),
-            vec![b' '; MAX_INPUT_BYTES + 1],
-        )
-        .unwrap();
-        assert!(
-            write(
-                root.path(),
-                &root.path().join("input.json"),
-                &root.path().join("reports.jsonl")
-            )
-            .is_err()
-        );
         let (root, input) = fixture();
         fs::write(
             root.path().join(format!(
@@ -440,11 +418,13 @@ mod tests {
         );
     }
     #[test]
-    fn full_caller_budget_is_retained_without_false_native_coverage() {
+    fn every_caller_sample_is_written_and_counted_without_false_native_coverage() {
+        // Past the former 4096-sample and 2 MiB input limits.
+        let samples = 25_000;
         let (root, mut input) = fixture();
         let sample = input["samples"][0].clone();
         input["samples"] = json!(
-            (0..MAX_SAMPLES)
+            (0..samples)
                 .map(|index| {
                     let mut row = sample.clone();
                     row["sample_index"] = json!(index);
@@ -452,18 +432,13 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         );
-        assert_eq!(import(root.path(), &input).unwrap(), MAX_SAMPLES);
-        let (document, _) = analyze(root.path(), &reports(root.path()));
-        assert_eq!(document["workspaces"][0]["sample_count"], MAX_SAMPLES);
-        assert_eq!(
-            document["workspaces"][0]["samples"]
-                .as_array()
-                .unwrap()
-                .len(),
-            MAX_SAMPLES
-        );
+        assert!(serde_json::to_vec(&input).unwrap().len() > 2 << 20);
+        assert_eq!(import(root.path(), &input).unwrap(), samples);
+        let reports = reports(root.path());
+        assert_eq!(reports.len(), samples);
+        let (document, _) = analyze(root.path(), &reports);
+        assert_eq!(document["workspaces"][0]["sample_count"], samples);
         assert!(has_omission(&document, "sampler-unavailable"));
         assert!(has_omission(&document, "caller-samples-unverified"));
-        assert!(!has_omission(&document, "sample-limit"));
     }
 }

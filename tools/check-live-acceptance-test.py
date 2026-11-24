@@ -31,8 +31,8 @@ import unittest
 from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
-from live_acceptance import (baseline, bodies, cookies, debugger, driver, headers, limits, metadata,
-                             nostacks, reserve, stacks, tabs, volume)
+from live_acceptance import (baseline, bodies, console_tables, cookies, debugger, driver, guest_tables, headers,
+                             limits, metadata, nostacks, reserve, stacks, tabs, tracked, volume, wasm, wasm_every)
 from live_acceptance.evidence import Api, ApiError, Session, decode_request_body, decode_request_target, parse_header_block
 from live_acceptance.fixture import POLL_SECONDS, payload, sha256
 from live_acceptance.pages import line_of, locate
@@ -107,7 +107,7 @@ class FixtureRoutes(unittest.TestCase):
         status, _, body = self.get("/")
         self.assertEqual(status, 200)
         for name in ("baseline", "stacks", "headers", "cookies", "bodies", "limits", "debugger", "tabs", "volume",
-                     "reserve"):
+                     "reserve", "wasm", "wasm-every", "tracked", "console-tables", "guest-tables"):
             self.assertIn(f"/{name}/index.html".encode(), body)
 
     def test_header_hops_redirect_twice_with_repeated_headers(self):
@@ -293,18 +293,118 @@ class FixtureRoutes(unittest.TestCase):
     def test_wasm_modules_validate_and_run(self):
         from live_acceptance.binary import wasm_dispatch, wasm_import_caller
         script = """
-const [dispatch, caller] = process.argv.slice(1).map(hex => Buffer.from(hex, 'hex'));
+const [dispatch, caller, paced] = process.argv.slice(1).map(hex => Buffer.from(hex, 'hex'));
 const {pick} = new WebAssembly.Instance(new WebAssembly.Module(dispatch)).exports;
 let stack = '';
 const imports = {env: {f: () => { stack = new Error().stack; }}};
 new WebAssembly.Instance(new WebAssembly.Module(caller), imports).exports.run();
-console.log(JSON.stringify({picks: [0, 1, 2, 3].map(pick), stack}));
+const {run} = new WebAssembly.Instance(new WebAssembly.Module(paced)).exports;
+console.log(JSON.stringify({picks: [0, 1, 2, 3].map(pick), stack, runs: [0, 1, 39, 40, 41].map(run)}));
 """
-        out = subprocess.run([NODE, "-e", script, wasm_dispatch().hex(), wasm_import_caller().hex()],
+        out = subprocess.run([NODE, "-e", script, wasm_dispatch().hex(), wasm_import_caller().hex(), wasm.MODULE.hex()],
                              capture_output=True, text=True, check=True).stdout
         result = json.loads(out)
         self.assertEqual(result["picks"], baseline.PICKS)
+        # Selector 0 takes the br_table's first arm in every function; any other its default.
+        self.assertEqual(result["runs"], [1, 2, 2, 2, 2])
         self.assertRegex(result["stack"], r"reb_inner[\s\S]*reb_run")
+
+
+
+class WasmEveryRecordStore(unittest.TestCase):
+    """The every-record area counts the store as it grows and finds a repeated or missing ordinal."""
+
+    @staticmethod
+    def record(kind: str, process: int, index: int, offset: int) -> bytes:
+        payload = bytearray(128)
+        payload[offset:offset + 4] = index.to_bytes(4, "little")
+        return json.dumps({"process_id": process, "monotonic_time_ns": str(1_000 + index), "category": "vm",
+                           "type": kind, "payload_encoding": "hex", "payload": payload.hex()},
+                          separators=(",", ":")).encode() + b"\n"
+
+    def test_counts_a_growing_store_and_names_holes(self):
+        dispatch, indirect = "wasm_dispatch_observation", "wasm_indirect_observation"
+        lines = [self.record(dispatch, 7, index, 20) for index in range(3)]
+        lines += [self.record(indirect, 7, index, 28) for index in (0, 2, 2)]
+        lines.append(self.record("wasm_dispatch_overflow", 7, 0, 20))
+        lines.append(self.record(dispatch, 8, 0, 20))
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "events.jsonl"
+            whole = b"".join(lines)
+            tail = wasm_every.Tail(path)
+            tail.read()
+            self.assertEqual(tail.counted, 0, "a store not yet written counts nothing")
+            # A line cut mid-write is counted once it is whole.
+            path.write_bytes(whole[:len(lines[0]) + 20])
+            tail.read()
+            self.assertEqual(tail.counted, 1)
+            path.write_bytes(whole)
+            tail.read()
+            self.assertEqual(tail.counted, 7)
+            decoded = wasm_every.decode(path)
+        streams = decoded.streams
+        self.assertEqual(streams[dispatch].count, 4)
+        self.assertEqual(streams[dispatch].holes(), {})
+        self.assertEqual(streams[dispatch].repeats, 0)
+        self.assertEqual(streams[indirect].count, 3)
+        self.assertEqual(streams[indirect].repeats, 1)
+        self.assertEqual(streams[indirect].holes(), {7: 1})
+        self.assertEqual(decoded.losses, {"wasm_dispatch_overflow": 1})
+        self.assertEqual(decoded.total(), 7)
+
+    def test_the_kind_starts_with_every_record(self):
+        kind = driver.KINDS["wasm-every"]
+        self.assertEqual(kind.flags, [*driver.CONTENT_FLAGS, "--wasm-every-record"])
+        self.assertEqual(kind.areas, [wasm_every])
+        self.assertNotIn("--wasm-every-record", driver.KINDS["content"].flags, "the paced area keeps its windows")
+
+class TablesKind(unittest.TestCase):
+    """The tables session arms 300 sites and a guest limit past 256 from files it writes before launch."""
+
+    def test_arguments_write_the_site_file_and_the_adapter(self):
+        tool = tracked.site_tool()
+        with tempfile.TemporaryDirectory() as root:
+            arguments = driver.KINDS["tables"].arguments(Path(root))
+            self.assertEqual(arguments[0::2], ["--js-invocation-sites", "--guest-adapter"])
+            sites_text = Path(arguments[1]).read_text(encoding="utf-8")
+            adapter_text = Path(arguments[3]).read_text(encoding="utf-8")
+        sites = json.loads(sites_text)["sites"]
+        self.assertEqual(len(sites), tracked.SITES)
+        self.assertGreater(tracked.SITES, 256)
+        self.assertEqual(sites_text, tool.sites_text(tracked.sites()), "the file is the tool's canonical text")
+        raw = tracked.SCRIPT.encode()
+        for index, site in enumerate(sites):
+            self.assertEqual(raw[site["byte_offset"]:site["byte_offset"] + 6], b"(value", index)
+            self.assertTrue(raw[:site["byte_offset"]].endswith(tracked.function_name(index).encode()), index)
+        recipe = json.loads(adapter_text)
+        original = json.loads((guest_tables.FIXTURE / "adapter.json").read_text(encoding="utf-8"))
+        self.assertEqual(recipe.pop("sample_limit"), guest_tables.SAMPLE_LIMIT)
+        original.pop("sample_limit")
+        self.assertEqual(recipe, original, "only the sample limit changes")
+        self.assertEqual(adapter_text, json.dumps(json.loads(adapter_text), sort_keys=True, separators=(",", ":")))
+        self.assertEqual(driver.KINDS["tables"].areas, [tracked, console_tables, guest_tables])
+
+    def test_reports_map_each_frame_to_its_document(self):
+        found = [{"record": "injected", "text": "", "document_id": "9"},
+                 {"record": "report", "text": "start ?0", "document_id": "9"},
+                 {"record": "report", "text": "start ?12", "document_id": "21"},
+                 {"record": "report", "text": "again ?0", "document_id": "9"},
+                 {"record": "refused", "text": "start ?5", "document_id": "4"}]
+        self.assertEqual(console_tables.reports(found, "start"), {0: "9", 12: "21"})
+        self.assertEqual(console_tables.reports(found, "again"), {0: "9"})
+
+    def test_guest_packages_serve_only_installed_files(self):
+        fixture = driver.build_fixture([guest_tables], OPTIONS).start()
+        try:
+            for path in ("/guest-tables/node_modules/../adapter.json", "/guest-tables/node_modules/%2e%2e/adapter.json",
+                         "/guest-tables/node_modules/missing.mjs"):
+                status, _, _ = request(fixture.port, path)
+                self.assertEqual(status, 404, path)
+            status, _, body = request(fixture.port, "/guest-tables/index.html")
+            self.assertEqual(status, 200)
+            self.assertIn(json.dumps(guest_tables.SOURCE).encode(), body)
+        finally:
+            fixture.stop()
 
 
 SCRIPT = re.compile(r"<script(?P<attributes>[^>]*)>(?P<body>[\s\S]*?)</script>")
@@ -331,8 +431,8 @@ class PageScripts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             files = []
 
-            def keep(name: str, text: bytes) -> None:
-                path = Path(directory) / (re.sub(r"[^A-Za-z0-9]+", "_", name) + ".js")
+            def keep(name: str, text: bytes, suffix: str = ".js") -> None:
+                path = Path(directory) / (re.sub(r"[^A-Za-z0-9]+", "_", name) + suffix)
                 path.write_bytes(text)
                 files.append(path)
 
@@ -342,10 +442,11 @@ class PageScripts(unittest.TestCase):
                 for index, match in enumerate(SCRIPT.finditer(body.decode())):
                     if "src=" in match["attributes"]:
                         continue
-                    if "speculationrules" in match["attributes"]:
+                    if "speculationrules" in match["attributes"] or "importmap" in match["attributes"]:
                         json.loads(match["body"])
                         continue
-                    keep(f"{page}_{index}", match["body"].encode())
+                    module = 'type="module"' in match["attributes"]
+                    keep(f"{page}_{index}", match["body"].encode(), ".mjs" if module else ".js")
             for path in served:
                 status, _, body = request(self.fx.port, path)
                 self.assertEqual(status, 200, path)
@@ -999,14 +1100,76 @@ class Evidence(unittest.TestCase):
             "csp_violation": {"debugger_observation": {"detail": {"directive": "img-src", "blocked_host": "localhost"}}},
         }
         debugger.STATE.stack = {"frames": [frame(0, "/debugger/index.html", line_of(page, "fetch('/api/x"))]}
+        self.keep(debugger.STATE)
         debugger.verify(self.run_)
         self.assertEqual(set(self.statuses().values()), {"PASS"}, self.report.lines)
-        self.assertEqual(len(self.report.lines), 3)
+        self.assertEqual(len(self.report.lines), 6)
         self.report.lines.clear()
         debugger.STATE = debugger.State()
         debugger.STATE.error = "get_native_console never listed the page"
         debugger.verify(self.run_)
         self.assertEqual(self.statuses(), {"arm a watch": "FAIL"})
+
+    def keep(self, state):
+        """Kept-rule evidence that matches the kept page."""
+        state.kept_reply = {"origin": self.fx.origin, "frame": "top"}
+        state.kept_state = {"session_id": "5", "target_id": "22", "origin": self.fx.origin, "frame": "top",
+                            "rules": {"requests": [{"url_contains": "/api/kept"}], "events": ["click"]}}
+        state.kept_records = [
+            ("request_watch_match", frame(0, "/debugger/kept.html?n=1",
+                                          line_of(debugger.KEPT_PAGE, "fetch('/api/kept"))["resolution"]),
+            ("listener_dispatch", frame(0, "/debugger/kept.html?n=1",
+                                        line_of(debugger.KEPT_PAGE, "function onKeptClick"))["resolution"])]
+        state.cleared_state = None
+        state.after_clear = []
+
+    def test_debugger_kept_rules_fail_on_each_difference(self):
+        page = debugger.index_page(self.fx.cross_site_origin)
+        cases = {
+            "keep the rules for later documents of the origin": [
+                lambda s: setattr(s, "kept_reply", None),
+                lambda s: setattr(s, "kept_reply", {"origin": self.fx.origin, "frame": "child"}),
+                lambda s: s.kept_state["rules"].update(dom=[{"element": 1}]),
+                lambda s: setattr(s, "kept_error", "watch with keep was not armed")],
+            "kept rules arm a new tab's document before its own scripts": [
+                lambda s: s.kept_records.pop(0),
+                lambda s: s.kept_records.append(("request_watch_match", frame(
+                    0, "/debugger/kept-child.html", line_of(debugger.KEPT_CHILD, "fetch('/api/kept"))["resolution"])),
+                lambda s: s.kept_records.append(("listener_dispatch", {"status": "unresolved",
+                                                                       "reason": "source_artifact_missing"})),
+                lambda s: s.kept_records.append(s.kept_records[0][:1] + ({**s.kept_records[0][1], "line": 1},))],
+            "unwatch forgets the kept rules": [
+                lambda s: setattr(s, "cleared_state", {"origin": self.fx.origin, "frame": "top"}),
+                lambda s: setattr(s, "cleared_state", "not read"),
+                lambda s: s.after_clear.append({"type": "listener_dispatch"})],
+        }
+        for case, changes in cases.items():
+            for change in changes:
+                self.report.lines.clear()
+                debugger.STATE = debugger.State()
+                debugger.STATE.observed = {
+                    "request_watch_match": {"debugger_observation": {"status": "decoded"}},
+                    "listener_dispatch": {"debugger_observation": {"detail": {"event_type": "click"}, "site": {
+                        "resolution": {"status": "resolved", "line": line_of(page, "function onWatchedClick")}}}},
+                    "csp_violation": {"debugger_observation": {"detail": {"directive": "img-src",
+                                                                          "blocked_host": "localhost"}}},
+                }
+                debugger.STATE.stack = {"frames": [frame(0, "/debugger/index.html", line_of(page, "fetch('/api/x"))]}
+                self.keep(debugger.STATE)
+                change(debugger.STATE)
+                debugger.verify(self.run_)
+                failed = {name for name, status in self.statuses().items() if status != "PASS"}
+                self.assertEqual(failed, {case}, self.report.lines)
+
+    def test_kept_pages_trigger_their_rules_from_the_first_script(self):
+        for name, text in (("/debugger/kept.html", debugger.KEPT_PAGE),
+                           ("/debugger/kept-child.html", debugger.KEPT_CHILD)):
+            status, _, body = self.get(name)
+            self.assertEqual((status, body.decode()), (200, text))
+            first = text.index("<script>\n")
+            self.assertLess(first, text.index(".click();"))
+            self.assertLess(first, text.index("fetch('/api/kept"))
+        self.assertIn('<iframe src="/debugger/kept-child.html">', debugger.KEPT_PAGE)
 
     def test_debugger_settle_waits_only_for_a_pending_source(self):
         waiting = {"frames": [{"resolution": {"status": "unresolved", "reason": "source_artifact_missing"}}]}
@@ -1020,6 +1183,68 @@ class Evidence(unittest.TestCase):
         self.assertIs(debugger.settle(lambda: waiting, debugger.top_frame, 0, 0), waiting)
         site = {"debugger_observation": {"site": {"resolution": {"status": "resolved", "line": 7}}}}
         self.assertEqual(debugger.listener_site(site), {"status": "resolved", "line": 7})
+
+    # What session_context.rs reports for a paced session.
+    WASM_SAMPLING = {"version": 1, "streams": ["br_table", "call_indirect"], "window_ms": 1000, "every_record": False,
+                     "records_per_window": 1024, "samples_per_function": None, "samples_per_indirect_site": None,
+                     "function_allow_count": 0, "function_deny_count": 0, "module_allowlist": False,
+                     "reset": "available"}
+
+    def wasm_evidence(self, records=3000, indirect=200, seconds=3.4, function=None, gap=True, generation=3):
+        """A paced capture of the hot loop: records spread over the loop, every function, one ordinal."""
+        module = self.backend.artifact("wasm_module", wasm.MODULE)
+        other = self.backend.artifact("wasm_module", b"another module")
+        self.get("/__beacon?m=wasm:hot", method="POST", body=json.dumps({"ok": True, "value": 900000}).encode())
+        self.backend.context = {"capture_options": {"wasm_sampling": dict(self.WASM_SAMPLING)}}
+
+        def observation(kind, artifact, index, count, function_index):
+            time = 10**9 + index * int(seconds * wasm.SECOND_NS) // max(count, 1)
+            return {"type": kind, "artifact_id": artifact, "process_id": 7, "monotonic_time_ns": str(time),
+                    "wasm_observation": {"status": "decoded", "function_index": function_index, "sample_index": index}}
+        events = [observation("wasm_dispatch_observation", module, index, records,
+                              index % wasm.FUNCTIONS if function is None else function) for index in range(records)]
+        events += [observation("wasm_indirect_observation", module, index, indirect, wasm.RUN_INDEX)
+                   for index in range(indirect)]
+        # Another page's module never counts toward this loop.
+        events.append(observation("wasm_dispatch_observation", other, 0, 1, 0))
+        events.append({"type": "wasm_dispatch_overflow", "artifact_id": "0", "process_id": 7})
+        self.backend.events = events
+        if gap:
+            self.backend.summary["checks"] = [{"code": "named_gap", "category": "vm", "count": "9",
+                                               "reason": "native_wasm_dispatch_budget_incomplete"}]
+        wasm.STATE = wasm.State()
+        wasm.STATE.reset = {"ok": True, "action": "reset_wasm_sample_budgets", "generation": generation}
+
+    def test_wasm_pacing_passes_on_a_paced_capture(self):
+        self.wasm_evidence()
+        wasm.verify(self.run_)
+        self.assertEqual(self.statuses(), {"session context wasm_sampling": "PASS", "br_table paced per window": "PASS",
+                                           "call_indirect paced per window": "PASS",
+                                           "paced remainder is named": "PASS",
+                                           "reset_wasm_sample_budgets mid-loop": "PASS"}, self.report.lines)
+
+    def test_wasm_pacing_fails_on_each_difference(self):
+        cases = [
+            ("a 16-record cap", {"records": 16, "indirect": 16},
+             {"br_table paced per window", "call_indirect paced per window"}),
+            ("a session-wide stop after one second", {"seconds": 0.9},
+             {"br_table paced per window", "call_indirect paced per window"}),
+            ("one function past its allowance", {"function": 3, "seconds": 2.5}, {"br_table paced per window"}),
+            ("a silent remainder", {"gap": False}, {"paced remainder is named"}),
+            ("a refused reset", {"generation": 0}, {"reset_wasm_sample_budgets mid-loop"}),
+        ]
+        for name, changes, failing in cases:
+            with self.subTest(name):
+                self.setUp()
+                self.wasm_evidence(**changes)
+                wasm.verify(self.run_)
+                self.assertEqual({case for case, status in self.statuses().items() if status == "FAIL"}, failing,
+                                 self.report.lines)
+        self.setUp()
+        self.wasm_evidence()
+        self.backend.context["capture_options"]["wasm_sampling"]["records_per_window"] = 16
+        wasm.verify(self.run_)
+        self.assertEqual(self.statuses()["session context wasm_sampling"], "FAIL")
 
     def test_report_never_passes_a_manual_or_skipped_case(self):
         report = Report("x")

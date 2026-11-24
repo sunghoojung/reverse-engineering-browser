@@ -7,8 +7,10 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
-    sync::LazyLock,
-    time::{Duration, Instant},
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 pub const MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -77,20 +79,24 @@ impl fmt::Display for ParseError {
 }
 impl std::error::Error for ParseError {}
 
+/// Stops a package operation whose request went away. There is no deadline:
+/// a package is bounded by its own size, node and record limits, so a valid
+/// one is validated, exported or compared however long the machine needs.
 struct Budget {
-    deadline: Instant,
+    cancelled: Arc<AtomicBool>,
 }
 impl Budget {
     fn new() -> Self {
-        Self::starting_at(Instant::now())
+        Self::cancellable(Arc::default())
     }
-    fn starting_at(now: Instant) -> Self {
-        Self {
-            deadline: now + Duration::from_secs(2),
-        }
+    fn cancellable(cancelled: Arc<AtomicBool>) -> Self {
+        Self { cancelled }
+    }
+    fn cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
     }
     fn check(&self) -> std::result::Result<(), ParseError> {
-        if Instant::now() >= self.deadline {
+        if self.cancelled() {
             Err(ParseError::ResourceLimit)
         } else {
             Ok(())
@@ -250,18 +256,10 @@ static SCHEMA: LazyLock<jsonschema::Validator> = LazyLock::new(|| {
     .expect("package schema JSON");
     jsonschema::validator_for(&schema).expect("local package schema")
 });
-fn initialized_validation_budget<F>(
-    schema: &LazyLock<jsonschema::Validator, F>,
-    now: impl FnOnce() -> Instant,
-) -> Budget
-where
-    F: FnOnce() -> jsonschema::Validator,
-{
-    // Compile the fixed trusted schema before timing any supplied package. A
-    // cold initializer (or a concurrent caller waiting for it) must not consume
-    // the input's budget. Comparison/export retain their whole-work deadlines.
-    LazyLock::force(schema);
-    Budget::starting_at(now())
+fn initialized_validation_budget(cancelled: Arc<AtomicBool>) -> Budget {
+    // Compile the fixed trusted schema before reading any supplied package.
+    LazyLock::force(&SCHEMA);
+    Budget::cancellable(cancelled)
 }
 struct Report {
     value: Value,
@@ -489,7 +487,6 @@ fn identities<'a>(
                         && (kind != "wasm" || context.is_none_or(|id| id == 0)))
                     || (origin == "canvas_to_data_url"
                         && (kind != "canvas_data_url" || context != Some(0)))
-                    || unsigned(&value["byte_size"], false).is_some_and(|n| n > 16 * 1024 * 1024)
                 {
                     report.issue("invalid_shape", section, Some(i));
                     report.check("metadata_profile", false);
@@ -954,6 +951,13 @@ pub fn package_id(package: &Value) -> std::result::Result<String, ParseError> {
 }
 
 fn validate(raw: &[u8], budget: &Budget) -> Result<Value> {
+    let report = validate_report(raw, budget)?;
+    if budget.cancelled() {
+        return Err(Error::cancelled("The package validation"));
+    }
+    Ok(report)
+}
+fn validate_report(raw: &[u8], budget: &Budget) -> Result<Value> {
     let mut report = Report::new();
     let package = match parse(raw, budget) {
         Ok(package) => package,
@@ -1049,21 +1053,32 @@ fn validate(raw: &[u8], budget: &Budget) -> Result<Value> {
 }
 /// Validate supplied bytes inertly. Success is internal consistency, not authenticity.
 pub fn validate_bytes(raw: &[u8]) -> Result<Value> {
-    validate(raw, &initialized_validation_budget(&SCHEMA, Instant::now))
+    validate_bytes_cancellable(raw, Arc::default())
+}
+/// `validate_bytes` for a request that can go away.
+pub(crate) fn validate_bytes_cancellable(raw: &[u8], cancelled: Arc<AtomicBool>) -> Result<Value> {
+    validate(raw, &initialized_validation_budget(cancelled))
 }
 
 /// Internal comparison boundary: validate the original bytes before normalizing.
 /// Does not promote supplied provenance or omitted artifact-byte assertions.
-pub(crate) fn validated_normalized_bytes(raw: &[u8]) -> Result<Value> {
-    let budget = initialized_validation_budget(&SCHEMA, Instant::now);
+pub(crate) fn validated_normalized_bytes(raw: &[u8], cancelled: Arc<AtomicBool>) -> Result<Value> {
+    let budget = initialized_validation_budget(cancelled);
     let report = validate(raw, &budget)?;
     if report["status"] != "valid" {
         return Err(Error::bad(
             "A supplied metadata package failed strict validation",
         ));
     }
-    let package = parse(raw, &budget).map_err(|e| Error::bad(e.to_string()))?;
-    let mut value = normalized(&package, &budget).map_err(|e| Error::bad(e.to_string()))?;
+    let failure = |error: ParseError| {
+        if budget.cancelled() {
+            Error::cancelled("The evidence comparison")
+        } else {
+            Error::bad(error.to_string())
+        }
+    };
+    let package = parse(raw, &budget).map_err(failure)?;
+    let mut value = normalized(&package, &budget).map_err(failure)?;
     value["package_id"] = report["package_id"].clone();
     Ok(value)
 }
@@ -1077,26 +1092,21 @@ pub fn export_bytes(
     events: &std::path::Path,
     artifacts: &std::path::Path,
 ) -> Result<Vec<u8>> {
-    export_bytes_at(
-        raw,
-        events,
-        artifacts,
-        Instant::now() + Duration::from_secs(10),
-    )
+    export_bytes_cancellable(raw, events, artifacts, Arc::default())
 }
-pub(crate) fn export_bytes_at(
+/// `export_bytes` for a request that can go away.
+pub(crate) fn export_bytes_cancellable(
     raw: &[u8],
     events: &std::path::Path,
     artifacts: &std::path::Path,
-    deadline: Instant,
+    cancelled: Arc<AtomicBool>,
 ) -> Result<Vec<u8>> {
-    let budget = Budget { deadline };
-    export_with_budget(raw, events, artifacts, &budget)
+    export_with_budget(raw, events, artifacts, &Budget::cancellable(cancelled))
 }
 fn export_failure(error: ParseError, budget: &Budget) -> Error {
     use crate::error::Code;
-    if budget.check().is_err() {
-        Error::new(408, "The evidence export exceeded its deadline").with_code(Code::Timeout)
+    if budget.cancelled() {
+        Error::cancelled("The evidence export")
     } else if error == ParseError::ResourceLimit {
         Error::new(413, "The evidence export exceeds a resource limit")
             .with_code(Code::ResourceLimit)
@@ -1469,7 +1479,7 @@ fn stored_export(
     let mut event_file = None;
     if let Some((store, basename)) = &events_store {
         let mut file = store.root.file(basename, false)?;
-        file.lines(64 * 1024 * 1024, 4096, 100_000, budget.deadline, |line| {
+        file.lines(64 * 1024 * 1024, 4096, 100_000, &budget.cancelled, |line| {
             let value = parse(line, budget).map_err(|e| export_failure(e, budget))?;
             let (k, projected, payload, gap) = source_event(&value, budget)?;
             if gap {
@@ -1531,29 +1541,36 @@ fn stored_export(
     let mut artifact_file = None;
     if let Some(store) = &artifacts_store {
         let mut file = store.root.file("manifest.jsonl", false)?;
-        file.lines(16 * 1024 * 1024, 8192, 10_000, budget.deadline, |line| {
-            let mut value = parse(line, budget).map_err(|e| export_failure(e, budget))?;
-            let digest: [u8; 32] =
-                Sha256::digest(serde_json::to_vec(&value).map_err(|_| frozen::limit())?).into();
-            let (k, projected) = source_artifact(&mut value)?;
-            if let Some(previous) = seen.get(&k) {
-                return Err(Error::conflict(if *previous == digest {
-                    "The evidence source contains a duplicate identity"
-                } else {
-                    "The evidence source contains a conflicting identity"
-                }));
-            }
-            memory.charge(256)?;
-            seen.insert(k, digest);
-            if artifacts_selected.contains(&k) {
-                memory.charge(8 * 1024)?;
-                package["records"]["artifacts"]
-                    .as_array_mut()
-                    .unwrap()
-                    .push(projected);
-            }
-            Ok(())
-        })?;
+        let record = crate::artifact_query::MANIFEST_RECORD_BYTES;
+        file.lines(
+            16 * 1024 * 1024,
+            record,
+            10_000,
+            &budget.cancelled,
+            |line| {
+                let mut value = parse(line, budget).map_err(|e| export_failure(e, budget))?;
+                let digest: [u8; 32] =
+                    Sha256::digest(serde_json::to_vec(&value).map_err(|_| frozen::limit())?).into();
+                let (k, projected) = source_artifact(&mut value)?;
+                if let Some(previous) = seen.get(&k) {
+                    return Err(Error::conflict(if *previous == digest {
+                        "The evidence source contains a duplicate identity"
+                    } else {
+                        "The evidence source contains a conflicting identity"
+                    }));
+                }
+                memory.charge(256)?;
+                seen.insert(k, digest);
+                if artifacts_selected.contains(&k) {
+                    memory.charge(8 * 1024)?;
+                    package["records"]["artifacts"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(projected);
+                }
+                Ok(())
+            },
+        )?;
         artifact_file = Some(file);
     }
     if events_selected
@@ -1570,14 +1587,10 @@ fn stored_export(
     let mut blobs_directory = None;
     if let Some(store) = &artifacts_store {
         let blobs = store.root.child("blobs")?;
-        let mut verified_bytes = 0u64;
         for value in records(&package, "artifacts") {
-            frozen::check(budget.deadline)?;
+            frozen::check(&budget.cancelled)?;
             let expected = unsigned(&value["byte_size"], false).unwrap();
             let hash = value["sha256"].as_str().unwrap();
-            if expected > frozen::MAX_BLOB_BYTES {
-                return Err(frozen::limit());
-            }
             if let Some((size, _)) = verified.get(hash) {
                 if *size != expected {
                     return Err(Error::protocol(
@@ -1586,9 +1599,9 @@ fn stored_export(
                 }
                 continue;
             }
-            verified_bytes = frozen::verified_total(verified_bytes, expected)?;
+            // Every blob is hashed whole, whatever its size or their sum.
             let mut blob = blobs.file(&format!("{hash}.bin"), false)?;
-            blob.hash(expected, hash, budget.deadline)?;
+            blob.hash(expected, hash, &budget.cancelled)?;
             verified.insert(hash.to_owned(), (expected, blob));
         }
         blobs_directory = Some(blobs);
@@ -1602,7 +1615,7 @@ fn stored_export(
     }
     let mut previous: Option<(u64, u32, u64)> = None;
     for k in seen.keys() {
-        frozen::check(budget.deadline)?;
+        frozen::check(&budget.cancelled)?;
         if let Key::Event(s, p, n) = *k
             && windows
                 .get(&(s, p))
@@ -1624,7 +1637,7 @@ fn stored_export(
     let mut relationships = Vec::new();
     for (section, kind) in [("events", "event"), ("artifacts", "artifact")] {
         for value in records(&package, section) {
-            frozen::check(budget.deadline)?;
+            frozen::check(&budget.cancelled)?;
             let from = key(kind, &value["key"]).unwrap();
             let claims = match from {
                 Key::Event(s, p, _) => vec![
@@ -1708,7 +1721,7 @@ fn stored_export(
         file.verify()?;
     }
     for (_, file) in verified.values() {
-        frozen::check(budget.deadline)?;
+        frozen::check(&budget.cancelled)?;
         file.verify()?;
     }
     if let Some(directory) = &blobs_directory {
@@ -1720,7 +1733,7 @@ fn stored_export(
     if let Some(store) = &artifacts_store {
         store.verify()?;
     }
-    frozen::check(budget.deadline)?;
+    frozen::check(&budget.cancelled)?;
     Ok(bytes)
 }
 #[cfg(unix)]
@@ -1781,34 +1794,22 @@ mod tests {
         }
     }
     #[test]
-    fn trusted_schema_initialization_precedes_the_unchanged_input_budget() {
-        use std::cell::Cell;
-        let start = Instant::now();
-        let initialized_at = start + Duration::from_secs(3);
-        let clock = Cell::new(start);
-        let schema = LazyLock::new(|| {
-            // Model an initializer longer than the entire input budget without
-            // sleeping or depending on scheduler load and test execution order.
-            clock.set(initialized_at);
-            jsonschema::validator_for(&json!({"type": "object"})).unwrap()
-        });
-        let cold = initialized_validation_budget(&schema, || clock.get());
-        assert_eq!(cold.deadline, initialized_at + Duration::from_secs(2));
-        assert!(schema.is_valid(&json!({})));
-        let warm = initialized_validation_budget(&schema, || clock.get());
-        assert_eq!(warm.deadline, cold.deadline);
-    }
-    #[test]
-    fn initialized_schema_does_not_rescue_an_expired_input_budget() {
-        let expired_at = Instant::now() - Duration::from_secs(3);
-        let budget = initialized_validation_budget(&SCHEMA, || expired_at);
+    fn a_cancelled_package_operation_stops_without_a_result() {
         let raw = include_bytes!("../assets/evidence-packages/golden-v1.json");
-        let result = validate(raw, &budget).unwrap();
-        assert_eq!(result["status"], "invalid");
-        assert!(issue(&result, "resource_limit"));
-        assert!(result["package_id"].is_null());
-        assert_eq!(result["checks"]["semantic_digest"], "not_run");
-        assert_eq!(parse(raw, &budget).unwrap_err(), ParseError::ResourceLimit);
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let error = validate_bytes_cancellable(raw, cancelled.clone()).unwrap_err();
+        assert_eq!(
+            (error.status, error.reason.code),
+            (499, crate::error::Code::Cancelled)
+        );
+        assert_eq!(
+            parse(raw, &Budget::cancellable(cancelled.clone())).unwrap_err(),
+            ParseError::ResourceLimit
+        );
+        let error = validated_normalized_bytes(raw, cancelled).unwrap_err();
+        assert_eq!(error.status, 499);
+        // Nothing else stops a valid package: it validates in full.
+        assert_eq!(validate_bytes(raw).unwrap()["status"], "valid");
     }
     fn golden() -> Value {
         serde_json::from_str(include_str!("../assets/evidence-packages/golden-v1.json")).unwrap()
@@ -2041,14 +2042,12 @@ mod tests {
             parse_bytes(raw.as_bytes()).unwrap_err(),
             ParseError::ResourceLimit
         );
-        let budget = Budget {
-            deadline: Instant::now(),
-        };
+        let budget = Budget::cancellable(Arc::new(AtomicBool::new(true)));
         assert_eq!(
             parse(b"{}", &budget).unwrap_err(),
             ParseError::ResourceLimit
         );
-        assert!(issue(&validate(b"{}", &budget).unwrap(), "resource_limit"));
+        assert_eq!(validate(b"{}", &budget).unwrap_err().status, 499);
     }
     #[test]
     fn privacy_fields_and_canaries_never_escape_even_with_new_digest() {
@@ -2541,24 +2540,22 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
-    fn export_request_memory_and_whole_deadline_bounds_are_exact() {
+    fn export_request_memory_and_cancellation_bounds_are_exact() {
         let empty = json!({"protocol_version":1,"selection":{"events":[],"artifacts":[]}});
         let raw = serde_json::to_vec(&empty).unwrap();
         let path = std::path::Path::new("/nonexistent-source-that-empty-selection-must-not-read");
-        let past = Budget {
-            deadline: Instant::now(),
-        };
+        let past = Budget::cancellable(Arc::new(AtomicBool::new(true)));
         assert_eq!(
             export_with_budget(&raw, path, path, &past)
                 .unwrap_err()
                 .status,
-            408
+            499
         );
         assert_eq!(
             finish_export(empty_package(empty["selection"].clone()), &past)
                 .unwrap_err()
                 .status,
-            408
+            499
         );
         let mut exact = raw.clone();
         exact.resize(MAX_EXPORT_REQUEST_BYTES, b' ');
@@ -2605,23 +2602,6 @@ mod tests {
         };
         memory.charge(31 * 1024 * 1024).unwrap();
         assert_eq!(memory.charge(1).unwrap_err().status, 413);
-        let mut total = 0;
-        for _ in 0..8 {
-            total = crate::evidence::frozen::verified_total(total, 16 * 1024 * 1024).unwrap();
-        }
-        assert_eq!(total, 128 * 1024 * 1024);
-        assert_eq!(
-            crate::evidence::frozen::verified_total(total, 1)
-                .unwrap_err()
-                .status,
-            413
-        );
-        assert_eq!(
-            crate::evidence::frozen::verified_total(0, 16 * 1024 * 1024 + 1)
-                .unwrap_err()
-                .status,
-            413
-        );
     }
     #[cfg(unix)]
     #[test]

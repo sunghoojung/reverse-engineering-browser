@@ -51,17 +51,25 @@ async function evidencePackageReadBytes(response, maximum, signal) {
   signal?.addEventListener('abort', cancel, {once: true});
   try {
     checkAbort();
-    // Own each chunk immediately so tiny views cannot retain huge backing stores.
-    const bytes = new Uint8Array(maximum);
+    // Own each chunk immediately so tiny views cannot retain huge backing
+    // stores. With no maximum (Infinity) the whole response is kept.
+    const whole = maximum === Infinity, bytes = whole ? null : new Uint8Array(maximum), parts = [];
     let size = 0, chunks = 0;
     while (true) {
       const {done, value} = await reader.read();
       checkAbort();
-      if (done) return bytes.subarray(0, size);
-      if (++chunks > 65536) throw new Error('The package response exceeded its transport chunk limit.');
+      if (done) {
+        if (!whole) return bytes.subarray(0, size);
+        const joined = new Uint8Array(size);
+        parts.reduce((at, part) => { joined.set(part, at); return at + part.byteLength; }, 0);
+        return joined;
+      }
+      if (++chunks > 65536 && !whole) throw new Error('The package response exceeded its transport chunk limit.');
       if (!(value instanceof Uint8Array)) throw new Error('The package response contained a non-byte chunk.');
-      if (value.byteLength > maximum - size) throw new Error('The package response exceeded its byte limit.');
-      bytes.set(value, size); size += value.byteLength;
+      if (whole) parts.push(value.byteOffset === 0 && value.byteLength === value.buffer.byteLength ? value : value.slice());
+      else if (value.byteLength > maximum - size) throw new Error('The package response exceeded its byte limit.');
+      else bytes.set(value, size);
+      size += value.byteLength;
       // Include empty chunks, and yield so timeout/Cancel tasks can run even if
       // every read is immediately fulfilled by a fragmented producer.
       if (chunks % 256 === 0) { await new Promise(resolve => setTimeout(resolve, 0)); checkAbort(); }
@@ -87,7 +95,7 @@ function evidencePackageValidationResult(value) {
 function evidencePackageError(status) {
   return ({400: 'The package request was rejected as malformed.',
     404: 'An exact selected identity is unavailable. Refresh the retained view and review the selection.',
-    408: 'The bounded package operation timed out. No package was saved; retry only when you choose.',
+    408: 'The request did not reach the local package service in time. No package was saved; retry only when you choose.',
     409: 'Export was refused: a writer may still hold a lease, the source changed, or identities conflict. No writer was stopped. Review the stores before retrying.',
     413: 'The package or source scan exceeds a supported bound. A smaller selection cannot bypass a whole-source scan limit.',
     422: 'The retained source or artifact integrity check failed. No package was produced.',
@@ -107,14 +115,16 @@ function evidencePackageView(document, validation) {
   return document;
 }
 
-function createEvidencePackageController({getSelection, onChange, protocol, fetcher = fetch, deadline = 15000}) {
+// No deadline: an operation shows its elapsed seconds until it finishes or
+// Cancel aborts it, which stops the local service's work too.
+function createEvidencePackageController({getSelection, onChange, protocol, fetcher = fetch}) {
   const model = {status: 'idle', message: '', validation: null, document: null, bytes: null, origin: null, selectionKey: null, revision: 0};
   let generation = 0;
   let active = null;
   const changed = () => { model.revision += 1; onChange(model); };
-  const cancel = (message = 'Cancelled. A bounded server operation already started may finish; its result will not be applied.') => {
+  const cancel = (message = 'Cancelled. The local service stops the operation; no result was applied.') => {
     if (!active) return;
-    generation += 1; clearTimeout(active.timer); active.controller.abort(); active = null;
+    generation += 1; clearInterval(active.timer); active.controller.abort(); active = null;
     model.status = 'cancelled'; model.message = message; changed();
   };
   const clear = () => {
@@ -134,13 +144,15 @@ function createEvidencePackageController({getSelection, onChange, protocol, fetc
     const controller = new AbortController();
     const current = () => generation === token && active?.controller === controller;
     const selectionCurrent = () => kind !== 'export' || evidencePackageSelectionKey(getSelection()) === model.selectionKey;
-    const timer = setTimeout(() => {
+    const working = kind === 'export' ? 'Reading the exact selection under cooperative stopped-store leases…' : 'Validating the original file bytes with the local service…';
+    const started = Date.now();
+    const timer = setInterval(() => {
       if (!current()) return;
-      cancel('The package operation timed out. No result was applied; retry only when you choose.');
-      model.status = 'error'; changed();
-    }, deadline);
+      model.message = `${working} ${Math.floor((Date.now() - started) / 1000)} s`; changed();
+    }, 1000);
+    timer?.unref?.();
     active = {controller, timer};
-    Object.assign(model, {status: 'loading', message: kind === 'export' ? 'Reading the exact selection under cooperative stopped-store leases…' : 'Validating the original file bytes with the local service…',
+    Object.assign(model, {status: 'loading', message: working,
       validation: null, document: null, bytes: null, origin: kind, selectionKey: kind === 'export' ? evidencePackageSelectionKey(selection) : null}); changed();
     const post = async (operation, bytes, maximum) => {
       const response = await fetcher(`/api/evidence/packages/${operation}`, {method: 'POST', cache: 'no-store',
@@ -182,7 +194,7 @@ function createEvidencePackageController({getSelection, onChange, protocol, fetc
       if (!current()) return;
       model.status = 'error'; model.message = error instanceof Error ? error.message : 'The local package service is unavailable.';
     } finally {
-      if (current()) { clearTimeout(timer); active = null; changed(); }
+      if (current()) { clearInterval(timer); active = null; changed(); }
     }
   };
   return {model, cancel, clear, export: () => run('export'), validate: file => run('file', file)};

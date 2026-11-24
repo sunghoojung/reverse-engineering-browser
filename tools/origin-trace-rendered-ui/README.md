@@ -90,14 +90,46 @@ what is retained and not be clipped. The Console header chip must read
 `Doc-start: permitted` in full, stay inside the header, overlap no other header
 control, and leave arming disabled. Nothing connects, arms or runs.
 
+`test45ConsoleTranscriptKeepsEveryEntry` connects the Console to a live
+capture document that the test's own page `fetch` stands in for. That document
+logs twelve thousand messages, every 97th of them two lines tall, in pages of
+a thousand, and then one message of 1 MiB. At both window sizes, the
+transcript must follow its end, with the 1 MiB message drawn whole. Every
+line of that message must stay inside its wrap width: the line count, the last
+line's box and the widest line must match a monospace wrap of the message, and
+a failure prints them. Fewer than
+250 rows may be in the document at the end, a quarter of the way down, and
+through forty scroll steps there and back, and those rows must be consecutive
+messages that cover the viewport with no gap. PageDown must scroll the focused
+transcript through WebKit's own scroll animation, which the layout never
+interrupts, with a step in each of at least three frames. Home is then
+pressed while a second PageDown still moves. The page reports PageDown's
+first step in a script message, and the test presses Home from that report
+with no script call between them, so Home goes down before PageDown's next
+frame however slow the runner is. A try counts when Home followed fewer steps
+than a lone PageDown took, the last of them within a frame. One that does not
+count is made again, up to five times, and the test fails if none counts.
+Home must reach the first entry, handled by the transcript, and stay there
+300 ms later, past the step WebKit's keyboard scroll takes after the
+transcript's write. End, Command-Up and Command-Down must reach the last line
+of the 1 MiB message, the first entry and the last line again, each handled by
+the transcript. A timed-out wait prints each scroll, `scrollend`, key, layout
+write and changed frame that led to it, and for each key the steps before it,
+the frames since the last of them and the writes after it. Search
+must find `rendered message 4242` among rows that are not drawn and draw only
+that match, and Escape must restore every entry. Screenshots
+`console-transcript-{end,middle,start,search}-*` show each state.
+
 `test18TrackCallsFromSources` opens a synthetic glue script (artifact 330) in
 Sources at both window sizes. **Track calls** at the default position must
 refuse top-level code; `o.dup`, typed with native keys and Return, must be
 refused with both definitions listed and their markup-bearing context lines
 inert; `window.hsw` must be saved without matching the decoys in a string and
 a comment; and **More** > **Go to line** and **Track calls** must save the
-callback around `awb(`. The titlebar chip must read `2 functions saved for the
-next capture` in full, inside the titlebar and over no other label.
+callback around `awb(`. The harness backend follows the saved set as an app
+capture does, so saving says the capture tracks the function at once, the set
+reports both sites armed, and the titlebar chip must read `Tracking 2
+functions` in full, inside the titlebar and over no other label.
 `test18bMinifiedSourceOpensPrettyPrinted` opens a one-line source map over
 16 KiB (artifact 332). It must open pretty-printed with formatted gutter
 numbers and the original location in their tooltips, keep its colors after
@@ -339,6 +371,15 @@ the stopped request: answering one raises an exception that ended the app. The
 next run, of a script that returns, must get its own `completed` answer, not
 409.
 
+`test21bDecoderQueueHasNoDeadline` opens the bundled `reb://` workspace and
+sends 160 gzip transforms of 768 KiB each to the packaged decoder at once. The
+decoder runs one at a time with no deadline, so every request must be answered
+with 200, however long the queue takes; with the old two-second wait most were
+refused as busy. It then sends 150 more, aborts them after 300 ms, and the next
+request must be answered within 1.5 s, since the abandoned ones would take
+seconds to drain if WebKit stopping them did not take them off the queue. It
+prints the times as a `decoder queue in the packaged app` line.
+
 `test22NewLiveSessionAsksAboutUnsavedWork` first opens the bundled workspace
 through **New Live Session…** and the start panel's **Continue Offline**, because the close guard
 trusts only a document the app loaded itself. When an earlier test left the
@@ -422,6 +463,13 @@ actual viewport's media query. Scrolling checks center the specific target and
 wait for it to settle before measuring it. Fixed chrome, the analysis pane at
 rest, and controls revealed by product navigation are checked without
 test-driven scrolling.
+
+Program Trees lists VM findings before the opcode workspace and its host links
+arrive, and each arrival rebuilds the finding's detail. A VM test that selects
+a finding and reads its Symbol Tree, handler listing or analysis panels first
+waits for `#vm-detail` and `#vm-symbol-list` to report `aria-busy="false"`, not
+only for the finding rows; reading after the rows alone raced that load and
+failed `test4VmNativeGuestRows` with a missing symbol row on a slow runner.
 
 To reproduce smaller CI displays locally, cap all requested heights without
 changing the display resolution. The `macos-latest` runner currently clamps

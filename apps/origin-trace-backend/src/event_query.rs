@@ -646,16 +646,23 @@ fn require_boundary(file: &mut File, length: u64, offset: u64) -> Result<()> {
 
 /// The position after the last newline. A trailing record without one is
 /// still being written and is left for a later read.
+/// It reads back a chunk at a time, so a record bound far above the usual
+/// record does not make every tail read that large.
 fn last_boundary(file: &mut File, length: u64, max_record: usize) -> Result<u64> {
-    let window = length.min(max_record as u64 + 1);
-    file.seek(SeekFrom::Start(length - window))?;
-    let mut tail = vec![0; window as usize];
-    file.read_exact(&mut tail)?;
-    match tail.iter().rposition(|byte| *byte == b'\n') {
-        Some(index) => Ok(length - window + index as u64 + 1),
-        None if window == length => Ok(0),
-        None => Err(oversized()),
+    let floor = length.saturating_sub(max_record as u64 + 1);
+    let mut chunk = vec![0; CHUNK];
+    let mut end = length;
+    while end > floor {
+        let size = (end - floor).min(CHUNK as u64) as usize;
+        let start = end - size as u64;
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut chunk[..size])?;
+        if let Some(index) = chunk[..size].iter().rposition(|byte| *byte == b'\n') {
+            return Ok(start + index as u64 + 1);
+        }
+        end = start;
     }
+    if floor == 0 { Ok(0) } else { Err(oversized()) }
 }
 
 fn oversized() -> Error {

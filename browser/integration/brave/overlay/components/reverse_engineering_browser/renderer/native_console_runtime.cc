@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -9,7 +9,9 @@
 #include <array>
 #include <charconv>
 #include <cmath>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string_view>
 #include <vector>
@@ -21,44 +23,45 @@
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
 #include "base/time/time.h"
+#include "brave/components/reverse_engineering_browser/common/native_console_protocol.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_script_cookie_sink.h"
+#include "third_party/blink/public/platform/web_security_origin.h"
 #include "third_party/blink/public/platform/web_string.h"
+#include "third_party/blink/public/web/web_document.h"
 #include "third_party/blink/public/web/web_element.h"
 #include "third_party/blink/public/web/web_local_frame.h"
+#include "url/origin.h"
 #include "v8/include/v8-debug.h"
 #include "v8/include/v8-native-console.h"
 #include "v8/include/v8-native-stack.h"
 
 namespace reb {
 namespace {
-std::int64_t Now() {
-  return base::TimeTicks::Now().since_origin().InMicroseconds();
-}
-std::string Bounded(std::string text, std::size_t limit = 2048) {
-  if (text.size() > limit) {
-    text.resize(limit);
-    while (!text.empty() && !base::IsStringUTF8(text))
-      text.pop_back();
-  }
-  return text;
-}
 v8::Local<v8::String> Key(v8::Isolate* isolate, const char* text) {
   return v8::String::NewFromUtf8(isolate, text).ToLocalChecked();
 }
-std::string WebText(const blink::WebString& value, std::size_t limit = 2048) {
-  return Bounded(value.Substring(0, limit).Utf8(), limit);
+// Every text a reply carries is whole: a value, a name, a source or a message
+// is never cut to fit a record.
+std::string WebText(const blink::WebString& value) {
+  return value.Utf8();
 }
-std::string Text(v8::Isolate* isolate, v8::Local<v8::String> value, bool* truncated = nullptr) {
+// A lone surrogate becomes U+FFFD, which has the same UTF-8 length, so the
+// measured size is exact.
+std::string Text(v8::Isolate* isolate, v8::Local<v8::String> value) {
   if (value.IsEmpty())
     return "";
-  std::array<char, 2048> buffer{};
-  std::size_t characters = 0;
-  const auto bytes = value->WriteUtf8(isolate, buffer.data(), buffer.size(),
-                                      v8::String::WriteFlags::kReplaceInvalidUtf8, &characters);
-  if (truncated)
-    *truncated = characters < static_cast<std::size_t>(value->Length());
-  return std::string(buffer.data(), bytes);
+  std::string text(value->Utf8Length(isolate), '\0');
+  text.resize(value->WriteUtf8(isolate, text.data(), text.size(),
+                               v8::String::WriteFlags::kReplaceInvalidUtf8));
+  return text;
+}
+// A JSON number for a count or position that may pass 2^31, as an array index
+// can: base::Value integers are 32 bits, doubles hold every index exactly.
+base::Value Count(std::uint64_t value) {
+  if (value <= static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
+    return base::Value(static_cast<int>(value));
+  return base::Value(static_cast<double>(value));
 }
 bool Inspectable(v8::Local<v8::Value> value) {
   if (!value->IsObject() || value->IsProxy())
@@ -104,7 +107,7 @@ base::DictValue Failure(const char* text) {
   return base::DictValue().Set("status", "error").Set("text", text);
 }
 bool Identifier(std::string_view name) {
-  if (name.empty() || name.size() > 128)
+  if (name.empty())
     return false;
   auto first = [](char c) { return base::IsAsciiAlpha(c) || c == '_' || c == '$'; };
   if (!first(name.front()))
@@ -144,6 +147,24 @@ void ObserveThrow(v8::Isolate* isolate) {
   NativeDebuggerWatch::Exception(frame_id, thrown.catcher == v8::NativeThrowCatcher::kNone ? 1 : 2,
                                  site);
 }
+// The renderer's main-thread isolate, recorded before its first arm, so the
+// observer follows every change of armed kinds, including a kept scope the
+// browser replaces while no Console command runs.
+v8::Isolate* g_watch_isolate = nullptr;
+bool g_throw_observer = false;
+void SyncThrowObserver() {
+  const bool wanted = NativeDebuggerWatch::Armed(kNativeWatchUncaught | kNativeWatchCaught);
+  if (!g_watch_isolate || wanted == g_throw_observer)
+    return;
+  v8::SetNativeThrowObserver(g_watch_isolate, wanted ? &ObserveThrow : nullptr);
+  g_throw_observer = wanted;
+}
+void UseWatchIsolate(v8::Isolate* isolate) {
+  if (g_watch_isolate || !isolate)
+    return;
+  g_watch_isolate = isolate;
+  NativeDebuggerWatch::SetKindsChanged(&SyncThrowObserver);
+}
 base::DictValue Location(v8::Isolate* isolate,
                          v8::Local<v8::Value> resource,
                          int line,
@@ -160,34 +181,57 @@ base::DictValue Location(v8::Isolate* isolate,
 NativeConsoleRuntime::NativeConsoleRuntime() = default;
 
 NativeConsoleRuntime::~NativeConsoleRuntime() {
-  Unwatch();
+  DocumentEnded();
 }
 
 void NativeConsoleRuntime::Reset() {
-  for (auto& slot : slots_) {
-    slot.value.Reset();
-    slot.id = 0;
-  }
-  expiration_.Stop();
+  retained_.clear();
   monitors_.clear();
   last_ = 0;
   messages_.Reset();
 }
 void NativeConsoleRuntime::Unwatch() {
-  if (watch_frame_ != 0) {
+  // The throw observer follows the armed kinds, so another document's arm
+  // keeps it.
+  if (watch_frame_ != 0)
     NativeDebuggerWatch::Disarm(watch_frame_);
-    // Another document's newer Arm keeps the observer it installed.
-    if (!NativeDebuggerWatch::Armed(kNativeWatchUncaught | kNativeWatchCaught))
-      v8::SetNativeThrowObserver(watch_isolate_, nullptr);
-  }
   watch_frame_ = 0;
-  watch_isolate_ = nullptr;
+}
+void NativeConsoleRuntime::DocumentStarted(v8::Isolate* isolate, blink::WebLocalFrame* frame) {
+  document_ = frame->GetDocument().Token().value();
+  frame_id_ = FrameId(frame);
+  if (!NativeDebuggerWatch::HasScope())
+    return;
+  // The browser serializes the scope's origin with url::Origin, so compare the
+  // document's own serialization: an opaque origin is "null" and never equals
+  // a scope.
+  const url::Origin origin = frame->GetSecurityOrigin();
+  UseWatchIsolate(isolate);
+  static_cast<void>(
+      NativeDebuggerWatch::ArmScope(frame_id_, origin.Serialize(), frame->IsOutermostMainFrame()));
+}
+void NativeConsoleRuntime::WindowCleared(v8::Isolate* isolate, blink::WebLocalFrame* frame) {
+  if (frame->GetDocument().Token().value() == document_)
+    return;
+  DocumentEnded();
+  DocumentStarted(isolate, frame);
+}
+void NativeConsoleRuntime::DocumentEnded() {
+  Unwatch();
+  // A document the kept scope armed.
+  if (frame_id_ != 0)
+    NativeDebuggerWatch::Disarm(frame_id_);
+  frame_id_ = 0;
+  document_ = base::UnguessableToken();
 }
 base::DictValue NativeConsoleRuntime::Watch(v8::Isolate* isolate,
                                             blink::WebLocalFrame* frame,
                                             const base::DictValue& command) {
-  // A refused watch leaves nothing armed, so the caller never guesses.
+  // A refused watch leaves nothing armed on this document, so the caller
+  // never guesses; a kept scope still arms later documents.
+  UseWatchIsolate(isolate);
   Unwatch();
+  NativeDebuggerWatch::Disarm(FrameId(frame));
   const auto* rules = command.FindDict("rules");
   if (!rules)
     return Failure("Watch rules must be an object");
@@ -204,12 +248,13 @@ base::DictValue NativeConsoleRuntime::Watch(v8::Isolate* isolate,
     const auto* url = rule ? rule->FindString("url_contains") : nullptr;
     const auto* method = rule ? rule->FindString("method") : nullptr;
     if (!url || !armed.AddRequest(*url, method ? *method : std::string()))
-      return Failure("Request rules are url_contains of 1 to 256 bytes and an uppercase method");
+      return Failure(
+          "At most 32 request rules, each url_contains of 1 to 256 bytes and an uppercase method");
   }
   const auto* events = rules->FindList("events");
   for (std::size_t i = 0; events && i < events->size(); ++i) {
     if (!(*events)[i].is_string() || !armed.AddEvent((*events)[i].GetString()))
-      return Failure("Event rules are 1 to 27 printable ASCII bytes, each once, at most 16");
+      return Failure("Event rules are 1 to 27 printable ASCII bytes, each once, at most 64");
   }
   armed.timers = rules->FindBool("timers").value_or(false);
   armed.csp = rules->FindBool("csp").value_or(false);
@@ -230,15 +275,12 @@ base::DictValue NativeConsoleRuntime::Watch(v8::Isolate* isolate,
     if (!armed.AddDom(element.GetDomNodeId(), rule->FindBool("attributes").value_or(false),
                       rule->FindBool("subtree").value_or(false),
                       rule->FindBool("removal").value_or(false)))
-      return Failure("At most 4 distinct elements, each watching attributes, subtree or removal");
+      return Failure("At most 32 distinct elements, each watching attributes, subtree or removal");
   }
   const std::uint64_t frame_id = FrameId(frame);
   if (!NativeDebuggerWatch::Arm(frame_id, armed))
     return Failure("No capture session is active in this renderer; nothing was armed");
   watch_frame_ = frame_id;
-  watch_isolate_ = isolate;
-  if (armed.uncaught)
-    v8::SetNativeThrowObserver(isolate, &ObserveThrow);
   std::vector<std::string> parts;
   if (armed.request_count)
     parts.push_back(base::NumberToString(armed.request_count) + " request rules");
@@ -258,61 +300,35 @@ base::DictValue NativeConsoleRuntime::Watch(v8::Isolate* isolate,
                                  : "Watching " + base::JoinString(parts, ", ") +
                                        ". Records arrive through get_events; nothing pauses.");
 }
-void NativeConsoleRuntime::Message(const std::string& text,
-                                   const std::string& source,
-                                   const std::string& stack,
+void NativeConsoleRuntime::Message(std::string text,
+                                   std::string source,
+                                   std::string stack,
                                    unsigned line,
-                                   int level,
-                                   bool truncated) {
-  auto message = Bounded(text);
-  auto url = Bounded(source, 512);
-  auto trace = Bounded(stack);
-  const bool clipped = truncated || text.size() > message.size() || source.size() > url.size() ||
-                       stack.size() > trace.size();
+                                   int level) {
   static constexpr std::array levels{"debug", "info", "warning", "error"};
   const auto record = base::DictValue()
-                          .Set("text", std::move(message))
-                          .Set("url", std::move(url))
-                          .Set("stack", std::move(trace))
+                          .Set("text", std::move(text))
+                          .Set("url", std::move(source))
+                          .Set("stack", std::move(stack))
                           .Set("line", static_cast<int>(std::min(line, 2147483647u)))
                           .Set("level", levels[std::clamp(level, 0, 3)])
-                          .Set("time", base::Time::Now().InMillisecondsFSinceUnixEpoch())
-                          .Set("truncated", clipped);
+                          .Set("time", base::Time::Now().InMillisecondsFSinceUnixEpoch());
   std::string encoded;
   if (base::JSONWriter::Write(record, &encoded))
     messages_.Push(std::move(encoded));
   else
     messages_.Drop();
 }
-void NativeConsoleRuntime::Expire() {
-  bool retained = false;
-  for (auto& slot : slots_) {
-    if (slot.id && slot.expires_us <= Now()) {
-      slot.value.Reset();
-      slot.id = 0;
-    }
-    retained |= slot.id != 0;
-  }
-  std::erase_if(monitors_, [](const Monitor& monitor) { return monitor.expires_us <= Now(); });
-  if (!retained && monitors_.empty())
-    expiration_.Stop();
-}
 std::uint64_t NativeConsoleRuntime::Retain(v8::Isolate* isolate,
                                            v8::Local<v8::Value> value,
                                            bool repl) {
   if (next_handle_ == UINT64_MAX)
     return 0;
-  if (!expiration_.IsRunning())
-    expiration_.Start(FROM_HERE, base::Seconds(1),
-                      base::BindRepeating(&NativeConsoleRuntime::Expire, base::Unretained(this)));
-  // Reusing a slot does not reuse its identity. The UI sees an expired-handle
-  // error instead of accidentally inspecting a more recent command's value.
-  auto& slot = slots_[next_slot_++ % slots_.size()];
-  slot.value.Reset(isolate, value);
-  slot.id = next_handle_++;
-  slot.expires_us = Now() + 60000000;
-  slot.repl = repl;
-  return slot.id;
+  const std::uint64_t id = next_handle_++;
+  auto& retained = retained_[id];
+  retained.repl = repl;
+  retained.value.Reset(isolate, value);
+  return id;
 }
 v8::Local<v8::Value> NativeConsoleRuntime::Lookup(v8::Isolate* isolate,
                                                   const std::string& handle,
@@ -320,13 +336,12 @@ v8::Local<v8::Value> NativeConsoleRuntime::Lookup(v8::Isolate* isolate,
   std::uint64_t id = 0;
   if (!base::StringToUint64(handle, &id) || !id || base::NumberToString(id) != handle)
     return {};
-  for (auto& slot : slots_)
-    if (slot.id == id && slot.expires_us > Now()) {
-      if (repl)
-        *repl = slot.repl;
-      return slot.value.Get(isolate);
-    }
-  return {};
+  const auto found = retained_.find(id);
+  if (found == retained_.end())
+    return {};
+  if (repl)
+    *repl = found->second.repl;
+  return found->second.value.Get(isolate);
 }
 base::DictValue NativeConsoleRuntime::Value(v8::Isolate* isolate,
                                             v8::Local<v8::Context> context,
@@ -334,7 +349,6 @@ base::DictValue NativeConsoleRuntime::Value(v8::Isolate* isolate,
                                             bool repl) {
   base::DictValue result;
   std::string type = "object", text = "Object";
-  bool truncated = false;
   if (value->IsUndefined()) {
     type = text = "undefined";
   } else if (value->IsNull()) {
@@ -344,7 +358,7 @@ base::DictValue NativeConsoleRuntime::Value(v8::Isolate* isolate,
     text = value.As<v8::Boolean>()->Value() ? "true" : "false";
   } else if (value->IsString()) {
     type = "string";
-    text = Text(isolate, value.As<v8::String>(), &truncated);
+    text = Text(isolate, value.As<v8::String>());
   } else if (value->IsNumber()) {
     type = "number";
     const auto number = value.As<v8::Number>()->Value();
@@ -361,14 +375,10 @@ base::DictValue NativeConsoleRuntime::Value(v8::Isolate* isolate,
     }
   } else if (value->IsBigInt()) {
     type = "bigint";
-    if (value.As<v8::BigInt>()->WordCount() > 16) {
-      text = "BigInt > 1024 bits";
-      truncated = true;
-    } else {
-      v8::Local<v8::String> number;
-      if (value->ToString(context).ToLocal(&number))
-        text = Text(isolate, number) + "n";
-    }
+    // BigInt formatting is engine code and calls nothing the page defined.
+    v8::Local<v8::String> number;
+    if (value->ToString(context).ToLocal(&number))
+      text = Text(isolate, number) + "n";
   } else if (value->IsSymbol()) {
     type = "symbol";
     const auto description = value.As<v8::Symbol>()->Description(isolate);
@@ -415,43 +425,36 @@ base::DictValue NativeConsoleRuntime::Value(v8::Isolate* isolate,
   else {
     const auto element = blink::WebElement::FromV8Value(isolate, value);
     if (!element.IsNull())
-      text =
-          "<" + WebText(element.TagName(), 128) +
-          (element.GetIdAttribute().IsEmpty() ? "" : "#" + WebText(element.GetIdAttribute(), 128)) +
-          ">";
+      text = "<" + WebText(element.TagName()) +
+             (element.GetIdAttribute().IsEmpty() ? "" : "#" + WebText(element.GetIdAttribute())) +
+             ">";
   }
   if (value->IsObject() || value->IsSymbol()) {
     const auto handle = Retain(isolate, value, repl);
     if (handle)
       result.Set("handle", base::NumberToString(handle));
   }
-  truncated |= text.size() > 2048;
   result.Set("type", type);
-  result.Set("text", Bounded(std::move(text)));
-  result.Set("truncated", truncated);
+  result.Set("text", std::move(text));
   return result;
 }
 base::DictValue NativeConsoleRuntime::Properties(v8::Isolate* isolate,
                                                  v8::Local<v8::Context> context,
                                                  v8::Local<v8::Value> value,
-                                                 int offset) {
+                                                 std::uint64_t offset) {
   const auto element = blink::WebElement::FromV8Value(isolate, value);
   if (!element.IsNull()) {
     base::ListValue properties;
     auto property = [&](const char* name, const blink::WebString& value) {
-      const auto text = value.Substring(0, 2048).Utf8();
       properties.Append(
           base::DictValue()
               .Set("name", name)
-              .Set("value", base::DictValue()
-                                .Set("type", "string")
-                                .Set("text", Bounded(text))
-                                .Set("truncated", value.length() > 2048 || text.size() > 2048)));
+              .Set("value", base::DictValue().Set("type", "string").Set("text", WebText(value))));
     };
     property("tagName", element.TagName());
     property("id", element.GetIdAttribute());
     property("class", element.GetAttribute(blink::WebString::FromUtf8("class")));
-    property("textContent", element.TextContentAbridged(512));
+    property("textContent", element.TextContent());
     auto child = element.FirstChild();
     if (!child.IsNull())
       properties.Append(base::DictValue()
@@ -466,29 +469,29 @@ base::DictValue NativeConsoleRuntime::Properties(v8::Isolate* isolate,
   if (!Inspectable(value))
     return Failure("Proxy, host interceptor or non-object: automatic property access is blocked");
   const auto object = value.As<v8::Object>();
+  // A page of 16 members per inspect; the owner pages on to the last one.
+  constexpr std::uint64_t kPage = 16;
   if (value->IsArray() || value->IsTypedArray()) {
-    const auto length =
+    const std::uint64_t length =
         value->IsArray() ? value.As<v8::Array>()->Length() : value.As<v8::TypedArray>()->Length();
-    const auto limit = std::min(length, static_cast<std::size_t>(65536));
-    const auto end = std::min(limit, static_cast<std::size_t>(offset + 16));
+    const auto end = offset >= length ? length : std::min(length, offset + kPage);
     base::ListValue properties;
-    for (std::size_t index = static_cast<std::size_t>(offset); index < end; ++index) {
+    for (std::uint64_t index = offset; index < end; ++index) {
       auto member =
           Data(isolate, context, object, Key(isolate, base::NumberToString(index).c_str()));
-      properties.Append(base::DictValue()
-                            .Set("name", base::NumberToString(index))
-                            .Set("value", member.IsEmpty() ? base::DictValue()
-                                                                 .Set("type", "accessor")
-                                                                 .Set("text", "[Empty / Accessor]")
-                                                                 .Set("truncated", false)
-                                                           : Value(isolate, context, member)));
+      properties.Append(
+          base::DictValue()
+              .Set("name", base::NumberToString(index))
+              .Set("value",
+                   member.IsEmpty()
+                       ? base::DictValue().Set("type", "accessor").Set("text", "[Empty / Accessor]")
+                       : Value(isolate, context, member)));
     }
     return base::DictValue()
         .Set("status", "ok")
         .Set("properties", std::move(properties))
-        .Set("more", end < limit)
-        .Set("truncated", length > limit)
-        .Set("offset", static_cast<int>(end));
+        .Set("more", end < length)
+        .Set("offset", Count(end));
   }
   v8::Local<v8::Array> names;
   if (!object
@@ -497,9 +500,9 @@ base::DictValue NativeConsoleRuntime::Properties(v8::Isolate* isolate,
            .ToLocal(&names))
     return Failure("Property enumeration failed");
   base::ListValue properties;
-  const auto limit = std::min(names->Length(), 65536u);
-  const auto end = std::min(limit, static_cast<unsigned>(offset + 16));
-  for (unsigned i = offset; i < end; ++i) {
+  const std::uint64_t count = names->Length();
+  const auto end = offset >= count ? count : std::min(count, offset + kPage);
+  for (auto i = static_cast<std::uint32_t>(std::min(offset, count)); i < end; ++i) {
     v8::Local<v8::Value> name;
     if (!names->Get(context, i).ToLocal(&name) || !name->IsName())
       continue;
@@ -512,10 +515,8 @@ base::DictValue NativeConsoleRuntime::Properties(v8::Isolate* isolate,
     auto data = Data(isolate, context, object, name.As<v8::Name>());
     if (data.IsEmpty()) {
       property.Set("accessor", true);
-      property.Set("value", base::DictValue()
-                                .Set("type", "accessor")
-                                .Set("text", "[Getter / Setter]")
-                                .Set("truncated", false));
+      property.Set("value",
+                   base::DictValue().Set("type", "accessor").Set("text", "[Getter / Setter]"));
     } else {
       property.Set("accessor", false);
       property.Set("value", Value(isolate, context, data));
@@ -532,19 +533,21 @@ base::DictValue NativeConsoleRuntime::Properties(v8::Isolate* isolate,
   return base::DictValue()
       .Set("status", "ok")
       .Set("properties", std::move(properties))
-      .Set("more", end < limit)
-      .Set("truncated", names->Length() > limit)
-      .Set("offset", static_cast<int>(end));
+      .Set("more", end < count)
+      .Set("offset", Count(end));
 }
 base::DictValue NativeConsoleRuntime::Complete(v8::Isolate* isolate,
                                                v8::Local<v8::Context> context,
                                                const base::DictValue& command) {
+  // Every match, from every object on the chain: a completion list is as long
+  // as what the owner and its prototypes actually define.
   const auto* path = command.FindList("path");
   const auto* prefix = command.FindString("prefix");
-  if (!path || path->size() > 8 || !prefix || prefix->size() > 128)
+  if (!path || !prefix)
     return Failure("Invalid completion path");
   std::vector<v8::Global<v8::String>> lexicals;
-  v8::debug::GetNativeConsoleLexicalNames(context, &lexicals, 1024);
+  v8::debug::GetNativeConsoleLexicalNames(context, &lexicals,
+                                          std::numeric_limits<std::uint32_t>::max());
   v8::Local<v8::Value> owner = context->Global()->GetPrototype();
   for (const auto& component : *path) {
     if (owner.IsEmpty())
@@ -578,10 +581,9 @@ base::DictValue NativeConsoleRuntime::Complete(v8::Isolate* isolate,
           break;
         }
     }
-    for (int depth = 0;
-         member.IsEmpty() && depth < 8 &&
-         (Inspectable(object) || object->StrictEquals(context->Global()->GetPrototype()));
-         ++depth) {
+    // A prototype chain is finite and acyclic, and proxies stop the walk.
+    while (member.IsEmpty() &&
+           (Inspectable(object) || object->StrictEquals(context->Global()->GetPrototype()))) {
       member = Data(isolate, context, object, Key(isolate, component.GetString().c_str()));
       if (!member.IsEmpty())
         break;
@@ -599,17 +601,14 @@ base::DictValue NativeConsoleRuntime::Complete(v8::Isolate* isolate,
   if (path->empty())
     for (const auto& lexical : lexicals) {
       const auto name = Text(isolate, lexical.Get(isolate));
-      if (items.size() < 24 && Identifier(name) && name.starts_with(*prefix) &&
-          seen.insert(name).second)
+      if (Identifier(name) && name.starts_with(*prefix) && seen.insert(name).second)
         items.Append(base::DictValue()
                          .Set("name", name)
                          .Set("kind", "property")
                          .Set("signature", "lexical binding"));
     }
-  for (int depth = 0;
-       depth < 8 && !owner.IsEmpty() &&
-       (Inspectable(owner) || owner->StrictEquals(context->Global()->GetPrototype()));
-       ++depth) {
+  while (!owner.IsEmpty() &&
+         (Inspectable(owner) || owner->StrictEquals(context->Global()->GetPrototype()))) {
     auto object = owner.As<v8::Object>();
     v8::Local<v8::Array> names;
     if (!object
@@ -617,7 +616,7 @@ base::DictValue NativeConsoleRuntime::Complete(v8::Isolate* isolate,
                                    v8::KeyConversionMode::kConvertToString)
              .ToLocal(&names))
       break;
-    for (unsigned i = 0; i < std::min(names->Length(), 4096u) && items.size() < 24; ++i) {
+    for (std::uint32_t i = 0; i < names->Length(); ++i) {
       v8::Local<v8::Value> name;
       if (!names->Get(context, i).ToLocal(&name) || !name->IsString())
         continue;
@@ -636,8 +635,6 @@ base::DictValue NativeConsoleRuntime::Complete(v8::Isolate* isolate,
       }
       items.Append(std::move(item));
     }
-    if (items.size() == 24)
-      break;
     owner = object->GetPrototype();
   }
   return base::DictValue().Set("status", "ok").Set("items", std::move(items));
@@ -646,11 +643,6 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
                                       v8::Local<v8::Context> context,
                                       blink::WebLocalFrame* frame,
                                       const std::string& command) {
-  for (auto& slot : slots_)
-    if (slot.id && slot.expires_us <= Now()) {
-      slot.value.Reset();
-      slot.id = 0;
-    }
   const base::AutoReset<bool> running(&g_running, true);
   const auto parsed = base::JSONReader::ReadDict(command, base::JSON_PARSE_RFC);
   base::DictValue result;
@@ -672,13 +664,12 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
     result = base::DictValue().Set("status", "ok").Set("text", "Watch rules disarmed");
   } else if (*operation == "evaluate") {
     const auto* source = parsed->FindString("source");
-    if (!source || source->empty() || source->size() > 8192 ||
-        source->find('\0') != std::string::npos)
-      result = Failure("JavaScript must be 1 to 8192 bytes without NUL");
+    if (!source || source->empty() || source->find('\0') != std::string::npos)
+      result = Failure("JavaScript must be non-empty without NUL");
+    // V8's own bound: a source string's length is an int.
+    else if (source->size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+      result = Failure("JavaScript is longer than V8 can hold in one string");
     else {
-      auto text = v8::String::NewFromUtf8(isolate, source->data(), v8::NewStringType::kNormal,
-                                          static_cast<int>(source->size()))
-                      .ToLocalChecked();
       v8::Local<v8::Value> value;
       bool success = false;
       bool repl = false;
@@ -687,9 +678,18 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
         value = Lookup(isolate, base::NumberToString(last_), &repl);
         success = !value.IsEmpty();
       } else {
-        success = v8::debug::EvaluateNativeConsole(isolate, text,
-                                                   v8::debug::NativeConsoleEvaluationMode::kRepl)
-                      .ToLocal(&value);
+        // Fails, rather than crashing the renderer, when the decoded source
+        // passes V8's string length.
+        v8::Local<v8::String> text;
+        success = v8::String::NewFromUtf8(isolate, source->data(), v8::NewStringType::kNormal,
+                                          static_cast<int>(source->size()))
+                      .ToLocal(&text);
+        if (!success)
+          result = Failure("JavaScript is longer than V8 can hold in one string");
+        else
+          success = v8::debug::EvaluateNativeConsole(isolate, text,
+                                                     v8::debug::NativeConsoleEvaluationMode::kRepl)
+                        .ToLocal(&value);
         repl = success && value->IsPromise();
       }
       if (success && repl) {
@@ -708,13 +708,13 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
         last_ = Retain(isolate, value, repl);
         result.Set("status", "ok");
         result.Set("value", Value(isolate, context, value, repl));
-      } else
+      } else if (!result.FindString("status"))
         result = Failure("JavaScript failed");
     }
   } else if (*operation == "last") {
     bool repl = false;
     auto value = Lookup(isolate, base::NumberToString(last_), &repl);
-    result = value.IsEmpty() ? Failure("Previous result expired")
+    result = value.IsEmpty() ? Failure("Previous result was released or cleared")
                              : base::DictValue()
                                    .Set("status", "ok")
                                    .Set("value", Value(isolate, context, value, repl));
@@ -723,13 +723,11 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
     bool repl = false;
     auto value = handle ? Lookup(isolate, *handle, &repl) : v8::Local<v8::Value>();
     if (value.IsEmpty())
-      result = Failure("Value expired, was released, or belongs to another document");
+      result = Failure("Value was released, cleared, or belongs to another document");
     else if (*operation == "release" || *operation == "cancel") {
-      for (auto& slot : slots_)
-        if (base::NumberToString(slot.id) == *handle) {
-          slot.value.Reset();
-          slot.id = 0;
-        }
+      std::uint64_t id = 0;
+      if (base::StringToUint64(*handle, &id))
+        retained_.erase(id);
       result.Set("status", "ok");
       result.Set("text", *operation == "cancel" ? "Stopped waiting; page work is not rolled back"
                                                 : "Value released");
@@ -739,10 +737,8 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
       else {
         v8::Local<v8::String> source;
         if (value.As<v8::Function>()->FunctionProtoToString(context).ToLocal(&source)) {
-          bool truncated = false;
           result.Set("status", "ok");
-          result.Set("text", Text(isolate, source, &truncated));
-          result.Set("truncated", truncated);
+          result.Set("text", Text(isolate, source));
         } else
           result = Failure("Function source unavailable");
       }
@@ -758,11 +754,13 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
                              : "Select an Element to monitor its events");
       else if (*operation == "listeners") {
         base::ListValue properties;
-        auto listeners = window   ? document.ConsoleWindowEventListeners(isolate, 32)
-                         : global ? document.ConsoleEventListeners(isolate, 32)
-                                  : node.ConsoleEventListeners(isolate, 32);
+        // Every registered listener.
+        constexpr unsigned kAll = std::numeric_limits<unsigned>::max();
+        auto listeners = window   ? document.ConsoleWindowEventListeners(isolate, kAll)
+                         : global ? document.ConsoleEventListeners(isolate, kAll)
+                                  : node.ConsoleEventListeners(isolate, kAll);
         for (const auto& listener : listeners) {
-          const auto label = WebText(listener.type, 128) + (listener.capture ? " capture" : "") +
+          const auto label = WebText(listener.type) + (listener.capture ? " capture" : "") +
                              (listener.passive ? " passive" : "") + (listener.once ? " once" : "");
           properties.Append(
               base::DictValue()
@@ -771,14 +769,12 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
                                     ? base::DictValue()
                                           .Set("type", "accessor")
                                           .Set("text", "[Inline / Native callback: not inspected]")
-                                          .Set("truncated", false)
                                     : Value(isolate, context, listener.callback)));
         }
         result.Set("status", "ok");
         result.Set("properties", std::move(properties));
         result.Set("more", false);
         result.Set("offset", 0);
-        result.Set("truncated", listeners.size() == 32);
       } else if (*operation == "unmonitor") {
         std::erase_if(monitors_,
                       [&](const Monitor& monitor) { return monitor.element.Equals(node); });
@@ -787,28 +783,30 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
       } else {
         std::erase_if(monitors_,
                       [&](const Monitor& monitor) { return monitor.element.Equals(node); });
-        if (monitors_.size() >= 8)
-          result = Failure("At most 8 event monitors; stop a monitor first");
-        else {
-          Monitor monitor{node, Now() + 60000000, {}};
-          for (const char* type : {"click", "input", "keydown", "submit"}) {
-            monitor.removals.push_back(node.AddConsoleEventListener(
-                blink::WebString::FromUtf8(type),
-                base::BindRepeating(
-                    [](NativeConsoleRuntime* runtime, std::string type, blink::WebDOMEvent) {
-                      runtime->Message("event: " + type, "", "", 0, 1);
-                    },
-                    base::Unretained(this), std::string(type))));
-          }
-          monitors_.push_back(std::move(monitor));
-          result.Set("status", "ok");
-          result.Set("text", "Monitoring click, input, keydown and submit for 60 seconds");
+        Monitor monitor{node, {}};
+        for (const char* type : {"click", "input", "keydown", "submit"}) {
+          monitor.removals.push_back(node.AddConsoleEventListener(
+              blink::WebString::FromUtf8(type),
+              base::BindRepeating(
+                  [](NativeConsoleRuntime* runtime, std::string type, blink::WebDOMEvent) {
+                    runtime->Message("event: " + type, "", "", 0, 1);
+                  },
+                  base::Unretained(this), std::string(type))));
         }
+        monitors_.push_back(std::move(monitor));
+        result.Set("status", "ok");
+        result.Set("text",
+                   "Monitoring click, input, keydown and submit until unmonitorEvents or the "
+                   "page navigates");
       }
     } else if (*operation == "inspect") {
-      const int offset = parsed->FindInt("offset").value_or(-1);
-      result = offset < 0 || offset > 65536 ? Failure("Invalid property offset")
-                                            : Properties(isolate, context, value, offset);
+      // Any member position a JavaScript array or typed array can have, up to
+      // 2^53 - 1, which a JSON number and a double both hold exactly.
+      const auto offset = parsed->FindDouble("offset");
+      result =
+          !offset || *offset < 0 || *offset > 9007199254740991.0 || *offset != std::floor(*offset)
+              ? Failure("Invalid property offset")
+              : Properties(isolate, context, value, static_cast<std::uint64_t>(*offset));
     } else if (*operation == "await") {
       if (!value->IsPromise())
         result = Failure("Value is not a promise");
@@ -833,12 +831,18 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
     } else if (*operation == "store" && repl) {
       result = Failure("Await this REPL evaluation before storing its result");
     } else if (*operation == "store") {
+      // The first free tempN. A page defines finitely many, so this ends; a
+      // failed lookup stops it rather than guessing.
       std::string name;
-      for (int attempt = 0; attempt < 128; ++attempt) {
+      for (;;) {
         name = "temp" + base::NumberToString(next_temp_++);
-        if (!context->Global()->HasOwnProperty(context, Key(isolate, name.c_str())).FromMaybe(true))
+        const auto taken = context->Global()->HasOwnProperty(context, Key(isolate, name.c_str()));
+        if (taken.IsNothing()) {
+          name.clear();
           break;
-        name.clear();
+        }
+        if (!taken.FromJust())
+          break;
       }
       // CreateDataProperty defines an own data property without invoking a
       // setter. Storing is an explicit, visible mutation in the experiment.
@@ -864,8 +868,9 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
       auto trace = message->GetStackTrace();
       if (trace.IsEmpty() && !exception.Exception().IsEmpty())
         trace = v8::Exception::GetStackTrace(exception.Exception());
+      // Every frame V8 captured.
       if (!trace.IsEmpty())
-        for (int i = 0; i < std::min(16, trace->GetFrameCount()); ++i) {
+        for (int i = 0; i < trace->GetFrameCount(); ++i) {
           auto entry = trace->GetFrame(isolate, i);
           stack.Append(Location(isolate, entry->GetScriptNameOrSourceURL(), entry->GetLineNumber(),
                                 entry->GetColumn())
@@ -875,8 +880,8 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
     }
   }
   std::string encoded;
-  if (!base::JSONWriter::Write(result, &encoded) || encoded.size() > 65536)
-    return "{\"status\":\"error\",\"text\":\"Result exceeded bounded transport\"}";
+  if (!base::JSONWriter::Write(result, &encoded))
+    return "{\"status\":\"error\",\"text\":\"Result could not be serialized\"}";
   return encoded;
 }
 }  // namespace reb

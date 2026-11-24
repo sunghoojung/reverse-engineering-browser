@@ -71,10 +71,11 @@ detects that disconnect promptly and disables every renderer host and browser
 capture sink. No page script controls probe activation.
 
 Canvas output is a separate, explicit sensitive-capture mode. When enabled for
-the session, a successful `HTMLCanvasElement.toDataURL()` result of at most 2
-MiB becomes a `canvas_data_url` artifact linked by `creator_event_id` to the
-exact readback operation. Larger or invalid results still produce metadata but
-no artifact. Renderer code passes the output one way to the browser process;
+the session, a successful `HTMLCanvasElement.toDataURL()` result of any size
+becomes a `canvas_data_url` artifact linked by `creator_event_id` to the
+exact readback operation. An invalid result, or one the renderer's artifact
+credit cannot take (`canvas_data_url_backlog`), still produces metadata but no
+artifact. Renderer code passes the output one way to the browser process;
 the browser remains the only owner of the authenticated artifact connection.
 
 Web Audio call sites observe selected graph construction, connection, source
@@ -186,12 +187,15 @@ response, race network requests included, through
 recorded http(s) starts indexed by the request ID's low 10 bits. Chromium patch
 `0040-record-memory-cache-reuse` records each
 `ResourceFetcher::DidLoadResourceFromMemoryCache` in an ordinary page as a
-`memory_cache_reuse` record once the sink admits it, 4,096 per configuration,
-with the rest counted in the queue (version 4) as class 70 and those of pages
-that are not ordinary as class 71. Chromium patch
-`0062-name-memory-cache-reuse-sources` passes the reused resource's
-`ResourceResponse::RequestId()`, the renderer request that loaded it, which the
-record (payload version 2) names through its initiator fields.
+`memory_cache_reuse` record once the sink admits it, every one, with those of
+pages that are not ordinary counted in the queue (version 4) as class 71.
+Chromium patch `0062-name-memory-cache-reuse-sources` passes the reused
+resource's `ResourceResponse::RequestId()`, the renderer request that loaded
+it, which the record (payload version 2) names through its initiator fields.
+Chromium patch `0065-record-whole-memory-cache-targets` converts the whole
+http(s) target in a content session; the sink sends a target past the inline
+prefix to the browser over `NativeProbeHost.CaptureRendererTarget`, which
+drains the parent first and keeps the target as the child's artifact.
 See [Native network v3](../../../../../../protocol/native-network-v3.md).
 
 Each request names the tab that caused it. Brave patch
@@ -263,10 +267,11 @@ most 64 KiB with an incremental SHA-256. Tees, request content and renderer
 content share the 32 MiB in-flight pool in
 `common/native_artifact_memory_pool.h`, charged with each queued data frame and
 returned when the writer drops it; a stream that finds the pool full waits for
-it to drain. Compiled script source that no response body carries and WASM
-byte-buffer API inputs use a separate one-way Mojo submission, charged to a
-256 MiB renderer credit that the browser returns once it no longer holds the
-buffer; see
+it to drain. Compiled script source that no response body carries, WASM
+byte-buffer API inputs, the modules Wasm observations and guest captures
+carry, runtime buffers, Canvas images and stack script sources use a separate
+one-way Mojo submission of any size, charged to a 256 MiB renderer credit that
+the browser returns once it no longer holds the buffer; see
 [native compiled scripts](../../../../../../protocol/native-compiled-scripts-v2.md).
 The browser copies renderer-owned shared memory before validation and records
 the stable execution context plus exact capture origin. A dedicated writer
@@ -323,6 +328,10 @@ are compact identities for a sample a function, module, call-site, or the
 cap until the omitted counter saturates. `reset_wasm_sample_budgets` publishes
 the pending omitted count and starts a new ring. See
 [overflow identities](../../../../../../protocol/native-wasm-dispatch-v1.md#overflow-identities).
+Full Wasm records do not use the probe queue: each renderer thread sends them
+to `NativeProbeHost` in `CaptureWasmRecords` batches of up to 512, flushed
+when the recording task ends and before the thread's next other message. See
+[batches](../../../../../../protocol/native-wasm-dispatch-v1.md#producer-and-identity).
 See the [capability boundary and acceptance gates](../../../../../../protocol/vm-opcode-workspace-v2.md#native-browser-capability-boundary).
 The VM category also permits 32-byte through 16-MiB snapshots of runtime-created
 `ArrayBuffer`, `Uint8Array`, `Uint16Array`, and `Uint32Array` data. The V8 hook
@@ -335,19 +344,21 @@ use `common/native_js_dispatch.h` for the 128-byte payload and the fixed 44-byte
 site records, and `common/native_js_dispatch_sites.h` for the browser-side
 canonical site file. The renderer sink exposes a pulled epoch and an
 allocation-free admission predicate to V8, never calls the frame-id provider on
-that path, and claims one of 256 configuration samples and one of 64 site samples
-before emitting through the ordinary ring. A full ring returns both claims and
-keeps its drop count; budget, emitter, invalid-input and compiled-before-arming
-refusals are coalesced gaps. See the
+that path, and gives every dispatch of up to 256 sites its site's next ordinal
+before emitting through the ordinary ring. A full ring keeps its drop count and
+leaves the ordinal missing; emitter, invalid-input, compiled-before-arming and
+activation-ID refusals are coalesced gaps. See the
 [contract](../../../../../../protocol/native-js-dispatch-v1.md).
 
 Native JavaScript invocation records (`js_invocation_start`,
 `js_invocation_settle` and `js_invocation_request`, events 24 to 26) use
 `common/native_js_invocation.h` for the payloads and the 44-byte
 function-entry site records (shape 3), and `common/native_js_invocation_sites.h`
-for the browser-side site file. The sink claims one of 256 starts per
-configuration and one of 64 per site, and one of 256 request records; settles
-carry a digest only under the session's opt-in. It reads the current
+for the browser-side site file. The sink keeps every site in a table of
+doubling segments named by a u32 slot, records every start with its site's
+next ordinal, tells V8 whether it recorded each start so
+V8 settles only those, and gives each request record the configuration's next
+ordinal; settles carry a digest only under the session's opt-in. It reads the current
 invocation through a provider Blink installs, for Wasm `br_table` and
 `call_indirect` observations, guest invocation markers and loader requests.
 See the [contract](../../../../../../protocol/native-js-invocation-v1.md).
@@ -363,8 +374,8 @@ hooks and `common/native_navigation_initiator_hook.h` carries a navigation's
 renderer stack to the browser link (event 47). Every table belongs to one
 thread: the document main thread and each dedicated, shared and service worker
 are named without allocating, and get their own tables at their first walk
-or message receipt while capture is active (at most 32 workers per renderer;
-a schedule or post with no script running makes none), so later walks take
+or message receipt while capture is active (every worker its own; a
+schedule or post with no script running makes none), so later walks take
 no lock; only the call that makes the tables, detach and the transport's
 routing of a browser refusal to its owning thread take the registry lock.
 `common/native_request_stack.h` also defines the task origin a posted message

@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -7,7 +7,9 @@
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_RENDERER_NATIVE_PROBE_TRANSPORT_H_
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -51,12 +53,14 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                  std::uint64_t wasm_capture_epoch = 0,
                  const std::string& guest_adapter_json = {},
                  const std::vector<std::uint8_t>& js_dispatch_sites = {},
-                 const std::vector<std::uint8_t>& js_invocation_sites = {},
+                 std::optional<mojo_base::BigBuffer> js_invocation_sites = {},
                  bool js_invocation_digests = false,
                  bool capture_request_content = false,
                  bool capture_browser_internal = false) override;
   void SetWasmSampleBudget(const std::vector<std::uint8_t>& policy) override;
   void ResetWasmSampleBudgets() override;
+  void UpdateJsInvocationSites(mojo_base::BigBuffer js_invocation_sites) override;
+  void SetDebuggerWatchScope(mojom::NativeWatchScopePtr scope) override;
   void Disable() override;
   void NativeStackArtifactRefused(std::uint64_t creator_event_id) override;
   void ReleaseArtifactCredit(std::uint64_t bytes) override;
@@ -80,6 +84,10 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                              std::uint64_t config_generation) noexcept;
   static bool EmitNativeGuest(const NativeGuestCapture& capture, std::uint64_t generation) noexcept;
   static bool EmitNativeGuestHost(const NativeProbeEvent& event, std::uint64_t generation) noexcept;
+  static bool EmitRendererTarget(const NativeProbeEvent& child,
+                                 std::string_view origin,
+                                 std::string_view target,
+                                 std::uint64_t generation) noexcept;
   static bool EmitWasmDispatch(const NativeWasmDispatchObservation& observation,
                                std::uint64_t generation) noexcept;
   static bool EmitWasmIndirect(const NativeWasmIndirectObservation& observation,
@@ -106,8 +114,34 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                              std::uint64_t credit_bytes) noexcept;
   mojo::SharedRemote<mojom::NativeProbeHost>* HostForCurrentSequence();
 
+  // A thread's Wasm records travel in batches of up to this many, one Mojo
+  // message each: a hot loop that keeps every record would otherwise pay a
+  // message, a hop to the IO thread and a browser task per record.
+  static constexpr std::size_t kWasmRecordsPerMessage = 512;
+  // One thread's Wasm records not yet sent, in sequence order. It goes when it
+  // is full, when the task that recorded it ends, before any other message of
+  // that thread, so the browser still sees each thread's messages in the
+  // order they were made, and when the thread exits.
+  struct WasmRecordBatch final {
+    WasmRecordBatch();
+    WasmRecordBatch(const WasmRecordBatch&) = delete;
+    WasmRecordBatch& operator=(const WasmRecordBatch&) = delete;
+    ~WasmRecordBatch();
+    void Send();
+
+    mojo::SharedRemote<mojom::NativeProbeHost> host;
+    std::uint64_t epoch = 0;
+    std::vector<mojom::NativeWasmRecordPtr> records;
+    bool flush_posted = false;
+  };
+  void AppendWasmRecord(const mojo::SharedRemote<mojom::NativeProbeHost>& host,
+                        std::uint64_t epoch,
+                        mojom::NativeWasmRecordPtr record);
+  void FlushWasmRecords();
+
   mojo::SharedRemote<mojom::NativeProbeHost> host_;
   base::ThreadLocalOwnedPointer<mojo::SharedRemote<mojom::NativeProbeHost>> thread_hosts_;
+  base::ThreadLocalOwnedPointer<WasmRecordBatch> wasm_batches_;
   mojo::AssociatedReceiver<mojom::NativeProbeClient> receiver_{this};
   // Mappings are retained for process lifetime so Disable cannot unmap a queue
   // after a worker has loaded its pointer but before that worker finishes its

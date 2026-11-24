@@ -548,6 +548,41 @@ void CheckScriptIdentities() {
   worker.reserved2[30] = 1;
   Check(!valid(worker), "a worker script identity with dirty reserved bytes");
 
+  // Version 3 digests a source of any length and names a transfer backlog.
+  auto any_length = base;
+  any_length.protocol_version = reb::kNativeScriptIdentityBacklogVersion;
+  reb::NativeStackScope document;
+  document.thread = static_cast<std::uint8_t>(reb::NativeStackThread::kDocument);
+  reb::SetNativeStackScope(any_length.reserved2, document);
+  Check(valid(any_length), "version 3 script identity");
+  any_length.source_length = reb::kNativeScriptIdentityV2SourceLimit + 1;
+  Check(valid(any_length), "version 3 digests a source past 16 MiB");
+  auto long_v2 = base;
+  long_v2.source_length = any_length.source_length;
+  Check(!valid(long_v2), "version 1 digests no source past 16 MiB");
+  auto backlog = any_length;
+  backlog.flags = reb::kNativeScriptIdentitySourceBacklog;
+  Check(valid(backlog), "version 3 source held back by the transfer backlog");
+  auto old_backlog = base;
+  old_backlog.flags = reb::kNativeScriptIdentitySourceBacklog;
+  Check(!valid(old_backlog), "version 1 names no backlog");
+  auto too_large = any_length;
+  too_large.flags = reb::kNativeScriptIdentitySourceTooLarge;
+  too_large.sha256.fill(0);
+  Check(!valid(too_large), "version 3 never sets source_too_large");
+  auto old_too_large = base;
+  old_too_large.flags = reb::kNativeScriptIdentitySourceTooLarge;
+  old_too_large.source_length = any_length.source_length;
+  old_too_large.sha256.fill(0);
+  Check(valid(old_too_large), "version 1 source past 16 MiB without a digest");
+  auto wasm_backlog = backlog;
+  wasm_backlog.kind = static_cast<std::uint8_t>(reb::NativeScriptIdentityKind::kWasm);
+  Check(!valid(wasm_backlog), "a Wasm identity names no backlog");
+  auto large_wasm = any_length;
+  large_wasm.kind = static_cast<std::uint8_t>(reb::NativeScriptIdentityKind::kWasm);
+  large_wasm.flags = 0;
+  Check(valid(large_wasm), "version 3 Wasm module past 16 MiB joins by digest");
+
   auto event = Event(reb::EventType::kScriptIdentity, reb::EventCategory::kNetwork,
                      reb::EncodeNativeRequestStackRecord(base));
   Check(reb::IsValidEvent(event), "script identity envelope is valid");

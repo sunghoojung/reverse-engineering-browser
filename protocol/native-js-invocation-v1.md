@@ -8,15 +8,19 @@ limit below exists, is
 
 ## Enablement
 
-Rebuild Brave with V8 patch `0011`, Chromium patch `0021` and the overlay.
+Rebuild Brave with V8 patches `0011`, `0023`, `0024`, `0025` and `0026`,
+Chromium patches `0021`, `0066`, `0067` and `0068` and the overlay.
 Launch a native live session with
 `REB_NATIVE_JS_INVOCATION_SITES=/absolute/path/sites.json`. The launcher adds
 `--js-flags=--reb-js-invocation-capture` and
 `--reb-js-invocation-sites=/absolute/path/sites.json`. The category mask must
-include VM (512); request records also need Network (256). The site file is
-read once per session, must be identical for the browser lifetime, and
-changing it needs a browser restart. The flag alone arms nothing, and the
-file alone emits nothing.
+include VM (512); request records also need Network (256). The browser reads
+the site file when the session starts. Records name sites by slot, so a slot
+keeps its site for the browser's lifetime: a file that renumbers a slot the
+browser has sent refuses the session, while armed flags and appended slots
+may change. With `REB_NATIVE_JS_INVOCATION_LIVE=1` the running capture also
+follows later versions of the file; see [Revisions](#revisions). The flag
+alone arms nothing, and the file alone emits nothing.
 
 `REB_NATIVE_JS_INVOCATION_DIGESTS=1` additionally passes
 `--reb-js-invocation-digests`, the session's sensitive opt-in for
@@ -25,25 +29,30 @@ prints a sensitive-capture label. Without it every settle record says
 `digest_state: not_requested`.
 
 Captures the packaged app starts arm its saved site set
-(`js-invocation-sites-v1.json` in Application Support, this exact format) from
-a private per-launch copy, with digests on in Content mode and off in
-Metadata mode; an explicit environment value wins. They also set
+(`js-invocation-sites-v1.json` in Application Support, version 1 of the format
+below) from a private per-launch copy, an empty version 2 slot table when
+nothing is saved, with digests on in Content mode and off in Metadata mode; an
+explicit environment value wins. They set `REB_NATIVE_JS_INVOCATION_LIVE=1`,
+so the capture follows the saved set, and
 `REB_NATIVE_JS_INVOCATION_IF_SUPPORTED=1`: if the Brave's V8 image does not
 define `reb_js_invocation_capture`, the launcher starts the session without
 the sites and digests and prints `JavaScript invocation tracking:
 unavailable`, instead of refusing the session. Without that switch a missing
 flag still refuses the session. Agent-started sessions arm sites only from the
 named options `js_invocation_sites` or `js_invocation_saved_sites` (their own
-saved set, never the app's), from a private copy and without that switch;
-digests need `js_invocation_digests`. See
+saved set, never the app's, even when empty), from a private copy and without
+that switch; only `js_invocation_saved_sites` follows its set while the
+session runs. Digests need `js_invocation_digests`. See
 [live session control](http-api.md#live-session-control). The
 routes that resolve and save sites are in
 [the HTTP API](http-api.md#saved-javascript-invocation-sites).
 
 `--reb-js-invocation-capture` implies `--reb-js-dispatch-capture`, so the
 compile-path settings of
-[JavaScript dispatch capture](native-js-dispatch-v1.md#enablement) apply: no
-code cache, compilation cache or streaming, and eager source positions.
+[JavaScript dispatch capture](native-js-dispatch-v1.md#enablement) apply: a
+script that an armed invocation or dispatch site names compiles on the main
+thread without a code cache or the compilation cache and with eager source
+positions, and every other script compiles as usual.
 Functions that start at an armed site are never optimized. Workers, worklets
 and service workers are unsupported: their isolates never arm a site, and a
 Wasm or loader record on a worker thread reads as `not_observed`.
@@ -68,13 +77,82 @@ refuses any other character. The backend computes the same key when Origin
 Trace saves a site by name or position; both check
 `tools/fixtures/native-js-invocation/site-cases.json`.
 
+Version 2 is a slot table that may be empty, each entry with an `armed`
+boolean, in the same canonical form with sorted keys:
+
+```json
+{"sites":[{"anchor_offset":120,"armed":false,"artifact_id":"12","artifact_sha256":"<64 lowercase hex>","byte_offset":118,"shape":"function-entry","source_length":456,"source_sha256":"<64 lowercase hex>"}],"version":2}
+```
+
+Entry n is slot n. A disarmed slot keeps its site so later slots are not
+renumbered; it records no new call. Version 1 is a slot table of at least
+one entry, all armed. The backend writes version 2 when it revises a
+following capture's file; the app's empty set starts as
+`{"sites":[],"version":2}`.
+
+Neither version has a count or file size limit below 48,806,446 sites
+(`kNativeJsInvocationSiteListLimit`). That bound is structural: each renderer
+receives the whole table as one `mojo_base.mojom.BigBuffer`, and Chromium maps
+one shared memory region only up to `INT_MAX` bytes of 44-byte records. It is
+far inside the records' u32 slot. The browser parses a revision off its UI
+sequence, so a long table never blocks it.
+
 The browser sends the renderer only fixed 44-byte records: `source_sha256`
-(32 bytes), `source_length` (u32), `anchor_offset` (u32), shape byte 3 and 3
-zero bytes. A dispatch record (shape 1 or 2) is refused here and a
-function-entry record is refused as a dispatch site.
+(32 bytes), `source_length` (u32), `anchor_offset` (u32), shape byte 3, a
+flags byte whose bit 0 means disarmed, and 2 zero bytes. Any other flag bit,
+a dispatch record (shape 1 or 2) here, or a function-entry record as a
+dispatch site is refused. A null record array means the session tracks no
+invocations; an empty one means it tracks with no slot yet. A table over 64
+KiB travels in shared memory; one the renderer cannot map arrives invalid and
+is refused with the configuration's `native_js_invocation_input_unavailable`
+gap.
 
 Generators, async generators, class constructors and class initializer
 functions are never armed; see the design for why.
+
+## Revisions
+
+A capture launched with `REB_NATIVE_JS_INVOCATION_LIVE=1` follows the saved
+set while it runs. The launcher first looks for the help text `armed sites
+revisable while running` of `reb_js_invocation_capture` in the Brave's V8
+image. A Brave without it keeps the startup sites and the launcher prints that
+saved functions apply from the next capture; an empty slot table, which such a
+Brave would refuse, then arms nothing. Otherwise the launcher creates
+`js-invocation-sites-generation` (decimal `0`) in the session directory and
+passes it to Brave as `--reb-js-invocation-sites-generation` and to the
+backend as `--js-invocation-session-generation`.
+
+Whenever the backend reads the saved set, it compares it with the capture's
+slot table. A removed site is disarmed in its slot, a saved one is armed
+again in its slot, and a new one takes the next slot; a site saved after all
+48,806,446 slots are used waits for the next capture and its saved entry says
+`armed_in_capture: false`. The backend replaces the site file with the new
+slot table and then the generation file with the next decimal, each by an
+atomic rename, so Brave never applies a generation without its table. A
+write that fails keeps the capture's table, reports `revision_error`, and is
+retried at the next listing.
+
+Brave's broker writer reads the generation on its wake of about 250 ms. A
+greater one makes it reread the whole site file on that thread. A sequenced
+pool task parses it, in order, and the browser sequence sends the table to
+every renderer of the session
+(`UpdateJsInvocationSites`); a renderer that starts later is configured with
+it. A table that renumbers a slot or is invalid is refused with one
+`native_js_invocation_sites_revision_refused` gap and the capture keeps its
+previous table. The renderer applies a table within its configuration:
+retained slots keep their site, ordinals and open calls and take the new
+armed flag, an omitted slot is disarmed, new slots are appended, and a
+revision counter advances. A table that renumbers a slot or is malformed is
+refused with the configuration's `native_js_invocation_input_unavailable` gap.
+
+V8 reads the counter through `JsInvocationCallbacks::revision` at its next
+sync and copies the sites again without ending the epoch, so a call that
+started before a revision settles after it and keeps its invocation ID. A
+function compiled while its slot was armed records again when the slot is
+re-armed, without recompiling. A function compiled while its slot was
+disarmed or did not exist reports `compiled_before_arming`; it gains tracking
+when its page reloads, because a script an armed site names skips the code
+cache and the compilation cache.
 
 ## V8 embedder interface
 
@@ -82,13 +160,29 @@ functions are never armed; see the design for why.
 `v8::JsInvocationSite`, `JsInvocationStart`, `JsInvocationSettle`,
 `JsInvocationContext`, `JsInvocationCallbacks`,
 `Isolate::SetJsInvocationCallbacks` and `Isolate::GetCurrentJsInvocation`.
-`kJsInvocationSiteLimit` and `kJsInvocationArgumentLimit` are 8 and
+Patch `0026` removes `kJsInvocationSiteLimit` (8 before patch `0023`, 256
+before `0026`): a slot is a `uint32_t`, so V8 arms the first 2^32 sites of a
+larger list and no others. `sites(epoch, sites, capacity)` copies the first
+`min(count, capacity)` sites and returns the whole count, and V8 calls it
+again with room for every site when the first call reports more. V8 keeps
+the sites sorted by source length, digest and anchor, so a script's sites
+are one range found by binary search and a call's slot by its anchor within
+it. A slot is stored as a Number, and a watched promise carries `(ID << 32) |
+slot` as a BigInt. `kJsInvocationArgumentLimit` is 8 and
 `kJsInvocationDigestByteLimit` is 1 MiB. V8 pulls the epoch (0 means
-inactive) and the sites when the epoch changes. `enabled(epoch, slot)` runs
+inactive) and the sites when the epoch changes, or when the optional
+`revision(epoch)` changes: then it copies the sites again and keeps the
+epoch's invocation IDs, so a call in flight settles under the new sites. A
+slot copied with `source_length` 0 is disarmed. `enabled(epoch, slot)` runs
 before anything is allocated for the call. `digests(epoch)` reports the
-session's opt-in. `start` and `settle` run synchronously on the isolate thread
-and must not execute JavaScript, allocate V8 objects, block or perform I/O.
-`GetCurrentJsInvocation` never allocates.
+session's opt-in. `start` returns whether the embedder recorded the call; V8
+wraps, carries and settles only a recorded call, so every recorded start has
+exactly one settle or a `settle_unavailable` gap and no other call does.
+`start` and `settle` run synchronously on the isolate thread and must not
+execute JavaScript, allocate V8 objects, block or perform I/O.
+`GetCurrentJsInvocation` never allocates. Invocation IDs are never reused in
+an isolate; after 2^30 - 1 of them V8 stops reporting calls and reports the
+`ids_exhausted` site status once per configuration and slot.
 
 The current invocation is carried in the continuation-preserved embedder
 data slot as an internal wrapper; `GetContinuationPreservedEmbedderData` and
@@ -101,43 +195,47 @@ the stack replaces it.
 Blink admits a start only from a live local document context and attaches
 its frame and a stable 64-bit digest of the document's `DocumentToken`. The
 renderer sink rechecks the configuration generation, session, VM category and
-expiry, requires the start to name its slot's configured site exactly, and
-claims one of 256 starts for the configuration and one of 64 for the site.
-V8 has already wrapped every call whose start it reports, so each reported
-start spends its claims even when the renderer then refuses it as input or
-the emitter rejects it; only a full ring returns them. Blink's refusal of a
-start whose context is not a live document spends one of the 256. A spent
-budget stops admission at once, so V8 stops wrapping calls at the embedder
-predicate, even while the ring cannot take the budget gap. A gap the ring
-could not take is held and written before the next start or settle record
-once the ring has room, or when the configuration ends; the ring's drop
-counter covers it until then.
-Settles have no separate budget: each admitted call settles at most once.
-The renderer records a settle only for a start it admitted, and that settle
-closes the start even when the settle record itself is refused, dropped or
-unavailable. The settle of a start that was refused or dropped is not
-recorded; that start's loss is already a gap or a ring drop.
-Request records claim one of 256 per configuration. Records travel through
-the existing 8,192-slot renderer ring and browser bridge.
+expiry and requires the start to name its slot's configured site exactly.
+Every call of every armed site is then recorded: there is no count per site
+or per configuration. Each recorded start takes its site's next ordinal,
+from 0 in each configuration, so a start the full ring dropped is a missing
+ordinal beside the ring's drop count; a start refused as input takes none.
+A start that is refused or dropped is not recorded, so V8 neither carries nor
+settles that call and it never counts as open.
+A gap the ring could not take is held and written before the next start or
+settle record once the ring has room, or when the configuration ends; the
+ring's drop counter covers it until then.
+The renderer counts recorded starts that have not settled, so a loader start
+outside script is reported as unknown only while one may be open. A settle
+closes its start even when the settle record itself is refused, dropped or
+unavailable. Request records take the configuration's next request ordinal
+the same way. Records travel through the existing 8,192-slot renderer ring
+and browser bridge; per-record work is a fixed-size encode and one ring
+write, and none allocates.
 
 | Loss | Visible as |
 | --- | --- |
-| Configuration budget (256 starts) exhausted | one `gap`, `native_js_invocation_budget_incomplete`, per configuration |
-| A site budget (64 starts) exhausted | one `gap`, `native_js_invocation_site_budget_incomplete`, per configuration |
-| Request budget (256) exhausted | one `gap`, `native_js_invocation_request_budget_incomplete`, per configuration |
+| V8 used every invocation ID of the isolate | one `gap`, `native_js_invocation_ids_exhausted`, per configuration |
 | Emitter rejected an admitted record | one `gap`, `native_js_invocation_transport_unavailable`, per configuration |
 | Record invalid, site mismatch, digest without the opt-in, or context is not a live document | one `gap`, `native_js_invocation_input_unavailable`, per configuration |
 | Settle job ran after its document went away | one `gap`, `native_js_invocation_settle_unavailable`, per configuration |
 | Function compiled before arming | one `gap`, `native_js_invocation_site_<n>_compiled_before_arming`, per configuration and slot |
 | Generator, constructor or initializer at the site | one `gap`, `native_js_invocation_site_<n>_unsupported_function`, per configuration and slot |
-| Renderer ring full | the ring's existing drop counter |
+| Renderer ring full | the ring's existing drop counter, and a missing site or request ordinal |
+| Browser refused a site revision that renumbers a slot or is invalid | one `gap`, `native_js_invocation_sites_revision_refused`, per refused revision; the capture keeps its table |
+| Renderer refused a site revision | one `gap`, `native_js_invocation_input_unavailable`, per configuration |
 
-Gaps are `vm` category events whose payload is the reason text.
+Gaps are `vm` category events whose payload is the reason text. Version 1
+records came from builds with budgets: those builds also wrote
+`native_js_invocation_budget_incomplete`,
+`native_js_invocation_site_budget_incomplete` and
+`native_js_invocation_request_budget_incomplete`, which consumers still
+name.
 
 ## Wire contract
 
 All three events are category `vm`, envelope protocol 3, with a 128-byte
-little-endian version-1 payload. `session_id`, `sequence_number`,
+little-endian version 2 payload. `session_id`, `sequence_number`,
 `monotonic_time_ns`, `process_id` and `thread_id` are nonzero;
 `artifact_id`, `parent_event_id`, `navigation_id` and `flags` are zero. The
 renderer does not know the browser's numeric navigation ID; the document a
@@ -152,9 +250,9 @@ never changes a layout.
 
 | Offset | Field | Type | Rule |
 | --- | --- | --- | --- |
-| 0 | version (1) | u16 | |
+| 0 | version (2) | u16 | |
 | 2 | size (128) | u16 | |
-| 4 | site slot | u8 | 0 to 7 |
+| 4 | version 1 site slot | u8 | zero |
 | 5 | flags | u8 | bit 0 parent unknown, bit 1 arguments truncated; other bits zero |
 | 6 | argument count | u16 | actual arguments excluding the receiver, saturating at 65535; bit 1 is set exactly when it exceeds 8 |
 | 8 | script ID | u32 | nonzero V8 script ID, scoped to the renderer isolate |
@@ -162,13 +260,13 @@ never changes a layout.
 | 16 | source length | u32 | UTF-16, nonzero |
 | 20 | invocation ID | u32 | nonzero, never reused in the isolate |
 | 24 | parent invocation ID | u32 | the invocation current at entry, or 0; below the invocation ID; 0 with bit 0 |
-| 28 | site sample index | u16 | below 64 |
-| 30 | sample index | u16 | below 256 |
+| 28 | site ordinal | u32 | this start's ordinal among its site's starts in the configuration |
 | 32 | argument kinds | 8 x u8 | for each described argument 1 to 14; zero beyond the count |
 | 40 | argument low bits | 8 x u32 | integer: low 32 bits; boolean: 0 or 1; otherwise and beyond the count 0 |
 | 72 | source SHA-256 | 32 bytes | the armed site's key |
 | 104 | document ID | u64 | nonzero digest of the DocumentToken |
-| 112 | reserved, all zero | 16 bytes | |
+| 112 | site slot | u32 | below the armed site count |
+| 116 | reserved, all zero | 12 bytes | |
 
 Value kinds: 1 integer, 2 non-integer number, 3 string, 4 symbol,
 5 undefined, 6 null, 7 boolean, 8 BigInt, 9 other object, 10 function,
@@ -180,9 +278,9 @@ Value kinds: 1 integer, 2 non-integer number, 3 string, 4 symbol,
 
 | Offset | Field | Type | Rule |
 | --- | --- | --- | --- |
-| 0 | version (1) | u16 | |
+| 0 | version (2) | u16 | |
 | 2 | size (128) | u16 | |
-| 4 | site slot | u8 | 0 to 7 |
+| 4 | version 1 site slot | u8 | zero |
 | 5 | outcome | u8 | 1 fulfilled, 2 rejected |
 | 6 | via | u8 | 1 synchronous return (fulfilled only), 2 synchronous throw (rejected only), 3 the native promise the caller received |
 | 7 | value kind | u8 | 1 to 14 |
@@ -196,7 +294,8 @@ Value kinds: 1 integer, 2 non-integer number, 3 string, 4 symbol,
 | 24 | rolling hash | u64 | with state 1: `h = h * 0x100000001b3 + byte` modulo 2^64 over those bytes |
 | 32 | value SHA-256 | 32 bytes | with state 1 only; otherwise zero |
 | 64 | document ID | u64 | nonzero |
-| 72 | reserved, all zero | 56 bytes | |
+| 72 | site slot | u32 | below the armed site count |
+| 76 | reserved, all zero | 52 bytes | |
 
 State 2 never applies to a fulfilled string or bytes; state 3 applies only to
 a fulfilled string or bytes; state 4 only to fulfilled bytes that are
@@ -211,19 +310,30 @@ be zero.
 
 | Offset | Field | Type | Rule |
 | --- | --- | --- | --- |
-| 0 | version (1) | u16 | |
+| 0 | version (2) | u16 | |
 | 2 | size (128) | u16 | |
 | 4 | state | u8 | 2 inside the invocation, 3 unknown |
 | 5 | reserved | 3 bytes | zero |
 | 8 | invocation ID | u32 | nonzero exactly with state 2 |
-| 12 | sample index | u16 | below 256 |
-| 14 | reserved | u16 | zero |
+| 12 | ordinal | u32 | this record's ordinal among the configuration's request records |
 | 16 | reserved, all zero | 112 bytes | |
 
 Only two cases are recorded: a request started by script while an
 invocation was current (2), and a request started with no script on the stack
-while at least one admitted invocation of the configuration had not settled
+while at least one recorded invocation of the configuration had not settled
 (3). A request started by script outside any invocation produces no record.
+
+### Version 1 records
+
+Builds before V8 patch `0023` and Chromium patch `0066` wrote version 1. It
+has the same layout except: the site slot is byte 4, 0 to 7, and start bytes
+112..116 and settle bytes 72..76 are reserved zero; start bytes 28..30 are a
+u16 site sample index below 64 and bytes 30..32 a u16 sample index below 256;
+request bytes 12..14 are a u16 sample index below 256 and bytes 14..16 are
+zero. Every consumer still reads version 1 with those rules. The event query
+reports a version 1 start's site sample index as `site_sample_index` and its
+sample index as `sample_index`; a version 2 start reports its site ordinal as
+`site_sample_index` and `sample_index` as null.
 
 ### Invocation context of Wasm records
 

@@ -36,7 +36,7 @@ async function controllerFixture(root) {
     replaceChildren(...nodes){this.children=[];this._text='';this.append(...nodes);}
     addEventListener(key,fn){this.listeners.set(key,fn);}
     contains(node){return node===this||this.children.some(child=>child.contains(node));}
-    matches(selector){if(selector.startsWith('.'))return this.className===selector.slice(1);const data=selector.match(/^\[data-([\w-]+)="([^"]+)"\]$/);if(data)return this.dataset[data[1].replace(/-([a-z])/g,(_,c)=>c.toUpperCase())]===data[2];return selector.split(', ').includes(this.tagName);}
+    matches(selector){if(selector.startsWith('.'))return String(this.className??'').split(' ').includes(selector.slice(1));const data=selector.match(/^\[data-([\w-]+)="([^"]+)"\]$/);if(data)return this.dataset[data[1].replace(/-([a-z])/g,(_,c)=>c.toUpperCase())]===data[2];return selector.split(', ').includes(this.tagName);}
     querySelectorAll(selector){return this.children.flatMap(node=>[...(node.matches(selector)?[node]:[]),...node.querySelectorAll(selector)]);}
     querySelector(selector){return this.querySelectorAll(selector)[0]??null;}
     focus(){document.activeElement=this;}
@@ -51,10 +51,11 @@ async function controllerFixture(root) {
   for(const name of ['name','folder','kind','language','content']){analystElements[name].tagName=name==='content'?'textarea':['folder','kind','language'].includes(name)?'select':'input';analystElements.editorForm.append(analystElements[name]);}
   const state={localAnalyst:analystFixtureLibrary(empty),localAnalystLoaded:true,localAnalystVersion:0,localAnalystNeedsReload:false,
     localAnalystPendingSave:null,localAnalystRefreshing:false,localAnalystSaving:false,localAnalystStatus:'ready',localAnalystMessage:'Loaded',
-    analystSelectedFileId:1,analystSelectedFolderId:2,analystExpandedFolderIds:new Set([1,2]),analystDraftDirty:false,analystFolderDirty:false};
+    analystSelectedFileId:1,analystSelectedFolderId:2,analystExpandedFolderIds:new Set([1,2]),analystDraftDirty:false,analystFolderDirty:false,
+    analystFolderRowsShown:new Map()};
   const f={state,elements:analystElements,document,server:copy(state.localAnalyst),mode:'ready',calls:[],timers:new Set(),held:[]};
   const context={state,analystElements,document,console,TextEncoder,TextDecoder,Uint8Array,AbortController,Response,
-    emptyLocalAnalystWorkspace:empty,location:{protocol:'http:'},formatByteSize:n=>`${n} B`,renderAnalystExecution(){},renderAnalystHistory(){},
+    emptyLocalAnalystWorkspace:empty,ANALYST_LIST_PAGE:200,location:{protocol:'http:'},formatByteSize:n=>`${n} B`,renderAnalystExecution(){},renderAnalystHistory(){},
     // The shared code view's editor: the textarea keeps the text, the mirror is colored as its language.
     mountCodeEditor:(textarea,mirror,syntaxOf)=>{f.colors={textarea,mirror,refreshes:0};return {refresh(){Object.assign(f.colors,{refreshes:f.colors.refreshes+1,syntax:syntaxOf(),text:textarea.value});}};},
     codeViewSyntax:language=>({language}),
@@ -245,7 +246,37 @@ export async function checkAnalystController(root) {
   assert.equal(await f.ui.refreshLocalAnalyst(true),true);
   assert.equal(f.state.localAnalyst.files.find(file=>file.id===1).content_bytes,3*1024*1024);
   console.log('PASS Analyst dirty same-file/navigation/folder/unload guards, focus, exact receipts, uncertain reconciliation, conflict bases, stale replies, no save deadline, libraries of any size and duplicate-write suppression (controller fixture; not rendered QA)');
+  await checkAnalystScale(root);
   await checkAnalystCancel(root);
+}
+
+// A library past every former shape cap: 1,000 files in one folder and a
+// chain of 300 nested folders. The tree shows each folder a page at a time
+// and always reaches the selected file.
+async function checkAnalystScale(root) {
+  const f=await controllerFixture(root),{ui,state,elements,document}=f;
+  const library={...copy(state.localAnalyst),generation:2,
+    folders:[{id:1,name:'Analyst Workspace',parent_id:null},...Array.from({length:300},(_,index)=>({id:index+2,name:`Level ${index+1}`,parent_id:index+1}))],
+    files:Array.from({length:1000},(_,index)=>({id:index+1,folder_id:1,name:`Note ${String(index).padStart(4,'0')}`,kind:'scratchpad',language:'text',
+      content:'x',content_bytes:1,created_at_ms:1000,updated_at_ms:1000}))};
+  assert(ui.isLocalAnalystWorkspace(library),'A library of any shape is accepted');
+  const cyclic=copy(library);cyclic.folders[1].parent_id=301;
+  assert(!ui.isLocalAnalystWorkspace(cyclic),'A cycle is still refused');
+  Object.assign(state,{localAnalyst:library,analystSelectedFileId:null,analystSelectedFolderId:1,analystExpandedFolderIds:new Set([1]),analystFolderRowsShown:new Map()});
+  const started=performance.now();ui.renderLocalAnalyst();const elapsed=performance.now()-started;
+  const rows=()=>elements.tree.children;
+  assert.equal(rows().length,1+200+1,'The root, its first page of entries and Show more');
+  assert.match(rows().at(-1).textContent,/Show 200 more.*801 left/);
+  assert.equal(elements.fileCount.textContent,'1,000 files');assert.equal(elements.folderUsage.textContent,'301');
+  assert.equal(elements.depthUsage.textContent,'300 levels');
+  rows().at(-1).click();assert.equal(rows().length,1+400+1,'Show more adds the next page');
+  assert.equal(document.activeElement,rows()[201],'The first newly shown entry takes focus');
+  state.analystSelectedFileId=1000;ui.renderLocalAnalyst();
+  assert(rows().some(row=>row.dataset.fileId==='1000'),'The selected file is always shown');
+  state.analystExpandedFolderIds=new Set(library.folders.map(folder=>folder.id));state.analystSelectedFileId=null;state.analystSelectedFolderId=301;
+  ui.renderLocalAnalyst();
+  assert.equal(rows().find(row=>row.dataset.folderId==='301').getAttribute('aria-level'),'301','A folder 300 levels deep is in the tree');
+  console.log(`PASS Analyst library past the former caps: 1,000 files, 301 folders, 300 levels, paged tree rendered in ${elapsed.toFixed(1)} ms (controller fixture; not rendered QA)`);
 }
 
 // Run and cancel through the production functions. Every render recomputes
@@ -256,12 +287,12 @@ async function checkAnalystCancel(root) {
   const control=()=>({disabled:false,checked:false,hidden:false,textContent:'',style:{}});
   const analystElements=new Proxy({},{get:(target,key)=>target[key]??=control()});
   const state={analystRunPending:false,analystActiveRunId:null,analystCancelRunId:null,analystNextRunId:1,analystRunStartedAt:null,analystRuns:[],
-    analystHistoryEvictions:0,analystSelectedRunId:null,analystDraftDirty:false,localAnalystNeedsReload:false,localAnalystPendingSave:null,
+    analystLogsShown:200,analystSelectedRunId:null,analystDraftDirty:false,localAnalystNeedsReload:false,localAnalystPendingSave:null,
     localAnalyst:{generation:3},localAnalystRunner:{available:true,active_run_id:null},events:[],artifacts:[],originTrace:null,signalProfile:null,
     vmAnalysisStatus:'ready',vmFindings:[]};
   const posts=[],notices=[];
   const ticks=[];
-  const context={state,analystElements,performance,
+  const context={state,analystElements,performance,ANALYST_LIST_PAGE:200,
     // The elapsed-seconds notice reschedules itself; the check runs ticks by hand.
     setTimeout:callback=>ticks.push(callback),
     analystFile:()=>({id:4,kind:'analyst-script',name:'probe.js',content:'return 1;'}),selectedAnalystArtifact:()=>null,

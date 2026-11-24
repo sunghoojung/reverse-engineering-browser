@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -42,9 +42,12 @@ enum class NativeSchemeClass : std::uint8_t {
 inline constexpr std::uint8_t kNativeWebUiRendererExclusion = 64;
 inline constexpr std::uint8_t kNativeWebUiRequestExclusion = 67;
 // Classes 68 and 69 belong to another part of the contract.
+// Reuses past the 4,096 records an earlier renderer admitted per
+// configuration. Current renderers record every reuse and never count it; the
+// class and its queue slot stay so earlier evidence still reads.
 inline constexpr std::uint8_t kNativeMemoryCacheReuseExclusion = 70;
 // Reuses in a page that is not ordinary (an SVG image's own document or a
-// page popup), which no tab owns; counted apart from the budget's overflow.
+// page popup), which no tab owns.
 inline constexpr std::uint8_t kNativeNonOrdinaryPageReuseExclusion = 71;
 inline constexpr std::uint16_t kNativeCaptureExclusionPayloadVersion = 1;
 inline constexpr std::uint32_t kNativeCaptureExclusionPayloadSize = 16;
@@ -82,8 +85,6 @@ inline constexpr std::uint8_t kNativeMemoryCacheReuseHostTruncated = 1U << 1U;
 // the renderer request whose response Blink reused, as a request_tab_link
 // names a renderer record.
 inline constexpr std::uint8_t kNativeMemoryCacheReuseSourceNamed = 1U << 2U;
-// Records one renderer configuration admits; later reuses count as class 70.
-inline constexpr std::uint32_t kNativeMemoryCacheReuseBudget = 4096;
 
 // resource_type is Blink's ResourceType, 1 to 15 at the pin.
 [[nodiscard]] inline std::array<std::byte, kNativeProbeInlinePayloadSize>

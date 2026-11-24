@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -60,7 +60,7 @@ inline bool Decimal(const std::string* text) {
 }  // namespace native_js_dispatch_sites_detail
 
 // Parses native-js-dispatch-sites-v1 (protocol/native-js-dispatch-v1.md):
-// exact compact canonical JSON, 1 to 8 unique sites. Returns the fixed
+// exact compact canonical JSON, 1 to 256 unique sites. Returns the fixed
 // 44-byte renderer records, or an empty vector for any refusal. Provenance
 // fields are validated for format and not used for matching.
 inline std::vector<std::uint8_t> ParseNativeJsDispatchSites(std::string_view json) {

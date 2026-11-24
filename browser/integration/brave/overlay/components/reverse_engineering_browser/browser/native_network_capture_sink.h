@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -166,6 +166,14 @@ class NativeNetworkCaptureSink final {
   bool NoteNavigationInitiator(std::string_view devtools_request_id,
                                std::uint32_t renderer_process_id,
                                std::uint64_t renderer_sequence) noexcept;
+  // A renderer's request_target child whose target passes its inline prefix
+  // (NativeProbeHost::CaptureRendererTarget): keeps the whole target as its
+  // artifact, as EmitRequestTarget keeps a browser request's, and sets the
+  // record's retention and artifact ID. `target` is the path and query.
+  static void RetainRendererTarget(NativeProbeEvent& event,
+                                   NativeRequestTarget target,
+                                   std::string origin,
+                                   std::string text) noexcept;
 
  private:
   friend class base::NoDestructor<NativeNetworkCaptureSink>;

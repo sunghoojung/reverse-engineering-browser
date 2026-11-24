@@ -227,31 +227,33 @@ enum LiveSessionFailureChecks {
     precondition(content["REB_CAPTURE_REQUEST_CONTENT"] == "1", "choosing Content there is a Content start")
     print("PASS native start panel: a start names only its mode, removed budget and media keys refused, the panel's mode deciding request content, and an inherited opt-out preselecting Metadata")
 
-    // Saved invocation sites arm app-started captures. Digests follow the
-    // mode and the session option, the launcher drops sites a Brave cannot
-    // arm, and explicit sites win.
+    // Saved invocation sites arm app-started captures, which follow the saved
+    // set. Digests follow the mode and the session option, the launcher drops
+    // sites a Brave cannot arm, and explicit sites win.
     let saved = URL(fileURLWithPath: "/private/tmp/origin-trace-live-x-js-invocation-sites.json")
-    let invocationNames = ["REB_NATIVE_JS_INVOCATION_SITES", "REB_NATIVE_JS_INVOCATION_DIGESTS", "REB_NATIVE_JS_INVOCATION_IF_SUPPORTED"]
+    let invocationNames = ["REB_NATIVE_JS_INVOCATION_SITES", "REB_NATIVE_JS_INVOCATION_DIGESTS",
+      "REB_NATIVE_JS_INVOCATION_IF_SUPPORTED", "REB_NATIVE_JS_INVOCATION_LIVE"]
     let invocationCases: [(String, [String: String], Bool, URL?, [String?])] = [
-      ("content", [:], true, saved, [saved.path, "1", "1"]),
-      ("metadata", [:], false, saved, [saved.path, "0", "1"]),
-      ("nothing saved", [:], true, nil, [nil, "0", nil]),
-      ("explicit digests off", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "0"], true, saved, [saved.path, "0", "1"]),
-      ("explicit digests on", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "1"], true, saved, [saved.path, "1", "1"]),
-      ("explicit digests never reach Metadata", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "1"], false, saved, [saved.path, "0", "1"]),
+      ("content", [:], true, saved, [saved.path, "1", "1", "1"]),
+      ("metadata", [:], false, saved, [saved.path, "0", "1", "1"]),
+      ("nothing saved", [:], true, nil, [nil, "0", nil, nil]),
+      ("explicit digests off", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "0"], true, saved, [saved.path, "0", "1", "1"]),
+      ("explicit digests on", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "1"], true, saved, [saved.path, "1", "1", "1"]),
+      ("explicit digests never reach Metadata", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "1"], false, saved, [saved.path, "0", "1", "1"]),
       ("nor with explicit sites", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "1", "REB_NATIVE_JS_INVOCATION_SITES": "/explicit.json"], false, saved,
-        ["/explicit.json", "0", nil]),
-      ("explicit sites", ["REB_NATIVE_JS_INVOCATION_SITES": "/explicit.json"], true, saved, ["/explicit.json", "1", nil]),
-      ("explicit sites off", ["REB_NATIVE_JS_INVOCATION_SITES": ""], true, saved, ["", "0", nil]),
-      ("strict check kept", ["REB_NATIVE_JS_INVOCATION_IF_SUPPORTED": "0"], true, saved, [saved.path, "1", "0"]),
-      ("no VM category", ["REB_CAPTURE_CATEGORY_MASK": "1280"], true, saved, [nil, "0", nil]),
-      ("unreadable mask", ["REB_CAPTURE_CATEGORY_MASK": "0xzz"], true, saved, [nil, "0", nil]),
+        ["/explicit.json", "0", nil, nil]),
+      ("explicit sites", ["REB_NATIVE_JS_INVOCATION_SITES": "/explicit.json"], true, saved, ["/explicit.json", "1", nil, nil]),
+      ("explicit sites off", ["REB_NATIVE_JS_INVOCATION_SITES": ""], true, saved, ["", "0", nil, nil]),
+      ("strict check kept", ["REB_NATIVE_JS_INVOCATION_IF_SUPPORTED": "0"], true, saved, [saved.path, "1", "0", "1"]),
+      ("following opted out", ["REB_NATIVE_JS_INVOCATION_LIVE": "0"], true, saved, [saved.path, "1", "1", "0"]),
+      ("no VM category", ["REB_CAPTURE_CATEGORY_MASK": "1280"], true, saved, [nil, "0", nil, nil]),
+      ("unreadable mask", ["REB_CAPTURE_CATEGORY_MASK": "0xzz"], true, saved, [nil, "0", nil, nil]),
     ]
     for (name, given, content, url, expected) in invocationCases {
       let environment = launch(given, content: content, sites: url)
       precondition(invocationNames.map { environment[$0] } == expected, "invocation defaults: \(name) \(invocationNames.map { environment[$0] })")
     }
-    print("PASS native live invocation sites: saved sites armed with digests in Content and without in Metadata, explicit sites win, digests only with armed sites, no VM category arms nothing")
+    print("PASS native live invocation sites: saved sites armed and followed, with digests in Content and without in Metadata, explicit sites win, digests only with armed sites, no VM category arms nothing")
 
     // A Metadata start decides every content-derived switch, whatever the
     // environment holds: chosen in the panel or by REB_AUTOMATIC_CAPTURE_MODE,
@@ -336,7 +338,7 @@ enum LiveSessionFailureChecks {
     // launcher switches that are exactly the choice wherever the mask allows.
     let optionDefaults = LiveSessionOptions.defaults
     precondition(!optionDefaults.freshProfile && optionDefaults.requestStacks && !optionDefaults.promiseStacks
-      && optionDefaults.wasmDispatch && optionDefaults.ignoreDebuggerStatements && optionDefaults.canvasImages
+      && optionDefaults.wasmDispatch && !optionDefaults.wasmEveryRecord && optionDefaults.ignoreDebuggerStatements && optionDefaults.canvasImages
       && optionDefaults.invocationDigests && optionDefaults.documentStart && !optionDefaults.browserInternal
       && !optionDefaults.extensionTraffic, "session option defaults")
     let every = Dictionary(uniqueKeysWithValues: LiveSessionOptions.keys.map { ($0, yes as Any) })
@@ -372,20 +374,40 @@ enum LiveSessionFailureChecks {
       && !LiveSessionOptions.configured(["REB_CAPTURE_EXTENSION_TRAFFIC": "0"], saved: allOn).extensionTraffic, "saved choices")
     let switchCases: [(UInt32, LiveSessionOptions, [String: String])] = [
       (4095, optionDefaults, ["REB_FRESH_PROFILE": "0", "REB_NATIVE_REQUEST_STACKS": "1", "REB_NATIVE_PROMISE_STACKS": "0",
-        "REB_NATIVE_WASM_DISPATCH": "1", "REB_NATIVE_WASM_CALL_INDIRECT": "1", "REB_NATIVE_QUIET_MODE": "1",
-        "REB_CONSOLE_DOCUMENT_START": "1", "REB_CAPTURE_BROWSER_INTERNAL": "0", "REB_CAPTURE_EXTENSION_TRAFFIC": "0"]),
+        "REB_NATIVE_WASM_DISPATCH": "1", "REB_NATIVE_WASM_CALL_INDIRECT": "1", "REB_NATIVE_WASM_EVERY_RECORD": "0",
+        "REB_NATIVE_QUIET_MODE": "1", "REB_CONSOLE_DOCUMENT_START": "1", "REB_CAPTURE_BROWSER_INTERNAL": "0",
+        "REB_CAPTURE_EXTENSION_TRAFFIC": "0"]),
       (4095, allOn, ["REB_FRESH_PROFILE": "1", "REB_NATIVE_REQUEST_STACKS": "1", "REB_NATIVE_PROMISE_STACKS": "1",
-        "REB_CAPTURE_BROWSER_INTERNAL": "1", "REB_CAPTURE_EXTENSION_TRAFFIC": "1"]),
+        "REB_NATIVE_WASM_EVERY_RECORD": "1", "REB_NATIVE_WASM_SAMPLES_PER_FUNCTION": "",
+        "REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE": "", "REB_CAPTURE_BROWSER_INTERNAL": "1",
+        "REB_CAPTURE_EXTENSION_TRAFFIC": "1"]),
+      // Every Wasm record needs Wasm dispatch.
+      (4095, LiveSessionOptions(stored: ["wasm_every_record": yes, "wasm_dispatch": no]),
+        ["REB_NATIVE_WASM_DISPATCH": "0", "REB_NATIVE_WASM_EVERY_RECORD": "0"]),
       // Promise stacks need request stacks, and both need Network and Artifact.
       (4095, LiveSessionOptions(stored: ["promise_stacks": yes, "request_stacks": no]),
         ["REB_NATIVE_REQUEST_STACKS": "0", "REB_NATIVE_PROMISE_STACKS": "0"]),
       (512 | 256, allOn, ["REB_NATIVE_REQUEST_STACKS": "0", "REB_NATIVE_PROMISE_STACKS": "0", "REB_NATIVE_WASM_DISPATCH": "0"]),
-      (0, allOn, ["REB_NATIVE_WASM_DISPATCH": "0", "REB_NATIVE_WASM_CALL_INDIRECT": "0", "REB_NATIVE_QUIET_MODE": "1"]),
+      (0, allOn, ["REB_NATIVE_WASM_DISPATCH": "0", "REB_NATIVE_WASM_CALL_INDIRECT": "0", "REB_NATIVE_WASM_EVERY_RECORD": "0",
+        "REB_NATIVE_QUIET_MODE": "1"]),
     ]
     for (mask, options, expected) in switchCases {
       let switches = options.launcherEnvironment(mask: mask)
       precondition(expected.allSatisfy { switches[$0.key] == $0.value }, "switches \(mask) \(switches)")
     }
+    // Only every record clears inherited per-function and per-site counts,
+    // which the launcher refuses beside it.
+    precondition(optionDefaults.launcherEnvironment(mask: 4095)["REB_NATIVE_WASM_SAMPLES_PER_FUNCTION"] == nil
+      && allOn.launcherEnvironment(mask: 0)["REB_NATIVE_WASM_SAMPLES_PER_FUNCTION"] == nil, "sample counts kept without every record")
+    let countsEnvironment = ["REB_NATIVE_WASM_SAMPLES_PER_FUNCTION": "8", "REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE": "4"]
+    let countsDefaults = { (options: LiveSessionOptions) in
+      LiveSessionCoordinator.captureDefaults(
+        environment: countsEnvironment,
+        content: LiveCaptureContent.resolve(environment: countsEnvironment, mode: .content, modeChosen: true), options: options)
+    }
+    precondition(countsDefaults(optionDefaults)["REB_NATIVE_WASM_SAMPLES_PER_FUNCTION"] == "8"
+      && countsDefaults(allOn)["REB_NATIVE_WASM_SAMPLES_PER_FUNCTION"] == ""
+      && countsDefaults(allOn)["REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE"] == "", "every record replaces inherited counts")
     // Every option replaces an inherited switch, and the profile and duration
     // never come from the environment.
     let panelEnvironment = ["REB_NATIVE_REQUEST_STACKS": "0", "REB_FRESH_PROFILE": "1", "REB_CAPTURE_BROWSER_INTERNAL": "1"]

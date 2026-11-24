@@ -160,73 +160,88 @@ bool CheckNativeConsoleMessages() {
   static_assert(!std::is_move_constructible_v<reb::NativeConsoleMessages>);
   static_assert(!std::is_move_assignable_v<reb::NativeConsoleMessages>);
   reb::NativeConsoleMessages queue;
-  constexpr std::string_view kEmpty = "{\"status\":\"ok\",\"messages\":[],\"dropped\":0}";
-  const auto reply = [](std::string_view records, std::uint32_t dropped) {
+  const auto reply = [](std::string_view records, std::uint32_t dropped, bool more = false) {
     return "{\"status\":\"ok\",\"messages\":[" + std::string(records) +
-           "],\"dropped\":" + std::to_string(dropped) + "}";
+           "],\"dropped\":" + std::to_string(dropped) + ",\"more\":" + (more ? "true" : "false") +
+           "}";
   };
-  if (queue.Poll() != kEmpty)
+  const std::string empty = reply("", 0);
+  if (queue.Poll() != empty)
     return false;
 
-  // The former raw-text accounting accepted 16 x 2048 control bytes, then
-  // drained them before rejecting the ~192 KiB JSON response. Charge the actual
-  // encoded records instead; retain the newest whole records and report loss.
-  std::string controls = "{\"text\":\"";
-  for (unsigned i = 0; i < 2048; ++i)
-    controls += "\\u0001";
-  controls += "\"}";
-  for (unsigned i = 0; i < 16; ++i)
-    queue.Push(controls);
-  const auto bounded = queue.Poll();
-  if (bounded != reply(controls + "," + controls, 14) ||
-      bounded.size() > reb::kNativeConsolePayloadLimit || queue.Poll() != kEmpty)
-    return false;
-
-  // Count pressure, repeated wraparound and FIFO order are independent of the
-  // encoded-byte limit. Quoted controls and UTF-8 remain serialized inert text.
-  for (unsigned pass = 0; pass < 64; ++pass) {
-    std::string expected;
-    for (unsigned i = 0; i < 40; ++i) {
-      const auto record = "{\"text\":\"雪\\n\\\"\\\\\",\"id\":" + std::to_string(i) + "}";
-      queue.Push(record);
-      if (i >= 8) {
-        if (!expected.empty())
-          expected += ',';
-        expected += record;
-      }
-    }
-    if (queue.Poll() != reply(expected, 8))
-      return false;
+  // Every message is kept whole and in order, with no count bound. Quoted
+  // controls and UTF-8 remain serialized inert text.
+  std::string expected;
+  for (unsigned i = 0; i < 10000; ++i) {
+    const auto record = "{\"text\":\"雪\\n\\\"\\\\\",\"id\":" + std::to_string(i) + "}";
+    queue.Push(record);
+    if (!expected.empty())
+      expected += ',';
+    expected += record;
   }
-
-  const std::string exact =
-      "{\"text\":\"" + std::string(reb::NativeConsoleMessages::kByteLimit - 11, 'x') + "\"}";
-  queue.Push(exact);
-  if (queue.Poll() != reply(exact, 0))
-    return false;
-  queue.Push(exact);
-  queue.Push("{}");
-  if (queue.Poll() != reply("{}", 1))
+  if (queue.Poll() != reply(expected, 0) || queue.Poll() != empty)
     return false;
 
+  // A message far larger than a page arrives whole, alone, and the rest
+  // follow on the next poll.
+  const std::string huge =
+      "{\"text\":\"" + std::string(reb::kNativeConsolePageBytes + 1024 * 1024, 'x') + "\"}";
+  queue.Push(huge);
   queue.Push("{}");
-  queue.Push(std::string(reb::NativeConsoleMessages::kByteLimit + 1, 'x'));
+  if (queue.Poll() != reply(huge, 0, true) || queue.Poll() != reply("{}", 0) ||
+      queue.Poll() != empty)
+    return false;
+
+  // A backlog larger than a page drains as several pages, each whole and in
+  // order, and none is lost.
+  const std::string mebibyte = "{\"text\":\"" + std::string(1024 * 1024 - 12, 'y') + "\"}";
+  const std::size_t backlog = 3 * reb::kNativeConsolePageBytes / mebibyte.size();
+  for (std::size_t i = 0; i < backlog; ++i)
+    queue.Push(mebibyte);
+  std::size_t received = 0;
+  for (bool more = true; more;) {
+    const auto page = queue.Poll();
+    if (page.size() > reb::kNativeConsolePageBytes + 128)
+      return false;
+    for (std::size_t at = page.find("{\"text"); at != std::string::npos;
+         at = page.find("{\"text", at + 1))
+      ++received;
+    more = page.ends_with(",\"more\":true}");
+  }
+  if (received != backlog)
+    return false;
+
+  // Only an owner that stops polling for this many bytes loses the oldest
+  // messages, and the loss is reported once with the next page.
+  const std::size_t over = reb::NativeConsoleMessages::kRetainedBytes / mebibyte.size() + 3;
+  for (std::size_t i = 0; i < over; ++i)
+    queue.Push(mebibyte);
+  const auto first = queue.Poll();
+  if (first.find("\"dropped\":3,") == std::string::npos)
+    return false;
+  while (queue.Poll().ends_with(",\"more\":true}")) {
+  }
+  if (queue.Poll() != empty)
+    return false;
+
+  queue.Push("{}");
   queue.Push("");
-  if (queue.Poll() != reply("{}", 2))
+  if (queue.Poll() != reply("{}", 1))
     return false;
   queue.Drop(std::numeric_limits<std::uint32_t>::max());
   queue.Drop();
   if (queue.Poll() != reply("", reb::NativeConsoleMessages::kDropLimit))
     return false;
-  queue.Push(controls);
+  queue.Push(huge);
   queue.Drop();
   queue.Reset();
-  if (queue.Poll() != kEmpty)
+  if (queue.Poll() != empty)
     return false;
 
-  std::cout << "Native console messages: escaping=passed count_limit=passed byte_limit=passed "
-               "fifo_wraparound=passed rejected_record=passed drop_saturation=passed "
-               "reset=passed\n";
+  std::cout
+      << "Native console messages: escaping=passed no_count_limit=passed whole_message=passed "
+         "paging=passed unpolled_backlog=passed rejected_record=passed "
+         "drop_saturation=passed reset=passed\n";
   return true;
 }
 

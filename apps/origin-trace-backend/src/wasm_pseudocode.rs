@@ -19,6 +19,7 @@
 //! section, exports and imports (`display_name`). Nothing here runs the module.
 use crate::{
     error::{Error, Result},
+    result_cache::{Cache, kept},
     wasm, wasm_graph,
     wasm_stack::{self, Callee, Clause, Control, Effect, Kind, ModuleTypes},
 };
@@ -27,18 +28,16 @@ use std::{
     collections::{BTreeMap, HashMap},
     fmt::Write as _,
     path::Path,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use wasmparser::{
     BlockType, ExternalKind, FuncValidatorAllocations, FunctionBody, KnownCustom, MemArg, Name,
     Operator, Parser, Payload, TypeRef, ValidPayload, Validator, WasmFeatures,
 };
 
-/// A lift keeps per-instruction offsets and per-line text; this many
-/// instructions keep one request in tens of megabytes.
-pub const MAX_INSTRUCTIONS: usize = 250_000;
-pub const MAX_LINES: usize = 300_000;
-const MAX_TEXT_BYTES: usize = 24 * 1024 * 1024;
 const MAX_LINE_TEXT: usize = 2048;
 /// Deeper or longer expressions are assigned to a temporary first, so a line
 /// stays readable and nesting cannot grow with the body.
@@ -59,7 +58,9 @@ pub const MAX_LINE_LIMIT: usize = 2000;
 /// compact and its pretty-printed JSON; a window is cut until the whole
 /// document fits 120 KiB in both, leaving room for the tool envelope.
 const WINDOW_BYTES: usize = 120 * 1024;
-/// The lift's size budgets; `BUDGET` in production, smaller in tests.
+/// The lift's size budgets. Production has none: a function lifts whole,
+/// since web engines already bound its body (7,654,321 bytes) and the request
+/// stops it by going away. Tests set small ones to reach the stopping paths.
 #[derive(Clone, Copy)]
 struct Budget {
     instructions: usize,
@@ -71,13 +72,18 @@ struct Budget {
     work: Option<u64>,
 }
 const BUDGET: Budget = Budget {
-    instructions: MAX_INSTRUCTIONS,
-    lines: MAX_LINES,
-    text_bytes: MAX_TEXT_BYTES,
+    instructions: usize::MAX,
+    lines: usize::MAX,
+    text_bytes: usize::MAX,
     work: None,
 };
 /// Stack entries visited between cancellation checks.
 const WORK_CHECK: u64 = 1 << 16;
+/// Lifts kept between windows, by module digest and function. A body of
+/// millions of instructions takes about a second to lift, so each later
+/// window of it reads the kept lift instead; two let a researcher page one
+/// function while looking at another.
+const CACHED_LIFTS: usize = 2;
 
 const LINE_KINDS: [&str; 7] = [
     "header",
@@ -415,6 +421,15 @@ struct Lift {
     /// The request went away before the lift finished; nothing reads it.
     cancelled: bool,
     omissions: Vec<String>,
+}
+
+/// A finished lift with the ownership counts every window reports.
+struct Lifted {
+    lift: Lift,
+    locals: u32,
+    unowned: usize,
+    repeated: usize,
+    lifted: usize,
 }
 
 /// A field of an operator whose memory argument is split from the rest by
@@ -2271,28 +2286,49 @@ pub fn pseudocode_named(
     // Module validation already refused any body past the 7,654,321-byte
     // limit web engines enforce, in this function or another one.
     let range = body.range();
-    let (lift, locals) = lift(&scan, &body, type_index, function, cancelled, BUDGET)?;
-    if lift.cancelled {
-        return Err(Error::cancelled("WASM readable view"));
-    }
+    // The digest names the bytes the lift was read from; the manifest's
+    // record of them is verified when they are read.
+    let key = (
+        artifact.sha256.as_str().unwrap_or_default().to_owned(),
+        function,
+    );
+    static LIFTS: Cache<(String, u32), Lifted> = Mutex::new(Vec::new());
+    let kept = kept(&LIFTS, key, CACHED_LIFTS, || {
+        let (lift, locals) = lift(&scan, &body, type_index, function, cancelled, BUDGET)?;
+        if lift.cancelled {
+            return Err(Error::cancelled("WASM readable view"));
+        }
+        // Ownership is checked, not assumed: a lift is complete only when
+        // every decoded instruction is owned by exactly one line.
+        let mut owners = vec![0u8; lift.instruction_count];
+        for line in &lift.lines {
+            for &instruction in &line.owned {
+                if let Some(count) = owners.get_mut(instruction as usize) {
+                    *count = count.saturating_add(1);
+                }
+            }
+        }
+        Ok(Lifted {
+            unowned: owners.iter().filter(|count| **count == 0).count(),
+            repeated: owners.iter().filter(|count| **count > 1).count(),
+            lifted: owners.iter().filter(|count| **count > 0).count(),
+            lift,
+            locals,
+        })
+    })?;
+    let Lifted {
+        lift,
+        locals,
+        unowned,
+        repeated,
+        lifted,
+    } = &*kept;
+    let (locals, unowned, repeated, lifted) = (*locals, *unowned, *repeated, *lifted);
     if line_offset > lift.lines.len() {
         return Err(Error::bad("line_offset exceeds the line count"));
     }
-    // Ownership is checked, not assumed: a lift is complete only when every
-    // decoded instruction is owned by exactly one line.
-    let mut owners = vec![0u8; lift.instruction_count];
-    for line in &lift.lines {
-        for &instruction in &line.owned {
-            if let Some(count) = owners.get_mut(instruction as usize) {
-                *count = count.saturating_add(1);
-            }
-        }
-    }
-    let unowned = owners.iter().filter(|count| **count == 0).count();
-    let repeated = owners.iter().filter(|count| **count > 1).count();
     let stopped = lift.truncated_instructions || lift.truncated_lines;
     let complete = !stopped && unowned == 0 && repeated == 0;
-    let lifted: usize = owners.iter().filter(|count| **count > 0).count();
     let fallback_count: u32 = lift.fallbacks.iter().sum();
     let mut fallbacks = serde_json::Map::new();
     for (name, count) in FALLBACK_REASONS.iter().zip(lift.fallbacks) {
@@ -2332,9 +2368,6 @@ pub fn pseudocode_named(
     }
     let limits = json!({
         "max_body_bytes": wasm_graph::MAX_BODY_BYTES,
-        "max_instructions": MAX_INSTRUCTIONS,
-        "max_lines": MAX_LINES,
-        "max_text_bytes": MAX_TEXT_BYTES,
         "max_line_text_bytes": MAX_LINE_TEXT,
         "max_expression_depth": MAX_EXPR_DEPTH,
         "max_line_limit": MAX_LINE_LIMIT,
@@ -2389,7 +2422,7 @@ pub fn pseudocode_named(
         let frames_truncated = window_document(
             &mut merged,
             &mut document,
-            &lift,
+            lift,
             &scan.names,
             line_offset,
             count,

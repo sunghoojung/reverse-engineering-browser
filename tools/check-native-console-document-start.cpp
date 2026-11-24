@@ -1,12 +1,13 @@
 // Offline contract check for the Console document-start script experiment.
-// Compiles and runs the exact production matcher, validators and fixed-record
-// codec the browser and renderer use. This is not a Blink, V8 or packaged-app
+// Compiles and runs the exact production matcher, validators and set codec the
+// browser and renderer use. This is not a Blink, V8 or packaged-app
 // gate: it proves what a document-start rule admits and refuses, not that the
 // pinned browser compiled or injected anything.
 
 #include "components/reverse_engineering_browser/common/native_console_document_start.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -33,26 +34,20 @@ void Check(bool condition, std::string_view message) {
 NativeConsoleDocumentStartRule MakeRule(std::string_view origin,
                                         std::string_view path,
                                         std::uint16_t frames) {
-  NativeConsoleDocumentStartRule rule;
-  Check(origin.size() <= rule.origin.size() && path.size() <= rule.path.size(), "rule fits");
-  rule.origin_bytes = static_cast<std::uint16_t>(origin.size());
-  rule.path_bytes = static_cast<std::uint16_t>(path.size());
-  rule.frame_flags = frames;
-  std::memcpy(rule.origin.data(), origin.data(), origin.size());
-  std::memcpy(rule.path.data(), path.data(), path.size());
-  return rule;
+  return {.origin = origin, .path = path, .frame_flags = frames};
 }
 
 NativeConsoleDocumentStartScript MakeScript(std::uint64_t id,
                                             const NativeConsoleDocumentStartRule& rule,
                                             std::string_view source) {
-  NativeConsoleDocumentStartScript script;
-  Check(source.size() <= script.source.size(), "source fits");
-  script.script_id = id;
-  script.rule = rule;
-  script.source_bytes = static_cast<std::uint32_t>(source.size());
-  std::memcpy(script.source.data(), source.data(), source.size());
-  return script;
+  return {.script_id = id, .rule = rule, .source = source};
+}
+
+std::vector<std::uint8_t> Encode(std::span<const NativeConsoleDocumentStartScript> scripts) {
+  std::vector<std::uint8_t> bytes(NativeConsoleDocumentStartEncodedBytes(scripts));
+  if (!bytes.empty())
+    Check(EncodeNativeConsoleDocumentStartScripts(scripts, bytes), "a sized set encodes");
+  return bytes;
 }
 
 void CheckOrigins() {
@@ -85,10 +80,10 @@ void CheckOrigins() {
   for (const auto* path : {"a", "../a", "/a?b", "/a#b", "/a b", "/a\x7f", "/a\n"}) {
     Check(!IsValidNativeConsoleDocumentStartPath(path), std::string("refused path: ") + path);
   }
-  std::string long_path(kNativeConsoleDocumentStartPathLimit, 'a');
+  // A prefix has no length bound: any literal path a document can commit.
+  std::string long_path(1024 * 1024, 'a');
   long_path[0] = '/';
-  Check(IsValidNativeConsoleDocumentStartPath(long_path), "prefix at the limit");
-  Check(!IsValidNativeConsoleDocumentStartPath(long_path + "a"), "prefix over the limit");
+  Check(IsValidNativeConsoleDocumentStartPath(long_path), "a 1 MiB literal prefix");
 }
 
 void CheckMatching() {
@@ -133,14 +128,18 @@ void CheckMatching() {
   broken.frame_flags = 0;
   Check(!IsValidNativeConsoleDocumentStartRule(broken), "no frame kind refused");
   broken = top;
-  broken.reserved = 1;
-  Check(!IsValidNativeConsoleDocumentStartRule(broken), "reserved must stay zero");
-  broken = top;
-  broken.origin[broken.origin_bytes] = 'x';
-  Check(!IsValidNativeConsoleDocumentStartRule(broken), "trailing origin bytes must stay zero");
-  broken = top;
-  broken.origin_bytes = 0;
+  broken.origin = {};
   Check(!IsValidNativeConsoleDocumentStartRule(broken), "an empty origin is refused");
+  // An origin has no length bound either: a long host is still one exact
+  // origin, and it matches only itself.
+  const std::string long_origin = "https://" + std::string(4096, 'a') + ".test";
+  const std::string long_prefix = "/" + std::string(4095, 'p');
+  auto long_rule = MakeRule(long_origin, long_prefix, kNativeConsoleDocumentStartTopFrame);
+  Check(IsValidNativeConsoleDocumentStartRule(long_rule), "a 4 KiB origin and path prefix");
+  Check(NativeConsoleDocumentStartMatches(long_rule, long_origin, long_rule.path, true),
+        "a long origin matches itself");
+  Check(!NativeConsoleDocumentStartMatches(long_rule, long_origin + "a", long_rule.path, true),
+        "a long origin matches nothing longer");
 }
 
 void CheckScriptsAndCodec() {
@@ -148,57 +147,84 @@ void CheckScriptsAndCodec() {
   const auto first = MakeScript(1, rule, "report('one');");
   const auto second = MakeScript(2, rule, "report('two');");
   Check(IsValidNativeConsoleDocumentStartScript(first), "valid script");
-  Check(NativeConsoleDocumentStartSource(first) == "report('one');", "source round-trip");
+  Check(first.source == "report('one');", "source round-trip");
   Check(NativeConsoleDocumentStartDigest("report('one');") !=
             NativeConsoleDocumentStartDigest("report('two');"),
         "distinct sources have distinct labels");
   Check(NativeConsoleDocumentStartDigest("report('one');") ==
-            NativeConsoleDocumentStartDigest(NativeConsoleDocumentStartSource(first)),
+            NativeConsoleDocumentStartDigest(first.source),
         "the label is stable");
 
-  std::array<std::uint8_t, kNativeConsoleDocumentStartSetBytes> buffer{};
   const std::array<NativeConsoleDocumentStartScript, 2> set{first, second};
-  const auto written = EncodeNativeConsoleDocumentStartScripts(set, buffer);
-  Check(written == 2 * sizeof(NativeConsoleDocumentStartScript), "two fixed records encoded");
-  std::array<NativeConsoleDocumentStartScript, kNativeConsoleDocumentStartScriptLimit> decoded{};
-  Check(DecodeNativeConsoleDocumentStartScripts(std::span(buffer).first(written), decoded) == 2,
+  const auto encoded = Encode(set);
+  Check(encoded.size() == sizeof(NativeConsoleDocumentStartSetHeader) +
+                              2 * sizeof(NativeConsoleDocumentStartRecordHeader) +
+                              2 * (std::string_view("https://fixture.test/").size() + 14),
+        "two records take their headers and their bytes, with no padding");
+  std::vector<NativeConsoleDocumentStartScript> decoded;
+  Check(DecodeNativeConsoleDocumentStartScripts(encoded, decoded) && decoded.size() == 2,
         "two records decoded");
   Check(decoded[0].script_id == 1 && decoded[1].script_id == 2, "identities preserved");
-  Check(NativeConsoleDocumentStartSource(decoded[1]) == "report('two');", "sources preserved");
+  Check(decoded[1].source == "report('two');", "sources preserved");
+  Check(decoded[0].rule.origin == "https://fixture.test" && decoded[0].rule.path == "/" &&
+            decoded[0].rule.frame_flags == kNativeConsoleDocumentStartTopFrame,
+        "rules preserved");
+  Check(
+      decoded[0].source.data() >= reinterpret_cast<const char*>(encoded.data()) &&
+          decoded[0].source.data() < reinterpret_cast<const char*>(encoded.data()) + encoded.size(),
+      "decoded sources are views into the shared bytes, not copies");
 
-  // A truncated, oversized, duplicated or partially invalid set arms nothing.
-  Check(DecodeNativeConsoleDocumentStartScripts(std::span(buffer).first(written - 1), decoded) == 0,
-        "a truncated record arms nothing");
-  Check(DecodeNativeConsoleDocumentStartScripts({}, decoded) == 0, "an empty set arms nothing");
+  // A truncated, padded, corrupted, duplicated or partially invalid set arms
+  // nothing, and leaves nothing decoded.
+  const auto refused = [&decoded](std::vector<std::uint8_t> bytes, std::string_view why) {
+    Check(!DecodeNativeConsoleDocumentStartScripts(bytes, decoded) && decoded.empty(), why);
+  };
+  refused({encoded.begin(), encoded.end() - 1}, "a truncated record arms nothing");
+  refused({}, "an empty region arms nothing");
+  auto padded = encoded;
+  padded.push_back(0);
+  refused(padded, "trailing bytes the header does not cover arm nothing");
+  auto magic = encoded;
+  magic[0] ^= 1;
+  refused(magic, "a wrong magic arms nothing");
+  auto count = encoded;
+  count[4] = 0xff;
+  count[5] = 0xff;
+  count[6] = 0xff;
+  count[7] = 0x7f;
+  refused(count, "a count the bytes cannot hold arms nothing");
+  static_assert(offsetof(NativeConsoleDocumentStartRecordHeader, reserved) == 22);
+  auto reserved = encoded;
+  reserved[sizeof(NativeConsoleDocumentStartSetHeader) + 22] = 1;
+  refused(reserved, "a nonzero reserved field arms nothing");
+  auto origin_past = encoded;
+  origin_past[sizeof(NativeConsoleDocumentStartSetHeader) + 15] = 0x7f;
+  refused(origin_past, "an origin length past the region arms nothing");
+  auto overlong = encoded;
+  overlong[sizeof(NativeConsoleDocumentStartSetHeader) + 8] = 0xff;
+  refused(overlong, "a source length past the region arms nothing");
   const std::array<NativeConsoleDocumentStartScript, 2> duplicate{first, MakeScript(1, rule, "x;")};
-  const auto duplicate_bytes = EncodeNativeConsoleDocumentStartScripts(duplicate, buffer);
-  Check(duplicate_bytes == 2 * sizeof(NativeConsoleDocumentStartScript), "encoded for the decoder");
-  Check(DecodeNativeConsoleDocumentStartScripts(std::span(buffer).first(duplicate_bytes),
-                                                decoded) == 0,
-        "duplicate script identities arm nothing");
+  Check(NativeConsoleDocumentStartEncodedBytes(duplicate) == 0,
+        "the encoder refuses duplicate script identities");
+  auto reordered = encoded;
+  reordered[sizeof(NativeConsoleDocumentStartSetHeader)] = 3;
+  refused(reordered, "identities that do not increase arm nothing");
+  auto invalid = encoded;
+  invalid.back() = 0xff;
+  refused(invalid, "one invalid snippet arms none of the set");
 
-  std::vector<NativeConsoleDocumentStartScript> five;
-  for (std::uint64_t id = 1; id <= kNativeConsoleDocumentStartScriptLimit + 1; ++id)
-    five.push_back(MakeScript(id, rule, "report('x');"));
-  std::array<std::uint8_t,
-             kNativeConsoleDocumentStartSetBytes + sizeof(NativeConsoleDocumentStartScript)>
-      wide{};
-  Check(EncodeNativeConsoleDocumentStartScripts(five, wide) == 0, "more than four scripts refused");
-
-  const std::string oversized(kNativeConsoleDocumentStartSourceLimit, 'a');
-  auto overlong = MakeScript(3, rule, oversized);
-  Check(IsValidNativeConsoleDocumentStartScript(overlong), "source at the per-script limit");
-  overlong.source_bytes = kNativeConsoleDocumentStartSourceLimit + 1;
-  Check(!IsValidNativeConsoleDocumentStartScript(overlong), "source over the per-script limit");
-
-  // Four maximum-size scripts exceed the total source budget.
-  std::vector<NativeConsoleDocumentStartScript> total;
-  for (std::uint64_t id = 1; id <= kNativeConsoleDocumentStartScriptLimit; ++id)
-    total.push_back(MakeScript(id, rule, oversized));
-  const auto total_bytes = EncodeNativeConsoleDocumentStartScripts(total, buffer);
-  Check(total_bytes == kNativeConsoleDocumentStartSetBytes, "encoded for the decoder");
-  Check(DecodeNativeConsoleDocumentStartScripts(std::span(buffer).first(total_bytes), decoded) == 0,
-        "the total source budget is enforced on decode");
+  // No count or size budget: many scripts and a large snippet round-trip.
+  std::vector<NativeConsoleDocumentStartScript> many;
+  for (std::uint64_t id = 1; id <= 10000; ++id)
+    many.push_back(MakeScript(id, rule, "report('x');"));
+  Check(DecodeNativeConsoleDocumentStartScripts(Encode(many), decoded) && decoded.size() == 10000,
+        "ten thousand scripts arm");
+  const std::string large(80 * 1024 * 1024, 'a');
+  const std::array<NativeConsoleDocumentStartScript, 1> one{MakeScript(1, rule, large)};
+  const auto large_set = Encode(one);
+  Check(DecodeNativeConsoleDocumentStartScripts(large_set, decoded) &&
+            decoded[0].source.size() == large.size(),
+        "an 80 MiB snippet arms");
 
   auto empty_source = MakeScript(4, rule, "");
   Check(!IsValidNativeConsoleDocumentStartScript(empty_source), "an empty snippet is refused");
@@ -230,17 +256,16 @@ void CheckWireAdmission() {
   request.target_id = 0;
   request.source_bytes = 0;
   Check(!IsNativeConsoleRequest(request), "an empty document-start command is refused");
-  request.source_bytes = kNativeConsolePayloadLimit + 1;
-  Check(!IsNativeConsoleRequest(request), "an oversized document-start command is refused");
+  // Only the record format's own 32-bit length bounds a command or a reply.
+  request.source_bytes = 0xffffffffu;
+  Check(IsNativeConsoleRequest(request), "a command of any length a record can name");
   request.source_bytes = 16;
 
   NativeConsoleResponse response;
   response.request_id = 1;
   response.type = NativeConsoleType::kDocumentStart;
-  response.payload_bytes = kNativeConsolePayloadLimit;
-  Check(IsNativeConsoleResponseFor(response, request), "a bounded JSON reply is admitted");
-  response.payload_bytes = kNativeConsolePayloadLimit + 1;
-  Check(!IsNativeConsoleResponseFor(response, request), "an oversized reply is refused");
+  response.payload_bytes = 0xffffffffu;
+  Check(IsNativeConsoleResponseFor(response, request), "a reply of any length is admitted");
   response.payload_bytes = 4;
   response.type = NativeConsoleType::kRuntime;
   Check(!IsNativeConsoleResponseFor(response, request),
@@ -251,8 +276,9 @@ void CheckWireAdmission() {
   response.type = NativeConsoleType::kDocumentStart;
   response.flags = kNativeConsoleDocumentStartSupported;
   Check(!IsNativeConsoleResponse(response, 1), "the capability bit is listing-only");
+  // Nothing is cut to fit a record, so only a partial listing says so.
   response.flags = kNativeConsoleTruncated;
-  Check(IsNativeConsoleResponse(response, 1), "truncation stays available on a command reply");
+  Check(!IsNativeConsoleResponse(response, 1), "a command reply is never truncated");
   response.flags = kNativeConsoleResponseFlags + 1;
   Check(!IsNativeConsoleResponse(response, 1), "unknown response flags are refused");
 
@@ -269,6 +295,59 @@ void CheckWireAdmission() {
   // operation 4 rather than retire a working v2 session.
   listing.flags = 0;
   Check(IsNativeConsoleResponse(listing, 2), "a v2 listing without the bit stays valid");
+  listing.item_count = 2;
+  Check(!IsNativeConsoleResponse(listing, 2), "a count the payload cannot hold is refused");
+  listing.item_count = 0;
+  listing.payload_bytes = 0;
+  Check(IsNativeConsoleResponse(listing, 2), "an empty listing is valid");
+}
+
+void CheckTargets() {
+  // Variable-length targets carry their whole metadata, however long.
+  const std::string origin = "https://fixture.test";
+  const std::string label = "top #7 · " + std::string(100000, 't');
+  const std::string url = origin + "/" + std::string(2 * 1024 * 1024, 'u');
+  std::string payload;
+  for (std::uint64_t id = 1; id <= 100; ++id) {
+    NativeConsoleTarget target;
+    target.id = id;
+    target.origin_bytes = static_cast<std::uint32_t>(origin.size());
+    target.label_bytes = static_cast<std::uint32_t>(label.size());
+    target.url_bytes = static_cast<std::uint32_t>(url.size());
+    target.flags = kNativeConsoleTargetTopFrame;
+    payload.append(reinterpret_cast<const char*>(&target), sizeof(target));
+    payload += origin + label + url;
+  }
+  const auto bytes = std::as_bytes(std::span(payload));
+  std::size_t offset = 0;
+  for (std::uint64_t id = 1; id <= 100; ++id) {
+    NativeConsoleTarget target;
+    std::string_view read_origin, read_label, read_url;
+    Check(ReadNativeConsoleTarget(bytes, offset, target, read_origin, read_label, read_url) &&
+              target.id == id && read_origin == origin && read_label == label && read_url == url,
+          "a hundred targets with 2 MiB URLs read back whole");
+  }
+  Check(offset == bytes.size(), "the listing ends after its last target");
+  NativeConsoleTarget target;
+  std::string_view a, b, c;
+  offset = 0;
+  Check(!ReadNativeConsoleTarget(bytes.first(sizeof(target) + 3), offset, target, a, b, c),
+        "a target whose strings run past the payload is refused");
+}
+
+void CheckStops() {
+  // A command Stop names its request; an injection Stop names its script, or
+  // every script below an id, never a command or a later script.
+  constexpr auto kStop = kNativeConsoleDocumentStartStopBit;
+  constexpr auto kBelow = kStop | kNativeConsoleDocumentStartStopBelowBit;
+  static_assert(NativeConsoleStopNames(7, 7) && !NativeConsoleStopNames(7, 8));
+  static_assert(NativeConsoleStopNames(kStop | 3, kStop | 3));
+  static_assert(!NativeConsoleStopNames(kStop | 3, kStop | 4));
+  static_assert(!NativeConsoleStopNames(kStop | 3, 3), "an injection Stop never ends a command");
+  static_assert(NativeConsoleStopNames(kBelow | 5, kStop | 4));
+  static_assert(!NativeConsoleStopNames(kBelow | 5, kStop | 5), "a later script keeps running");
+  static_assert(!NativeConsoleStopNames(kBelow | 5, 4), "a set Stop never ends a command");
+  static_assert(!NativeConsoleStopNames(0, 0));
 }
 
 }  // namespace
@@ -278,6 +357,8 @@ int main() {
   CheckMatching();
   CheckScriptsAndCodec();
   CheckWireAdmission();
+  CheckTargets();
+  CheckStops();
   std::cout << "Console document-start rule, codec and wire admission checks passed "
                "(no Blink, V8 or browser execution)\n";
 }

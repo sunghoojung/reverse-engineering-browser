@@ -10,6 +10,7 @@
 #include <type_traits>
 #include "reb/event.hpp"
 #include "reb/js_invocation.hpp"
+#include "reb/wasm_dispatch.hpp"
 namespace reb {
 // Dispatch sites one adapter recipe may configure.
 inline constexpr std::uint32_t kWasmGuestSiteLimit = 8;
@@ -270,6 +271,9 @@ static_assert(offsetof(WasmGuestInvocationPayload, recipe_sha256) == 32);
   std::copy_n(bytes.begin() + 92, 36, value.reserved.begin());
   return true;
 }
+// A recipe's sample limit is a Chromium JSON integer, so at most this, and a
+// sample's index is below its limit.
+inline constexpr std::uint32_t kWasmGuestSampleIndexLimit = 2147483647U;
 [[nodiscard]] inline bool IsValidWasmGuestDispatch(const EventRecord& event) noexcept {
   WasmGuestDispatchPayload value;
   return wasm_guest_detail::Envelope(event) && event.header.type == EventType::kWasmGuestDispatch &&
@@ -278,8 +282,9 @@ static_assert(offsetof(WasmGuestInvocationPayload, recipe_sha256) == 32);
          DecodeWasmGuestDispatchPayload(event.inline_payload, value) &&
          value.protocol_version == 1 && value.payload_size == 128 &&
          value.function_index < 16U * 1024U * 1024U && value.module_byte_offset >= 8 &&
-         value.module_byte_offset < 16U * 1024U * 1024U &&
-         value.table_count < 16U * 1024U * 1024U && value.sample_index < 256 && value.instance_id &&
+         value.module_byte_offset < kWasmModuleByteOffsetLimit &&
+         value.table_count < 16U * 1024U * 1024U &&
+         value.sample_index < kWasmGuestSampleIndexLimit && value.instance_id &&
          value.invocation_id && value.bytecode_artifact_id &&
          value.bytecode_artifact_id != event.header.artifact_id && value.memory_length &&
          value.memory_length <= 65536 && value.guest_pc < value.memory_length &&

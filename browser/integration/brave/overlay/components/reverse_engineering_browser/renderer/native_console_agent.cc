@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -8,6 +8,7 @@
 #include <array>
 #include <charconv>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -18,8 +19,8 @@
 #include "base/strings/utf_string_conversions.h"
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/common/native_console_protocol.h"
-#include "brave/components/reverse_engineering_browser/renderer/native_console_deadline.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_console_document_start.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_console_execution.h"
 #include "content/public/renderer/render_frame.h"
 #include "third_party/blink/public/common/associated_interfaces/associated_interface_registry.h"
 #include "third_party/blink/public/platform/scheduler/web_agent_group_scheduler.h"
@@ -30,20 +31,19 @@
 namespace reb {
 namespace {
 
-std::string CopyString(v8::Isolate* isolate, v8::Local<v8::String> string, bool& truncated) {
-  std::array<char, kNativeConsoleTextLimit> buffer{};
-  std::size_t characters = 0;
-  const auto bytes = string->WriteUtf8(isolate, buffer.data(), buffer.size(),
-                                       v8::String::WriteFlags::kReplaceInvalidUtf8, &characters);
-  truncated = characters < static_cast<std::size_t>(string->Length());
-  return std::string(buffer.data(), bytes);
+// The whole string. A lone surrogate becomes U+FFFD, which has the same UTF-8
+// length, so the measured size is exact.
+std::string CopyString(v8::Isolate* isolate, v8::Local<v8::String> string) {
+  std::string text(string->Utf8Length(isolate), '\0');
+  text.resize(string->WriteUtf8(isolate, text.data(), text.size(),
+                                v8::String::WriteFlags::kReplaceInvalidUtf8));
+  return text;
 }
 
 NativeConsoleType Preview(v8::Isolate* isolate,
                           v8::Local<v8::Context> context,
                           v8::Local<v8::Value> value,
-                          std::string& text,
-                          bool& truncated) {
+                          std::string& text) {
   if (value->IsUndefined()) {
     text = "undefined";
     return NativeConsoleType::kUndefined;
@@ -57,7 +57,7 @@ NativeConsoleType Preview(v8::Isolate* isolate,
     return NativeConsoleType::kBoolean;
   }
   if (value->IsString()) {
-    text = CopyString(isolate, value.As<v8::String>(), truncated);
+    text = CopyString(isolate, value.As<v8::String>());
     return NativeConsoleType::kString;
   }
   if (value->IsNumber()) {
@@ -75,15 +75,10 @@ NativeConsoleType Preview(v8::Isolate* isolate,
     return NativeConsoleType::kNumber;
   }
   if (value->IsBigInt()) {
-    // Conversion is bounded before requesting decimal formatting.
-    if (value.As<v8::BigInt>()->WordCount() > 16) {
-      text = "[BigInt larger than 1024 bits]";
-      truncated = true;
-    } else {
-      v8::Local<v8::String> formatted;
-      if (value->ToString(context).ToLocal(&formatted))
-        text = CopyString(isolate, formatted, truncated);
-    }
+    // BigInt formatting is engine code and calls nothing the page defined.
+    v8::Local<v8::String> formatted;
+    if (value->ToString(context).ToLocal(&formatted))
+      text = CopyString(isolate, formatted);
     return NativeConsoleType::kBigInt;
   }
   // Never enumerate objects or coerce them to strings: proxies, accessors,
@@ -127,6 +122,9 @@ void NativeConsoleAgent::Bind(mojo::PendingAssociatedReceiver<mojom::NativeConso
   receiver_.reset();
   receiver_.Bind(std::move(receiver));
 }
+void NativeConsoleAgent::BindControl(mojo::PendingReceiver<mojom::NativeConsoleControl> control) {
+  BindNativeConsoleControl(std::move(control));
+}
 void NativeConsoleAgent::Describe(DescribeCallback callback) {
   const auto* frame = render_frame() ? render_frame()->GetWebFrame() : nullptr;
   std::move(callback).Run(frame && !frame->IsProvisional()
@@ -138,8 +136,14 @@ void NativeConsoleAgent::Describe(DescribeCallback callback) {
 // matching snippet observes this document before its own scripts. Nothing runs
 // here unless the separate document-start experiment is armed.
 void NativeConsoleAgent::DidCreateScriptContext(v8::Local<v8::Context> context, int world_id) {
-  if (world_id == 0)
-    InjectNativeConsoleDocumentStart(render_frame(), context, document_start_);
+  if (world_id != 0)
+    return;
+  InjectNativeConsoleDocumentStart(render_frame(), context, document_start_);
+  // After any document-start snippet, so a kept watch scope observes the
+  // page's own scripts rather than the researcher's.
+  auto* frame = render_frame() ? render_frame()->GetWebFrame() : nullptr;
+  if (frame && !frame->IsProvisional())
+    runtime_.DocumentStarted(frame->GetAgentGroupScheduler()->Isolate(), frame);
 }
 
 // A same-origin commit from the initial empty document keeps that window and
@@ -149,12 +153,15 @@ void NativeConsoleAgent::DidCreateScriptContext(v8::Local<v8::Context> context, 
 // before its parser runs, which is where that document is matched instead.
 void NativeConsoleAgent::DidClearWindowObject() {
   InjectNativeConsoleDocumentStartIntoReusedWindow(render_frame(), document_start_);
+  auto* frame = render_frame() ? render_frame()->GetWebFrame() : nullptr;
+  if (document_start_.context && frame && !frame->IsProvisional())
+    runtime_.WindowCleared(frame->GetAgentGroupScheduler()->Isolate(), frame);
 }
 
 void NativeConsoleAgent::WillReleaseScriptContext(v8::Local<v8::Context> context, int world_id) {
   if (world_id == 0) {
     runtime_.Reset();
-    runtime_.Unwatch();
+    runtime_.DocumentEnded();
     document_start_.context = false;
   }
 }
@@ -163,18 +170,17 @@ void NativeConsoleAgent::DetailedConsoleMessageAdded(const std::u16string& messa
                                                      const std::u16string& stack,
                                                      uint32_t line,
                                                      blink::mojom::ConsoleMessageLevel level) {
-  runtime_.Message(base::UTF16ToUTF8(message.substr(0, 2048)),
-                   base::UTF16ToUTF8(source.substr(0, 512)),
-                   base::UTF16ToUTF8(stack.substr(0, 2048)), line, static_cast<int>(level),
-                   message.size() > 2048 || source.size() > 512 || stack.size() > 2048);
+  runtime_.Message(base::UTF16ToUTF8(message), base::UTF16ToUTF8(source), base::UTF16ToUTF8(stack),
+                   line, static_cast<int>(level));
 }
 void NativeConsoleAgent::Runtime(const base::UnguessableToken& document,
+                                 std::uint64_t request_id,
                                  std::uint64_t expires_at_monotonic_us,
                                  const std::string& command,
                                  RuntimeCallback callback) {
   auto reply = [&callback](NativeConsoleStatus status, const char* text) {
     std::move(callback).Run(static_cast<uint16_t>(status),
-                            static_cast<uint16_t>(NativeConsoleType::kUndefined), text, false);
+                            static_cast<uint16_t>(NativeConsoleType::kUndefined), text);
   };
   auto* frame = render_frame() ? render_frame()->GetWebFrame() : nullptr;
   if (!frame || frame->IsProvisional() || document.is_empty() ||
@@ -195,37 +201,34 @@ void NativeConsoleAgent::Runtime(const base::UnguessableToken& document,
     return;
   }
   v8::Context::Scope entered(context);
-  auto& deadline = NativeConsoleDeadline::Get();
-  if (!deadline.Begin(isolate, kNativeConsoleExecutionMillis)) {
-    reply(NativeConsoleStatus::kForbidden, "Watchdog unavailable");
-    return;
-  }
+  auto& execution = NativeConsoleExecution::Get();
+  execution.Begin(isolate, request_id);
   v8::TryCatch terminated(isolate);
   std::string result;
   {
     // Explicit commands can schedule promise continuations. Run their checkpoint
-    // inside the synchronous watchdog, rather than outside its 200 ms budget.
+    // inside the command, so Stop also ends them.
     v8::MicrotasksScope microtasks(isolate, context->GetMicrotaskQueue(),
                                    v8::MicrotasksScope::kRunMicrotasks);
     result = runtime_.Run(isolate, context, frame, command);
   }
-  if (deadline.Finish()) {
+  if (execution.Finish() != NativeConsoleExecution::End::kReturned) {
     terminated.Reset();
-    reply(NativeConsoleStatus::kTimeout,
-          "Synchronous execution exceeded 200 ms; changes are not rolled back");
+    reply(NativeConsoleStatus::kStopped, "Stopped; changes are not rolled back");
     return;
   }
   std::move(callback).Run(static_cast<uint16_t>(NativeConsoleStatus::kOk),
-                          static_cast<uint16_t>(NativeConsoleType::kRuntime), result, false);
+                          static_cast<uint16_t>(NativeConsoleType::kRuntime), result);
 }
 
 void NativeConsoleAgent::Evaluate(const base::UnguessableToken& document,
+                                  std::uint64_t request_id,
                                   std::uint64_t expires_at_monotonic_us,
                                   const std::string& source,
                                   EvaluateCallback callback) {
   auto reply = [&callback](NativeConsoleStatus status, const char* text) {
     std::move(callback).Run(static_cast<std::uint16_t>(status),
-                            static_cast<std::uint16_t>(NativeConsoleType::kUndefined), text, false);
+                            static_cast<std::uint16_t>(NativeConsoleType::kUndefined), text);
   };
   auto* frame = render_frame() ? render_frame()->GetWebFrame() : nullptr;
   if (!frame || frame->IsProvisional() || document.is_empty() ||
@@ -238,9 +241,13 @@ void NativeConsoleAgent::Evaluate(const base::UnguessableToken& document,
     reply(NativeConsoleStatus::kTimeout, "Command expired while waiting for the renderer");
     return;
   }
-  if (source.empty() || source.size() > kNativeConsoleSourceLimit || !base::IsStringUTF8(source) ||
-      source.find('\0') != std::string::npos) {
-    reply(NativeConsoleStatus::kMalformed, "JavaScript must be 1 to 8192 bytes of valid UTF-8");
+  if (source.empty() || !base::IsStringUTF8(source) || source.find('\0') != std::string::npos) {
+    reply(NativeConsoleStatus::kMalformed, "JavaScript must be non-empty valid UTF-8");
+    return;
+  }
+  // V8's own bound: a source string's length is an int.
+  if (source.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    reply(NativeConsoleStatus::kMalformed, "JavaScript is longer than V8 can hold in one string");
     return;
   }
   v8::Isolate* isolate = frame->GetAgentGroupScheduler()->Isolate();
@@ -254,11 +261,8 @@ void NativeConsoleAgent::Evaluate(const base::UnguessableToken& document,
   v8::MicrotasksScope microtasks(isolate, context->GetMicrotaskQueue(),
                                  v8::MicrotasksScope::kDoNotRunMicrotasks);
   v8::TryCatch exception(isolate);
-  auto& deadline = NativeConsoleDeadline::Get();
-  if (!deadline.Begin(isolate, kNativeConsoleExecutionMillis)) {
-    reply(NativeConsoleStatus::kForbidden, "Execution watchdog is unavailable");
-    return;
-  }
+  auto& execution = NativeConsoleExecution::Get();
+  execution.Begin(isolate, request_id);
   v8::Local<v8::String> code;
   v8::Local<v8::Script> script;
   v8::Local<v8::Value> value;
@@ -268,31 +272,27 @@ void NativeConsoleAgent::Evaluate(const base::UnguessableToken& document,
                        v8::Script::Compile(context, code).ToLocal(&script) &&
                        script->Run(context).ToLocal(&value);
   std::string text;
-  bool truncated = false;
   NativeConsoleType type = NativeConsoleType::kUndefined;
   if (success)
-    type = Preview(isolate, context, value, text, truncated);
-  const bool timed_out = deadline.Finish();
-  if (timed_out) {
+    type = Preview(isolate, context, value, text);
+  if (execution.Finish() != NativeConsoleExecution::End::kReturned) {
     exception.Reset();
-    reply(NativeConsoleStatus::kTimeout,
-          "Synchronous execution exceeded its 200 ms budget; changes are not rolled back");
+    reply(NativeConsoleStatus::kStopped, "Stopped; changes are not rolled back");
     return;
   }
   if (!success) {
     // A primitive thrown string is safe to copy. Never format an Error object
     // through page-controlled Error.prepareStackTrace or property accessors.
     if (!exception.Exception().IsEmpty() && exception.Exception()->IsString()) {
-      text = CopyString(isolate, exception.Exception().As<v8::String>(), truncated);
+      text = CopyString(isolate, exception.Exception().As<v8::String>());
     } else
       text = "JavaScript failed to compile or threw an exception";
     std::move(callback).Run(static_cast<std::uint16_t>(NativeConsoleStatus::kException),
-                            static_cast<std::uint16_t>(NativeConsoleType::kUndefined), text,
-                            truncated);
+                            static_cast<std::uint16_t>(NativeConsoleType::kUndefined), text);
     return;
   }
   std::move(callback).Run(static_cast<std::uint16_t>(NativeConsoleStatus::kOk),
-                          static_cast<std::uint16_t>(type), text, truncated);
+                          static_cast<std::uint16_t>(type), text);
 }
 
 }  // namespace reb

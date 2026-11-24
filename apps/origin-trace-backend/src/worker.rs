@@ -7,7 +7,7 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::Command,
-    sync::watch,
+    sync::{mpsc, watch},
 };
 
 // Workers own a process group. Cancellation and dropped futures must also stop
@@ -28,6 +28,8 @@ pub struct Output {
     pub stderr: Vec<u8>,
     pub success: bool,
     pub exit_code: Option<i32>,
+    /// The signal that ended the worker, when one did.
+    pub signal: Option<i32>,
     pub duration_us: u64,
 }
 /// Reads a worker stream to its end. An analysis worker's output grows with
@@ -61,11 +63,69 @@ pub async fn run(
     output_limit: Option<usize>,
     deadline: Option<Duration>,
 ) -> Result<Output> {
-    run_cancel(command, input, output_limit, deadline, None).await
+    run_cancel(
+        command,
+        vec![Input::Borrowed(input)],
+        output_limit,
+        deadline,
+        None,
+    )
+    .await
 }
+/// One part of a worker's stdin. Parts are written in order, so a large part
+/// reaches the worker without first being copied after the others.
+pub enum Input<'a> {
+    Borrowed(&'a [u8]),
+    /// Freed once written, so it is not held while the worker runs.
+    Owned(Vec<u8>),
+    /// Encoded by a [`ChunkWriter`] while the worker reads it, so the encoded
+    /// input is never held whole.
+    Chunks(mpsc::Receiver<Vec<u8>>),
+}
+const CHUNK_BYTES: usize = 1 << 20;
+/// A blocking writer whose bytes reach a worker as an [`Input::Chunks`]
+/// part. Each chunk waits for the worker to take the one before it, so at
+/// most a few chunks are held. Writes fail once the worker is gone.
+pub struct ChunkWriter {
+    sender: mpsc::Sender<Vec<u8>>,
+    buffer: Vec<u8>,
+}
+impl ChunkWriter {
+    pub fn new() -> (Self, Input<'static>) {
+        let (sender, chunks) = mpsc::channel(4);
+        (
+            Self {
+                sender,
+                buffer: Vec::with_capacity(CHUNK_BYTES),
+            },
+            Input::Chunks(chunks),
+        )
+    }
+}
+impl std::io::Write for ChunkWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.buffer.extend_from_slice(bytes);
+        if self.buffer.len() >= CHUNK_BYTES {
+            self.flush()?;
+        }
+        Ok(bytes.len())
+    }
+    /// Sends what is buffered; the part ends when the writer drops.
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        let chunk = std::mem::replace(&mut self.buffer, Vec::with_capacity(CHUNK_BYTES));
+        self.sender
+            .blocking_send(chunk)
+            .map_err(|_| std::io::ErrorKind::BrokenPipe.into())
+    }
+}
+/// [`run`] with its input written as consecutive parts, and with `cancel`
+/// stopping the worker and its descendants.
 pub async fn run_cancel(
     command: &mut Command,
-    input: &[u8],
+    input: Vec<Input<'_>>,
     output_limit: Option<usize>,
     deadline: Option<Duration>,
     mut cancel: Option<&mut watch::Receiver<bool>>,
@@ -104,7 +164,21 @@ pub async fn run_cancel(
         _=async {if let Some(receiver)=cancel.as_mut() {if !*receiver.borrow() {let _=receiver.changed().await;}} else {std::future::pending::<()>().await}}=> {let _=child.kill().await;let _=child.wait().await;return Err(Error::new(499,"Worker cancelled").with_reason(Reason::at(Code::Cancelled, Phase::Worker)));},
         result=async {
             let work = async {
-                tokio::try_join!(async { stdin.write_all(input).await?; drop(stdin); Ok::<_,Error>(()) }, bounded_read(stdout,output_limit),bounded_read(stderr,Some(64*1024)),async { child.wait().await.map_err(Error::from) })
+                tokio::try_join!(async {
+                    for part in input {
+                        match part {
+                            Input::Borrowed(bytes) => stdin.write_all(bytes).await?,
+                            Input::Owned(bytes) => stdin.write_all(&bytes).await?,
+                            Input::Chunks(mut chunks) => {
+                                while let Some(chunk) = chunks.recv().await {
+                                    stdin.write_all(&chunk).await?;
+                                }
+                            }
+                        }
+                    }
+                    drop(stdin);
+                    Ok::<_, Error>(())
+                }, bounded_read(stdout,output_limit),bounded_read(stderr,Some(64*1024)),async { child.wait().await.map_err(Error::from) })
             };
             match deadline {
                 Some(deadline) => tokio::time::timeout(deadline, work).await,
@@ -118,6 +192,7 @@ pub async fn run_cancel(
             stderr,
             success: status.success(),
             exit_code: status.code(),
+            signal: std::os::unix::process::ExitStatusExt::signal(&status),
             duration_us: started
                 .elapsed()
                 .as_micros()
@@ -170,7 +245,7 @@ mod tests {
                 .arg(child_path);
             run_cancel(
                 &mut command,
-                b"",
+                Vec::new(),
                 Some(1024),
                 Some(Duration::from_secs(5)),
                 Some(&mut receiver),

@@ -32,6 +32,8 @@ constexpr auto kForever = std::numeric_limits<std::uint64_t>::max();
 reb::NativeProbeQueue renderer_queue;
 std::vector<reb::NativeProbeEvent> browser_events;
 unsigned artifact_calls = 0;
+std::uint64_t charged_credit = 0;
+std::uint64_t released_credit = 0;
 bool reconfigure_after_accept = false;
 bool reconfigure_after_artifact = false;
 void Configure();
@@ -63,15 +65,27 @@ void EmitArtifact(reb::NativeArtifactKind kind,
                   std::span<const std::uint8_t> bytes,
                   const reb::NativeRuntimeScript& script,
                   std::uint64_t credit) noexcept {
-  assert(kind == reb::NativeArtifactKind::kBytecodeBuffer && credit == 0);
+  assert(kind == reb::NativeArtifactKind::kBytecodeBuffer);
   assert(origin == reb::NativeArtifactCaptureOrigin::kRuntimeTypedArray);
+  // The buffer and the allocating script source it carries are charged to the
+  // renderer's artifact credit.
+  assert(credit == bytes.size() + script.source.size());
+  charged_credit += credit;
   ++artifact_calls;
   // This adapter substitutes only Mojo delivery. Browser parent assignment and
   // validation below are the real product implementation, not fixture authorship.
+  // Like NativeProbeHost, the browser returns each part's credit once it is copied.
+  const auto release = [](const std::uint64_t part) {
+    return base::ScopedClosureRunner(base::OnceClosure([part] {
+      released_credit += part;
+      renderer.ReleaseArtifactCredit(part);
+    }));
+  };
   base::test_process_id = 202;
   browser.CaptureRuntimeTypedArray(
       101, script.session_id, script.script_id, script.is_eval, creator, context, frame, url,
-      mojo_base::BigBuffer(script.source), mojo_base::BigBuffer(bytes));
+      mojo_base::BigBuffer(script.source), release(script.source.size()),
+      mojo_base::BigBuffer(bytes), release(bytes.size()));
   base::test_process_id = 101;
   if (reconfigure_after_artifact) {
     reconfigure_after_artifact = false;
@@ -149,12 +163,12 @@ int main(int argc, char* argv[]) {
     for (const auto scope : {std::array<std::uint64_t, 3>{102, 7, 8}, {101, 77, 8}, {101, 7, 88}}) {
       const auto before = socket.transfers.size();
       browser.CaptureRuntimeTypedArray(static_cast<int>(scope[0]), kSession, 9, false, 1, scope[1],
-                                       scope[2], "script://9", mojo_base::BigBuffer({}),
-                                       mojo_base::BigBuffer(bytes));
+                                       scope[2], "script://9", mojo_base::BigBuffer({}), {},
+                                       mojo_base::BigBuffer(bytes), {});
       assert(socket.transfers.size() == before);
       browser.CaptureRuntimeTypedArray(static_cast<int>(scope[0]), kSession, 9, false, 1, scope[1],
                                        scope[2], "script://9", mojo_base::BigBuffer(source_bytes),
-                                       mojo_base::BigBuffer(bytes));
+                                       {}, mojo_base::BigBuffer(bytes), {});
       assert(socket.transfers.size() == before + 2);
       assert(socket.transfers.back()->header.parent_artifact_id ==
              socket.transfers[before]->header.artifact_id);
@@ -170,8 +184,8 @@ int main(int argc, char* argv[]) {
       assert(failed.header.type == reb::NativeProbeType::kArtifactCaptureFailed);
   } else if (mode == "browser-stale") {
     browser.CaptureRuntimeTypedArray(101, kSession + 1, 9, false, 1, 7, 8, "script://9",
-                                     mojo_base::BigBuffer(source_bytes),
-                                     mojo_base::BigBuffer(bytes));
+                                     mojo_base::BigBuffer(source_bytes), {},
+                                     mojo_base::BigBuffer(bytes), {});
     assert(socket.transfers.empty());
   } else if (mode == "disabled" || mode == "expired" || mode == "stale" ||
              mode == "missing-source") {
@@ -193,6 +207,8 @@ int main(int argc, char* argv[]) {
     std::cerr << "unknown case: " << mode << '\n';
     return 2;
   }
+  // Every path, accepted, refused or stale, returned what the renderer charged.
+  assert(released_credit == charged_credit);
   // A test adapter writes unchanged queued records; production receiver/broker
   // parsing, hashing, manifest assignment and analyzer run in the Python driver.
   std::filesystem::create_directories(output);

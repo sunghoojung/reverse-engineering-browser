@@ -25,7 +25,7 @@ void Check(const bool condition, const char* const message) {
 }
 
 // The renderer encoder (overlay) and the core decoder each own a copy of the
-// version-1 layout. Set one field at a time to a distinct value and require
+// version-2 layout. Set one field at a time to a distinct value and require
 // identical bytes and identical cross-decoding, so the copies cannot drift.
 template <class OverlayField, class CoreField, class Value>
 void CheckField(OverlayField reb::NativeJsDispatchObservationPayload::*overlay_field,
@@ -73,8 +73,7 @@ void CheckWireParity() {
   CheckField(&O::activation_id, &C::activation_id, 0x21222324U, "activation_id");
   CheckField(&O::parent_activation_id, &C::parent_activation_id, 0x25262728U,
              "parent_activation_id");
-  CheckField(&O::site_sample_index, &C::site_sample_index, 0x292a, "site_sample_index");
-  CheckField(&O::sample_index, &C::sample_index, 0x2b2c, "sample_index");
+  CheckField(&O::site_ordinal, &C::site_ordinal, 0x292a2b2cU, "site_ordinal");
   for (std::size_t i = 0; i < 32; ++i) {
     O overlay;
     C core;
@@ -104,7 +103,7 @@ reb::EventRecord Valid() {
   reb::JsDispatchObservationPayload p;
   p.shape = static_cast<std::uint8_t>(reb::JsDispatchShape::kIndexedCall);
   p.selector_kind = static_cast<std::uint8_t>(reb::JsDispatchSelectorKind::kInteger);
-  p.site_slot = 7;
+  p.site_slot = 255;
   p.flags = reb::kJsDispatchNewActivation | reb::kJsDispatchHandlerSpan;
   p.script_id = 9;
   p.anchor_offset = 99;
@@ -115,8 +114,7 @@ reb::EventRecord Valid() {
   p.handler_end = 11;
   p.activation_id = 5;
   p.parent_activation_id = 4;
-  p.site_sample_index = 63;
-  p.sample_index = 255;
+  p.site_ordinal = 0xffffffffU;
   p.source_sha256.fill(std::byte{0x5a});
   event.inline_payload = reb::EncodeJsDispatchObservationPayload(p);
   return event;
@@ -170,13 +168,14 @@ void CheckValidation() {
   Expect("tab zero", [](auto& e) { e.header.tab_id = 0; }, true);
   // Payload rules.
   ExpectPayload("reserved", [](P& p) { p.reserved[47] = std::byte{1}; }, false);
-  ExpectPayload("version", [](P& p) { p.protocol_version = 2; }, false);
+  ExpectPayload("version", [](P& p) { p.protocol_version = 3; }, false);
+  ExpectPayload("version zero", [](P& p) { p.protocol_version = 0; }, false);
   ExpectPayload("size", [](P& p) { p.payload_size = 127; }, false);
   ExpectPayload("shape zero", [](P& p) { p.shape = 0; }, false);
   ExpectPayload("shape", [](P& p) { p.shape = 3; }, false);
   ExpectPayload("kind zero", [](P& p) { p.selector_kind = 0; }, false);
   ExpectPayload("kind", [](P& p) { p.selector_kind = 10; }, false);
-  ExpectPayload("slot", [](P& p) { p.site_slot = 8; }, false);
+  ExpectPayload("slot zero", [](P& p) { p.site_slot = 0; }, true);
   for (unsigned bit = 4; bit < 8; ++bit)
     ExpectPayload("flags", [bit](P& p) { p.flags |= static_cast<std::uint8_t>(1U << bit); }, false);
   ExpectPayload("script", [](P& p) { p.script_id = 0; }, false);
@@ -204,8 +203,19 @@ void CheckValidation() {
         p.flags |= reb::kJsDispatchParentSearchTruncated;
       },
       true);
-  ExpectPayload("site sample", [](P& p) { p.site_sample_index = 64; }, false);
-  ExpectPayload("sample", [](P& p) { p.sample_index = 256; }, false);
+  // Version 1 evidence from earlier builds keeps its own bounds: 8 slots and
+  // packed indexes below 64 per site and 256 per configuration.
+  const auto v1 = [](std::uint8_t slot, std::uint32_t site_sample, std::uint32_t sample) {
+    return [=](P& p) {
+      p.protocol_version = 1;
+      p.site_slot = slot;
+      p.site_ordinal = site_sample | (sample << 16U);
+    };
+  };
+  ExpectPayload("v1", v1(7, 63, 255), true);
+  ExpectPayload("v1 slot", v1(8, 0, 0), false);
+  ExpectPayload("v1 site sample", v1(0, 64, 0), false);
+  ExpectPayload("v1 sample", v1(0, 0, 256), false);
   // Handler span consistency.
   ExpectPayload(
       "handler without flag",
@@ -278,10 +288,13 @@ void CheckValidation() {
     Check(!reb::DecodeJsDispatchObservationPayload(std::span(event.inline_payload).first(size),
                                                    decoded),
           "truncated decode");
-  Check(event.inline_payload[0] == std::byte{1} && event.inline_payload[1] == std::byte{0} &&
+  Check(event.inline_payload[0] == std::byte{2} && event.inline_payload[1] == std::byte{0} &&
             event.inline_payload[2] == std::byte{128} && event.inline_payload[3] == std::byte{0} &&
+            event.inline_payload[6] == std::byte{0xff} &&
             event.inline_payload[20] == std::byte{0xff} &&
-            event.inline_payload[46] == std::byte{0xff} && event.inline_payload[47] == std::byte{0},
+            event.inline_payload[44] == std::byte{0xff} &&
+            event.inline_payload[47] == std::byte{0xff} &&
+            event.inline_payload[48] == std::byte{0x5a},
         "little-endian layout");
   Check(reb::EventTypeName(reb::EventType::kJsDispatchObservation) == "js_dispatch_observation",
         "event type name");

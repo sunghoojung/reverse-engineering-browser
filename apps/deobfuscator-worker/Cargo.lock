@@ -601,6 +601,9 @@ dependencies = [
 [[package]]
 name = "reb-js-lexer"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "regex"

@@ -13,9 +13,16 @@ namespace reb {
 // into the script source V8 compiled; the site is named by source_sha256 (over
 // that text as UTF-16LE), source_length and anchor_offset. No argument,
 // receiver or string content is part of this record.
-inline constexpr std::size_t kJsDispatchSiteLimit = 8;
-inline constexpr std::size_t kJsDispatchSampleBudget = 256;
-inline constexpr std::size_t kJsDispatchSiteSampleBudget = 64;
+//
+// Payload version 2 records every dispatch of up to 256 sites, each with a
+// u32 ordinal. Version 1, written by earlier builds, armed at most 8 sites and
+// recorded at most 64 dispatches per site and 256 per configuration; it stays
+// readable.
+inline constexpr std::uint16_t kJsDispatchPayloadVersion = 2;
+inline constexpr std::size_t kJsDispatchSiteLimit = 256;
+inline constexpr std::size_t kJsDispatchV1SiteLimit = 8;
+inline constexpr std::size_t kJsDispatchV1SampleBudget = 256;
+inline constexpr std::size_t kJsDispatchV1SiteSampleBudget = 64;
 
 enum class JsDispatchShape : std::uint8_t {
   kSwitch = 1,
@@ -44,7 +51,7 @@ inline constexpr std::uint8_t kJsDispatchKnownFlags =
     kJsDispatchHandlerSpan;
 
 struct JsDispatchObservationPayload final {
-  std::uint16_t protocol_version = 1;
+  std::uint16_t protocol_version = kJsDispatchPayloadVersion;
   std::uint16_t payload_size = 128;
   std::uint8_t shape = 0;
   std::uint8_t selector_kind = 0;
@@ -59,8 +66,11 @@ struct JsDispatchObservationPayload final {
   std::uint32_t handler_end = 0;
   std::uint32_t activation_id = 0;
   std::uint32_t parent_activation_id = 0;
-  std::uint16_t site_sample_index = 0;
-  std::uint16_t sample_index = 0;
+  // Version 2: this dispatch's ordinal among the site's dispatches in its
+  // configuration, from 0. A missing ordinal is a dropped record. Version 1
+  // held the per-site index in the low 16 bits and the per-configuration
+  // index in the high 16 bits.
+  std::uint32_t site_ordinal = 0;
   std::array<std::byte, 32> source_sha256{};
   std::array<std::byte, 48> reserved{};
 };
@@ -82,8 +92,7 @@ static_assert(offsetof(JsDispatchObservationPayload, handler_start) == 28);
 static_assert(offsetof(JsDispatchObservationPayload, handler_end) == 32);
 static_assert(offsetof(JsDispatchObservationPayload, activation_id) == 36);
 static_assert(offsetof(JsDispatchObservationPayload, parent_activation_id) == 40);
-static_assert(offsetof(JsDispatchObservationPayload, site_sample_index) == 44);
-static_assert(offsetof(JsDispatchObservationPayload, sample_index) == 46);
+static_assert(offsetof(JsDispatchObservationPayload, site_ordinal) == 44);
 static_assert(offsetof(JsDispatchObservationPayload, source_sha256) == 48);
 static_assert(offsetof(JsDispatchObservationPayload, reserved) == 80);
 
@@ -110,8 +119,7 @@ static_assert(offsetof(JsDispatchObservationPayload, reserved) == 80);
   put(32, value.handler_end, 4);
   put(36, value.activation_id, 4);
   put(40, value.parent_activation_id, 4);
-  put(44, value.site_sample_index, 2);
-  put(46, value.sample_index, 2);
+  put(44, value.site_ordinal, 4);
   std::copy(value.source_sha256.begin(), value.source_sha256.end(), out.begin() + 48);
   std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 80);
   return out;
@@ -143,8 +151,7 @@ static_assert(offsetof(JsDispatchObservationPayload, reserved) == 80);
   value.handler_end = get(32, 4);
   value.activation_id = get(36, 4);
   value.parent_activation_id = get(40, 4);
-  value.site_sample_index = static_cast<std::uint16_t>(get(44, 2));
-  value.sample_index = static_cast<std::uint16_t>(get(46, 2));
+  value.site_ordinal = get(44, 4);
   std::copy(bytes.begin() + 48, bytes.begin() + 80, value.source_sha256.begin());
   std::copy(bytes.begin() + 80, bytes.end(), value.reserved.begin());
   return true;
@@ -157,13 +164,16 @@ static_assert(offsetof(JsDispatchObservationPayload, reserved) == 80);
   const bool switch_shape = value.shape == static_cast<std::uint8_t>(JsDispatchShape::kSwitch);
   const bool indexed_shape =
       value.shape == static_cast<std::uint8_t>(JsDispatchShape::kIndexedCall);
-  if (value.protocol_version != 1 || value.payload_size != 128 ||
-      (!switch_shape && !indexed_shape) || value.selector_kind < 1 || value.selector_kind > 9 ||
-      value.site_slot >= kJsDispatchSiteLimit || (value.flags & ~kJsDispatchKnownFlags) != 0 ||
-      value.script_id == 0 || value.source_length == 0 ||
-      value.anchor_offset >= value.source_length || value.activation_id == 0 ||
-      value.site_sample_index >= kJsDispatchSiteSampleBudget ||
-      value.sample_index >= kJsDispatchSampleBudget)
+  // Version 1 also bounded the slot and both packed indexes.
+  const bool version = value.protocol_version == kJsDispatchPayloadVersion ||
+                       (value.protocol_version == 1 && value.site_slot < kJsDispatchV1SiteLimit &&
+                        (value.site_ordinal & 0xFFFFU) < kJsDispatchV1SiteSampleBudget &&
+                        (value.site_ordinal >> 16U) < kJsDispatchV1SampleBudget);
+  if (!version || value.payload_size != 128 || (!switch_shape && !indexed_shape) ||
+      value.selector_kind < 1 || value.selector_kind > 9 ||
+      (value.flags & ~kJsDispatchKnownFlags) != 0 || value.script_id == 0 ||
+      value.source_length == 0 || value.anchor_offset >= value.source_length ||
+      value.activation_id == 0)
     return false;
   const auto kind = static_cast<JsDispatchSelectorKind>(value.selector_kind);
   if ((kind == JsDispatchSelectorKind::kBoolean && value.selector_low32 > 1) ||

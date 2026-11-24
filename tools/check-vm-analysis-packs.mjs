@@ -22,7 +22,8 @@ const spec = JSON.parse(await readFile(new URL('protocol/openapi.json', root), '
 for (const mode of ['apply', 'compare']) {
   const route = spec.paths[`/api/analysis/vm/packs/${mode}`].post;
   assert.equal(route.operationId, `vm_pack_${mode}`);
-  assert.equal(route['x-max-body-bytes'], 1073741824);
+  // The body parses as it arrives, so its size needs no bound.
+  assert.equal(route['x-max-body-bytes'], Number.MAX_SAFE_INTEGER);
   assert.deepEqual(route['x-reb-execution'].effects, ['analysis']);
   assert.equal(route.requestBody.content['application/json'].schema.additionalProperties, false);
 }
@@ -38,15 +39,23 @@ function harness({native = false, fetcher, clipboard} = {}) {
     set textContent(value) { this.text = String(value); this.children = []; }
     get textContent() { return this.text + this.children.map(child => child.textContent).join(''); }
     append(...items) { this.children.push(...items); }
+    replaceChildren(...items) { this.text = ''; this.children = items; }
     setAttribute(key, value) { this.attributes[key] = String(value); }
     addEventListener(key, callback) { this.events[key] = callback; }
     click() { return this.events.click?.(); }
     focus() { document.activeElement = this; }
   }
   const document = {createElement: tag => new Element(tag), documentElement: {classList: {contains: () => native}}};
+  // The shared code view is checked with Response and Payload; here it holds the whole text.
+  const views = [];
+  const createCodeView = ({text, label, className}) => {
+    const box = new Element('div'); box.className = `code-view ${className}`; box.setAttribute('aria-label', label); box.text = text;
+    const view = {box, disposed: false, dispose() { view.disposed = true; }}; views.push(view); return view;
+  };
   const api = runInNewContext(readerSource + '\n' + source + ';({mountVmAnalysisPacks})', {
+    createCodeView, codeViewSyntax: language => ({kind: language}),
     document, location: {protocol: 'http:'}, navigator: {clipboard}, TextEncoder, TextDecoder, Uint8Array, BigInt,
-    AbortController, setTimeout, clearTimeout, fetch: fetcher, Blob, URL
+    AbortController, setTimeout, clearTimeout, setInterval, clearInterval, fetch: fetcher, Blob, URL
   });
   const root = new Element('section'), ui = api.mountVmAnalysisPacks(root);
   const all = element => [element, ...element.children.flatMap(all)];
@@ -58,7 +67,7 @@ function harness({native = false, fetcher, clipboard} = {}) {
     files[index].files = [{name: 'owned.json', size: bytes.length, arrayBuffer: arrayBuffer || (async () => bytes.buffer)}];
     await files[index].events.change();
   };
-  return {root, ui, button, files, status, load, document};
+  return {root, ui, button, files, status, load, document, views};
 }
 const report = {contract_version: 1, document_kind: 'vm-pack-application', document_digest: 'a'.repeat(64), rankings: []};
 const response = (value = report, status = 200) => new Response(JSON.stringify(value), {status});
@@ -194,7 +203,13 @@ next = new Response('{"contract_version":1,"document_kind":"vm-pack-application"
 await ui.ui.run('apply');
 assert.match(inspector().textContent, /See exact JSON/);
 assert(!inspector().textContent.includes('18446744073709552000'), 'Inspector never serializes a rounded identity');
-assert.match(inspector().textContent, /Row preview limited/);
+// A long row is whole in its code view, and so is its label field.
+const rowView = () => all(inspector()).find(element => element.attributes['aria-label'] === 'Retained row evidence');
+assert(rowView().text.includes(`"${'x'.repeat(70000)}"`) && rowView().text.endsWith('"\n  ]\n}'), 'The row is shown whole');
+assert.match(inspector().textContent, new RegExp(`x{70000}`), 'Field text is shown whole');
+const rawReport = all(ui.root).find(element => element.attributes['aria-label'] === 'Analysis pack report');
+assert(rawReport.text.includes('x'.repeat(70000)), 'The raw report is shown whole');
+assert(ui.views.filter(view => !view.disposed).length <= 2, 'Replaced views are disposed');
 await ui.button('Copy complete report JSON').click(); assert(copied.includes('18446744073709551615'), 'Original unsafe integer survives export exactly');
 ui.button('Clear').click(); assert.deepEqual(query(), {search: false, previous: false, next: false});
 ui.root.events['vm-workspace-search'](); ui.root.events['vm-workspace-next']();

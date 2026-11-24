@@ -193,6 +193,15 @@ assert(staticHost.textContent.includes('3 host events share this frame and 2 nam
 renderApiState.vmHostLinks={...hostLinks, workspace_document_digest:'f'.repeat(64)};
 const staleHost=renderApi.renderVmHostLinks(hostSource);
 assert(staleHost.textContent.includes('Guest position unknown'));
+// A report still being read claims nothing about the guest position, and an
+// embedded workspace, which has no report to read, is never left loading.
+Object.assign(renderApiState,{vmHostLinks:null,vmHostLinksStatus:'loading'});
+const pendingHost=renderApi.renderVmHostLinks(hostSource);
+assert(pendingHost.textContent.includes('Loading host event positions.'));
+assert(!pendingHost.textContent.includes('Guest position unknown'));
+renderApiState.vmOpcodeWorkspaceEmbedded=true;
+assert(renderApi.renderVmHostLinks(hostSource).textContent.includes('Guest position unknown'));
+Object.assign(renderApiState,{vmOpcodeWorkspaceEmbedded:false,vmHostLinksStatus:'ready'});
 renderApiState.vmHostLinks=hostLinks;
 const unscopedSources=renderApi.renderVmSessionSources(hostSource);
 assert(unscopedSources.textContent.includes('not in the retained catalog'));
@@ -584,7 +593,26 @@ const symbolTree = app.slice(app.indexOf('      function renderVmOpcodeWorkspace
 assert(symbolTree.includes('const rows = workspace ? vmOpcodeRows(workspace) : [];'));
 assert(symbolTree.includes('row.label'));
 assert(!symbolTree.includes('workspace.handlers'));
-console.log('PASS shared Wasm dispatch spans group in the handler listing; distinct spans and JavaScript rows stay separate');
+// The Symbol Tree says what the workspace notice says: loading is busy and
+// claims no empty tree, a failed read says so, and only a read workspace with
+// no rows for the finding is reported as having no symbols.
+const symbolList = new TestElement('div'), symbolDetail = new TestElement('div');
+symbolDetail.querySelectorAll = () => [];
+const symbolState = {vmOpcodeWorkspace: null, vmHostLinks: null, vmHostLinksStatus: 'loading'};
+const renderSymbols = runInNewContext(`${model}\n${helper}\n${renders}\n${symbolTree}\n(selected => renderVmOpcodeWorkspaceInPlace(selected))`, {
+  document: {...testDocument, querySelector: selector => selector === '#vm-symbol-list' ? symbolList : null},
+  elements: {vmDetail: symbolDetail}, updateVmNavigationMenus: () => {}, window: {matchMedia: () => ({matches: true})},
+  state: symbolState, TextEncoder, Event});
+for (const [status, text, busy] of [['loading', 'Loading retained handlers.', 'true'],
+  ['unavailable', 'Handler symbols are unavailable: the opcode workspace is unavailable.', 'false'],
+  ['malformed', 'Handler symbols are unavailable: the opcode workspace was rejected.', 'false'],
+  ['ready', 'No retained handler symbols for this finding.', 'false']]) {
+  symbolState.vmOpcodeWorkspaceStatus = status;
+  renderSymbols({findingId: 'unread', sourceArtifactId: '999'});
+  assert.equal(symbolList.textContent, text, `${status} Symbol Tree text`);
+  assert.equal(symbolList.attributes['aria-busy'], busy, `${status} Symbol Tree busy state`);
+}
+console.log('PASS shared Wasm dispatch spans group in the handler listing; distinct spans and JavaScript rows stay separate; the Symbol Tree and host links name loading and failure, never an empty result');
 const samplePanel = new TestElement('section');
 renderApi.appendVmPagedRows(samplePanel, sampleRow.retainedSamples, 'retained samples', record => { const row = new TestElement('p'); row.textContent = `Sample ${record.sample_index}`; return row; });
 assert.equal(descendants(samplePanel).find(node=>node.dataset.vmPagedRows==='retained samples').children.length,32);
@@ -625,7 +653,7 @@ for (const mutate of [
   doc=>{doc.workspaces[0].native_wasm_observations[0].table_count=199;},
   doc=>{doc.workspaces[0].native_wasm_observations[0].selector=-1;},
   doc=>{doc.workspaces[0].native_wasm_observations[0].selected_arm=1;},
-  doc=>{doc.workspaces[0].native_wasm_observations[0].sample_index=16;},
+  doc=>{doc.workspaces[0].native_wasm_observations[0].sample_index=0xffffffff;},
   doc=>{doc.workspaces[0].native_wasm_observations[0].guest_pc=1;},
   doc=>{doc.workspaces[0].handlers[2].sample_count=doc.workspaces[0].handlers[2].native_wasm_sample_count=1;doc.workspaces[0].handlers[2].state='observed';},
   doc=>{delete doc.workspaces[0].native_wasm_observation_count;}
@@ -720,10 +748,10 @@ if (process.env.REB_NATIVE_WASM_GOLDEN) {
   }
   console.log('PASS actual C++ → viewer typed payload, unsigned fields, envelope and reserved-byte cases');
 }
-const jsValid = ['default', 'indexed', 'nested', 'string-selector', 'parent-unknown', 'wide-identities'];
+const jsValid = ['default', 'indexed', 'nested', 'string-selector', 'parent-unknown', 'wide-identities', 'last-slot', 'version-1'];
 if (process.env.REB_NATIVE_JS_GOLDEN) {
-  for (const mode of [...jsValid, 'reserved', 'version', 'size', 'truncated', 'shape', 'kind', 'slot', 'flags', 'parent-order',
-    'handler-without-flag', 'switch-handler', 'non-integer-bits', 'sample-index', 'site-sample-index', 'anchor', 'boolean-bits',
+  for (const mode of [...jsValid, 'reserved', 'version', 'size', 'truncated', 'shape', 'kind', 'version-1-slot', 'flags', 'parent-order',
+    'handler-without-flag', 'switch-handler', 'non-integer-bits', 'version-1-sample-index', 'version-1-site-sample-index', 'anchor', 'boolean-bits',
     'activation', 'script', 'source-length', 'parent-flags', 'handler-order', 'handler-script', 'envelope-version',
     'envelope-flags', 'identity', 'artifact', 'parent-event', 'navigation', 'request', 'big-endian']) {
     const event=JSON.parse(execFileSync(process.env.REB_NATIVE_JS_GOLDEN,['--case',mode],{encoding:'utf8'}));

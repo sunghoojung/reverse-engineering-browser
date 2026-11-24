@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -16,11 +16,15 @@ namespace reb {
 // Live V8 dispatch at an armed static JavaScript site, see
 // protocol/native-js-dispatch-v1.md. The renderer copies no argument,
 // receiver or string contents; a selector keeps only its kind and low bits.
-inline constexpr std::size_t kNativeJsDispatchSiteLimit = 8;
-inline constexpr std::size_t kNativeJsDispatchSampleBudget = 256;
-inline constexpr std::size_t kNativeJsDispatchSiteSampleBudget = 64;
+// Every dispatch at an armed site is recorded; there is no sample count. The
+// site table is bounded by the record's u8 site slot.
+inline constexpr std::size_t kNativeJsDispatchSiteLimit = 256;
 inline constexpr std::size_t kNativeJsDispatchSiteRecordSize = 44;
-inline constexpr std::size_t kNativeJsDispatchSitesFileLimit = 4096;
+// Holds 256 sites in their longest JSON form (about 340 bytes each).
+inline constexpr std::size_t kNativeJsDispatchSitesFileLimit = 128 * 1024;
+// Payload version 2 replaces version 1's sample indexes, which counted into
+// the removed per-configuration budgets, with a u32 ordinal.
+inline constexpr std::uint16_t kNativeJsDispatchPayloadVersion = 2;
 inline constexpr std::size_t kNativeJsDispatchPayloadSize = 128;
 
 enum class NativeJsDispatchShape : std::uint8_t { kSwitch = 1, kIndexedCall = 2 };
@@ -35,7 +39,12 @@ enum class NativeJsDispatchSelectorKind : std::uint8_t {
   kBigInt = 8,
   kObject = 9,
 };
-enum class NativeJsDispatchSiteStatus : std::uint8_t { kCompiledBeforeArming = 1 };
+// kIdsExhausted: the isolate used every activation ID, so new activations at
+// the site are not reported.
+enum class NativeJsDispatchSiteStatus : std::uint8_t {
+  kCompiledBeforeArming = 1,
+  kIdsExhausted = 2,
+};
 
 inline constexpr std::uint8_t kNativeJsDispatchNewActivation = 1U << 0U;
 inline constexpr std::uint8_t kNativeJsDispatchParentUnknown = 1U << 1U;
@@ -62,7 +71,7 @@ struct NativeJsDispatchSite final {
 }
 
 struct NativeJsDispatchObservationPayload final {
-  std::uint16_t protocol_version = 1;
+  std::uint16_t protocol_version = kNativeJsDispatchPayloadVersion;
   std::uint16_t payload_size = 128;
   std::uint8_t shape = 0;
   std::uint8_t selector_kind = 0;
@@ -77,8 +86,9 @@ struct NativeJsDispatchObservationPayload final {
   std::uint32_t handler_end = 0;
   std::uint32_t activation_id = 0;
   std::uint32_t parent_activation_id = 0;
-  std::uint16_t site_sample_index = 0;
-  std::uint16_t sample_index = 0;
+  // This dispatch's 0-based ordinal among its site's dispatches in the
+  // renderer's configuration; a missing ordinal is a dropped record.
+  std::uint32_t site_ordinal = 0;
   std::array<std::uint8_t, 32> source_sha256{};
   std::array<std::byte, 48> reserved{};
 };
@@ -101,8 +111,7 @@ static_assert(offsetof(NativeJsDispatchObservationPayload, handler_start) == 28)
 static_assert(offsetof(NativeJsDispatchObservationPayload, handler_end) == 32);
 static_assert(offsetof(NativeJsDispatchObservationPayload, activation_id) == 36);
 static_assert(offsetof(NativeJsDispatchObservationPayload, parent_activation_id) == 40);
-static_assert(offsetof(NativeJsDispatchObservationPayload, site_sample_index) == 44);
-static_assert(offsetof(NativeJsDispatchObservationPayload, sample_index) == 46);
+static_assert(offsetof(NativeJsDispatchObservationPayload, site_ordinal) == 44);
 static_assert(offsetof(NativeJsDispatchObservationPayload, source_sha256) == 48);
 static_assert(offsetof(NativeJsDispatchObservationPayload, reserved) == 80);
 
@@ -110,13 +119,11 @@ static_assert(offsetof(NativeJsDispatchObservationPayload, reserved) == 80);
 // JavaScript readers, so a record the renderer emits is never refused later.
 [[nodiscard]] constexpr bool IsValidNativeJsDispatchObservationPayload(
     const NativeJsDispatchObservationPayload& value) noexcept {
-  if (value.protocol_version != 1 || value.payload_size != 128 ||
+  if (value.protocol_version != kNativeJsDispatchPayloadVersion || value.payload_size != 128 ||
       (value.shape != 1 && value.shape != 2) || value.selector_kind < 1 ||
-      value.selector_kind > 9 || value.site_slot >= kNativeJsDispatchSiteLimit ||
-      (value.flags & ~kNativeJsDispatchFlagMask) != 0 || value.script_id == 0 ||
-      value.source_length == 0 || value.anchor_offset >= value.source_length ||
-      value.activation_id == 0 || value.site_sample_index >= kNativeJsDispatchSiteSampleBudget ||
-      value.sample_index >= kNativeJsDispatchSampleBudget)
+      value.selector_kind > 9 || (value.flags & ~kNativeJsDispatchFlagMask) != 0 ||
+      value.script_id == 0 || value.source_length == 0 ||
+      value.anchor_offset >= value.source_length || value.activation_id == 0)
     return false;
   const auto kind = static_cast<NativeJsDispatchSelectorKind>(value.selector_kind);
   if (kind == NativeJsDispatchSelectorKind::kBoolean) {
@@ -179,8 +186,7 @@ inline void Put(std::span<std::byte> out,
   Put(out, 32, value.handler_end, 4);
   Put(out, 36, value.activation_id, 4);
   Put(out, 40, value.parent_activation_id, 4);
-  Put(out, 44, value.site_sample_index, 2);
-  Put(out, 46, value.sample_index, 2);
+  Put(out, 44, value.site_ordinal, 4);
   for (std::size_t i = 0; i < value.source_sha256.size(); ++i)
     out[48 + i] = static_cast<std::byte>(value.source_sha256[i]);
   std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 80);
@@ -208,8 +214,7 @@ inline void Put(std::span<std::byte> out,
   value.handler_end = Get(bytes, 32, 4);
   value.activation_id = Get(bytes, 36, 4);
   value.parent_activation_id = Get(bytes, 40, 4);
-  value.site_sample_index = static_cast<std::uint16_t>(Get(bytes, 44, 2));
-  value.sample_index = static_cast<std::uint16_t>(Get(bytes, 46, 2));
+  value.site_ordinal = Get(bytes, 44, 4);
   for (std::size_t i = 0; i < value.source_sha256.size(); ++i)
     value.source_sha256[i] = std::to_integer<std::uint8_t>(bytes[48 + i]);
   std::copy(bytes.begin() + 80, bytes.end(), value.reserved.begin());
@@ -243,7 +248,7 @@ EncodeNativeJsDispatchSite(const NativeJsDispatchSite& site) noexcept {
   return out;
 }
 
-// Decodes 1 to 8 records into out and returns the count, or 0 when any record
+// Decodes 1 to 256 records into out and returns the count, or 0 when any record
 // is malformed or a (source_sha256, anchor_offset) key repeats.
 [[nodiscard]] inline std::size_t DecodeNativeJsDispatchSites(
     std::span<const std::uint8_t> bytes,

@@ -23,7 +23,7 @@ use crate::{
 };
 use axum::{
     Router,
-    body::{Body, to_bytes},
+    body::{Body, Bytes, HttpBody, to_bytes},
     extract::State,
     http::{HeaderMap, HeaderValue, Method, Request, StatusCode},
     response::{IntoResponse, Response},
@@ -219,7 +219,7 @@ pub struct App {
     event_waiters: Arc<Semaphore>,
     live_browser: LiveBrowser,
     invocation_sites: Arc<js_invocation_sites::Store>,
-    invocation_session: js_invocation_sites::Session,
+    invocation_session: Arc<js_invocation_sites::Session>,
     /// Script-text digests of immutable artifacts, by artifact SHA-256.
     text_digests: Arc<std::sync::Mutex<BTreeMap<String, String>>>,
 }
@@ -251,12 +251,13 @@ impl App {
         let invocation_sites = Arc::new(js_invocation_sites::Store::new(
             options.js_invocation_site_store.clone(),
         ));
-        let invocation_session = js_invocation_sites::Session::read(
+        let invocation_session = Arc::new(js_invocation_sites::Session::read(
             options.js_invocation_session_sites.as_deref(),
             options.js_invocation_session_state.as_deref(),
             options.js_invocation_session_digests,
+            options.js_invocation_session_generation.as_deref(),
             &invocation_sites,
-        );
+        ));
         let app = Arc::new(Self {
             port,
             ui_root: options.ui_root(),
@@ -474,42 +475,38 @@ impl App {
         admitted: Option<OwnedSemaphorePermit>,
     ) -> Result<Vec<u8>> {
         // Share the existing blocking-I/O admission pool, with a narrower package
-        // cap and a single bounded wait. A dropped caller cannot release permits
-        // while its blocking validation work is still running.
-        let permits = tokio::time::timeout(Duration::from_secs(1), async {
-            let package = match admitted {
-                Some(permit) => permit,
-                None => self.package_io.clone().acquire_owned().await.map_err(|_| {
-                    Error::new(503, "Package operations are unavailable")
-                        .with_code(Code::DependencyUnavailable)
-                })?,
-            };
-            let io = self.io.clone().acquire_owned().await.map_err(|_| {
+        // cap. There is no admission or work deadline: an operation waits for
+        // its permits and runs until done, and a caller that goes away sets the
+        // flag the work polls, so its permits come back promptly.
+        let package = match admitted {
+            Some(permit) => permit,
+            None => self.package_io.clone().acquire_owned().await.map_err(|_| {
                 Error::new(503, "Package operations are unavailable")
                     .with_code(Code::DependencyUnavailable)
-            })?;
-            Ok::<_, Error>((package, io))
-        })
-        .await
-        .map_err(|_| {
-            Error::new(408, "Package admission deadline exceeded").with_code(Code::Timeout)
-        })??;
+            })?,
+        };
+        let io = self.io.clone().acquire_owned().await.map_err(|_| {
+            Error::new(503, "Package operations are unavailable")
+                .with_code(Code::DependencyUnavailable)
+        })?;
+        let permits = (package, io);
         let events = self.options.store.clone();
         let artifacts = self.options.artifacts.clone();
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let _cancel = CancelOnDrop(cancelled.clone());
         tokio::task::spawn_blocking(move || {
             let _permits = permits;
             match operation {
-                PackageOperation::Export => {
-                    evidence_package::export_bytes_at(&bytes, &events, &artifacts, deadline)
-                }
+                PackageOperation::Export => evidence_package::export_bytes_cancellable(
+                    &bytes, &events, &artifacts, cancelled,
+                ),
                 PackageOperation::Compare => {
-                    evidence_comparison::compare_bytes_at(&bytes, deadline)
+                    evidence_comparison::compare_bytes_cancellable(&bytes, cancelled)
                 }
-                PackageOperation::Validate => {
-                    serde_json::to_vec(&evidence_package::validate_bytes(&bytes)?)
-                        .map_err(|_| Error::new(500, "Package validation failed"))
-                }
+                PackageOperation::Validate => serde_json::to_vec(
+                    &evidence_package::validate_bytes_cancellable(&bytes, cancelled)?,
+                )
+                .map_err(|_| Error::new(500, "Package validation failed")),
             }
         })
         .await
@@ -2352,24 +2349,46 @@ impl App {
         let raw = self
             .blocking(move || evidence::read(&root, &record))
             .await?;
-        let request = js_invocation_sites::worker_request(&raw, target)?;
-        let response = self.deobfuscator.invocation_site(request).await?;
+        // The verified bytes' SHA-256 keys the kept index, so a later query
+        // over the same artifact is answered without parsing it again.
+        let index = self
+            .deobfuscator
+            .invocation_index(
+                artifact["sha256"].as_str().unwrap_or_default(),
+                js_invocation_sites::indexed_text(&raw)?,
+            )
+            .await?;
+        let response = js_invocation_sites::answer(&raw, target, &index)?;
         js_invocation_sites::validate_worker(&raw, target, &response)?;
         let store = self.invocation_sites.clone();
         let saved = tokio::task::spawn_blocking(move || store.load())
             .await
             .map_err(|e| Error::new(500, e.to_string()))??;
-        let document =
-            js_invocation_sites::resolution(&raw, &artifact, target, &response, label, &saved)?;
+        let document = js_invocation_sites::resolution(
+            &raw,
+            &artifact,
+            target,
+            &response,
+            label,
+            &saved,
+            self.invocation_session.applies(),
+        )?;
         Ok((document, artifact))
     }
     /// The saved set, whether this session retained each saved version, and
-    /// what this session's launcher armed.
+    /// what this capture arms. A live capture follows the set it reads here,
+    /// so every change through these routes, and any other writer's change
+    /// at the next listing, reaches the running capture.
     async fn invocation_site_set(&self) -> Result<Value> {
         let store = self.invocation_sites.clone();
-        let saved = tokio::task::spawn_blocking(move || store.load())
-            .await
-            .map_err(|e| Error::new(500, e.to_string()))??;
+        let session = self.invocation_session.clone();
+        let saved = tokio::task::spawn_blocking(move || {
+            let saved = store.load()?;
+            session.follow(&saved);
+            Ok::<_, Error>(saved)
+        })
+        .await
+        .map_err(|e| Error::new(500, e.to_string()))??;
         let root = self.options.artifacts.clone();
         let digests = self.text_digests.clone();
         let listed = saved.clone();
@@ -2514,6 +2533,57 @@ impl App {
         })
         .await
     }
+    /// The analyst actions take their request whole: a library replacement
+    /// or a run's evidence snapshot moves into the work instead of being
+    /// copied.
+    async fn analyst_action(&self, value: Value) -> Result<Value> {
+        match value["action"].as_str().unwrap_or("") {
+            "replace_local_analyst_workspace" => {
+                let store = self.workspace.clone();
+                self.blocking(move || store.replace(&value)).await
+            }
+            "run_local_analyst_script" => {
+                let store = self.workspace.clone();
+                let workspace = self.blocking(move || store.load()).await?;
+                let run = crate::analyst::Run::new(value, &workspace)?;
+                // The script reads the stored, SHA-256 verified bytes of
+                // the artifact the page selected, whatever their size.
+                let selected = match run.selected() {
+                    Some(id) => {
+                        let artifact = self.find_artifact(id).await?;
+                        run.admit(&artifact)?;
+                        let root = self.options.artifacts.clone();
+                        let record = artifact.clone();
+                        let bytes = self
+                            .cancellable(move |cancelled| {
+                                evidence::verified_range_cancellable(
+                                    &root,
+                                    &record,
+                                    0,
+                                    usize::MAX,
+                                    cancelled,
+                                )
+                            })
+                            .await?;
+                        Some((artifact, bytes))
+                    }
+                    None => None,
+                };
+                self.analyst.run(run, selected).await
+            }
+            "set_wasm_function_name" => {
+                let store = self.workspace.clone();
+                self.blocking(move || crate::wasm_names::set_function_name(&store, &value))
+                    .await
+            }
+            "cancel_local_analyst_script" => {
+                validation::fields(&value, &["action", "run_id"], "Analyst cancellation")?;
+                let cancelled = self.analyst.cancel(&value["run_id"])?;
+                Ok(json!({"ok":true,"run_id":value["run_id"],"cancel_requested":cancelled}))
+            }
+            _ => Err(Error::bad("Analyst workspace action is invalid")),
+        }
+    }
     async fn post(&self, path: &str, value: &Value) -> Result<Value> {
         match path {
             "/api/decoder/actions" => self.decoder.action(value).await,
@@ -2522,54 +2592,6 @@ impl App {
                 let value = value.clone();
                 self.blocking(move || store.replace(&value)).await
             }
-            "/api/local-analyst/actions" => match value["action"].as_str().unwrap_or("") {
-                "replace_local_analyst_workspace" => {
-                    let store = self.workspace.clone();
-                    let value = value.clone();
-                    self.blocking(move || store.replace(&value)).await
-                }
-                "run_local_analyst_script" => {
-                    let store = self.workspace.clone();
-                    let workspace = self.blocking(move || store.load()).await?;
-                    let run = crate::analyst::Run::new(value, &workspace)?;
-                    // The script reads the stored, SHA-256 verified bytes of
-                    // the artifact the page selected, whatever their size.
-                    let selected = match run.selected() {
-                        Some(id) => {
-                            let artifact = self.find_artifact(id).await?;
-                            run.admit(&artifact)?;
-                            let root = self.options.artifacts.clone();
-                            let record = artifact.clone();
-                            let bytes = self
-                                .cancellable(move |cancelled| {
-                                    evidence::verified_range_cancellable(
-                                        &root,
-                                        &record,
-                                        0,
-                                        usize::MAX,
-                                        cancelled,
-                                    )
-                                })
-                                .await?;
-                            Some((artifact, bytes))
-                        }
-                        None => None,
-                    };
-                    self.analyst.run(run, selected).await
-                }
-                "set_wasm_function_name" => {
-                    let store = self.workspace.clone();
-                    let value = value.clone();
-                    self.blocking(move || crate::wasm_names::set_function_name(&store, &value))
-                        .await
-                }
-                "cancel_local_analyst_script" => {
-                    validation::fields(value, &["action", "run_id"], "Analyst cancellation")?;
-                    let cancelled = self.analyst.cancel(&value["run_id"])?;
-                    Ok(json!({"ok":true,"run_id":value["run_id"],"cancel_requested":cancelled}))
-                }
-                _ => Err(Error::bad("Analyst workspace action is invalid")),
-            },
             "/api/live-wasm/actions" => self.live_wasm.action(value),
             "/api/native-debugger/actions" => {
                 // The command blocks on the peer socket, so it does not run
@@ -2734,6 +2756,140 @@ impl App {
                 .is_none_or(|h| h.to_str().is_ok_and(|h| valid(h, false)))
     }
 }
+/// The deadline only stops a stalled client from holding admission. It
+/// grows by a second per declared 16 MiB, so a large body on a busy machine
+/// is never refused for its size.
+fn body_deadline(length: usize) -> Duration {
+    Duration::from_secs(5 + (length >> 24) as u64)
+}
+fn body_timeout() -> Error {
+    Error::new(408, "The request body deadline was exceeded")
+        .with_reason(Reason::at(Code::Timeout, Phase::RequestBody))
+}
+fn json_content_type(headers: &axum::http::HeaderMap) -> Result<()> {
+    let content_type = headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let mut fields = content_type.split(';').map(str::trim);
+    let media = fields.next().unwrap_or("");
+    let charset = fields.next();
+    if headers.get_all("content-type").iter().count() != 1
+        || !media.eq_ignore_ascii_case("application/json")
+        || fields.next().is_some()
+        || charset.is_some_and(|value| {
+            !value.eq_ignore_ascii_case("charset=utf-8")
+                && !value.eq_ignore_ascii_case("charset=\"utf-8\"")
+        })
+    {
+        return Err(Error::new(
+            415,
+            "Owned VM controls require application/json with optional UTF-8 charset",
+        ));
+    }
+    Ok(())
+}
+/// Parses a request body of exactly `length` bytes while it arrives, so the
+/// body is never also held whole as text and its size needs no bound.
+/// `parse` runs on a blocking thread and reads the body in order, with
+/// backpressure on the connection. It sees the end of the body only once all
+/// `length` bytes arrived in time; a body that is cut off, too long or late
+/// reads as an error instead, so work after the parse never starts on part
+/// of a body.
+///
+/// The deadline follows what arrived, not what was declared: five seconds
+/// plus one per 16 MiB received, not counting time spent waiting for the
+/// parser. A client that keeps sending is never refused for its size, and
+/// one that stalls releases its admission within seconds, whatever length
+/// it declared.
+async fn streamed<T: Send + 'static>(
+    mut body: Body,
+    length: usize,
+    parse: impl FnOnce(std::io::BufReader<BodyReader>) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let (sender, chunks) = tokio::sync::mpsc::channel(16);
+    let parser = tokio::task::spawn_blocking(move || {
+        parse(std::io::BufReader::with_capacity(
+            64 * 1024,
+            BodyReader {
+                chunks,
+                current: Bytes::new(),
+                position: 0,
+                ended: false,
+            },
+        ))
+    });
+    let pump = async move {
+        let started = tokio::time::Instant::now();
+        let mut waited = Duration::ZERO;
+        let mut received = 0usize;
+        while let Some(frame) = tokio::time::timeout_at(
+            started + body_deadline(received) + waited,
+            std::future::poll_fn(|context| std::pin::Pin::new(&mut body).poll_frame(context)),
+        )
+        .await
+        .map_err(|_| body_timeout())?
+        {
+            let frame = frame.map_err(|_| Error::bad("The request body exceeds its size limit"))?;
+            let Ok(chunk) = frame.into_data() else {
+                continue;
+            };
+            if chunk.is_empty() {
+                continue;
+            }
+            received = received.saturating_add(chunk.len());
+            if received > length {
+                return Err(Error::bad("The request body length is invalid"));
+            }
+            let waiting = tokio::time::Instant::now();
+            if sender.send(chunk).await.is_err() {
+                // The parser stopped early and its error is the answer.
+                return Ok(());
+            }
+            waited += waiting.elapsed();
+        }
+        if received != length {
+            return Err(Error::bad("The request body length is invalid"));
+        }
+        let _ = sender.send(Bytes::new()).await;
+        Ok(())
+    };
+    let pumped = pump.await;
+    let parsed = parser
+        .await
+        .map_err(|_| Error::new(500, "Request body parsing failed"))?;
+    pumped.and(parsed)
+}
+/// The blocking side of [`streamed`]: body chunks in arrival order, ending
+/// at the empty chunk sent once the whole body arrived. A channel closed
+/// without it is a body that never completed.
+struct BodyReader {
+    chunks: tokio::sync::mpsc::Receiver<Bytes>,
+    current: Bytes,
+    position: usize,
+    ended: bool,
+}
+impl std::io::Read for BodyReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        while self.position == self.current.len() {
+            if self.ended {
+                return Ok(0);
+            }
+            match self.chunks.blocking_recv() {
+                Some(chunk) if chunk.is_empty() => self.ended = true,
+                Some(chunk) => {
+                    self.current = chunk;
+                    self.position = 0;
+                }
+                None => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+            }
+        }
+        let count = buffer.len().min(self.current.len() - self.position);
+        buffer[..count].copy_from_slice(&self.current[self.position..self.position + count]);
+        self.position += count;
+        Ok(count)
+    }
+}
 async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response {
     let (parts, body) = request.into_parts();
     let path = parts.uri.path();
@@ -2812,16 +2968,39 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
             } else {
                 None
             };
-            // The deadline only stops a stalled client from holding admission.
-            // It grows by a second per declared 16 MiB, so a large body on a
-            // busy machine is never refused for its size.
-            let deadline = Duration::from_secs(5 + (length >> 24) as u64);
-            let bytes = tokio::time::timeout(deadline, to_bytes(body, maximum))
+            // A pack request and an analyst run's evidence snapshot parse as
+            // they arrive, so the body is held once, as its parsed value.
+            if matches!(
+                path,
+                "/api/analysis/vm/packs/apply" | "/api/analysis/vm/packs/compare"
+            ) {
+                json_content_type(&parts.headers)?;
+                let comparison = path.ends_with("/compare");
+                return streamed(body, length, move |reader| {
+                    let _permit = comparison_permit;
+                    crate::vm_pack::request(crate::vm_pack::parse_reader(reader)?, comparison)
+                })
                 .await
-                .map_err(|_| {
-                    Error::new(408, "The request body deadline was exceeded")
-                        .with_reason(Reason::at(Code::Timeout, Phase::RequestBody))
-                })?
+                .map(|value| axum::Json(value).into_response());
+            }
+            if path == "/api/local-analyst/actions" {
+                let value = streamed(body, length, |reader| {
+                    let value: Value = serde_json::from_reader(reader)
+                        .map_err(|_| Error::bad("The request body is malformed JSON"))?;
+                    if !value.is_object() {
+                        return Err(Error::bad("The request body must be an object"));
+                    }
+                    Ok(value)
+                })
+                .await?;
+                return app
+                    .analyst_action(value)
+                    .await
+                    .map(|value| axum::Json(value).into_response());
+            }
+            let bytes = tokio::time::timeout(body_deadline(length), to_bytes(body, maximum))
+                .await
+                .map_err(|_| body_timeout())?
                 .map_err(|_| Error::bad("The request body exceeds its size limit"))?;
             if bytes.len() != length {
                 return Err(Error::bad("The request body length is invalid"));
@@ -2833,13 +3012,13 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                 _ => None,
             } {
                 return app
-                    .package_operation(bytes.to_vec(), operation, comparison_permit)
+                    .package_operation(Vec::from(bytes), operation, comparison_permit)
                     .await
                     .map(|bytes| ([("content-type", "application/json")], bytes).into_response());
             }
             if path == "/api/float32/compare" {
                 return app
-                    .float32_operation(bytes.to_vec())
+                    .float32_operation(Vec::from(bytes))
                     .await
                     .map(|bytes| ([("content-type", "application/json")], bytes).into_response());
             }
@@ -2853,52 +3032,15 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
             }
             // Typed parse of up to 64 MiB of numbers, never a generic JSON tree.
             if path == "/api/graph-layout" {
-                return crate::graph_layout::route(bytes.to_vec())
+                return crate::graph_layout::route(Vec::from(bytes))
                     .await
                     .map(|bytes| ([("content-type", "application/json")], bytes).into_response());
             }
             if matches!(
                 path,
-                "/api/vm-debugger/actions"
-                    | "/api/analysis/vm/experiments"
-                    | "/api/analysis/vm/packs/apply"
-                    | "/api/analysis/vm/packs/compare"
+                "/api/vm-debugger/actions" | "/api/analysis/vm/experiments"
             ) {
-                let content_type = parts
-                    .headers
-                    .get("content-type")
-                    .and_then(|value| value.to_str().ok())
-                    .unwrap_or("");
-                let mut fields = content_type.split(';').map(str::trim);
-                let media = fields.next().unwrap_or("");
-                let charset = fields.next();
-                if parts.headers.get_all("content-type").iter().count() != 1
-                    || !media.eq_ignore_ascii_case("application/json")
-                    || fields.next().is_some()
-                    || charset.is_some_and(|value| {
-                        !value.eq_ignore_ascii_case("charset=utf-8")
-                            && !value.eq_ignore_ascii_case("charset=\"utf-8\"")
-                    })
-                {
-                    return Err(Error::new(
-                        415,
-                        "Owned VM controls require application/json with optional UTF-8 charset",
-                    ));
-                }
-                if matches!(
-                    path,
-                    "/api/analysis/vm/packs/apply" | "/api/analysis/vm/packs/compare"
-                ) {
-                    let comparison = path.ends_with("/compare");
-                    let bytes = bytes.to_vec();
-                    return tokio::task::spawn_blocking(move || {
-                        let _permit = comparison_permit;
-                        crate::vm_pack::request(&bytes, comparison)
-                    })
-                    .await
-                    .map_err(|_| Error::new(500, "VM pack analysis failed"))?
-                    .map(|value| axum::Json(value).into_response());
-                }
+                json_content_type(&parts.headers)?;
                 if path == "/api/analysis/vm/experiments" {
                     let (_, workspace) = app.vm_documents().await?;
                     return app
@@ -2915,6 +3057,7 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
             }
             let value: Value = serde_json::from_slice(&bytes)
                 .map_err(|_| Error::bad("The request body is malformed JSON"))?;
+            drop(bytes);
             if !value.is_object() {
                 return Err(Error::bad("The request body must be an object"));
             }
@@ -3405,21 +3548,24 @@ mod tests {
                         .unwrap(),
                 )
             };
-            let error = app
-                .package_operation(b"{}".to_vec(), PackageOperation::Validate, None)
-                .await
-                .unwrap_err();
-            assert_eq!(error.status, if closed { 503 } else { 408 });
-            assert_eq!(
-                serde_json::to_value(&error).unwrap(),
-                json!({
-                    "error": if closed { "Package operations are unavailable" } else {
-                        "Package admission deadline exceeded"
-                    },
-                    "code": if closed { "dependency_unavailable" } else { "timeout" },
-                    "details": {}
-                })
-            );
+            let waiting = app.package_operation(b"{}".to_vec(), PackageOperation::Validate, None);
+            if closed {
+                let error = waiting.await.unwrap_err();
+                assert_eq!(error.status, 503);
+                assert_eq!(
+                    serde_json::to_value(&error).unwrap(),
+                    json!({"error": "Package operations are unavailable",
+                        "code": "dependency_unavailable", "details": {}})
+                );
+            } else {
+                // No admission deadline: the operation waits for its permits,
+                // and one whose request goes away gives up its place.
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(200), waiting)
+                        .await
+                        .is_err()
+                );
+            }
             drop(held);
             if !closed {
                 let bytes = app

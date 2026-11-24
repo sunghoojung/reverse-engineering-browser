@@ -11,8 +11,13 @@
 namespace reb {
 // Header block records, see protocol/native-network-v3.md. The Brave overlay's
 // common/native_network_headers.h is the producer half of this ABI.
-inline constexpr std::uint16_t kHeaderPayloadVersion = 1;
-inline constexpr std::uint32_t kHeaderBlockLimitBytes = 320U * 1024U;
+// Version 2 retains a block of any length; version 1 recorded a block longer
+// than kHeaderBlockLimitV1Bytes as not_captured_block_limit.
+inline constexpr std::uint16_t kHeaderPayloadVersion = 2;
+inline constexpr std::uint32_t kHeaderBlockLimitV1Bytes = 320U * 1024U;
+// Version 2's not_captured_block_limit: the length field's ceiling, reached
+// only by a block too long for it.
+inline constexpr std::uint32_t kHeaderLengthUnrepresentable = 0xffff'ffffU;
 
 enum class HeaderSource : std::uint8_t {
   kBrowser = 1,
@@ -102,8 +107,8 @@ static_assert(offsetof(HeaderBlockPayload, reserved1) == 80);
   };
   const auto source = static_cast<HeaderSource>(value.source);
   const auto state = static_cast<HeaderState>(value.state);
-  if (value.protocol_version != kHeaderPayloadVersion || value.payload_size != 128 ||
-      value.reserved0 != 0 || !zero(value.reserved1) ||
+  if (value.protocol_version < 1 || value.protocol_version > kHeaderPayloadVersion ||
+      value.payload_size != 128 || value.reserved0 != 0 || !zero(value.reserved1) ||
       value.state < static_cast<std::uint8_t>(kCaptured) ||
       value.state > static_cast<std::uint8_t>(kNotCapturedUrl)) {
     return false;
@@ -133,9 +138,12 @@ static_assert(offsetof(HeaderBlockPayload, reserved1) == 80);
   }
   const bool empty = state == kEmpty;
   const bool limited = state == kNotCapturedBlockLimit;
+  const bool too_long = value.protocol_version == 1
+                            ? value.block_length > kHeaderBlockLimitV1Bytes
+                            : value.block_length == kHeaderLengthUnrepresentable;
   if ((value.header_count == 0) != empty || (value.block_length == 0) != empty ||
       static_cast<std::uint64_t>(value.block_length) < 5ULL * value.header_count ||
-      limited != (value.block_length > kHeaderBlockLimitBytes) || zero(value.sha256) != limited) {
+      limited != too_long || zero(value.sha256) != limited) {
     return false;
   }
   return has_artifact == (state == kCaptured || state == kCapturedShared);

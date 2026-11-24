@@ -135,9 +135,9 @@ worker and message gaps as theirs.
 | Source bytes read | 1 GiB | later sources are counted in `truncated.source_budget`; their frames name `source_budget` |
 | Source reads after the deadline | none | counted in `truncated.source_deadline`; their frames name `source_deadline` |
 
-Each renderer sends at most 1,024 request and 1,024 scheduling stacks per
-configuration, so the stack budget holds sixteen such renderers; the node and
-edge budgets hold the frames of every distinct stack of that many. The answer
+Renderers send every distinct stack, so a long capture can hold more than the
+stack budget; the rest are counted in `stacks.over_budget`, never silently
+dropped, and the node and edge budgets hold the frames of every stack drawn. The answer
 is cached until the event store's last complete record or the artifact
 manifest's length changes. An answer the deadline cut is not cached, so the
 next request reads again.

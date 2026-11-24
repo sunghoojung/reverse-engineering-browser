@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// Copyright 2026 The Reverse Engineering Browser Authors
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -188,8 +188,8 @@ std::string OriginOf(const GURL& url, const NativeRequestTarget& target) {
   return spec;
 }
 
-// The whole URL when it fits the manifest's 8 KiB, else the origin; empty
-// unless HTTP(S).
+// The whole URL, which fits an artifact URL as every URL Chromium carries
+// does, else the origin; empty unless HTTP(S).
 std::string ArtifactUrlOf(const GURL& url, const NativeRequestTarget& target) {
   if (target.scheme != NativeRequestScheme::kHttp && target.scheme != NativeRequestScheme::kHttps) {
     return {};
@@ -496,13 +496,14 @@ void NativeNetworkCaptureSink::EmitHeaderBlock(const NativeProbeEmitter emitter,
   });
   summary.header_count = count;
   summary.block_length = static_cast<std::uint32_t>(
-      std::min<std::uint64_t>(length, std::numeric_limits<std::uint32_t>::max()));
+      std::min<std::uint64_t>(length, kNativeHeaderLengthUnrepresentable));
   NativeProbeEvent event = MakeChildEvent(type, parent);
   if (count == 0) {
     summary.state = NativeHeaderState::kEmpty;
     crypto::hash::Hasher hasher(crypto::hash::HashKind::kSha256);
     hasher.Finish(summary.sha256);
-  } else if (length > kNativeHeaderBlockLimitBytes) {
+  } else if (length >= kNativeHeaderLengthUnrepresentable) {
+    // A block of any size is retained; only the record's length field bounds it.
     summary.state = NativeHeaderState::kNotCapturedBlockLimit;
   } else {
     std::vector<std::uint8_t> block;
@@ -586,9 +587,9 @@ void NativeNetworkCaptureSink::EmitCookieList(const NativeProbeEmitter emitter,
     summary.state = NativeHeaderState::kEmpty;
     crypto::hash::Hasher hasher(crypto::hash::HashKind::kSha256);
     hasher.Finish(summary.sha256);
-  } else if (length > kNativeCookieListLimitBytes) {
-    summary.list_length = static_cast<std::uint32_t>(
-        std::min<std::uint64_t>(length, std::numeric_limits<std::uint32_t>::max()));
+  } else if (length >= kNativeHeaderLengthUnrepresentable) {
+    // A list of any size is retained; only the record's length field bounds it.
+    summary.list_length = static_cast<std::uint32_t>(kNativeHeaderLengthUnrepresentable);
     summary.state = NativeHeaderState::kNotCapturedBlockLimit;
   } else {
     summary.list_length = static_cast<std::uint32_t>(length);
@@ -614,6 +615,24 @@ void NativeNetworkCaptureSink::EndHeaderHop(TrackedHeaders& tracked,
   if (emitted_extra_info && !tracked.open_received && tracked.awaiting.size() < 21) {
     tracked.awaiting.push_back(tracked.open);
   }
+}
+
+void NativeNetworkCaptureSink::RetainRendererTarget(NativeProbeEvent& event,
+                                                    NativeRequestTarget target,
+                                                    std::string origin,
+                                                    std::string text) noexcept {
+  const std::size_t size = text.size();
+  target.retention = RetentionOf(NativeArtifactCaptureSink::Get().CaptureRequestContent(
+      {.kind = NativeArtifactKind::kRequestTarget,
+       .request_id = event.header.request_id,
+       .frame_id = event.header.frame_id,
+       .creator_event_id = event.header.sequence_number,
+       .url = std::move(origin),
+       .mime_type = "text/plain",
+       .size = size,
+       .text = std::move(text)},
+      event.header.artifact_id));
+  event.inline_payload = EncodeNativeRequestTargetPayload(target);
 }
 
 void NativeNetworkCaptureSink::EmitRequestTarget(const NativeProbeEmitter emitter,

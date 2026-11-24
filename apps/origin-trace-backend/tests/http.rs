@@ -3466,7 +3466,7 @@ fn vm_runtime_audio_is_bounded_relevance_not_vm_structure_or_value_capture() {
                 "events_filter":{"session_id":"1","navigation_id":"2","frame_id":"3"}})
         );
         assert!(!document.to_string().contains("must-not-copy"));
-        assert_eq!(document["producer"]["version"], "1.14.0");
+        assert_eq!(document["producer"]["version"], "1.15.0");
         assert_eq!(
             document["profile"]["runtime_rule_weights"]["antibot.runtime-web-audio"],
             25
@@ -4328,7 +4328,7 @@ async fn vm_lexical_scoring_retains_dispatch_families_and_original_artifacts() {
         .unwrap()
         .validate(&document)
         .unwrap();
-    assert_eq!(document["producer"]["version"], "1.14.0");
+    assert_eq!(document["producer"]["version"], "1.15.0");
     assert_eq!(document["profile"]["javascript_scoring_version"], 3);
     assert_eq!(document["profile"]["runtime_evidence_version"], 2);
     let profile = origin_trace_backend::vm::canonical(&document["profile"]).unwrap();
@@ -7726,7 +7726,7 @@ async fn analysis_catalog_resolves_every_generated_rule_and_preserves_profile_id
     assert_eq!(catalog["current_producer"], document["producer"]);
     assert_eq!(
         catalog["current_producer"],
-        json!({"id":"origin-trace-vm-detector","version":"1.14.0"})
+        json!({"id":"origin-trace-vm-detector","version":"1.15.0"})
     );
     assert_eq!(catalog["compatibility"]["build_identity"], "not-recorded");
     assert_eq!(catalog["current_profile"], document["profile"]);

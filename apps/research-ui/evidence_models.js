@@ -2918,8 +2918,47 @@
             new Set(table.matching_slots).size === table.matching_slots.length));
       }
 
+      // VM detector 1.15.0 lists each table and call type a site uses once,
+      // whole; a site's table carries the first 32 of those slots and the
+      // same counts. Earlier documents have no list and only a site prefix.
+      function vmIndirectTablesValid(classification) {
+        const tables = classification.indirect_tables;
+        if (tables === undefined) return true;
+        if (!Array.isArray(tables)) return false;
+        const count = value => value === null || isSafeIntegerInRange(value, 0, Number.MAX_SAFE_INTEGER);
+        const byKey = new Map();
+        let previous = null;
+        for (const table of tables) {
+          if (!vmWorkspaceExact(table, ['table_index', 'type_index', 'populated_slot_count', 'matching_slot_count', 'matching_slots']) ||
+            !isSafeIntegerInRange(table.table_index, 0, 4294967295) || !isSafeIntegerInRange(table.type_index, 0, 4294967295) ||
+            !count(table.populated_slot_count) || !count(table.matching_slot_count)) return false;
+          if (previous !== null && (table.table_index < previous.table_index ||
+            (table.table_index === previous.table_index && table.type_index <= previous.type_index))) return false;
+          previous = table;
+          const slots = table.matching_slots;
+          if (slots === null ? table.matching_slot_count !== null
+            : !Array.isArray(slots) || slots.length !== table.matching_slot_count ||
+              !slots.every((slot, index) => isSafeIntegerInRange(slot, 0, 4294967295) && (index === 0 || slot > slots[index - 1]))) return false;
+          byKey.set(`${table.table_index}:${table.type_index}`, {table, used: false});
+        }
+        for (const site of classification.sites) {
+          if (site.table === null) continue;
+          const entry = byKey.get(`${site.table.table_index}:${site.table.type_index}`);
+          if (entry === undefined) return false;
+          entry.used = true;
+          const {table} = entry;
+          if (site.table.populated_slot_count !== table.populated_slot_count ||
+            site.table.matching_slot_count !== table.matching_slot_count) return false;
+          if (table.matching_slots === null ? site.table.matching_slots !== null
+            : site.table.matching_slots === null || site.table.matching_slots.length !== Math.min(32, table.matching_slots.length) ||
+              !site.table.matching_slots.every((slot, index) => slot === table.matching_slots[index])) return false;
+        }
+        return [...byKey.values()].every(entry => entry.used);
+      }
+
       function isVmDispatchClassification(classification, workspace) {
-        if (!vmWorkspaceExact(classification, ['classification_version', 'site_count', 'omitted_site_count', 'role_counts', 'kind_counts', 'sites', 'omissions']) ||
+        const keys = ['classification_version', 'site_count', 'omitted_site_count', 'role_counts', 'kind_counts', 'sites', 'omissions'];
+        if (!vmWorkspaceExact(classification, classification?.indirect_tables === undefined ? keys : [...keys, 'indirect_tables']) ||
           !Array.isArray(classification.omissions) || classification.omissions.length > 16 ||
           !classification.omissions.every(omission => isPlainObject(omission) &&
             hasOnlyKeys(omission, new Set(['reason', 'detail', 'omitted_records'])) &&
@@ -2939,7 +2978,8 @@
         if (sum(classification.role_counts) !== classification.site_count ||
           sum(classification.kind_counts) !== classification.site_count) return false;
         return classification.sites.every(site =>
-          isVmDispatchClassificationSite(site, workspace.interpreter_artifact_id, workspace.runtime));
+          isVmDispatchClassificationSite(site, workspace.interpreter_artifact_id, workspace.runtime)) &&
+          vmIndirectTablesValid(classification);
       }
 
       function isVmDispatchInventory(inventory) {

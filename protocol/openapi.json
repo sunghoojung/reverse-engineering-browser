@@ -17152,6 +17152,64 @@
                   "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/dispatchClassificationSite"
                 }
               },
+              "indirect_tables": {
+                "type": "array",
+                "description": "VM detector 1.15.0 and later: each table and call type that a listed call_indirect site uses, once, in ascending order, with every matching slot. A site's table lists the first 32 of these slots; listing the whole shared set on every site would grow the document with sites times slots. Absent from earlier documents.",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "table_index",
+                    "type_index",
+                    "populated_slot_count",
+                    "matching_slot_count",
+                    "matching_slots"
+                  ],
+                  "properties": {
+                    "table_index": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4294967295
+                    },
+                    "type_index": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4294967295
+                    },
+                    "populated_slot_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "matching_slot_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "matching_slots": {
+                      "anyOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "array",
+                          "uniqueItems": true,
+                          "items": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 4294967295
+                          }
+                        }
+                      ],
+                      "description": "Every real table slot index, ascending, whose function signature equals the type. Null when the table layout is unknown."
+                    }
+                  }
+                }
+              },
               "omissions": {
                 "type": "array",
                 "maxItems": 16,
@@ -20424,6 +20482,64 @@
                 "type": "array",
                 "items": {
                   "$ref": "#/components/schemas/VmAnalysis/$defs/dispatchClassificationSite"
+                }
+              },
+              "indirect_tables": {
+                "type": "array",
+                "description": "VM detector 1.15.0 and later: each table and call type that a listed call_indirect site uses, once, in ascending order, with every matching slot. A site's table lists the first 32 of these slots; listing the whole shared set on every site would grow the document with sites times slots. Absent from earlier documents.",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "table_index",
+                    "type_index",
+                    "populated_slot_count",
+                    "matching_slot_count",
+                    "matching_slots"
+                  ],
+                  "properties": {
+                    "table_index": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4294967295
+                    },
+                    "type_index": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4294967295
+                    },
+                    "populated_slot_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "matching_slot_count": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "matching_slots": {
+                      "anyOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "array",
+                          "uniqueItems": true,
+                          "items": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 4294967295
+                          }
+                        }
+                      ],
+                      "description": "Every real table slot index, ascending, whose function signature equals the type. Null when the table layout is unknown."
+                    }
+                  }
                 }
               },
               "omissions": {

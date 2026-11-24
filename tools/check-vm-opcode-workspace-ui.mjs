@@ -426,6 +426,32 @@ for (const mutate of [
   const malformed = structuredClone(shapedDocument); mutate(malformed.workspaces[0]);
   assert(!validateModule(malformed), String(mutate));
 }
+// VM detector 1.15.0 lists each table and type a site uses once, whole; a
+// site carries its first 32 slots and the same counts.
+const wideSlots = Array.from({length: 40}, (_, index) => index * 2 + 1);
+const listedTables = structuredClone(shapedDocument);
+const listedSite = listedTables.workspaces[0].dispatch_classification.sites[1];
+listedSite.table = {table_index: 0, type_index: 0, populated_slot_count: 80, matching_slot_count: 40, matching_slots: wideSlots.slice(0, 32)};
+listedTables.workspaces[0].dispatch_classification.indirect_tables =
+  [{table_index: 0, type_index: 0, populated_slot_count: 80, matching_slot_count: 40, matching_slots: wideSlots}];
+assert(validateModule(listedTables), 'a classification with its whole indirect table validates');
+assert(renderApi.renderVmDispatchSites(listedTables.workspaces[0]).textContent.includes('40 of 80 placed slots match type 0: 1, 3,'));
+assert(renderApi.renderVmDispatchSites(listedTables.workspaces[0]).textContent.includes(', and 8 more'));
+for (const mutate of [
+  value => { value.dispatch_classification.indirect_tables[0].matching_slots[35] = 1; },
+  value => { value.dispatch_classification.indirect_tables[0].matching_slots.pop(); },
+  value => { value.dispatch_classification.indirect_tables[0].matching_slot_count = 41; },
+  value => { value.dispatch_classification.indirect_tables[0].type_index = 1; },
+  value => { value.dispatch_classification.indirect_tables.push({...value.dispatch_classification.indirect_tables[0], type_index: 1}); },
+  value => { value.dispatch_classification.indirect_tables[0].extra = true; },
+  value => { value.dispatch_classification.sites[1].table.matching_slots[3] = 99; },
+  value => { value.dispatch_classification.sites[1].table.matching_slots.pop(); },
+  value => { value.dispatch_classification.sites[1].table.populated_slot_count = 81; },
+  value => { value.dispatch_classification.indirect_tables = {}; },
+]) {
+  const malformed = structuredClone(listedTables); mutate(malformed.workspaces[0]);
+  assert(!validateModule(malformed), String(mutate));
+}
 // Every schema dispatch_kind, including unknown, is accepted and counted.
 const unknownKind = structuredClone(shapedDocument);
 const unknownSite = unknownKind.workspaces[0].dispatch_classification;

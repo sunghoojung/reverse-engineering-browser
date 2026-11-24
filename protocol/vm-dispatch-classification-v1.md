@@ -258,9 +258,12 @@ item stores a reference whose function is unknown, so it never matches a type
 and never erases knowledge silently. `matching_slot_count` counts every
 matching slot and `matching_slots` lists the first 32. Every site with the
 same table and type shares that one set, so listing it whole on each site would
-grow the document with sites times slots. VM detectors before 1.14.0 did not
-expand a table of more than 1,000,000 placed slots; their documents stay
-valid.
+grow the document with sites times slots. Instead, since VM detector 1.15.0,
+`indirect_tables` lists each table and type that a listed site uses once, in
+ascending order, with the same counts and every matching slot in ascending
+order; a site's `matching_slots` is the first 32 of that list. Earlier
+documents have no `indirect_tables`. VM detectors before 1.14.0 did not expand
+a table of more than 1,000,000 placed slots. Documents from both stay valid.
 
 `populated_slot_count` is the corrected count of placed slots. It is not a
 ranking input: the detector's Wasm ranking keeps its own element fanout, which

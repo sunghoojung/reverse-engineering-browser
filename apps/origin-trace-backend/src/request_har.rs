@@ -699,6 +699,29 @@ pub fn export(sink: &mut Sink, rows: &[i64], index: Value, export: &Export) {
     }
 }
 
+/// Calls `visit` with each row of `rows` and its entries, in order, reading
+/// one batch of rows and one row's records at a time, as `export` does. A
+/// `false` from `visit` stops the walk. Returns the rows visited.
+pub(crate) fn visit_rows(
+    rows: &[i64],
+    export: &Export,
+    mut visit: impl FnMut(&Value, &[Value]) -> Result<bool>,
+) -> Result<usize> {
+    let mut drops: HashMap<String, Drops> = HashMap::new();
+    let mut visited = 0;
+    for batch in rows.chunks(BATCH) {
+        let documents = export.requests.blocking_lock().export_documents(batch)?;
+        for row in &documents {
+            let entries = row_entries(row, &mut drops, export)?;
+            visited += 1;
+            if !visit(row, &entries)? {
+                return Ok(visited);
+            }
+        }
+    }
+    Ok(visited)
+}
+
 /// One row's entries from every record of its root request.
 fn row_entries(
     row: &Value,

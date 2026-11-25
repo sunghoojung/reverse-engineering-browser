@@ -1,7 +1,7 @@
 use crate::{
     analysis_catalog,
     analyst::Analyst,
-    artifact_map, artifact_query, artifact_text,
+    artifact_map, artifact_query, artifact_text, backend_map,
     capture::{self, Capture, StopRefusal},
     config::{CaptureMode, Options},
     decoder::Decoder,
@@ -200,6 +200,9 @@ pub struct App {
     exports: Arc<Semaphore>,
     analysis: Mutex<Option<VmDocumentsCache>>,
     /// Cursors of the current cross-reference selection; one entry only.
+    /// Recent backend maps by their read's tag, so a repeated read of an
+    /// unchanged session does not walk every row again.
+    backend_maps: Arc<crate::result_cache::Cache<String, Value>>,
     xrefs: Arc<crate::xrefs::Cursors>,
     /// The store's drop gaps, extended only over appended bytes.
     gaps: Arc<crate::gap_tally::GapTally>,
@@ -325,6 +328,7 @@ impl App {
             exports: Arc::new(Semaphore::new(2)),
             analysis: Mutex::new(None),
             xrefs: Arc::default(),
+            backend_maps: Arc::default(),
             gaps: Arc::default(),
             flow_graph: Arc::default(),
             wasm_names: Arc::default(),
@@ -1365,6 +1369,99 @@ impl App {
             }
             "/api/requests/har" => {
                 let credentials = q.credentials()?;
+            "/api/backend-map" => {
+                let query = request_index::RequestQuery::parse_export(&q, raw_query, &[])?;
+                let options = self.options.clone();
+                let progress = self.requests.lock().await.progress_marker();
+                let tag = evidence::resource_etag(
+                    &options.store,
+                    &format!(
+                        "backend-map:{}:{}:{progress}:{raw_query}",
+                        backend_map::FORMAT,
+                        evidence::resource_etag(&options.artifacts.join("manifest.jsonl"), ""),
+                    ),
+                );
+                if matches_etag(headers, Some(&tag)) {
+                    return Ok(not_modified(&tag));
+                }
+                etag = Some(tag.clone());
+                // A map walks every selected row, like an export, so it shares
+                // the export permits rather than holding a reader slot.
+                let permit = self.exports.clone().try_acquire_owned().map_err(|_| {
+                    Error::new(
+                        429,
+                        "Two request exports or backend maps are already running; retry when one ends",
+                    )
+                })?;
+                let (requests, gaps, cache) = (
+                    self.requests.clone(),
+                    self.gaps.clone(),
+                    self.backend_maps.clone(),
+                );
+                let document = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    crate::result_cache::kept(&cache, tag, 4, || {
+                        let (rows, index) = requests.blocking_lock().export_rows(&query)?;
+                        let mut map = backend_map::Map::default();
+                        // Cookie names need the cookie headers themselves;
+                        // backend_map drops every credential value before a
+                        // rule reads the entry and never returns one.
+                        request_har::visit_rows(
+                            &rows,
+                            &request_har::Export {
+                                requests: &requests,
+                                gaps: &gaps,
+                                store: &options.store,
+                                artifacts: &options.artifacts,
+                                credentials: request_headers::Credentials::Returned,
+                            },
+                            |row, entries| {
+                                map.add_row(row, entries);
+                                Ok(true)
+                            },
+                        )?;
+                        // Scripts are kept as source artifacts rather than
+                        // response bodies; each distinct one on a mapped host
+                        // is read whole and verified once.
+                        let hosts = map.hosts();
+                        let mut seen = std::collections::BTreeSet::new();
+                        // The whole manifest, without the bounded scan's deadline,
+                        // so a long session's scripts are all read.
+                        let (manifest, _) = evidence::manifest_from(&options.artifacts, 0)?;
+                        let scripts = manifest
+                            .into_iter()
+                            .filter(|artifact| artifact["kind"] == "javascript");
+                        for artifact in scripts {
+                            let host = url::Url::parse(artifact["url"].as_str().unwrap_or(""))
+                                .ok()
+                                .and_then(|url| {
+                                    url.host_str().map(|host| match url.port() {
+                                        Some(port) => format!("{host}:{port}"),
+                                        None => host.to_owned(),
+                                    })
+                                })
+                                .map(|host| host.to_ascii_lowercase());
+                            if !host.is_some_and(|host| hosts.contains(&host))
+                                || !seen
+                                    .insert(artifact["sha256"].as_str().unwrap_or("").to_owned())
+                            {
+                                continue;
+                            }
+                            match evidence::read(&options.artifacts, &artifact)
+                                .ok()
+                                .and_then(|bytes| String::from_utf8(bytes).ok())
+                            {
+                                Some(text) => map.add_script(&artifact, &text),
+                                None => map.script_unreadable(),
+                            }
+                        }
+                        Ok(map.document(index))
+                    })
+                })
+                .await
+                .map_err(|_| Error::new(500, "The backend map stopped"))??;
+                (*document).clone()
+            }
                 let query = request_index::RequestQuery::parse_export(
                     &q,
                     raw_query,

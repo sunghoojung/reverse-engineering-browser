@@ -4104,15 +4104,16 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // The block graph shapes of artifacts 341 to 345, cold at each size: the
   // time from the native click on Graph to the frame after the first drawing
   // (decode, transfer, layout and draw), and frames while Shift+Arrow pans at
-  // the opening zoom and fitted whole: the interval between frames, and the
-  // time a frame spent before this test's callback, which is the graph's
-  // draw. The numbers are printed as RENDERED_UI_GRAPH lines. A median
-  // interval fails past three display frames, or past twice the slower median
-  // of the 25-block exceptions shape at that size where that is longer: a
-  // display without a GPU, as on a CI host, holds even that shape to 30-50 ms
-  // a frame while its draw takes 1 ms, so the floor is the machine's, not the
-  // graph's. A single long frame does not fail, since a hidden or sleeping
-  // display stops frames whatever the page does. Then Shift+Arrow pushes the
+  // the opening zoom and fitted whole. Each pan frame counts the edges the
+  // graph strokes: segments, length and dash periods, and the length beyond
+  // the view grown by its own size on each side. A canvas dashes a whole path
+  // before it clips, so the graph adds only an edge's runs near the view, and
+  // a frame that strokes more than a pixel beyond the grown view fails. The
+  // counts follow the drawing, not the machine. The interval between frames
+  // and the time a frame spent before this test's callback, which is the
+  // graph's draw, are printed with the counts as RENDERED_UI_GRAPH lines and
+  // never fail: on a display without a GPU, as on a CI host, raster stalls set
+  // them and change from one second to the next. Then Shift+Arrow pushes the
   // fitted view far past the bottom right, where it must stop on the drawing.
   @MainActor
   func test25bBlockGraphShapes() async throws {
@@ -4120,7 +4121,6 @@ final class OriginTraceRenderedUITests: XCTestCase {
     for size in windowSizes + [("wide", 1440, 900)] {
       let ui = try await prepare(size)
       try await show(ui, "sources")
-      var medians: [(context: String, median: Double, result: [String: Any])] = []
       for (id, name) in shapes {
         let context = "\(size.name) \(name)"
         try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"\(id)\"]")
@@ -4180,20 +4180,59 @@ final class OriginTraceRenderedUITests: XCTestCase {
           // Shift+Arrow is dispatched once a frame, after this callback asks
           // for the next one, so the graph draws each pan first in the next
           // frame. It steps right, down, left and up in turn, so every frame
-          // draws a new view and none reaches the edge a pan stops at.
+          // draws a new view and none reaches the edge a pan stops at. Each
+          // Path2D keeps the points it is given, and a stroke of one on the
+          // graph's canvas is measured in device pixels under the transform
+          // and dash it is laid with, then reported in CSS pixels. An arcTo
+          // is counted as a line to its corner. A frame's work is what was
+          // stroked since the callback before it.
           let result = try await ui.json("""
-            (async () => { const canvas = document.querySelector('#source-graph-host .block-graph-canvas');
+            (async () => { const canvas = document.querySelector('#source-graph-host .block-graph-canvas'), context = canvas.getContext('2d');
               const press = key => canvas.dispatchEvent(new KeyboardEvent('keydown', {key, shiftKey: true, bubbles: true, cancelable: true}));
-              const zoom = document.querySelector('#source-graph-host .block-graph-zoom').textContent, intervals = [], draws = [];
-              await new Promise(done => { let last = 0, count = 0;
-                const tick = now => { if (last) { intervals.push(now - last); draws.push(performance.now() - now); } last = now;
-                  if (count++ === 90) { done(); return; } press(['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'][count % 4]); requestAnimationFrame(tick); };
-                requestAnimationFrame(tick); });
+              const zoom = document.querySelector('#source-graph-host .block-graph-zoom').textContent, intervals = [], draws = [], works = [];
+              const path = Path2D.prototype, own = {moveTo: path.moveTo, lineTo: path.lineTo, arcTo: path.arcTo}, points = new WeakMap();
+              const keep = (name, line) => function (...args) { let list = points.get(this); if (!list) points.set(this, list = []); list.push(line, args[0], args[1]); return own[name].apply(this, args); };
+              let work = null;
+              const w = canvas.width, h = canvas.height, ratio = w / canvas.getBoundingClientRect().width;
+              const measure = (list, {a, d, e, f}, dash) => {
+                const period = dash.reduce((sum, part) => sum + part, 0) * (dash.length % 2 ? 2 : 1) * Math.abs(a);
+                let x = 0, y = 0;
+                for (let i = 0; i < list.length; i += 3) {
+                  const nx = a * list[i + 1] + e, ny = d * list[i + 2] + f;
+                  if (list[i]) {
+                    // The part inside the grown view, from -w to 2w and -h to 2h.
+                    const dx = nx - x, dy = ny - y, length = Math.hypot(dx, dy);
+                    let t0 = 0, t1 = 1;
+                    for (const [p, q] of [[-dx, x + w], [dx, 2 * w - x], [-dy, y + h], [dy, 2 * h - y]]) {
+                      if (p === 0) { if (q < 0) t1 = -1; } else if (p < 0) t0 = Math.max(t0, q / p); else t1 = Math.min(t1, q / p);
+                    }
+                    work.segments += 1; work.length += length / ratio; work.beyond += length * (1 - Math.max(0, t1 - t0)) / ratio;
+                    if (period) work.periods += length / period;
+                  }
+                  x = nx; y = ny;
+                }
+              };
+              path.moveTo = keep('moveTo', 0); path.lineTo = keep('lineTo', 1); path.arcTo = keep('arcTo', 1);
+              context.stroke = function (shape) {
+                if (work && shape instanceof Path2D) measure(points.get(shape) ?? [], this.getTransform(), this.getLineDash());
+                return CanvasRenderingContext2D.prototype.stroke.apply(this, arguments);
+              };
+              try {
+                await new Promise(done => { let last = 0, count = 0;
+                  const tick = now => { if (last) { intervals.push(now - last); draws.push(performance.now() - now); works.push(work); } last = now;
+                    work = {segments: 0, length: 0, periods: 0, beyond: 0};
+                    if (count++ === 90) { done(); return; } press(['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'][count % 4]); requestAnimationFrame(tick); };
+                  requestAnimationFrame(tick); });
+              } finally { work = null; Object.assign(path, own); delete context.stroke; }
               const stats = list => { list.sort((a, b) => a - b); return {p50: Math.round(list[list.length >> 1]), p95: Math.round(list[Math.floor(list.length * 0.95)]), max: Math.round(list[list.length - 1])}; };
-              return {zoom, interval: stats(intervals), draw: stats(draws)}; })()
+              const median = key => stats(works.map(item => item[key])).p50;
+              return {zoom, interval: stats(intervals), draw: stats(draws),
+                strokes: {segments: median('segments'), lengthPx: median('length'), dashPeriods: median('periods'), beyondPx: Math.ceil(Math.max(...works.map(item => item.beyond)))}}; })()
             """)
           frames[view] = result
-          medians.append(("\(context) \(view)", (result["interval"] as? [String: Any])?["p50"] as? Double ?? .infinity, result))
+          let strokes = result["strokes"] as? [String: Any] ?? [:]
+          XCTAssertGreaterThan(strokes["segments"] as? Double ?? 0, 0, "\(context) \(view): the pan frames stroked edges, so their work was counted: \(result)")
+          XCTAssertLessThanOrEqual(strokes["beyondPx"] as? Double ?? .infinity, 1, "\(context) \(view): a pan frame stroked edges beyond the view grown by its own size, work a canvas dashes before it clips: \(result)")
         }
         print("RENDERED_UI_GRAPH \(size.name) \(name) firstPaintMs=\(Int(paint)) stats=\(String(reflecting: stats)) frames=\(frames)")
         // Fitted whole, Shift+Arrow far past the bottom right stops on the
@@ -4212,12 +4251,6 @@ final class OriginTraceRenderedUITests: XCTestCase {
         XCTAssertGreaterThan(colors, 1, "\(context): a pan far past the drawing left the canvas blank")
         if name == "dispatch256" { try await assertEdgeKey(ui, context) }
         try await ui.click("#source-graph")
-      }
-      let floor = medians.filter { $0.context.hasPrefix("\(size.name) exceptions ") }.map(\.median).max() ?? .infinity
-      let bound = max(50, 2 * floor)
-      print("RENDERED_UI_GRAPH_BOUND \(size.name) floorMs=\(floor) boundMs=\(bound)")
-      for entry in medians {
-        XCTAssertLessThanOrEqual(entry.median, bound, "\(entry.context): panning is not smooth against this machine's \(floor) ms floor: \(entry.result)")
       }
     }
   }

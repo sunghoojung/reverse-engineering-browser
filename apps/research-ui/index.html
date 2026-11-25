@@ -11,6 +11,7 @@
     <link rel="stylesheet" href="wasm_runner.css">
     <link rel="stylesheet" href="entropy_map.css">
     <link rel="stylesheet" href="wasm_identification.css">
+    <link rel="stylesheet" href="backend_map.css">
     <link rel="stylesheet" href="block_graph.css">
     <link rel="stylesheet" href="wasm_readable.css">
     <link rel="stylesheet" href="wasm_diff_view.css">
@@ -49,12 +50,13 @@
             <button class="nav-button" type="button" data-screen="vm" id="nav-vm-workspace" aria-controls="screen-vm" aria-label="VM" aria-keyshortcuts="Meta+3 Control+3" title="VM (⌘ / Ctrl + 3)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 6h8v8H6zM8 3v3m4-3v3M8 14v3m4-3v3M3 8h3m-3 4h3m8-4h3m-3 4h3"/></svg><span class="nav-label">VM</span><kbd class="nav-shortcut" aria-hidden="true">3</kbd></button>
             <button class="nav-button" type="button" data-screen="signals" aria-label="Fingerprinting" aria-keyshortcuts="Meta+4 Control+4" title="Fingerprinting (⌘ / Ctrl + 4)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10a6 6 0 0 1 12 0m-9 0a3 3 0 0 1 6 0v4m-3-4v7M4 13v2m12-2v2"/></svg><span class="nav-label">Fingerprinting</span><kbd class="nav-shortcut" aria-hidden="true">4</kbd></button>
             <button class="nav-button" type="button" data-screen="backtrace" aria-label="Flow" aria-keyshortcuts="Meta+5 Control+5" title="Flow (⌘ / Ctrl + 5)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3v9a3 3 0 0 0 3 3h9m-4-4 4 4-4 4"/></svg><span class="nav-label">Flow</span><kbd class="nav-shortcut" aria-hidden="true">5</kbd></button>
+            <button class="nav-button" type="button" data-screen="backend" aria-label="Backend" aria-keyshortcuts="Meta+6 Control+6" title="Backend (⌘ / Ctrl + 6)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4h12v4H4zm0 8h12v4H4zM7 6h1m-1 8h1"/></svg><span class="nav-label">Backend</span><kbd class="nav-shortcut" aria-hidden="true">6</kbd></button>
           </div>
           <div class="nav-group" role="group" aria-labelledby="nav-group-workbench">
             <span id="nav-group-workbench" class="nav-heading">Workbench</span>
-            <button class="nav-button" type="button" data-screen="api-collection" aria-label="Collection" aria-keyshortcuts="Meta+6 Control+6" title="Collection (⌘ / Ctrl + 6)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4h6l2 3h6v10H3z"/></svg><span class="nav-label">Collection</span><kbd class="nav-shortcut" aria-hidden="true">6</kbd></button>
-            <button class="nav-button" type="button" data-screen="analyst" aria-label="Analyst" aria-keyshortcuts="Meta+7 Control+7" title="Analyst (⌘ / Ctrl + 7)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 3h6l4 4v10H6zm6 0v4h4M8 11h5m-5 3h3"/></svg><span class="nav-label">Analyst</span><kbd class="nav-shortcut" aria-hidden="true">7</kbd></button>
-            <button class="nav-button" type="button" data-screen="tools" aria-label="Tools" aria-keyshortcuts="Meta+8 Control+8" title="Tools (⌘ / Ctrl + 8)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 3v6m-2-3h4m7 5v6m-2-3h4M13 3v4M4 13v4"/></svg><span class="nav-label">Tools</span><kbd class="nav-shortcut" aria-hidden="true">8</kbd></button>
+            <button class="nav-button" type="button" data-screen="api-collection" aria-label="Collection" aria-keyshortcuts="Meta+7 Control+7" title="Collection (⌘ / Ctrl + 7)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4h6l2 3h6v10H3z"/></svg><span class="nav-label">Collection</span><kbd class="nav-shortcut" aria-hidden="true">7</kbd></button>
+            <button class="nav-button" type="button" data-screen="analyst" aria-label="Analyst" aria-keyshortcuts="Meta+8 Control+8" title="Analyst (⌘ / Ctrl + 8)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 3h6l4 4v10H6zm6 0v4h4M8 11h5m-5 3h3"/></svg><span class="nav-label">Analyst</span><kbd class="nav-shortcut" aria-hidden="true">8</kbd></button>
+            <button class="nav-button" type="button" data-screen="tools" aria-label="Tools" aria-keyshortcuts="Meta+9 Control+9" title="Tools (⌘ / Ctrl + 9)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 3v6m-2-3h4m7 5v6m-2-3h4M13 3v4M4 13v4"/></svg><span class="nav-label">Tools</span><kbd class="nav-shortcut" aria-hidden="true">9</kbd></button>
           </div>
         </nav>
         <div class="sidebar-actions">
@@ -707,6 +709,35 @@
             </div>
           </section>
 
+          <section id="screen-backend" class="screen backend-map" aria-label="Backend map" hidden>
+            <header class="screen-head">
+              <button class="back-button" type="button" data-screen="traffic" aria-label="Back to traffic">←</button>
+              <div><h1>Backend map</h1><div class="screen-subtitle">A guess at the site's backend from the traffic it sent this page. Nothing is requested or looked up.</div></div>
+              <div class="screen-head-actions"><button class="secondary-button backend-map-refresh" type="button" title="Read every captured request again">Refresh</button></div>
+            </header>
+            <div class="backend-map-bar">
+              <div class="backend-map-tabs" role="tablist" aria-label="Backend map views">
+                <button id="backend-tab-stack" class="tools-tab" type="button" role="tab" data-backend-tab="stack" aria-selected="true" aria-controls="backend-panel-stack">Stack</button>
+                <button id="backend-tab-hosts" class="tools-tab" type="button" role="tab" data-backend-tab="hosts" aria-selected="false" aria-controls="backend-panel-hosts" tabindex="-1">Hosts &amp; routes</button>
+              </div>
+              <div class="backend-map-party" role="group" aria-label="Party">
+                <button class="request-flag" type="button" data-backend-party="all" aria-pressed="true">All</button>
+                <button class="request-flag" type="button" data-backend-party="first_party" aria-pressed="false" title="Hosts on the site of the session's top-level documents">1st party</button>
+                <button class="request-flag" type="button" data-backend-party="third_party" aria-pressed="false">3rd party</button>
+              </div>
+              <span class="backend-map-status" role="status" aria-live="polite"></span>
+            </div>
+            <div class="backend-map-notice" data-kind="loading" role="status" aria-live="polite">Open this screen to read the session's traffic.</div>
+            <div id="backend-panel-stack" class="backend-map-panel" role="tabpanel" aria-labelledby="backend-tab-stack">
+              <div class="backend-map-list backend-map-stack-list" role="region" aria-label="Technologies" tabindex="-1"></div>
+              <div class="backend-map-detail backend-map-stack-detail" role="region" aria-label="Technology evidence" tabindex="0"></div>
+            </div>
+            <div id="backend-panel-hosts" class="backend-map-panel" role="tabpanel" aria-labelledby="backend-tab-hosts" hidden>
+              <div class="backend-map-list backend-map-host-list" role="region" aria-label="Hosts" tabindex="-1"></div>
+              <div class="backend-map-detail backend-map-host-detail" role="region" aria-label="Host routes" tabindex="0"></div>
+            </div>
+            <details class="backend-map-about"><summary>How this is guessed</summary><p class="backend-map-rules"></p><ul class="backend-map-limits"></ul></details>
+          </section>
           <section id="screen-tools" class="screen" aria-label="Decoder and JWT tools" hidden>
             <header class="screen-head">
               <button class="back-button" type="button" data-screen="traffic" aria-label="Back to traffic">←</button>
@@ -999,6 +1030,7 @@
     <script src="debugger_pause.js"></script>
     <script src="entropy_map.js"></script>
     <script src="wasm_identification.js"></script>
+    <script src="backend_map.js"></script>
     <script src="wasm_inspection.js"></script>
 
     <script src="app.js"></script>

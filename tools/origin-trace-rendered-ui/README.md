@@ -123,6 +123,14 @@ what is retained and not be clipped. The Console header chip must read
 `Doc-start: permitted` in full, stay inside the header, overlap no other header
 control, and leave arming disabled. Nothing connects, arms or runs.
 
+`test46BackendMap` opens Backend from the sidebar at both window sizes. The
+sidebar must not overflow at the minimum window with Backend added. The map
+must load without an error notice, and the Stack and Hosts tabs must lay out
+without clipping and keep captured hosts inert. Right Arrow on the Stack tab
+must move to Hosts, and Down Arrow on the first host must select the next.
+Screenshots are `backend-stack-*`, `backend-hosts-*` and the light theme's
+`backend-hosts-light-*`.
+
 `test45ConsoleTranscriptKeepsEveryEntry` connects the Console to a live
 capture document that the test's own page `fetch` stands in for. That document
 logs twelve thousand messages, every 97th of them two lines tall, in pages of

@@ -73,6 +73,19 @@ const wasmIdentification = typeof createWasmIdentificationPanel === 'function' ?
     if (problem) elements.sourcePosition.textContent = problem;
   }
 }) : null;
+// Backend: the session's guessed backend (backend_map.js); its citations open Traffic rows.
+const backendMapPanel = typeof createBackendMapPanel === 'function' ? createBackendMapPanel({
+  root: document.querySelector('#screen-backend'),
+  openRow: id => { if (typeof openBackendMapRow === 'function') openBackendMapRow(id); },
+  openArtifact: id => {
+    showScreen('sources');
+    if (typeof selectArtifact === 'function' && selectArtifact(id) === false) {
+      state.sourceNoticeKind = 'warning';
+      state.sourceNotice = `Script artifact ${id} is not in the retained catalog, so it was not opened.`;
+      if (typeof renderSourceHealth === 'function') renderSourceHealth();
+    }
+  }
+}) : null;
 // Compare with: the function match table between two captured Wasm modules.
 const wasmDiffPanel = typeof createWasmDiffPanel === 'function' && document.querySelector('#source-diff-view') ? createWasmDiffPanel({
   button: document.querySelector('#source-wasm-diff'), root: document.querySelector('#source-diff-view'),
@@ -4186,6 +4199,30 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const url = String(indexed.path ?? '');
         const name = `${indexed.method} ${url.length > 120 ? `${url.slice(0, 119)}…` : url} (request ${indexed.id})`;
         return `${name} was not opened: its records could not be read (${reason}).${previous ? ' The inspector still shows the request selected before it.' : ''} It opens when its records can be read.`;
+      }
+
+      // A Backend map citation opens its Traffic row, located through the
+      // request index when the loaded page does not hold it.
+      async function openBackendMapRow(id) {
+        showScreen('traffic');
+        if (typeof setConsoleTrafficView === 'function') setConsoleTrafficView(false);
+        if (state.trafficIndex?.row?.(id) || state.requests.some(request => request.id === id)) { selectTrafficRow(id); return; }
+        const ask = async parameters => {
+          const response = await fetch(`/api/requests?${new URLSearchParams({sort: 'capture', order: 'asc', limit: '1', ...parameters})}`,
+            {cache: 'no-store', signal: AbortSignal.timeout(10000)});
+          const page = await response.json().catch(() => null);
+          if (!response.ok || page?.format !== 'reb-request-index-v2' || !Array.isArray(page.requests)) throw new Error(`the request index answered HTTP ${response.status}`);
+          return page;
+        };
+        try {
+          const position = (await ask({offset: '0', locate: id})).located?.[id];
+          if (!Number.isSafeInteger(position)) { setNetworkNotice('empty', `Request ${id} is not in the request index, so it was not selected.`); return; }
+          const row = (await ask({offset: String(position)})).requests[0];
+          if (row?.id !== id) { setNetworkNotice('empty', `Request ${id} moved in the request index while it was located. Nothing was selected.`); return; }
+          loadTrafficRequest(trafficIndexRequest(row, state.sessionMode === 'demo' ? 'demo' : 'live'), true);
+        } catch (error) {
+          setNetworkNotice('empty', `Request ${id} was not located: ${error?.message ?? error}.`);
+        }
       }
 
       // A row the newest window does not hold whole is read from the store first.
@@ -9722,6 +9759,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
 
         evidenceWorkspace.setVisible(screenName === 'evidence');
+        if (typeof backendMapPanel !== 'undefined' && backendMapPanel) backendMapPanel.setVisible(screenName === 'backend');
         if (screenName !== 'backtrace' && typeof flowWorkspace !== 'undefined') flowWorkspace.sync({visible: false});
         if (screenName !== 'sources') sourceFactsPanel.cancel();
         if (typeof entropyMap !== 'undefined') entropyMap.setVisible(screenName === 'sources');

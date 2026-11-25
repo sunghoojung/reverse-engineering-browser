@@ -38,7 +38,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
-const UI_ASSETS: [&str; 88] = [
+const UI_ASSETS: [&str; 90] = [
     "index.html",
     "block_graph.css",
     "block_graph.js",
@@ -61,6 +61,8 @@ const UI_ASSETS: [&str; 88] = [
     "entropy_map.js",
     "wasm_identification.css",
     "wasm_identification.js",
+    "backend_map.css",
+    "backend_map.js",
     "wasm_inspection.js",
     "agent_panel.css",
     "agent_panel.js",
@@ -198,11 +200,11 @@ pub struct App {
     package_io: Arc<Semaphore>,
     /// Streamed request exports, which run for as long as their client reads.
     exports: Arc<Semaphore>,
-    analysis: Mutex<Option<VmDocumentsCache>>,
-    /// Cursors of the current cross-reference selection; one entry only.
     /// Recent backend maps by their read's tag, so a repeated read of an
     /// unchanged session does not walk every row again.
     backend_maps: Arc<crate::result_cache::Cache<String, Value>>,
+    analysis: Mutex<Option<VmDocumentsCache>>,
+    /// Cursors of the current cross-reference selection; one entry only.
     xrefs: Arc<crate::xrefs::Cursors>,
     /// The store's drop gaps, extended only over appended bytes.
     gaps: Arc<crate::gap_tally::GapTally>,
@@ -326,9 +328,9 @@ impl App {
             io: Arc::new(Semaphore::new(4)),
             package_io: Arc::new(Semaphore::new(2)),
             exports: Arc::new(Semaphore::new(2)),
+            backend_maps: Arc::default(),
             analysis: Mutex::new(None),
             xrefs: Arc::default(),
-            backend_maps: Arc::default(),
             gaps: Arc::default(),
             flow_graph: Arc::default(),
             wasm_names: Arc::default(),
@@ -1367,8 +1369,6 @@ impl App {
                     }
                 };
             }
-            "/api/requests/har" => {
-                let credentials = q.credentials()?;
             "/api/backend-map" => {
                 let query = request_index::RequestQuery::parse_export(&q, raw_query, &[])?;
                 let options = self.options.clone();
@@ -1462,6 +1462,8 @@ impl App {
                 .map_err(|_| Error::new(500, "The backend map stopped"))??;
                 (*document).clone()
             }
+            "/api/requests/har" => {
+                let credentials = q.credentials()?;
                 let query = request_index::RequestQuery::parse_export(
                     &q,
                     raw_query,

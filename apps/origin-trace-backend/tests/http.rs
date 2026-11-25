@@ -13776,6 +13776,7 @@ async fn request_har_exports_redirect_and_failed_hops_with_their_headers() {
     );
     assert_eq!(first["_reb"]["outcome"], "redirect");
     assert_eq!(first["_reb"]["url_complete"], true);
+    assert_eq!(first["_reb"]["request_id"], "17");
     assert_eq!(first["startedDateTime"], "1970-01-01T00:00:00.001Z");
     assert_eq!(first["time"], 3.0);
     assert_eq!(

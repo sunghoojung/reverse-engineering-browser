@@ -203,7 +203,7 @@ pub fn entries(
             let receive = milliseconds(finish - response_at.unwrap_or(finish));
             let (url, url_complete) = urls[index].clone();
             let hop_method = hop.method.clone().unwrap_or_else(|| method.clone());
-            let mut request = json!({
+            let mut har_request = json!({
                 "method": hop_method,
                 "url": url,
                 "httpVersion": if final_hop { row["protocol"].as_str().unwrap_or("") } else { "" },
@@ -216,9 +216,9 @@ pub fn entries(
             if index == 0
                 && let Some(body) = request_body(records, &hops[0], artifacts, root)
             {
-                request["bodySize"] = body.0;
+                har_request["bodySize"] = body.0;
                 if let Some(data) = body.1 {
-                    request["postData"] = data;
+                    har_request["postData"] = data;
                 }
             }
             let mut content = json!({
@@ -241,7 +241,7 @@ pub fn entries(
             let mut entry = json!({
                 "startedDateTime": iso_date(start),
                 "time": wait + receive,
-                "request": request,
+                "request": har_request,
                 "response": {
                     "status": status,
                     "statusText": "",

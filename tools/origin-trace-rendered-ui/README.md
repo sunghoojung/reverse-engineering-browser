@@ -134,21 +134,29 @@ a failure prints them. Fewer than
 250 rows may be in the document at the end, a quarter of the way down, and
 through forty scroll steps there and back, and those rows must be consecutive
 messages that cover the viewport with no gap. PageDown must scroll the focused
-transcript through WebKit's own scroll animation, which the layout never
-interrupts, with a step in each of at least three frames. Home is then
-pressed while a second PageDown still moves. The page reports PageDown's
-first step in a script message, and the test presses Home from that report
-with no script call between them, so Home goes down before PageDown's next
-frame however slow the runner is. A try counts when Home followed fewer steps
-than a lone PageDown took, the last of them within a frame. One that does not
-count is made again, up to five times, and the test fails if none counts.
+transcript through WebKit's own scroll animation, not the transcript's, and
+the layout must not write the scroll offset while it moves, since a write
+stops it part way. That animation moves 1000 px a second for at most 200 ms
+by the clock, so each frame drawn while it runs is a step, and a frame longer
+than the whole scroll sees only its end. A lone PageDown must take a step in
+each of at least three frames, or in each frame that began while it ran where
+fewer did. A `RENDERED_UI_PAGEDOWN` line at each size gives its steps,
+distance, duration, frames and writes, with the key, step, write and frame
+times they are read from. Home is then pressed while a second PageDown still
+moves. The page reports PageDown's first step in a script message, and the
+test presses Home from that report with no script call between them. A try
+counts when Home went down after that step and before PageDown had gone as far
+as a lone one. One that does not count is made again, up to five times. The
+test fails if none counts, unless every Home went down after a lone
+PageDown's time was over, as on a runner whose frames are longer than the
+whole scroll; a `RENDERED_UI_PAGEDOWN` line then gives each try instead.
 Home must reach the first entry, handled by the transcript, and stay there
 300 ms later, past the step WebKit's keyboard scroll takes after the
 transcript's write. End, Command-Up and Command-Down must reach the last line
 of the 1 MiB message, the first entry and the last line again, each handled by
 the transcript. A timed-out wait prints each scroll, `scrollend`, key, layout
-write and changed frame that led to it, and for each key the steps before it,
-the frames since the last of them and the writes after it. Search
+write and changed frame that led to it, and for each key the steps before it
+and the writes after it. Search
 must find `rendered message 4242` among rows that are not drawn and draw only
 that match, and Escape must restore every entry. Screenshots
 `console-transcript-{end,middle,start,search}-*` show each state.

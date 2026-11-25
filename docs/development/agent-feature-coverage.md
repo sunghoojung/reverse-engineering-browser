@@ -83,6 +83,7 @@ Every option is off unless the start names it, and none is inherited.
 | Initiator tab (call stack) | `get_request_stack` | R | Covered |
 | Timing tab | `get_events` for the request's records | R | Covered |
 | Signals tab | `get_request_signal_profile` | R | Covered |
+| Backend (Stack, Hosts & routes) | `get_backend_map` with the Traffic filters or `rows` | R | Added; derived names, counts, templates and short tokens only, so it is listed at every level |
 | Export… → HAR (selected request or filtered list), Copy as cURL and Copy as fetch | `export_requests_har` (`rows`, or the list's filters and `through`) | F | Added; Full access only, because the archive holds headers, credential values and bodies. A large archive returns a structural summary, so narrow it with `rows` |
 | Evidence tab and Inspect observations & artifacts | `get_events`, `get_artifacts` with filters | R | Covered |
 | Trace origin | `get_origin_trace` | R | Covered |

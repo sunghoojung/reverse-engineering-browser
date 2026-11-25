@@ -317,16 +317,18 @@ background under the overview cue and the minimap. It prints a `RENDERED_UI_GRAP
 and size: the time from the native click on Graph to the frame after the first
 drawing, which spans decode, transfer, layout and draw, and, while Shift+Arrow
 pans once a frame at each zoom (right, down, left and up in turn, so every
-frame draws a new view clear of a pan limit), the median, 95th percentile and
-slowest frame interval and the time each frame spends drawing the graph. Then
+frame draws a new view clear of a pan limit), the edges each frame strokes: the
+median segments, length and dash periods, and the most length any frame
+stroked beyond the view grown by its own size on each side. A canvas lays a
+dash pattern along a whole path before it clips, so the graph adds only an
+edge's runs near the view, and a frame that strokes more than a CSS pixel
+beyond the grown view fails, as does a view whose frames stroke no edge. These
+counts follow the drawing, not the machine. The line also gives the median,
+95th percentile and slowest frame interval and the time each frame spends
+drawing the graph, which never fail: on a display without a GPU, as on a CI
+host, raster stalls set them and change from one second to the next. Then
 Shift+Arrow pushes the fitted view far past the bottom right, where the canvas
-must still draw the graph, not only its background. A median interval
-fails over 50 ms, or over twice the slower median of the 25-block exceptions
-shape at that size where that is longer (a `RENDERED_UI_GRAPH_BOUND` line per
-size). A display without a GPU, as on a CI host, holds even that shape to
-30-50 ms a frame while its draw takes 1 ms, so the bound follows the machine.
-One long frame does not fail, because a hidden window or a sleeping display
-stops frames whatever the page does.
+must still draw the graph, not only its background.
 
 `test35MissingFinalHeaders` opens a content-session request the HTTP cache
 answered, which has only a provisional request block that an older browser's

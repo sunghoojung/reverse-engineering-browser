@@ -2370,6 +2370,32 @@ mod tests {
         );
     }
 
+    /// A live capture of a large public site set `jwt-session`, which an
+    /// `<app>-session` rule read as Laravel. Only framework defaults count.
+    #[test]
+    fn a_generic_session_cookie_names_no_framework() {
+        let mut map = Map::default();
+        let document = json!({"id": "1", "type": "doc", "main_frame": true});
+        map.add_row(
+            &document,
+            &[entry(
+                "https://www.example.com/",
+                json!([{"name": "Cookie", "value": "jwt-session=A; user_session=B"}]),
+                json!([{"name": "Set-Cookie", "value": "jwt-session=C; Path=/"}]),
+                None,
+                None,
+            )],
+        );
+        let out = map.document(json!({"complete": true}));
+        let names: Vec<&str> = out["technologies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|technology| technology["name"].as_str().unwrap())
+            .collect();
+        assert!(names.is_empty(), "{names:?}");
+    }
+
     #[test]
     fn browser_pages_are_not_hosts() {
         let mut map = Map::default();

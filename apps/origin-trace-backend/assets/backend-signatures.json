@@ -2291,14 +2291,6 @@
      "description": "Laravel 11+'s default session cookie name"
     },
     {
-     "id": "app-session",
-     "on": "cookie",
-     "pattern": "^[a-z0-9_]+-session$",
-     "weight": 40,
-     "tier": "convention",
-     "description": "A Laravel 11+ <app>-session cookie name"
-    },
-    {
      "id": "validation",
      "on": "body",
      "pattern": "^\\{\\s*\\\"message\\\"\\s*:\\s*\\\"[^\\\"]*\\\"\\s*,\\s*\\\"errors\\\"\\s*:\\s*\\{",
@@ -2516,7 +2508,7 @@
      "id": "rails-session",
      "on": "cookie",
      "pattern": "^_[a-z0-9_]+_session$",
-     "weight": 50,
+     "weight": 30,
      "tier": "convention",
      "description": "Rails's default _<app>_session cookie name"
     },

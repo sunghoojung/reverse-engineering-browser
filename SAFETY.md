@@ -16,6 +16,20 @@ it.
 - Keep testing within the authorized target, methods, time window, and any
   limits set by the owner or organizer. Permission to visit a site does not by
   itself authorize security testing.
+- Passive observation of public pages is the one activity that needs no owner
+  authorization. A session may open a site's publicly served, signed-out pages
+  and keep what the browser received, as any visitor's browser and its
+  developer tools would, and offline analyzers such as the backend map may
+  read that evidence. It stays passive only while you:
+  - do not sign in, create an account or use someone else's session;
+  - do not submit forms, place orders, or send any request the page itself
+    would not send, and do not replay, modify, fuzz or probe requests;
+  - do not bypass bot protection, a CAPTCHA, a rate limit or an access
+    control, and end the session when the site challenges or blocks it;
+  - open a handful of pages by hand or with `open_url`, never crawl;
+  - follow the site's terms and keep the evidence local and unpublished.
+
+  Anything beyond that is security testing and needs the authorization above.
 - REB does not maintain a list of preapproved sites, verify ownership, or
   determine whether a user has permission.
 - Current native event records do not carry a trustworthy origin identity, so
@@ -30,7 +44,8 @@ it.
 
 - Opening the packaged Origin Trace app starts a visibly labeled local research
   session with implemented native capture categories. CDP collection and injected
-  JavaScript hooks have been removed. Launch only for authorized targets/data.
+  JavaScript hooks have been removed. Launch only for authorized targets/data
+  or the passive observation of public pages described above.
   Sessions the app starts share one persistent research profile, separate
   from the researcher's own browser profiles, with Chromium's mock Keychain,
   so the browser neither reads nor writes the macOS Keychain; the start panel

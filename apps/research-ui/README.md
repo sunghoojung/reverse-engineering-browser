@@ -527,6 +527,35 @@ rendered suite enforce:
 real timers and a stub backend) and `test31DebuggerSidebar` drives it in the
 packaged app.
 
+## Backend map
+
+**Backend** (⌘6) guesses the site's backend from the session's captured
+traffic: hosting, CDN, proxies, server, framework, API layer, backend services
+and third-party products ([Backend map v1](../../docs/product/backend-map-v1.md),
+`get_backend_map`). It reads the map when the screen opens and on **Refresh**;
+an unchanged session answers 304 and keeps the view, and a failed read keeps
+the last map with a notice.
+
+- **Stack** groups technologies as Site stack, Services the site uses and Vendor
+  infrastructure. Each row shows its category, confidence, basis (`marker`,
+  `convention`, `implied` or `declared`), party and captured tokens such as an
+  edge region or version. The detail lists every signal with its hosts and the
+  first and last citation; a citation opens its Traffic row, located through the
+  request index when the loaded page does not hold it.
+- **Hosts & routes** lists contacted hosts with their role, then hosts that a
+  policy, Link or CORS header or a body only named. A host's detail gives its
+  methods, statuses, protocols, remote addresses with provider ranges, CORS
+  header names and its route table with server-named templates. The party filter
+  applies here.
+- Up and Down move between rows of a list, and Left and Right between the tabs.
+  Every captured name is inserted as text. **How this is guessed** gives the
+  rule set's review date and the map's limitations.
+
+Adding Backend made nine workspaces in the sidebar. Below a 620 px tall window
+the collapsed rail uses tighter spacing so every entry and action stays inside
+the 560 px minimum. The workbench shortcuts moved to ⌘7 (Collection), ⌘8
+(Analyst) and ⌘9 (Tools).
+
 ## Local passive security report
 
 The passive security report is an offline command for one saved exact-request
@@ -1983,6 +2012,7 @@ capture, fetch anything or change a row.
 | `app_state.js`, `evidence_models.js`, `app.js` | Initial state and DOM bindings, evidence validation and projection, interaction and rendering |
 | `wasm_inspection.js` | Paged Inspect: 1,000-row pages of `inspect_wasm` read as the editor moves, byte-offset location and backend Find over every row, with Cancel for the first index |
 | `wasm_identification.js`, `wasm_identification.css` | The Inspect identification summary, its Details list and the Functions menu badges, all read from `get_wasm_identification` |
+| `backend_map.js`, `backend_map.css` | The Backend screen: Stack by scope with cited signals, Hosts & routes with declared-only hosts, read from `get_backend_map`; citations open Traffic rows through the request index |
 | `entropy_map.js`, `entropy_map.css` | Sources Map: the fixed-size canvas view, its segmented modes, summary and states; the only color tokens the map uses |
 | `invocation_sites.js` | Track calls: the saved invocation site pane, byte offsets of Sources positions and the titlebar tracking chip |
 | `session_panel.js`, `session_panel.css` | The live session start panel: start choices, startup, failure with Retry; the decision itself is native (`macos/SessionPanel.swift`) |

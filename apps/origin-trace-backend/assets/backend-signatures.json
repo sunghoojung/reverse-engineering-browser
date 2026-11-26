@@ -1,0 +1,5009 @@
+{
+ "format": "reb-backend-signatures-v1",
+ "reviewed": "2026-11-25",
+ "categories": [
+  {
+   "id": "hosting",
+   "label": "Hosting and platform"
+  },
+  {
+   "id": "cdn",
+   "label": "CDN and edge"
+  },
+  {
+   "id": "proxy",
+   "label": "Proxy, load balancer and gateway"
+  },
+  {
+   "id": "web_server",
+   "label": "Web server"
+  },
+  {
+   "id": "framework",
+   "label": "Web framework"
+  },
+  {
+   "id": "language",
+   "label": "Language and runtime"
+  },
+  {
+   "id": "api",
+   "label": "API layer"
+  },
+  {
+   "id": "baas",
+   "label": "Backend service and database"
+  },
+  {
+   "id": "auth",
+   "label": "Authentication"
+  },
+  {
+   "id": "storage",
+   "label": "Object storage and media"
+  },
+  {
+   "id": "cms",
+   "label": "CMS and commerce platform"
+  },
+  {
+   "id": "realtime",
+   "label": "Realtime"
+  },
+  {
+   "id": "search",
+   "label": "Search"
+  },
+  {
+   "id": "payments",
+   "label": "Payments"
+  },
+  {
+   "id": "monitoring",
+   "label": "Error monitoring and tracing"
+  },
+  {
+   "id": "analytics",
+   "label": "Analytics"
+  },
+  {
+   "id": "feature_flags",
+   "label": "Feature flags and experiments"
+  },
+  {
+   "id": "bot_protection",
+   "label": "Bot protection and WAF"
+  },
+  {
+   "id": "frontend",
+   "label": "Front-end library"
+  }
+ ],
+ "technologies": [
+  {
+   "id": "vercel",
+   "name": "Vercel",
+   "category": "hosting",
+   "references": [
+    "https://vercel.com/docs/headers/response-headers",
+    "https://vercel.com/docs/errors"
+   ],
+   "implies": [],
+   "signals": [
+    {
+     "id": "x-vercel-id",
+     "on": "response_header",
+     "name": "x-vercel-id",
+     "pattern": "^([a-z]{3}\\d+)::",
+     "capture": {
+      "name": "edge_region",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Vercel names the edge region that served the request first in x-vercel-id"
+    },
+    {
+     "id": "x-vercel-cache",
+     "on": "response_header",
+     "name": "x-vercel-cache",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Vercel's edge cache status header"
+    },
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "(?i)^vercel$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Vercel answers with server: Vercel"
+    },
+    {
+     "id": "vercel-app",
+     "on": "host",
+     "pattern": "\\.vercel\\.app$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A vercel.app deployment host"
+    },
+    {
+     "id": "insights",
+     "on": "path",
+     "pattern": "^/_vercel/(insights|speed-insights)/",
+     "weight": 80,
+     "tier": "vendor",
+     "description": "Vercel Web Analytics or Speed Insights collection path"
+    },
+    {
+     "id": "x-matched-path",
+     "on": "response_header",
+     "name": "x-matched-path",
+     "weight": 60,
+     "tier": "convention",
+     "description": "Vercel names the route template that handled the request"
+    },
+    {
+     "id": "x-vercel-error",
+     "on": "response_header",
+     "name": "x-vercel-error",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Vercel platform error code"
+    }
+   ]
+  },
+  {
+   "id": "netlify",
+   "name": "Netlify",
+   "category": "hosting",
+   "references": [
+    "https://docs.netlify.com/",
+    "https://docs.netlify.com/platform/caching/"
+   ],
+   "implies": [],
+   "signals": [
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "(?i)^netlify$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Netlify answers with server: Netlify"
+    },
+    {
+     "id": "x-nf-request-id",
+     "on": "response_header",
+     "name": "x-nf-request-id",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Netlify's request ID header"
+    },
+    {
+     "id": "netlify-app",
+     "on": "host",
+     "pattern": "\\.netlify\\.app$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A netlify.app deployment host"
+    },
+    {
+     "id": "functions",
+     "on": "path",
+     "pattern": "^/\\.netlify/(functions|edge-functions|images)/",
+     "weight": 80,
+     "tier": "vendor",
+     "description": "Netlify Functions or Image CDN path"
+    },
+    {
+     "id": "cache-status",
+     "on": "response_header",
+     "name": "cache-status",
+     "pattern": "\\\"Netlify (Edge|Durable)\\\"",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Netlify names its caches in Cache-Status"
+    },
+    {
+     "id": "etag",
+     "on": "response_header",
+     "name": "etag",
+     "pattern": "-ssl(-df)?\\\"$",
+     "weight": 60,
+     "tier": "convention",
+     "description": "Netlify's ETags end in -ssl"
+    }
+   ]
+  },
+  {
+   "id": "railway",
+   "name": "Railway",
+   "category": "hosting",
+   "references": [
+    "https://docs.railway.com/"
+   ],
+   "implies": [],
+   "signals": [
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "(?i)^railway",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Railway's edge proxy answers with server: railway-edge"
+    },
+    {
+     "id": "x-railway-edge",
+     "on": "response_header",
+     "name": "x-railway-edge",
+     "pattern": "^railway/([a-z0-9-]+)",
+     "capture": {
+      "name": "edge_region",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Railway names its edge in x-railway-edge"
+    },
+    {
+     "id": "x-railway-request-id",
+     "on": "response_header",
+     "name": "x-railway-request-id",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Railway's request ID header"
+    },
+    {
+     "id": "up-railway-app",
+     "on": "host",
+     "pattern": "\\.up\\.railway\\.app$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A railway.app service host"
+    }
+   ]
+  },
+  {
+   "id": "fly",
+   "name": "Fly.io",
+   "category": "hosting",
+   "references": [
+    "https://fly.io/docs/networking/request-headers/"
+   ],
+   "implies": [],
+   "signals": [
+    {
+     "id": "fly-request-id",
+     "on": "response_header",
+     "name": "fly-request-id",
+     "pattern": "-([a-z]{3})$",
+     "capture": {
+      "name": "region",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Fly's proxy request ID ends with the region that served it"
+    },
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "^Fly/",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Fly's proxy answers with server: Fly/..."
+    },
+    {
+     "id": "via",
+     "on": "response_header",
+     "name": "via",
+     "pattern": "(?i)fly\\.io",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Fly's proxy adds via: ... fly.io"
+    },
+    {
+     "id": "fly-dev",
+     "on": "host",
+     "pattern": "\\.fly\\.dev$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A fly.dev app host"
+    }
+   ]
+  },
+  {
+   "id": "render",
+   "name": "Render",
+   "category": "hosting",
+   "references": [
+    "https://render.com/docs"
+   ],
+   "implies": [],
+   "signals": [
+    {
+     "id": "x-render-origin-server",
+     "on": "response_header",
+     "name": "x-render-origin-server",
+     "pattern": "^([A-Za-z0-9._/-]+)",
+     "capture": {
+      "name": "origin_server",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Render names the origin server behind its proxy"
+    },
+    {
+     "id": "rndr-id",
+     "on": "response_header",
+     "name": "rndr-id",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Render's request ID header"
+    },
+    {
+     "id": "onrender",
+     "on": "host",
+     "pattern": "\\.onrender\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An onrender.com service host"
+    }
+   ]
+  },
+  {
+   "id": "heroku",
+   "name": "Heroku",
+   "category": "hosting",
+   "references": [
+    "https://devcenter.heroku.com/articles/http-routing"
+   ],
+   "implies": [],
+   "signals": [
+    {
+     "id": "via",
+     "on": "response_header",
+     "name": "via",
+     "pattern": "(?i)\\b(vegur|heroku-router)\\b",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "Heroku's router adds via: vegur or heroku-router"
+    },
+    {
+     "id": "herokuapp",
+     "on": "host",
+     "pattern": "\\.herokuapp\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A herokuapp.com app host"
+    },
+    {
+     "id": "error",
+     "on": "body",
+     "pattern": "herokucdn\\.com/error-pages",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Heroku's router error page"
+    }
+   ]
+  },
+  {
+   "id": "github_pages",
+   "name": "GitHub Pages",
+   "category": "hosting",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "^GitHub\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "GitHub Pages answers with server: GitHub.com"
+    },
+    {
+     "id": "github-io",
+     "on": "host",
+     "pattern": "\\.github\\.io$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A github.io Pages host"
+    },
+    {
+     "id": "missing",
+     "on": "body",
+     "pattern": "There isn.t a GitHub Pages site here\\.",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "GitHub Pages' missing-site page"
+    }
+   ]
+  },
+  {
+   "id": "cloudflare_pages",
+   "name": "Cloudflare Pages",
+   "category": "hosting",
+   "references": [],
+   "implies": [
+    "cloudflare"
+   ],
+   "signals": [
+    {
+     "id": "pages-dev",
+     "on": "host",
+     "pattern": "\\.pages\\.dev$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A pages.dev deployment host"
+    }
+   ]
+  },
+  {
+   "id": "cloudflare_workers",
+   "name": "Cloudflare Workers",
+   "category": "hosting",
+   "references": [],
+   "implies": [
+    "cloudflare"
+   ],
+   "signals": [
+    {
+     "id": "workers-dev",
+     "on": "host",
+     "pattern": "\\.workers\\.dev$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A workers.dev Worker host"
+    },
+    {
+     "id": "cf-worker",
+     "on": "response_header",
+     "name": "server-timing",
+     "pattern": "\\bcfWorker\\b",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Cloudflare reports that a Worker ran"
+    }
+   ]
+  },
+  {
+   "id": "firebase_hosting",
+   "name": "Firebase Hosting",
+   "category": "hosting",
+   "references": [],
+   "implies": [
+    "firebase"
+   ],
+   "signals": [
+    {
+     "id": "web-app",
+     "on": "host",
+     "pattern": "\\.(web\\.app|firebaseapp\\.com)$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Firebase Hosting web.app or firebaseapp.com host"
+    }
+   ]
+  },
+  {
+   "id": "aws_amplify",
+   "name": "AWS Amplify Hosting",
+   "category": "hosting",
+   "references": [],
+   "implies": [
+    "cloudfront"
+   ],
+   "signals": [
+    {
+     "id": "amplifyapp",
+     "on": "host",
+     "pattern": "\\.amplifyapp\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An amplifyapp.com deployment host"
+    }
+   ]
+  },
+  {
+   "id": "google_cloud_run",
+   "name": "Google Cloud Run",
+   "category": "hosting",
+   "references": [],
+   "implies": [
+    "google_frontend"
+   ],
+   "signals": [
+    {
+     "id": "run-app",
+     "on": "host",
+     "pattern": "\\.run\\.app$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A run.app Cloud Run service host"
+    }
+   ]
+  },
+  {
+   "id": "app_engine",
+   "name": "Google App Engine",
+   "category": "hosting",
+   "references": [],
+   "implies": [
+    "google_frontend"
+   ],
+   "signals": [
+    {
+     "id": "appspot",
+     "on": "host",
+     "pattern": "\\.appspot\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An appspot.com App Engine host"
+    }
+   ]
+  },
+  {
+   "id": "azure_app_service",
+   "name": "Azure App Service",
+   "category": "hosting",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "azurewebsites",
+     "on": "host",
+     "pattern": "\\.azurewebsites\\.net$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An azurewebsites.net App Service host"
+    },
+    {
+     "id": "arr-affinity",
+     "on": "cookie",
+     "pattern": "^ARRAffinity(SameSite)?$",
+     "weight": 80,
+     "tier": "vendor",
+     "description": "App Service's ARR affinity cookie"
+    }
+   ]
+  },
+  {
+   "id": "deno_deploy",
+   "name": "Deno Deploy",
+   "category": "hosting",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "^deno/([a-z0-9-]+)",
+     "capture": {
+      "name": "region",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Deno Deploy answers with server: deno/<region>"
+    },
+    {
+     "id": "deno-dev",
+     "on": "host",
+     "pattern": "\\.deno\\.(dev|net)$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A deno.dev deployment host"
+    }
+   ]
+  },
+  {
+   "id": "digitalocean_apps",
+   "name": "DigitalOcean App Platform",
+   "category": "hosting",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "ondigitalocean",
+     "on": "host",
+     "pattern": "\\.ondigitalocean\\.app$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An ondigitalocean.app host"
+    }
+   ]
+  },
+  {
+   "id": "cloudflare",
+   "name": "Cloudflare",
+   "category": "cdn",
+   "references": [
+    "https://developers.cloudflare.com/fundamentals/reference/http-headers/",
+    "https://www.cloudflare.com/ips/",
+    "https://developers.cloudflare.com/fundamentals/reference/policies-compliances/cloudflare-cookies/"
+   ],
+   "implies": [],
+   "signals": [
+    {
+     "id": "cf-ray",
+     "on": "response_header",
+     "name": "cf-ray",
+     "pattern": "-([A-Z]{3})$",
+     "capture": {
+      "name": "pop",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Cloudflare's ray ID ends with the data center that served it"
+    },
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "(?i)^cloudflare$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Cloudflare answers with server: cloudflare"
+    },
+    {
+     "id": "cf-cache-status",
+     "on": "response_header",
+     "name": "cf-cache-status",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Cloudflare's cache status header"
+    },
+    {
+     "id": "cdn-cgi",
+     "on": "path",
+     "pattern": "^/cdn-cgi/",
+     "weight": 80,
+     "tier": "vendor",
+     "description": "A Cloudflare /cdn-cgi/ path"
+    },
+    {
+     "id": "cf-cookies",
+     "on": "cookie",
+     "pattern": "^(__cf_bm|cf_clearance|__cflb|__cfruid|_cfuvid)$",
+     "weight": 80,
+     "tier": "vendor",
+     "description": "A Cloudflare cookie name"
+    },
+    {
+     "id": "remote",
+     "on": "remote_address",
+     "ranges": "cloudflare",
+     "weight": 70,
+     "tier": "vendor",
+     "description": "The connection's remote address is in Cloudflare's published ranges"
+    },
+    {
+     "id": "server-timing",
+     "on": "response_header",
+     "name": "server-timing",
+     "pattern": "\\bcf(L4|Worker|CacheStatus|Edge|Origin|RequestDuration)\\b",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "Cloudflare's Server-Timing metrics"
+    },
+    {
+     "id": "nel",
+     "on": "host",
+     "pattern": "^a\\.nel\\.cloudflare\\.com$",
+     "weight": 80,
+     "tier": "vendor",
+     "description": "Cloudflare's Network Error Logging endpoint"
+    },
+    {
+     "id": "cf-cookies-more",
+     "on": "cookie",
+     "pattern": "^(__cfwaitingroom|cf_chl_rc_i|cf_chl_rc_m|cf_chl_rc_ni|cf_ob_info|cf_use_ob)$",
+     "weight": 80,
+     "tier": "vendor",
+     "description": "More Cloudflare cookie names"
+    }
+   ]
+  },
+  {
+   "id": "cloudfront",
+   "name": "Amazon CloudFront",
+   "category": "cdn",
+   "references": [
+    "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/",
+    "https://ip-ranges.amazonaws.com/ip-ranges.json",
+    "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/understanding-response-headers-policies.html"
+   ],
+   "implies": [
+    "aws"
+   ],
+   "signals": [
+    {
+     "id": "x-amz-cf-pop",
+     "on": "response_header",
+     "name": "x-amz-cf-pop",
+     "pattern": "^([A-Z]{3}\\d+(-[A-Z0-9]+)?)",
+     "capture": {
+      "name": "pop",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "CloudFront names the edge location that served the request"
+    },
+    {
+     "id": "x-amz-cf-id",
+     "on": "response_header",
+     "name": "x-amz-cf-id",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "CloudFront's request ID header"
+    },
+    {
+     "id": "via",
+     "on": "response_header",
+     "name": "via",
+     "pattern": "\\(CloudFront\\)",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "CloudFront adds via: ... (CloudFront)"
+    },
+    {
+     "id": "x-cache",
+     "on": "response_header",
+     "name": "x-cache",
+     "pattern": "(?i)cloudfront",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "CloudFront's x-cache names it"
+    },
+    {
+     "id": "cloudfront-net",
+     "on": "host",
+     "pattern": "\\.cloudfront\\.net$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A cloudfront.net distribution host"
+    },
+    {
+     "id": "remote",
+     "on": "remote_address",
+     "ranges": "cloudfront",
+     "weight": 70,
+     "tier": "vendor",
+     "description": "The connection's remote address is in CloudFront's published ranges"
+    },
+    {
+     "id": "server-timing",
+     "on": "response_header",
+     "name": "server-timing",
+     "pattern": "cdn-(upstream-layer|upstream-fbl|downstream-fbl|hit-layer)",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "CloudFront's Server-Timing metrics"
+    },
+    {
+     "id": "pop",
+     "on": "response_header",
+     "name": "server-timing",
+     "pattern": "cdn-pop;\\s*desc=\\\"?([A-Z]{3}\\d+(-[A-Z0-9]+)?)",
+     "capture": {
+      "name": "pop",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "CloudFront's Server-Timing names its POP"
+    },
+    {
+     "id": "error",
+     "on": "body",
+     "pattern": "Generated by cloudfront \\(CloudFront\\)",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "CloudFront's own error page"
+    }
+   ]
+  },
+  {
+   "id": "fastly",
+   "name": "Fastly",
+   "category": "cdn",
+   "references": [
+    "https://www.fastly.com/documentation/reference/http/http-headers/",
+    "https://api.fastly.com/public-ip-list"
+   ],
+   "implies": [],
+   "signals": [
+    {
+     "id": "x-served-by",
+     "on": "response_header",
+     "name": "x-served-by",
+     "pattern": "cache-[a-z0-9]+-([A-Z]{3,4})\\b",
+     "capture": {
+      "name": "pop",
+      "group": 1
+     },
+     "weight": 90,
+     "tier": "vendor",
+     "description": "Fastly names the cache node, whose suffix is its POP"
+    },
+    {
+     "id": "x-fastly-request-id",
+     "on": "response_header",
+     "name": "x-fastly-request-id",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Fastly's request ID header"
+    },
+    {
+     "id": "fastly-restarts",
+     "on": "response_header",
+     "name": "fastly-restarts",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Fastly's restart counter header"
+    },
+    {
+     "id": "remote",
+     "on": "remote_address",
+     "ranges": "fastly",
+     "weight": 70,
+     "tier": "vendor",
+     "description": "The connection's remote address is in Fastly's published ranges"
+    }
+   ]
+  },
+  {
+   "id": "akamai",
+   "name": "Akamai",
+   "category": "cdn",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "^Akamai(GHost|NetStorage)",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Akamai answers with server: AkamaiGHost or AkamaiNetStorage"
+    },
+    {
+     "id": "akamai-grn",
+     "on": "response_header",
+     "name": "akamai-grn",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Akamai's reference number header"
+    },
+    {
+     "id": "x-akamai-transformed",
+     "on": "response_header",
+     "name": "x-akamai-transformed",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Akamai's transformation header"
+    },
+    {
+     "id": "akamai-hosts",
+     "on": "host",
+     "pattern": "\\.(akamaihd\\.net|akamaized\\.net|edgekey\\.net|edgesuite\\.net)$",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "An Akamai delivery host"
+    }
+   ]
+  },
+  {
+   "id": "bunny",
+   "name": "bunny.net",
+   "category": "cdn",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "^BunnyCDN",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "bunny.net answers with server: BunnyCDN-..."
+    },
+    {
+     "id": "cdn-pullzone",
+     "on": "response_header",
+     "name": "cdn-pullzone",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "bunny.net's pull zone header"
+    },
+    {
+     "id": "b-cdn",
+     "on": "host",
+     "pattern": "\\.b-cdn\\.net$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A b-cdn.net pull zone host"
+    }
+   ]
+  },
+  {
+   "id": "azure_front_door",
+   "name": "Azure Front Door",
+   "category": "cdn",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "x-azure-ref",
+     "on": "response_header",
+     "name": "x-azure-ref",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Azure Front Door's reference header"
+    }
+   ]
+  },
+  {
+   "id": "google_frontend",
+   "name": "Google Front End",
+   "category": "cdn",
+   "references": [
+    "https://www.gstatic.com/ipranges/cloud.json"
+   ],
+   "implies": [],
+   "signals": [
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "^Google Frontend$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Google's front end answers with server: Google Frontend"
+    },
+    {
+     "id": "via",
+     "on": "response_header",
+     "name": "via",
+     "pattern": "(?i)\\b1\\.1 google\\b",
+     "weight": 80,
+     "tier": "vendor",
+     "description": "Google's load balancer adds via: 1.1 google"
+    },
+    {
+     "id": "x-cloud-trace-context",
+     "on": "response_header",
+     "name": "x-cloud-trace-context",
+     "weight": 60,
+     "tier": "convention",
+     "description": "Google Cloud's trace context header"
+    },
+    {
+     "id": "remote-gcp",
+     "on": "remote_address",
+     "ranges": "gcp",
+     "weight": 60,
+     "tier": "vendor",
+     "description": "The connection's remote address is in Google Cloud's published customer ranges"
+    },
+    {
+     "id": "remote-google",
+     "on": "remote_address",
+     "ranges": "google",
+     "weight": 50,
+     "tier": "vendor",
+     "description": "The connection's remote address is in Google's own published ranges"
+    }
+   ]
+  },
+  {
+   "id": "varnish",
+   "name": "Varnish",
+   "category": "cdn",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "x-varnish",
+     "on": "response_header",
+     "name": "x-varnish",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Varnish's transaction ID header"
+    },
+    {
+     "id": "via",
+     "on": "response_header",
+     "name": "via",
+     "pattern": "(?i)varnish",
+     "weight": 80,
+     "tier": "vendor",
+     "description": "Varnish adds via: ... varnish"
+    }
+   ]
+  },
+  {
+   "id": "aws",
+   "name": "Amazon Web Services",
+   "category": "hosting",
+   "references": [
+    "https://ip-ranges.amazonaws.com/ip-ranges.json"
+   ],
+   "implies": [],
+   "signals": [
+    {
+     "id": "remote",
+     "on": "remote_address",
+     "ranges": "aws",
+     "weight": 60,
+     "tier": "vendor",
+     "description": "The connection's remote address is in AWS's published ranges"
+    },
+    {
+     "id": "x-amzn-requestid",
+     "on": "response_header",
+     "name": "x-amzn-requestid",
+     "weight": 70,
+     "tier": "vendor",
+     "description": "An AWS service request ID header"
+    },
+    {
+     "id": "x-amzn-trace-id",
+     "on": "response_header",
+     "name": "x-amzn-trace-id",
+     "weight": 60,
+     "tier": "vendor",
+     "description": "AWS X-Ray's trace header, added by AWS load balancers"
+    },
+    {
+     "id": "type",
+     "on": "body",
+     "pattern": "\\\"__type\\\"\\s*:\\s*\\\"[A-Za-z.#]*Exception\\\"",
+     "mime": "json",
+     "weight": 70,
+     "tier": "vendor",
+     "description": "An AWS JSON protocol error"
+    },
+    {
+     "id": "error-type",
+     "on": "response_header",
+     "name": "x-amzn-errortype",
+     "weight": 80,
+     "tier": "vendor",
+     "description": "An AWS error type header"
+    }
+   ]
+  },
+  {
+   "id": "aws_elb",
+   "name": "AWS Elastic Load Balancing",
+   "category": "proxy",
+   "references": [],
+   "implies": [
+    "aws"
+   ],
+   "signals": [
+    {
+     "id": "awsalb",
+     "on": "cookie",
+     "pattern": "^AWS(ALB|ALBCORS|ELB|ELBCORS|ALBTG|ALBTGCORS)$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An AWS load balancer stickiness cookie"
+    },
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "^awselb/",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Classic or Application Load Balancer answers with server: awselb/..."
+    },
+    {
+     "id": "awsalbapp",
+     "on": "cookie",
+     "pattern": "^AWSALBAPP-\\d+$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An AWS ALB application stickiness cookie name"
+    }
+   ]
+  },
+  {
+   "id": "aws_api_gateway",
+   "name": "Amazon API Gateway",
+   "category": "proxy",
+   "references": [],
+   "implies": [
+    "aws"
+   ],
+   "signals": [
+    {
+     "id": "x-amz-apigw-id",
+     "on": "response_header",
+     "name": "x-amz-apigw-id",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "API Gateway's request ID header"
+    },
+    {
+     "id": "execute-api",
+     "on": "host",
+     "pattern": "\\.execute-api\\.([a-z0-9-]+)\\.amazonaws\\.com$",
+     "capture": {
+      "name": "region",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An execute-api host, which names its region"
+    },
+    {
+     "id": "missing-token",
+     "on": "body",
+     "pattern": "^\\{\\s*\\\"message\\\"\\s*:\\s*\\\"Missing Authentication Token\\\"\\s*\\}",
+     "mime": "json",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "API Gateway's unmatched-route answer"
+    }
+   ]
+  },
+  {
+   "id": "aws_lambda",
+   "name": "AWS Lambda",
+   "category": "hosting",
+   "references": [],
+   "implies": [
+    "aws"
+   ],
+   "signals": [
+    {
+     "id": "lambda-url",
+     "on": "host",
+     "pattern": "\\.lambda-url\\.([a-z0-9-]+)\\.on\\.aws$",
+     "capture": {
+      "name": "region",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Lambda function URL host, which names its region"
+    }
+   ]
+  },
+  {
+   "id": "envoy",
+   "name": "Envoy",
+   "category": "proxy",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "(?i)^envoy$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Envoy answers with server: envoy"
+    },
+    {
+     "id": "x-envoy-upstream-service-time",
+     "on": "response_header",
+     "name": "x-envoy-upstream-service-time",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Envoy reports upstream time"
+    }
+   ]
+  },
+  {
+   "id": "kong",
+   "name": "Kong Gateway",
+   "category": "proxy",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "via",
+     "on": "response_header",
+     "name": "via",
+     "pattern": "(?i)\\bkong/([0-9][0-9.]*)",
+     "capture": {
+      "name": "version",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Kong adds via: kong/<version>"
+    },
+    {
+     "id": "kong-headers",
+     "on": "response_header_prefix",
+     "name": "x-kong-",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Kong's x-kong- latency headers"
+    }
+   ]
+  },
+  {
+   "id": "traefik",
+   "name": "Traefik",
+   "category": "proxy",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "traefik",
+     "on": "cookie",
+     "pattern": "^_TRAEFIK_BACKEND$",
+     "weight": 80,
+     "tier": "vendor",
+     "description": "Traefik's stickiness cookie"
+    }
+   ]
+  },
+  {
+   "id": "nginx",
+   "name": "nginx",
+   "category": "web_server",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "^nginx(?:/([0-9][0-9.]*))?",
+     "capture": {
+      "name": "version",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "nginx answers with server: nginx"
+    },
+    {
+     "id": "etag",
+     "on": "response_header",
+     "name": "etag",
+     "pattern": "^(W/)?\\\"[0-9a-f]{8}-[0-9a-f]+\\\"$",
+     "weight": 50,
+     "tier": "convention",
+     "description": "nginx's static ETag: mtime and length in hex"
+    },
+    {
+     "id": "error-page",
+     "on": "body",
+     "pattern": "<hr><center>nginx(?:/([0-9][0-9.]*))?</center>",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "capture": {
+      "name": "version",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "nginx's default error page"
+    }
+   ]
+  },
+  {
+   "id": "openresty",
+   "name": "OpenResty",
+   "category": "web_server",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "^openresty(?:/([0-9][0-9.]*))?",
+     "capture": {
+      "name": "version",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "OpenResty answers with server: openresty"
+    }
+   ]
+  },
+  {
+   "id": "apache",
+   "name": "Apache HTTP Server",
+   "category": "web_server",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "^Apache(?:/([0-9][0-9.]*))?",
+     "capture": {
+      "name": "version",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Apache answers with server: Apache"
+    },
+    {
+     "id": "etag",
+     "on": "response_header",
+     "name": "etag",
+     "pattern": "^(W/)?\\\"([0-9a-f]+-)?[0-9a-f]+-[0-9a-f]{12,14}(-gzip|-br)?\\\"$",
+     "weight": 50,
+     "tier": "convention",
+     "description": "Apache's FileETag: size and microsecond mtime in hex"
+    },
+    {
+     "id": "address",
+     "on": "body",
+     "pattern": "<address>Apache(?:/([0-9][0-9.]*))?",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "capture": {
+      "name": "version",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Apache's default error page signature"
+    }
+   ]
+  },
+  {
+   "id": "iis",
+   "name": "Microsoft IIS",
+   "category": "web_server",
+   "references": [],
+   "implies": [
+    "dotnet"
+   ],
+   "signals": [
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "^Microsoft-IIS/([0-9][0-9.]*)",
+     "capture": {
+      "name": "version",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "IIS answers with server: Microsoft-IIS/<version>"
+    },
+    {
+     "id": "etag",
+     "on": "response_header",
+     "name": "etag",
+     "pattern": "^\\\"[0-9a-f]{14,16}:0\\\"$",
+     "weight": 70,
+     "tier": "convention",
+     "description": "IIS's static ETag: FILETIME hex and :0"
+    }
+   ]
+  },
+  {
+   "id": "caddy",
+   "name": "Caddy",
+   "category": "web_server",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "^Caddy$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Caddy answers with server: Caddy"
+    }
+   ]
+  },
+  {
+   "id": "litespeed",
+   "name": "LiteSpeed",
+   "category": "web_server",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "(?i)^litespeed",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "LiteSpeed answers with server: LiteSpeed"
+    }
+   ]
+  },
+  {
+   "id": "gunicorn",
+   "name": "Gunicorn",
+   "category": "web_server",
+   "references": [],
+   "implies": [
+    "python"
+   ],
+   "signals": [
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "^gunicorn(?:/([0-9][0-9.]*))?",
+     "capture": {
+      "name": "version",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Gunicorn answers with server: gunicorn"
+    }
+   ]
+  },
+  {
+   "id": "uvicorn",
+   "name": "Uvicorn",
+   "category": "web_server",
+   "references": [],
+   "implies": [
+    "python"
+   ],
+   "signals": [
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "^uvicorn$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Uvicorn answers with server: uvicorn"
+    }
+   ]
+  },
+  {
+   "id": "werkzeug",
+   "name": "Werkzeug",
+   "category": "web_server",
+   "references": [],
+   "implies": [
+    "python"
+   ],
+   "signals": [
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "^Werkzeug/([0-9][0-9.]*)",
+     "capture": {
+      "name": "version",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Werkzeug's development server answers with server: Werkzeug/<version>"
+    },
+    {
+     "id": "not-found",
+     "on": "body",
+     "pattern": "The requested URL was not found on the server\\. If you entered the URL manually|The requested resource does not exist\\.",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "Werkzeug's default not-found page"
+    }
+   ]
+  },
+  {
+   "id": "kestrel",
+   "name": "Kestrel",
+   "category": "web_server",
+   "references": [],
+   "implies": [
+    "dotnet"
+   ],
+   "signals": [
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "^Kestrel$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "ASP.NET Core's Kestrel answers with server: Kestrel"
+    }
+   ]
+  },
+  {
+   "id": "jetty",
+   "name": "Jetty",
+   "category": "web_server",
+   "references": [],
+   "implies": [
+    "java"
+   ],
+   "signals": [
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "^Jetty",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Jetty answers with server: Jetty(...)"
+    }
+   ]
+  },
+  {
+   "id": "tomcat",
+   "name": "Apache Tomcat",
+   "category": "web_server",
+   "references": [],
+   "implies": [
+    "java"
+   ],
+   "signals": [
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "^Apache-Coyote",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Tomcat's connector answers with server: Apache-Coyote"
+    }
+   ]
+  },
+  {
+   "id": "cowboy",
+   "name": "Cowboy",
+   "category": "web_server",
+   "references": [],
+   "implies": [
+    "erlang"
+   ],
+   "signals": [
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "^Cowboy$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Erlang's Cowboy answers with server: Cowboy"
+    }
+   ]
+  },
+  {
+   "id": "gws",
+   "name": "Google Web Server",
+   "category": "web_server",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "^(gws|ESF|sffe)$",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "Google's own front ends answer with server: gws, ESF or sffe"
+    }
+   ]
+  },
+  {
+   "id": "amazon_s3_server",
+   "name": "Amazon S3",
+   "category": "web_server",
+   "references": [],
+   "implies": [
+    "amazon_s3"
+   ],
+   "signals": [
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "^AmazonS3$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "S3 answers with server: AmazonS3"
+    }
+   ]
+  },
+  {
+   "id": "nodejs",
+   "name": "Node.js",
+   "category": "language",
+   "references": [],
+   "implies": [],
+   "signals": []
+  },
+  {
+   "id": "python",
+   "name": "Python",
+   "category": "language",
+   "references": [],
+   "implies": [],
+   "signals": []
+  },
+  {
+   "id": "php",
+   "name": "PHP",
+   "category": "language",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "x-powered-by",
+     "on": "response_header",
+     "name": "x-powered-by",
+     "pattern": "^PHP/([0-9][0-9.]*)",
+     "capture": {
+      "name": "version",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "PHP announces x-powered-by: PHP/<version>"
+    },
+    {
+     "id": "phpsessid",
+     "on": "cookie",
+     "pattern": "^PHPSESSID$",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "PHP's default session cookie name"
+    },
+    {
+     "id": "php-file",
+     "on": "path",
+     "pattern": "\\.php$",
+     "weight": 80,
+     "tier": "convention",
+     "description": "A .php script path"
+    }
+   ]
+  },
+  {
+   "id": "ruby",
+   "name": "Ruby",
+   "category": "language",
+   "references": [],
+   "implies": [],
+   "signals": []
+  },
+  {
+   "id": "java",
+   "name": "Java",
+   "category": "language",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "jsessionid",
+     "on": "cookie",
+     "pattern": "^JSESSIONID$",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "The Java servlet session cookie name"
+    },
+    {
+     "id": "jsessionid-path",
+     "on": "path",
+     "pattern": ";jsessionid=",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "A servlet session ID in the path"
+    }
+   ]
+  },
+  {
+   "id": "dotnet",
+   "name": ".NET",
+   "category": "language",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "x-powered-by",
+     "on": "response_header",
+     "name": "x-powered-by",
+     "pattern": "^ASP\\.NET$",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "ASP.NET announces x-powered-by: ASP.NET"
+    }
+   ]
+  },
+  {
+   "id": "erlang",
+   "name": "Erlang/OTP",
+   "category": "language",
+   "references": [],
+   "implies": [],
+   "signals": []
+  },
+  {
+   "id": "elixir",
+   "name": "Elixir",
+   "category": "language",
+   "references": [],
+   "implies": [],
+   "signals": []
+  },
+  {
+   "id": "go",
+   "name": "Go",
+   "category": "language",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "not-found",
+     "on": "body",
+     "pattern": "^404 page not found\\n?$",
+     "mime": "^text/plain",
+     "weight": 80,
+     "tier": "convention",
+     "description": "Go net/http's default not-found body"
+    }
+   ]
+  },
+  {
+   "id": "nextjs",
+   "name": "Next.js",
+   "category": "framework",
+   "references": [
+    "https://nextjs.org/docs",
+    "https://github.com/vercel/next.js/blob/canary/packages/next/src/lib/constants.ts"
+   ],
+   "implies": [
+    "react"
+   ],
+   "signals": [
+    {
+     "id": "x-powered-by",
+     "on": "response_header",
+     "name": "x-powered-by",
+     "pattern": "^Next\\.js",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Next.js announces x-powered-by: Next.js"
+    },
+    {
+     "id": "x-nextjs-cache",
+     "on": "response_header",
+     "name": "x-nextjs-cache",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Next.js reports its ISR cache state"
+    },
+    {
+     "id": "x-nextjs-prerender",
+     "on": "response_header",
+     "name": "x-nextjs-prerender",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Next.js marks a prerendered response"
+    },
+    {
+     "id": "x-nextjs-stale-time",
+     "on": "response_header",
+     "name": "x-nextjs-stale-time",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Next.js App Router stale time header"
+    },
+    {
+     "id": "vary-rsc",
+     "on": "response_header",
+     "name": "vary",
+     "pattern": "(?i)next-router-state-tree",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Next.js App Router varies on its router headers"
+    },
+    {
+     "id": "next-router-state-tree",
+     "on": "request_header",
+     "name": "next-router-state-tree",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "The Next.js App Router sends its router state on navigation"
+    },
+    {
+     "id": "next-action",
+     "on": "request_header",
+     "name": "next-action",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Next.js Server Action call"
+    },
+    {
+     "id": "next-assets",
+     "on": "path",
+     "pattern": "^/_next/(static|image|data)/",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "A Next.js /_next/ asset, image or data path"
+    },
+    {
+     "id": "next-data",
+     "on": "body",
+     "pattern": "<script id=\\\"__NEXT_DATA__\\\"",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "The Pages Router's __NEXT_DATA__ script"
+    },
+    {
+     "id": "next-flight",
+     "on": "body",
+     "pattern": "self\\.__next_f\\.push",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "The App Router's streamed flight data"
+    },
+    {
+     "id": "next-version",
+     "on": "body",
+     "pattern": "window\\.next\\s*=\\s*\\{\\s*version\\s*:\\s*\\\"([0-9][0-9A-Za-z.+-]*)\\\"",
+     "mime": "javascript|ecmascript",
+     "capture": {
+      "name": "version",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "The Next.js client bundle sets window.next.version"
+    },
+    {
+     "id": "deployment-id",
+     "on": "response_header",
+     "name": "x-nextjs-deployment-id",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Next.js skew protection names the deployment"
+    },
+    {
+     "id": "middleware",
+     "on": "response_header",
+     "name": "x-middleware-rewrite",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "Next.js middleware rewrote the request"
+    },
+    {
+     "id": "postponed",
+     "on": "response_header",
+     "name": "x-nextjs-postponed",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Next.js partial prerendering header"
+    },
+    {
+     "id": "rsc",
+     "on": "request_header",
+     "name": "rsc",
+     "pattern": "^1$",
+     "weight": 60,
+     "tier": "convention",
+     "description": "The App Router fetches an RSC payload"
+    },
+    {
+     "id": "prefetch",
+     "on": "request_header",
+     "name": "next-router-prefetch",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "The App Router prefetches a route"
+    },
+    {
+     "id": "data",
+     "on": "request_header",
+     "name": "x-nextjs-data",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Pages Router data request"
+    },
+    {
+     "id": "not-found",
+     "on": "body",
+     "pattern": "This page could not be found\\.",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "weight": 70,
+     "tier": "vendor",
+     "description": "Next.js's built-in not-found page"
+    }
+   ]
+  },
+  {
+   "id": "nuxt",
+   "name": "Nuxt",
+   "category": "framework",
+   "references": [],
+   "implies": [
+    "vue"
+   ],
+   "signals": [
+    {
+     "id": "nuxt-assets",
+     "on": "path",
+     "pattern": "^/_nuxt/",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "A Nuxt /_nuxt/ asset path"
+    },
+    {
+     "id": "nuxt-payload",
+     "on": "path",
+     "pattern": "/_payload\\.json$",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "A Nuxt _payload.json data path"
+    },
+    {
+     "id": "nuxt-state",
+     "on": "body",
+     "pattern": "window\\.__NUXT__|id=\\\"__NUXT_DATA__\\\"",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Nuxt's serialized state"
+    },
+    {
+     "id": "island",
+     "on": "path",
+     "pattern": "^/__nuxt_island/",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "A Nuxt server island"
+    }
+   ]
+  },
+  {
+   "id": "remix",
+   "name": "Remix",
+   "category": "framework",
+   "references": [],
+   "implies": [
+    "react"
+   ],
+   "signals": [
+    {
+     "id": "remix-context",
+     "on": "body",
+     "pattern": "window\\.__remixContext",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Remix's serialized context"
+    },
+    {
+     "id": "remix-data",
+     "on": "query_key",
+     "name": "_data",
+     "weight": 60,
+     "tier": "convention",
+     "description": "A Remix loader data request"
+    }
+   ]
+  },
+  {
+   "id": "react_router",
+   "name": "React Router (framework mode)",
+   "category": "framework",
+   "references": [],
+   "implies": [
+    "react"
+   ],
+   "signals": [
+    {
+     "id": "rr-context",
+     "on": "body",
+     "pattern": "window\\.__reactRouterContext",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "React Router's serialized framework context"
+    },
+    {
+     "id": "rr-data",
+     "on": "path",
+     "pattern": "\\.data$",
+     "weight": 40,
+     "tier": "convention",
+     "description": "A React Router single-fetch .data request"
+    },
+    {
+     "id": "x-remix-response",
+     "on": "response_header",
+     "name": "x-remix-response",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "React Router single fetch marks its data responses"
+    }
+   ]
+  },
+  {
+   "id": "sveltekit",
+   "name": "SvelteKit",
+   "category": "framework",
+   "references": [],
+   "implies": [
+    "svelte"
+   ],
+   "signals": [
+    {
+     "id": "sk-data",
+     "on": "path",
+     "pattern": "/__data\\.json$",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "A SvelteKit __data.json request"
+    },
+    {
+     "id": "sk-immutable",
+     "on": "path",
+     "pattern": "^/_app/immutable/",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "SvelteKit's /_app/immutable/ assets"
+    },
+    {
+     "id": "sk-start",
+     "on": "body",
+     "pattern": "__sveltekit_[a-z0-9]+",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "SvelteKit's start script"
+    },
+    {
+     "id": "page",
+     "on": "response_header",
+     "name": "x-sveltekit-page",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "SvelteKit marks a page response"
+    },
+    {
+     "id": "action",
+     "on": "request_header",
+     "name": "x-sveltekit-action",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A SvelteKit form action request"
+    },
+    {
+     "id": "routeid",
+     "on": "response_header",
+     "name": "x-sveltekit-routeid",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "SvelteKit names a prerendered route"
+    }
+   ]
+  },
+  {
+   "id": "astro",
+   "name": "Astro",
+   "category": "framework",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "astro-assets",
+     "on": "path",
+     "pattern": "^/_astro/",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "Astro's /_astro/ assets"
+    },
+    {
+     "id": "astro-island",
+     "on": "body",
+     "pattern": "<astro-island\\b",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An Astro island element"
+    },
+    {
+     "id": "islands",
+     "on": "path",
+     "pattern": "^/_(server-islands|actions)/",
+     "weight": 80,
+     "tier": "vendor",
+     "description": "An Astro server island or action"
+    }
+   ]
+  },
+  {
+   "id": "gatsby",
+   "name": "Gatsby",
+   "category": "framework",
+   "references": [],
+   "implies": [
+    "react"
+   ],
+   "signals": [
+    {
+     "id": "gatsby-root",
+     "on": "body",
+     "pattern": "id=\\\"___gatsby\\\"",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Gatsby's root element"
+    },
+    {
+     "id": "page-data",
+     "on": "path",
+     "pattern": "^/page-data/.*\\.json$",
+     "weight": 80,
+     "tier": "vendor",
+     "description": "Gatsby's page-data JSON"
+    }
+   ]
+  },
+  {
+   "id": "express",
+   "name": "Express",
+   "category": "framework",
+   "references": [],
+   "implies": [
+    "nodejs"
+   ],
+   "signals": [
+    {
+     "id": "x-powered-by",
+     "on": "response_header",
+     "name": "x-powered-by",
+     "pattern": "^Express$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Express announces x-powered-by: Express"
+    },
+    {
+     "id": "connect-sid",
+     "on": "cookie",
+     "pattern": "^connect\\.sid$",
+     "weight": 80,
+     "tier": "vendor",
+     "description": "express-session's default cookie name"
+    },
+    {
+     "id": "cannot-get",
+     "on": "body",
+     "pattern": "<pre>Cannot (GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) /",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "Express's default not-found page"
+    },
+    {
+     "id": "etag",
+     "on": "response_header",
+     "name": "etag",
+     "pattern": "^W/\\\"[0-9a-f]+-[A-Za-z0-9+/]{27}\\\"$",
+     "weight": 60,
+     "tier": "convention",
+     "description": "The etag package's weak body ETag, Express's default"
+    }
+   ]
+  },
+  {
+   "id": "nestjs",
+   "name": "NestJS",
+   "category": "framework",
+   "references": [],
+   "implies": [
+    "nodejs"
+   ],
+   "signals": [
+    {
+     "id": "nest-404",
+     "on": "body",
+     "pattern": "\\\"message\\\"\\s*:\\s*\\\"Cannot (GET|POST|PUT|PATCH|DELETE) /[^\\\"]*\\\"\\s*,\\s*\\\"error\\\"\\s*:\\s*\\\"Not Found\\\"",
+     "mime": "json",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "NestJS's default not-found JSON"
+    }
+   ]
+  },
+  {
+   "id": "laravel",
+   "name": "Laravel",
+   "category": "framework",
+   "references": [
+    "https://laravel.com/docs/12.x/validation#validation-error-response-format"
+   ],
+   "implies": [
+    "php"
+   ],
+   "signals": [
+    {
+     "id": "laravel-session",
+     "on": "cookie",
+     "pattern": "^laravel_session$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Laravel's default session cookie name"
+    },
+    {
+     "id": "xsrf-token",
+     "on": "cookie",
+     "pattern": "^XSRF-TOKEN$",
+     "weight": 30,
+     "tier": "convention",
+     "description": "The XSRF-TOKEN cookie Laravel (and Angular clients) use"
+    },
+    {
+     "id": "x-inertia",
+     "on": "request_header",
+     "name": "x-inertia",
+     "weight": 50,
+     "tier": "convention",
+     "description": "An Inertia.js request, most often to Laravel"
+    },
+    {
+     "id": "livewire",
+     "on": "path",
+     "pattern": "^/livewire(-[0-9a-f]+)?/(update|message|livewire\\.js)",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "A Laravel Livewire endpoint"
+    },
+    {
+     "id": "laravel-11-session",
+     "on": "cookie",
+     "pattern": "^laravel-session$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Laravel 11+'s default session cookie name"
+    },
+    {
+     "id": "validation",
+     "on": "body",
+     "pattern": "^\\{\\s*\\\"message\\\"\\s*:\\s*\\\"[^\\\"]*\\\"\\s*,\\s*\\\"errors\\\"\\s*:\\s*\\{",
+     "mime": "json",
+     "weight": 70,
+     "tier": "convention",
+     "description": "Laravel's validation error body"
+    }
+   ]
+  },
+  {
+   "id": "symfony",
+   "name": "Symfony",
+   "category": "framework",
+   "references": [],
+   "implies": [
+    "php"
+   ],
+   "signals": [
+    {
+     "id": "x-debug-token",
+     "on": "response_header",
+     "name": "x-debug-token",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Symfony's profiler token header (debug mode)"
+    }
+   ]
+  },
+  {
+   "id": "wordpress",
+   "name": "WordPress",
+   "category": "cms",
+   "references": [],
+   "implies": [
+    "php"
+   ],
+   "signals": [
+    {
+     "id": "wp-paths",
+     "on": "path",
+     "pattern": "^/wp-(json|content|includes|admin)/",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "A WordPress path"
+    },
+    {
+     "id": "link-api",
+     "on": "response_header",
+     "name": "link",
+     "pattern": "api\\.w\\.org",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "WordPress links its REST API in a Link header"
+    },
+    {
+     "id": "x-pingback",
+     "on": "response_header",
+     "name": "x-pingback",
+     "weight": 80,
+     "tier": "vendor",
+     "description": "WordPress's pingback header"
+    }
+   ]
+  },
+  {
+   "id": "django",
+   "name": "Django",
+   "category": "framework",
+   "references": [],
+   "implies": [
+    "python"
+   ],
+   "signals": [
+    {
+     "id": "csrfmiddlewaretoken",
+     "on": "body",
+     "pattern": "name=\\\"csrfmiddlewaretoken\\\"",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Django's CSRF form field"
+    },
+    {
+     "id": "csrftoken",
+     "on": "cookie",
+     "pattern": "^csrftoken$",
+     "weight": 60,
+     "tier": "convention",
+     "description": "Django's default CSRF cookie name"
+    },
+    {
+     "id": "django-sessionid",
+     "on": "cookie",
+     "pattern": "^sessionid$",
+     "weight": 30,
+     "tier": "convention",
+     "description": "Django's default session cookie name"
+    },
+    {
+     "id": "x-csrftoken",
+     "on": "request_header",
+     "name": "x-csrftoken",
+     "weight": 50,
+     "tier": "convention",
+     "description": "A client sending Django's CSRF header"
+    },
+    {
+     "id": "debug-404",
+     "on": "body",
+     "pattern": "Using the URLconf defined in",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Django's DEBUG 404 page, a misconfiguration in production"
+    }
+   ]
+  },
+  {
+   "id": "django_rest_framework",
+   "name": "Django REST framework",
+   "category": "api",
+   "references": [],
+   "implies": [
+    "django"
+   ],
+   "signals": [
+    {
+     "id": "drf-detail",
+     "on": "body",
+     "pattern": "^\\{\\s*\\\"detail\\\"\\s*:\\s*\\\"(Not found\\.|Authentication credentials were not provided\\.|You do not have permission to perform this action\\.)\\\"\\s*\\}",
+     "mime": "json",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Django REST framework error body"
+    },
+    {
+     "id": "drf-page",
+     "on": "body",
+     "pattern": "^\\{\\s*\\\"count\\\"\\s*:\\s*\\d+\\s*,\\s*\\\"next\\\"\\s*:\\s*(null|\\\"[^\\\"]*\\\")\\s*,\\s*\\\"previous\\\"\\s*:",
+     "mime": "json",
+     "weight": 60,
+     "tier": "convention",
+     "description": "A DRF page: count, next, previous, results"
+    }
+   ]
+  },
+  {
+   "id": "fastapi",
+   "name": "FastAPI",
+   "category": "framework",
+   "references": [],
+   "implies": [
+    "python"
+   ],
+   "signals": [
+    {
+     "id": "validation",
+     "on": "body",
+     "pattern": "^\\{\\s*\\\"detail\\\"\\s*:\\s*\\[\\s*\\{\\s*\\\"(type|loc)\\\"\\s*:",
+     "mime": "json",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "FastAPI's validation error body"
+    },
+    {
+     "id": "docs",
+     "on": "path",
+     "pattern": "^/(docs|redoc|openapi\\.json)$",
+     "weight": 40,
+     "tier": "convention",
+     "description": "FastAPI's default docs and schema paths"
+    }
+   ]
+  },
+  {
+   "id": "flask",
+   "name": "Flask",
+   "category": "framework",
+   "references": [],
+   "implies": [
+    "python"
+   ],
+   "signals": []
+  },
+  {
+   "id": "rails",
+   "name": "Ruby on Rails",
+   "category": "framework",
+   "references": [
+    "https://api.rubyonrails.org/classes/ActionDispatch/ServerTiming.html"
+   ],
+   "implies": [
+    "ruby"
+   ],
+   "signals": [
+    {
+     "id": "csrf-param",
+     "on": "body",
+     "pattern": "<meta name=\\\"csrf-param\\\" content=\\\"authenticity_token\\\"",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Rails's csrf-param meta tag"
+    },
+    {
+     "id": "x-runtime",
+     "on": "response_header",
+     "name": "x-runtime",
+     "weight": 60,
+     "tier": "convention",
+     "description": "Rack's x-runtime timing header, set by Rails by default"
+    },
+    {
+     "id": "rails-session",
+     "on": "cookie",
+     "pattern": "^_[a-z0-9_]+_session$",
+     "weight": 30,
+     "tier": "convention",
+     "description": "Rails's default _<app>_session cookie name"
+    },
+    {
+     "id": "server-timing",
+     "on": "response_header",
+     "name": "server-timing",
+     "pattern": "\\b(sql\\.active_record|process_action\\.action_controller|render_template\\.action_view)\\b",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Rails's ServerTiming middleware names ActiveSupport events"
+    },
+    {
+     "id": "etag",
+     "on": "response_header",
+     "name": "etag",
+     "pattern": "^W/\\\"[0-9a-f]{32}\\\"$",
+     "weight": 30,
+     "tier": "convention",
+     "description": "Rack::ETag's weak 32-hex ETag (shared with others)"
+    },
+    {
+     "id": "404",
+     "on": "body",
+     "pattern": "The page you were looking for doesn.t exist",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "weight": 80,
+     "tier": "vendor",
+     "description": "Rails's default public/404.html"
+    }
+   ]
+  },
+  {
+   "id": "hotwire_turbo",
+   "name": "Hotwire Turbo",
+   "category": "frontend",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "turbo-stream",
+     "on": "response_header",
+     "name": "content-type",
+     "pattern": "^text/vnd\\.turbo-stream\\.html",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Turbo Stream response"
+    },
+    {
+     "id": "turbo-frame",
+     "on": "request_header",
+     "name": "turbo-frame",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Turbo Frame request"
+    }
+   ]
+  },
+  {
+   "id": "aspnet",
+   "name": "ASP.NET",
+   "category": "framework",
+   "references": [],
+   "implies": [
+    "dotnet"
+   ],
+   "signals": [
+    {
+     "id": "x-aspnet-version",
+     "on": "response_header",
+     "name": "x-aspnet-version",
+     "pattern": "^([0-9][0-9.]*)",
+     "capture": {
+      "name": "version",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "ASP.NET names its version"
+    },
+    {
+     "id": "x-aspnetmvc-version",
+     "on": "response_header",
+     "name": "x-aspnetmvc-version",
+     "pattern": "^([0-9][0-9.]*)",
+     "capture": {
+      "name": "version",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "ASP.NET MVC names its version"
+    },
+    {
+     "id": "aspnet-session",
+     "on": "cookie",
+     "pattern": "^ASP\\.NET_SessionId$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "ASP.NET's session cookie name"
+    },
+    {
+     "id": "aspnetcore",
+     "on": "cookie",
+     "pattern": "^\\.AspNetCore\\.",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An ASP.NET Core cookie name"
+    },
+    {
+     "id": "viewstate",
+     "on": "body",
+     "pattern": "name=\\\"__VIEWSTATE\\\"",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "ASP.NET Web Forms view state"
+    },
+    {
+     "id": "verification-token",
+     "on": "body",
+     "pattern": "name=\\\"__RequestVerificationToken\\\"",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "ASP.NET's anti-forgery form field"
+    },
+    {
+     "id": "problem-details",
+     "on": "body",
+     "pattern": "\\\"traceId\\\"\\s*:\\s*\\\"00-[0-9a-f]{32}-[0-9a-f]{16}-0[01]\\\"",
+     "mime": "json",
+     "weight": 80,
+     "tier": "vendor",
+     "description": "ASP.NET Core ProblemDetails with a W3C traceId"
+    },
+    {
+     "id": "problem-type",
+     "on": "body",
+     "pattern": "\\\"type\\\"\\s*:\\s*\\\"https://tools\\.ietf\\.org/html/rfc(9110|7231)#section-",
+     "mime": "json",
+     "weight": 80,
+     "tier": "vendor",
+     "description": "ASP.NET Core ProblemDetails type URL"
+    }
+   ]
+  },
+  {
+   "id": "blazor",
+   "name": "Blazor",
+   "category": "framework",
+   "references": [],
+   "implies": [
+    "aspnet"
+   ],
+   "signals": [
+    {
+     "id": "blazor",
+     "on": "path",
+     "pattern": "^/_blazor\\b",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Blazor Server's /_blazor hub"
+    },
+    {
+     "id": "framework",
+     "on": "path",
+     "pattern": "^/_framework/blazor\\.",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Blazor's framework scripts"
+    }
+   ]
+  },
+  {
+   "id": "spring",
+   "name": "Spring Boot",
+   "category": "framework",
+   "references": [],
+   "implies": [
+    "java"
+   ],
+   "signals": [
+    {
+     "id": "whitelabel",
+     "on": "body",
+     "pattern": "Whitelabel Error Page",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Spring Boot's default error page"
+    },
+    {
+     "id": "error-json",
+     "on": "body",
+     "pattern": "^\\{\\s*\\\"timestamp\\\"\\s*:\\s*\\\"[^\\\"]+\\\"\\s*,\\s*\\\"status\\\"\\s*:\\s*\\d{3}\\s*,\\s*\\\"error\\\"\\s*:\\s*\\\"[^\\\"]*\\\"\\s*,\\s*(\\\"message\\\"\\s*:\\s*\\\"[^\\\"]*\\\"\\s*,\\s*)?\\\"path\\\"\\s*:",
+     "mime": "json",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "Spring Boot's default error JSON"
+    },
+    {
+     "id": "etag",
+     "on": "response_header",
+     "name": "etag",
+     "pattern": "^(W/)?\\\"0[0-9a-f]{32}\\\"$",
+     "weight": 60,
+     "tier": "convention",
+     "description": "Spring's ShallowEtagHeaderFilter ETag: 0 then 32 hex"
+    }
+   ]
+  },
+  {
+   "id": "phoenix",
+   "name": "Phoenix",
+   "category": "framework",
+   "references": [],
+   "implies": [
+    "elixir"
+   ],
+   "signals": [
+    {
+     "id": "live-socket",
+     "on": "path",
+     "pattern": "^/live/websocket$",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "Phoenix LiveView's socket path"
+    },
+    {
+     "id": "phx",
+     "on": "body",
+     "pattern": "data-phx-(main|session|static)",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Phoenix LiveView markup"
+    }
+   ]
+  },
+  {
+   "id": "htmx",
+   "name": "htmx",
+   "category": "frontend",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "hx-request",
+     "on": "request_header",
+     "name": "hx-request",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An htmx request"
+    }
+   ]
+  },
+  {
+   "id": "react",
+   "name": "React",
+   "category": "frontend",
+   "references": [],
+   "implies": [],
+   "signals": []
+  },
+  {
+   "id": "vue",
+   "name": "Vue",
+   "category": "frontend",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "vue-scoped",
+     "on": "body",
+     "pattern": "data-v-[0-9a-f]{8}",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "weight": 60,
+     "tier": "convention",
+     "description": "Vue scoped style attributes"
+    }
+   ]
+  },
+  {
+   "id": "svelte",
+   "name": "Svelte",
+   "category": "frontend",
+   "references": [],
+   "implies": [],
+   "signals": []
+  },
+  {
+   "id": "angular",
+   "name": "Angular",
+   "category": "frontend",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "ng-version",
+     "on": "body",
+     "pattern": "ng-version=\\\"([0-9][0-9.]*)\\\"",
+     "mime": "^(text/html|application/xhtml\\+xml)",
+     "capture": {
+      "name": "version",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Angular stamps ng-version on its root"
+    }
+   ]
+  },
+  {
+   "id": "graphql",
+   "name": "GraphQL",
+   "category": "api",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "graphql",
+     "on": "path",
+     "pattern": "(?i)/graphql\\b",
+     "weight": 70,
+     "tier": "convention",
+     "description": "A /graphql endpoint path"
+    },
+    {
+     "id": "query-body",
+     "on": "request_body",
+     "pattern": "^\\s*\\{.*\\\"query\\\"\\s*:\\s*\\\"\\s*(query|mutation|subscription|fragment|\\{)",
+     "weight": 90,
+     "tier": "convention",
+     "description": "A request body holding a GraphQL document"
+    },
+    {
+     "id": "content-type",
+     "on": "response_header",
+     "name": "content-type",
+     "pattern": "^application/graphql-response\\+json",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A GraphQL-over-HTTP response type"
+    }
+   ]
+  },
+  {
+   "id": "apollo",
+   "name": "Apollo GraphQL",
+   "category": "api",
+   "references": [],
+   "implies": [
+    "graphql"
+   ],
+   "signals": [
+    {
+     "id": "client-name",
+     "on": "request_header",
+     "name": "apollographql-client-name",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Apollo Client identifies itself"
+    },
+    {
+     "id": "require-preflight",
+     "on": "request_header",
+     "name": "apollo-require-preflight",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Apollo Server's CSRF prevention header"
+    },
+    {
+     "id": "persisted",
+     "on": "request_body",
+     "pattern": "\\\"persistedQuery\\\"\\s*:\\s*\\{\\s*\\\"version\\\"",
+     "weight": 80,
+     "tier": "convention",
+     "description": "An Automatic Persisted Query"
+    },
+    {
+     "id": "codes",
+     "on": "body",
+     "pattern": "\\\"code\\\"\\s*:\\s*\\\"(GRAPHQL_PARSE_FAILED|GRAPHQL_VALIDATION_FAILED|PERSISTED_QUERY_NOT_FOUND|PERSISTED_QUERY_NOT_SUPPORTED|OPERATION_RESOLUTION_FAILURE)\\\"",
+     "mime": "json",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "An Apollo Server error code"
+    }
+   ]
+  },
+  {
+   "id": "hasura",
+   "name": "Hasura",
+   "category": "api",
+   "references": [],
+   "implies": [
+    "graphql",
+    "postgresql"
+   ],
+   "signals": [
+    {
+     "id": "hasura-headers",
+     "on": "response_header_prefix",
+     "name": "x-hasura-",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Hasura's x-hasura- headers"
+    },
+    {
+     "id": "hasura-request",
+     "on": "request_header_prefix",
+     "name": "x-hasura-",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "A client sending Hasura's x-hasura- headers"
+    },
+    {
+     "id": "hasura-app",
+     "on": "host",
+     "pattern": "\\.hasura\\.app$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Hasura Cloud host"
+    },
+    {
+     "id": "errors",
+     "on": "body",
+     "pattern": "\\\"code\\\"\\s*:\\s*\\\"(validation-failed|parse-failed|constraint-violation|access-denied)\\\"",
+     "mime": "json",
+     "weight": 70,
+     "tier": "convention",
+     "description": "A Hasura error code"
+    }
+   ]
+  },
+  {
+   "id": "aws_appsync",
+   "name": "AWS AppSync",
+   "category": "api",
+   "references": [],
+   "implies": [
+    "graphql",
+    "aws"
+   ],
+   "signals": [
+    {
+     "id": "appsync",
+     "on": "host",
+     "pattern": "\\.appsync-api\\.([a-z0-9-]+)\\.amazonaws\\.com$",
+     "capture": {
+      "name": "region",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An AppSync GraphQL host, which names its region"
+    }
+   ]
+  },
+  {
+   "id": "postgrest",
+   "name": "PostgREST",
+   "category": "api",
+   "references": [],
+   "implies": [
+    "postgresql"
+   ],
+   "signals": [
+    {
+     "id": "pgrst",
+     "on": "body",
+     "pattern": "\\\"code\\\"\\s*:\\s*\\\"PGRST\\d{3}\\\"",
+     "mime": "json",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A PostgREST error code"
+    },
+    {
+     "id": "content-profile",
+     "on": "response_header",
+     "name": "content-profile",
+     "weight": 80,
+     "tier": "vendor",
+     "description": "PostgREST names the schema it answered from"
+    },
+    {
+     "id": "prefer",
+     "on": "request_header",
+     "name": "prefer",
+     "pattern": "(?i)return=(minimal|representation|headers-only)|count=(exact|planned|estimated)",
+     "weight": 60,
+     "tier": "convention",
+     "description": "A client asking PostgREST for a return mode"
+    }
+   ]
+  },
+  {
+   "id": "trpc",
+   "name": "tRPC",
+   "category": "api",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "trpc",
+     "on": "path",
+     "pattern": "/trpc/[A-Za-z0-9_.,]+$",
+     "weight": 80,
+     "tier": "convention",
+     "description": "A tRPC procedure path"
+    }
+   ]
+  },
+  {
+   "id": "grpc_web",
+   "name": "gRPC-Web",
+   "category": "api",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "x-grpc-web",
+     "on": "request_header",
+     "name": "x-grpc-web",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A gRPC-Web client header"
+    }
+   ]
+  },
+  {
+   "id": "connect_rpc",
+   "name": "Connect RPC",
+   "category": "api",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "connect-protocol-version",
+     "on": "request_header",
+     "name": "connect-protocol-version",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Connect protocol client header"
+    }
+   ]
+  },
+  {
+   "id": "openapi",
+   "name": "OpenAPI document",
+   "category": "api",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "spec",
+     "on": "path",
+     "pattern": "/(openapi|swagger)(\\.json|\\.ya?ml)?$|/swagger-ui/|/api-docs\\b",
+     "weight": 80,
+     "tier": "convention",
+     "description": "A published OpenAPI or Swagger document path"
+    }
+   ]
+  },
+  {
+   "id": "postgresql",
+   "name": "PostgreSQL",
+   "category": "baas",
+   "references": [],
+   "implies": [],
+   "signals": []
+  },
+  {
+   "id": "supabase",
+   "name": "Supabase",
+   "category": "baas",
+   "references": [
+    "https://supabase.com/docs",
+    "https://github.com/supabase/supabase-js"
+   ],
+   "implies": [
+    "postgrest",
+    "postgresql"
+   ],
+   "signals": [
+    {
+     "id": "supabase-co",
+     "on": "host",
+     "pattern": "^([a-z0-9]{20})\\.supabase\\.(co|in)$",
+     "capture": {
+      "name": "project",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Supabase project host, which names its project reference"
+    },
+    {
+     "id": "x-client-info",
+     "on": "request_header",
+     "name": "x-client-info",
+     "pattern": "supabase-(?:js|flutter|swift|py|kt|csharp)(?:-[a-z]+)?/([0-9][0-9A-Za-z.+-]*)",
+     "capture": {
+      "name": "client_version",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "supabase-js identifies itself and its version"
+    },
+    {
+     "id": "supabase-paths",
+     "on": "path",
+     "pattern": "^/(rest|auth|storage|realtime|functions|graphql)/v1/",
+     "weight": 50,
+     "tier": "convention",
+     "description": "A Supabase service path"
+    },
+    {
+     "id": "sb-headers",
+     "on": "response_header_prefix",
+     "name": "sb-",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "Supabase's sb- gateway headers"
+    },
+    {
+     "id": "auth-cookie",
+     "on": "cookie",
+     "pattern": "^sb-[a-z0-9]{20}-auth-token(\\.\\d+)?$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Supabase's sb-<project>-auth-token cookie name"
+    },
+    {
+     "id": "api-version",
+     "on": "request_header",
+     "name": "x-supabase-api-version",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Supabase Auth's API version header"
+    },
+    {
+     "id": "accept-profile",
+     "on": "request_header",
+     "name": "accept-profile",
+     "weight": 60,
+     "tier": "convention",
+     "description": "PostgREST's schema selection header"
+    },
+    {
+     "id": "supabase-any",
+     "on": "host",
+     "pattern": "(^|\\.)supabase\\.(co|in)$",
+     "weight": 60,
+     "tier": "vendor",
+     "description": "A supabase.co host, also as a policy wildcard"
+    },
+    {
+     "id": "bundle-url",
+     "on": "body",
+     "pattern": "https://([a-z0-9]{20})\\.supabase\\.co\\b",
+     "mime": "javascript|ecmascript",
+     "capture": {
+      "name": "project",
+      "group": 1
+     },
+     "weight": 90,
+     "tier": "vendor",
+     "description": "A bundle names a Supabase project URL"
+    }
+   ]
+  },
+  {
+   "id": "firebase",
+   "name": "Firebase",
+   "category": "baas",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "firestore",
+     "on": "host",
+     "pattern": "^firestore\\.googleapis\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "The Cloud Firestore API host"
+    },
+    {
+     "id": "rtdb",
+     "on": "host",
+     "pattern": "\\.(firebaseio\\.com|firebasedatabase\\.app)$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Realtime Database host"
+    },
+    {
+     "id": "storage",
+     "on": "host",
+     "pattern": "^firebasestorage\\.googleapis\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "The Firebase Storage API host"
+    },
+    {
+     "id": "installations",
+     "on": "host",
+     "pattern": "^(firebaseinstallations|firebaseremoteconfig|fcmregistrations)\\.googleapis\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Firebase installations, Remote Config or FCM host"
+    },
+    {
+     "id": "auth-handler",
+     "on": "path",
+     "pattern": "^/__/(auth|firebase)/",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "Firebase Hosting's reserved /__/ path"
+    },
+    {
+     "id": "config",
+     "on": "body",
+     "pattern": "authDomain\\s*:\\s*\\\"([a-z0-9-]+)\\.firebaseapp\\.com\\\"",
+     "mime": "javascript|ecmascript",
+     "capture": {
+      "name": "project",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A bundle holds a Firebase config"
+    }
+   ]
+  },
+  {
+   "id": "firebase_auth",
+   "name": "Firebase Authentication",
+   "category": "auth",
+   "references": [],
+   "implies": [
+    "firebase"
+   ],
+   "signals": [
+    {
+     "id": "identity",
+     "on": "host",
+     "pattern": "^(identitytoolkit|securetoken)\\.googleapis\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Firebase Authentication's token hosts"
+    }
+   ]
+  },
+  {
+   "id": "convex",
+   "name": "Convex",
+   "category": "baas",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "convex",
+     "on": "host",
+     "pattern": "\\.convex\\.(cloud|site)$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Convex deployment host"
+    }
+   ]
+  },
+  {
+   "id": "appwrite",
+   "name": "Appwrite",
+   "category": "baas",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "x-appwrite-project",
+     "on": "request_header",
+     "name": "x-appwrite-project",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An Appwrite client header"
+    },
+    {
+     "id": "appwrite",
+     "on": "host",
+     "pattern": "\\.appwrite\\.io$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An Appwrite Cloud host"
+    }
+   ]
+  },
+  {
+   "id": "pocketbase",
+   "name": "PocketBase",
+   "category": "baas",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "collections",
+     "on": "path",
+     "pattern": "^/api/collections/[^/]+/records",
+     "weight": 70,
+     "tier": "convention",
+     "description": "PocketBase's records API"
+    }
+   ]
+  },
+  {
+   "id": "aws_cognito",
+   "name": "Amazon Cognito",
+   "category": "auth",
+   "references": [],
+   "implies": [
+    "aws"
+   ],
+   "signals": [
+    {
+     "id": "cognito-idp",
+     "on": "host",
+     "pattern": "^cognito-(idp|identity)\\.([a-z0-9-]+)\\.amazonaws\\.com$",
+     "capture": {
+      "name": "region",
+      "group": 2
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Cognito API host, which names its region"
+    },
+    {
+     "id": "hosted-ui",
+     "on": "host",
+     "pattern": "\\.auth\\.[a-z0-9-]+\\.amazoncognito\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Cognito hosted UI domain"
+    },
+    {
+     "id": "pool",
+     "on": "body",
+     "pattern": "\\\"?(?:aws_user_pools_id|userPoolId|UserPoolId)\\\"?\\s*:\\s*\\\"([a-z]{2}-[a-z]+-\\d)_[A-Za-z0-9]+\\\"",
+     "mime": "javascript|ecmascript",
+     "capture": {
+      "name": "region",
+      "group": 1
+     },
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A bundle names a Cognito user pool, whose prefix is its region"
+    }
+   ]
+  },
+  {
+   "id": "clerk",
+   "name": "Clerk",
+   "category": "auth",
+   "references": [
+    "https://github.com/clerk/javascript/blob/main/packages/backend/src/constants.ts"
+   ],
+   "implies": [],
+   "signals": [
+    {
+     "id": "clerk",
+     "on": "host",
+     "pattern": "(^|\\.)clerk\\.|\\.clerk\\.accounts\\.dev$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Clerk Frontend API host"
+    },
+    {
+     "id": "client-uat",
+     "on": "cookie",
+     "pattern": "^__client_uat(_[A-Za-z0-9-]+)?$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Clerk's __client_uat cookie name"
+    },
+    {
+     "id": "more",
+     "on": "cookie",
+     "pattern": "^(__clerk_db_jwt|__clerk_handshake|__refresh)(_[A-Za-z0-9-]+)?$",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "More Clerk cookie names"
+    }
+   ]
+  },
+  {
+   "id": "auth0",
+   "name": "Auth0",
+   "category": "auth",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "auth0",
+     "on": "host",
+     "pattern": "\\.auth0\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An Auth0 tenant host"
+    },
+    {
+     "id": "spa",
+     "on": "cookie",
+     "pattern": "^auth0\\..+\\.is\\.authenticated$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "The Auth0 SPA SDK's cookie name"
+    }
+   ]
+  },
+  {
+   "id": "okta",
+   "name": "Okta",
+   "category": "auth",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "okta",
+     "on": "host",
+     "pattern": "\\.(okta|oktapreview)\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An Okta org host"
+    }
+   ]
+  },
+  {
+   "id": "authjs",
+   "name": "Auth.js (NextAuth)",
+   "category": "auth",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "routes",
+     "on": "path",
+     "pattern": "^/api/auth/(session|csrf|providers|callback|signin|signout)\\b",
+     "weight": 80,
+     "tier": "vendor",
+     "description": "Auth.js's default routes"
+    },
+    {
+     "id": "cookies",
+     "on": "cookie",
+     "pattern": "^(__(Secure|Host)-)?(next-auth|authjs)\\.",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An Auth.js cookie name"
+    }
+   ]
+  },
+  {
+   "id": "stytch",
+   "name": "Stytch",
+   "category": "auth",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "stytch",
+     "on": "host",
+     "pattern": "(^|\\.)stytch\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Stytch API host"
+    }
+   ]
+  },
+  {
+   "id": "workos",
+   "name": "WorkOS",
+   "category": "auth",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "workos",
+     "on": "host",
+     "pattern": "(^|\\.)workos\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A WorkOS API host"
+    }
+   ]
+  },
+  {
+   "id": "google_identity",
+   "name": "Google Identity Services",
+   "category": "auth",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "gsi",
+     "on": "host",
+     "pattern": "^accounts\\.google\\.com$",
+     "weight": 70,
+     "tier": "vendor",
+     "description": "Google's account sign-in host"
+    }
+   ]
+  },
+  {
+   "id": "amazon_s3",
+   "name": "Amazon S3",
+   "category": "storage",
+   "references": [],
+   "implies": [
+    "aws"
+   ],
+   "signals": [
+    {
+     "id": "s3",
+     "on": "host",
+     "pattern": "(^|\\.)s3([.-][a-z0-9-]+)?\\.amazonaws\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An S3 endpoint host"
+    },
+    {
+     "id": "x-amz-request-id",
+     "on": "response_header",
+     "name": "x-amz-request-id",
+     "weight": 70,
+     "tier": "vendor",
+     "description": "S3's request ID header"
+    },
+    {
+     "id": "error",
+     "on": "body",
+     "pattern": "<Error>\\s*<Code>(NoSuchKey|NoSuchBucket|AccessDenied)</Code>",
+     "mime": "xml",
+     "weight": 80,
+     "tier": "convention",
+     "description": "An S3 XML error"
+    }
+   ]
+  },
+  {
+   "id": "google_cloud_storage",
+   "name": "Google Cloud Storage",
+   "category": "storage",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "x-goog-generation",
+     "on": "response_header",
+     "name": "x-goog-generation",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Cloud Storage names the object generation"
+    },
+    {
+     "id": "x-guploader-uploadid",
+     "on": "response_header",
+     "name": "x-guploader-uploadid",
+     "weight": 80,
+     "tier": "vendor",
+     "description": "Google's upload server ID header"
+    },
+    {
+     "id": "gcs",
+     "on": "host",
+     "pattern": "^storage\\.googleapis\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "The Cloud Storage host"
+    }
+   ]
+  },
+  {
+   "id": "azure_blob",
+   "name": "Azure Blob Storage",
+   "category": "storage",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "x-ms-blob-type",
+     "on": "response_header",
+     "name": "x-ms-blob-type",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Azure Blob Storage names the blob type"
+    },
+    {
+     "id": "blob",
+     "on": "host",
+     "pattern": "\\.blob\\.core\\.windows\\.net$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An Azure Blob host"
+    },
+    {
+     "id": "not-found",
+     "on": "body",
+     "pattern": "<Code>BlobNotFound</Code>",
+     "mime": "xml",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An Azure Blob error"
+    }
+   ]
+  },
+  {
+   "id": "cloudflare_r2",
+   "name": "Cloudflare R2",
+   "category": "storage",
+   "references": [],
+   "implies": [
+    "cloudflare"
+   ],
+   "signals": [
+    {
+     "id": "r2",
+     "on": "host",
+     "pattern": "\\.r2\\.(dev|cloudflarestorage\\.com)$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An R2 bucket host"
+    }
+   ]
+  },
+  {
+   "id": "cloudinary",
+   "name": "Cloudinary",
+   "category": "storage",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "res",
+     "on": "host",
+     "pattern": "^res\\.cloudinary\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Cloudinary's delivery host"
+    }
+   ]
+  },
+  {
+   "id": "imgix",
+   "name": "imgix",
+   "category": "storage",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "imgix",
+     "on": "host",
+     "pattern": "\\.imgix\\.net$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An imgix source host"
+    }
+   ]
+  },
+  {
+   "id": "uploadthing",
+   "name": "UploadThing",
+   "category": "storage",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "utfs",
+     "on": "host",
+     "pattern": "(^|\\.)(utfs\\.io|ufs\\.sh)$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "UploadThing's file hosts"
+    }
+   ]
+  },
+  {
+   "id": "shopify",
+   "name": "Shopify",
+   "category": "cms",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "x-shopid",
+     "on": "response_header",
+     "name": "x-shopid",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Shopify names the shop"
+    },
+    {
+     "id": "x-shopify-stage",
+     "on": "response_header",
+     "name": "x-shopify-stage",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Shopify's stage header"
+    },
+    {
+     "id": "cdn",
+     "on": "host",
+     "pattern": "^cdn\\.shopify\\.com$",
+     "weight": 80,
+     "tier": "vendor",
+     "description": "Shopify's CDN host"
+    },
+    {
+     "id": "shopify",
+     "on": "cookie",
+     "pattern": "^_shopify_(y|s|sa_t|sa_p)$",
+     "weight": 80,
+     "tier": "vendor",
+     "description": "A Shopify cookie name"
+    }
+   ]
+  },
+  {
+   "id": "contentful",
+   "name": "Contentful",
+   "category": "cms",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "contentful",
+     "on": "host",
+     "pattern": "^(cdn|preview|graphql)\\.contentful\\.com$|^images\\.ctfassets\\.net$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Contentful delivery host"
+    }
+   ]
+  },
+  {
+   "id": "sanity",
+   "name": "Sanity",
+   "category": "cms",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "sanity",
+     "on": "host",
+     "pattern": "\\.api\\.sanity\\.io$|^cdn\\.sanity\\.io$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Sanity API or CDN host"
+    }
+   ]
+  },
+  {
+   "id": "strapi",
+   "name": "Strapi",
+   "category": "cms",
+   "references": [],
+   "implies": [
+    "nodejs"
+   ],
+   "signals": [
+    {
+     "id": "x-powered-by",
+     "on": "response_header",
+     "name": "x-powered-by",
+     "pattern": "(?i)strapi",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Strapi announces x-powered-by: Strapi"
+    }
+   ]
+  },
+  {
+   "id": "ghost",
+   "name": "Ghost",
+   "category": "cms",
+   "references": [],
+   "implies": [
+    "nodejs"
+   ],
+   "signals": [
+    {
+     "id": "x-ghost-cache-status",
+     "on": "response_header",
+     "name": "x-ghost-cache-status",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Ghost(Pro)'s cache header"
+    }
+   ]
+  },
+  {
+   "id": "wix",
+   "name": "Wix",
+   "category": "cms",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "x-wix-request-id",
+     "on": "response_header",
+     "name": "x-wix-request-id",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Wix's request ID header"
+    },
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "^Pepyaka",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Wix answers with server: Pepyaka"
+    }
+   ]
+  },
+  {
+   "id": "squarespace",
+   "name": "Squarespace",
+   "category": "cms",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "static",
+     "on": "host",
+     "pattern": "^static1\\.squarespace\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Squarespace's static host"
+    },
+    {
+     "id": "server",
+     "on": "response_header",
+     "name": "server",
+     "pattern": "(?i)^squarespace",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Squarespace answers with server: Squarespace"
+    }
+   ]
+  },
+  {
+   "id": "webflow",
+   "name": "Webflow",
+   "category": "cms",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "assets",
+     "on": "host",
+     "pattern": "(^|\\.)website-files\\.com$|\\.webflow\\.io$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Webflow asset or site host"
+    }
+   ]
+  },
+  {
+   "id": "socket_io",
+   "name": "Socket.IO",
+   "category": "realtime",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "socket-io",
+     "on": "path",
+     "pattern": "^/socket\\.io/",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "Socket.IO's transport path"
+    },
+    {
+     "id": "eio",
+     "on": "query_key",
+     "name": "eio",
+     "weight": 80,
+     "tier": "vendor",
+     "description": "Engine.IO's protocol version parameter"
+    }
+   ]
+  },
+  {
+   "id": "pusher",
+   "name": "Pusher",
+   "category": "realtime",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "pusher",
+     "on": "host",
+     "pattern": "(^|\\.)pusher(app)?\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Pusher Channels host"
+    }
+   ]
+  },
+  {
+   "id": "ably",
+   "name": "Ably",
+   "category": "realtime",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "ably",
+     "on": "host",
+     "pattern": "\\.ably(-realtime)?\\.(io|com|net)$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An Ably realtime host"
+    }
+   ]
+  },
+  {
+   "id": "phoenix_channels",
+   "name": "Phoenix Channels",
+   "category": "realtime",
+   "references": [],
+   "implies": [
+    "phoenix"
+   ],
+   "signals": [
+    {
+     "id": "vsn",
+     "on": "query_key",
+     "name": "vsn",
+     "weight": 70,
+     "tier": "convention",
+     "description": "Phoenix's socket serializer version parameter"
+    }
+   ]
+  },
+  {
+   "id": "liveblocks",
+   "name": "Liveblocks",
+   "category": "realtime",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "liveblocks",
+     "on": "host",
+     "pattern": "\\.liveblocks\\.io$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Liveblocks host"
+    }
+   ]
+  },
+  {
+   "id": "algolia",
+   "name": "Algolia",
+   "category": "search",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "algolia",
+     "on": "host",
+     "pattern": "\\.(algolia\\.net|algolianet\\.com|algolia\\.io)$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An Algolia search host"
+    }
+   ]
+  },
+  {
+   "id": "meilisearch",
+   "name": "Meilisearch Cloud",
+   "category": "search",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "meili",
+     "on": "host",
+     "pattern": "\\.meilisearch\\.io$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Meilisearch Cloud host"
+    }
+   ]
+  },
+  {
+   "id": "typesense",
+   "name": "Typesense Cloud",
+   "category": "search",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "typesense",
+     "on": "host",
+     "pattern": "\\.typesense\\.net$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Typesense Cloud host"
+    }
+   ]
+  },
+  {
+   "id": "stripe",
+   "name": "Stripe",
+   "category": "payments",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "stripe",
+     "on": "host",
+     "pattern": "^(js|api|m|r|q|hooks|checkout|merchant-ui-api)\\.stripe\\.(com|network)$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Stripe host"
+    },
+    {
+     "id": "key",
+     "on": "body",
+     "pattern": "\\bpk_(live|test)_[A-Za-z0-9]{20,}",
+     "mime": "javascript|ecmascript",
+     "capture": {
+      "name": "mode",
+      "group": 1
+     },
+     "weight": 90,
+     "tier": "vendor",
+     "description": "A bundle holds a Stripe publishable key; only live or test is kept"
+    },
+    {
+     "id": "cookies",
+     "on": "cookie",
+     "pattern": "^__stripe_(mid|sid)$",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "Stripe.js's cookie names"
+    }
+   ]
+  },
+  {
+   "id": "paypal",
+   "name": "PayPal",
+   "category": "payments",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "paypal",
+     "on": "host",
+     "pattern": "(^|\\.)paypal(objects)?\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A PayPal host"
+    }
+   ]
+  },
+  {
+   "id": "braintree",
+   "name": "Braintree",
+   "category": "payments",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "braintree",
+     "on": "host",
+     "pattern": "(^|\\.)braintree(gateway|-api)\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Braintree host"
+    }
+   ]
+  },
+  {
+   "id": "paddle",
+   "name": "Paddle",
+   "category": "payments",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "paddle",
+     "on": "host",
+     "pattern": "(^|\\.)paddle\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Paddle host"
+    }
+   ]
+  },
+  {
+   "id": "lemonsqueezy",
+   "name": "Lemon Squeezy",
+   "category": "payments",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "lemon",
+     "on": "host",
+     "pattern": "(^|\\.)lemonsqueezy\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Lemon Squeezy host"
+    }
+   ]
+  },
+  {
+   "id": "sentry",
+   "name": "Sentry",
+   "category": "monitoring",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "ingest",
+     "on": "host",
+     "pattern": "(^|\\.)ingest\\.([a-z]{2}\\.)?sentry\\.io$|^sentry\\.io$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Sentry ingest host"
+    },
+    {
+     "id": "sentry-trace",
+     "on": "request_header",
+     "name": "sentry-trace",
+     "weight": 70,
+     "tier": "vendor",
+     "description": "The page sends Sentry trace context, so that backend is traced too"
+    },
+    {
+     "id": "baggage",
+     "on": "request_header",
+     "name": "baggage",
+     "pattern": "sentry-",
+     "weight": 60,
+     "tier": "vendor",
+     "description": "Sentry's trace baggage on a request"
+    },
+    {
+     "id": "sdk",
+     "on": "body",
+     "pattern": "sentry\\.javascript\\.(browser|react|nextjs|vue|svelte|sveltekit|angular|remix|nuxt|astro|solid|ember|gatsby)",
+     "mime": "javascript|ecmascript",
+     "capture": {
+      "name": "sdk",
+      "group": 1
+     },
+     "weight": 90,
+     "tier": "vendor",
+     "description": "A Sentry JavaScript SDK names itself"
+    },
+    {
+     "id": "dsn",
+     "on": "body",
+     "pattern": "https://[0-9a-f]{32}@o\\d+\\.ingest\\.(?:[a-z]{2}\\.)?sentry\\.io/\\d+",
+     "mime": "javascript|ecmascript",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A bundle holds a Sentry DSN"
+    }
+   ]
+  },
+  {
+   "id": "datadog",
+   "name": "Datadog",
+   "category": "monitoring",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "intake",
+     "on": "host",
+     "pattern": "^browser-intake-[a-z0-9.-]*datadoghq\\.(com|eu)$|(^|\\.)datadoghq-browser-agent\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Datadog's browser intake host"
+    },
+    {
+     "id": "trace",
+     "on": "request_header",
+     "name": "x-datadog-trace-id",
+     "weight": 70,
+     "tier": "vendor",
+     "description": "The page sends Datadog trace context, so that backend is traced too"
+    }
+   ]
+  },
+  {
+   "id": "new_relic",
+   "name": "New Relic",
+   "category": "monitoring",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "bam",
+     "on": "host",
+     "pattern": "^(bam|bam-cell|js-agent)\\.(eu01\\.)?nr-data\\.net$|^js-agent\\.newrelic\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "New Relic's browser agent hosts"
+    },
+    {
+     "id": "newrelic",
+     "on": "request_header",
+     "name": "newrelic",
+     "weight": 70,
+     "tier": "vendor",
+     "description": "New Relic's distributed trace header"
+    }
+   ]
+  },
+  {
+   "id": "logrocket",
+   "name": "LogRocket",
+   "category": "monitoring",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "lr",
+     "on": "host",
+     "pattern": "(^|\\.)lr-(ingest|in|intake)\\.(io|com)$|^cdn\\.logr-ingest\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A LogRocket host"
+    }
+   ]
+  },
+  {
+   "id": "bugsnag",
+   "name": "Bugsnag",
+   "category": "monitoring",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "bugsnag",
+     "on": "host",
+     "pattern": "^(sessions|notify)\\.bugsnag\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Bugsnag host"
+    }
+   ]
+  },
+  {
+   "id": "rollbar",
+   "name": "Rollbar",
+   "category": "monitoring",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "rollbar",
+     "on": "host",
+     "pattern": "^api\\.rollbar\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Rollbar's API host"
+    }
+   ]
+  },
+  {
+   "id": "honeycomb",
+   "name": "Honeycomb",
+   "category": "monitoring",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "honeycomb",
+     "on": "host",
+     "pattern": "^api\\.(eu1\\.)?honeycomb\\.io$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Honeycomb's API host"
+    }
+   ]
+  },
+  {
+   "id": "opentelemetry",
+   "name": "W3C Trace Context",
+   "category": "monitoring",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "traceparent",
+     "on": "request_header",
+     "name": "traceparent",
+     "weight": 40,
+     "tier": "convention",
+     "description": "The page propagates W3C traceparent, so some backend is traced"
+    }
+   ]
+  },
+  {
+   "id": "highlight",
+   "name": "Highlight",
+   "category": "monitoring",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "highlight",
+     "on": "host",
+     "pattern": "(^|\\.)highlight\\.io$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Highlight host"
+    }
+   ]
+  },
+  {
+   "id": "google_analytics",
+   "name": "Google Analytics",
+   "category": "analytics",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "ga",
+     "on": "host",
+     "pattern": "^(www|region\\d+|ssl)\\.google-analytics\\.com$|^analytics\\.google\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Google Analytics collection host"
+    },
+    {
+     "id": "collect",
+     "on": "path",
+     "pattern": "^/g/collect$",
+     "weight": 60,
+     "tier": "convention",
+     "description": "GA4's /g/collect path"
+    }
+   ]
+  },
+  {
+   "id": "google_tag_manager",
+   "name": "Google Tag Manager",
+   "category": "analytics",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "gtm",
+     "on": "host",
+     "pattern": "^www\\.googletagmanager\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Google Tag Manager's host"
+    }
+   ]
+  },
+  {
+   "id": "segment",
+   "name": "Segment",
+   "category": "analytics",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "segment",
+     "on": "host",
+     "pattern": "^(cdn|api)\\.segment\\.(com|io)$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Segment host"
+    }
+   ]
+  },
+  {
+   "id": "posthog",
+   "name": "PostHog",
+   "category": "analytics",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "posthog",
+     "on": "host",
+     "pattern": "(^|\\.)posthog\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A PostHog host"
+    }
+   ]
+  },
+  {
+   "id": "amplitude",
+   "name": "Amplitude",
+   "category": "analytics",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "amplitude",
+     "on": "host",
+     "pattern": "(^|\\.)amplitude\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An Amplitude host"
+    }
+   ]
+  },
+  {
+   "id": "mixpanel",
+   "name": "Mixpanel",
+   "category": "analytics",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "mixpanel",
+     "on": "host",
+     "pattern": "(^|\\.)mixpanel\\.com$|^cdn\\.mxpnl\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Mixpanel host"
+    }
+   ]
+  },
+  {
+   "id": "plausible",
+   "name": "Plausible",
+   "category": "analytics",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "plausible",
+     "on": "host",
+     "pattern": "^plausible\\.io$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Plausible's host"
+    }
+   ]
+  },
+  {
+   "id": "hotjar",
+   "name": "Hotjar",
+   "category": "analytics",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "hotjar",
+     "on": "host",
+     "pattern": "(^|\\.)hotjar\\.(com|io)$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Hotjar host"
+    }
+   ]
+  },
+  {
+   "id": "microsoft_clarity",
+   "name": "Microsoft Clarity",
+   "category": "analytics",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "clarity",
+     "on": "host",
+     "pattern": "(^|\\.)clarity\\.ms$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Clarity host"
+    }
+   ]
+  },
+  {
+   "id": "heap",
+   "name": "Heap",
+   "category": "analytics",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "heap",
+     "on": "host",
+     "pattern": "(^|\\.)heap(analytics|-api)\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Heap host"
+    }
+   ]
+  },
+  {
+   "id": "fullstory",
+   "name": "FullStory",
+   "category": "analytics",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "fullstory",
+     "on": "host",
+     "pattern": "(^|\\.)fullstory\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A FullStory host"
+    }
+   ]
+  },
+  {
+   "id": "vercel_analytics",
+   "name": "Vercel Web Analytics",
+   "category": "analytics",
+   "references": [],
+   "implies": [
+    "vercel"
+   ],
+   "signals": [
+    {
+     "id": "insights",
+     "on": "path",
+     "pattern": "^/_vercel/(insights|speed-insights)/",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Vercel Analytics collection path"
+    }
+   ]
+  },
+  {
+   "id": "intercom",
+   "name": "Intercom",
+   "category": "analytics",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "intercom",
+     "on": "host",
+     "pattern": "(^|\\.)intercom(cdn)?\\.(io|com)$|(^|\\.)intercomassets\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An Intercom host"
+    }
+   ]
+  },
+  {
+   "id": "launchdarkly",
+   "name": "LaunchDarkly",
+   "category": "feature_flags",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "ld",
+     "on": "host",
+     "pattern": "(^|\\.)launchdarkly\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A LaunchDarkly host"
+    }
+   ]
+  },
+  {
+   "id": "statsig",
+   "name": "Statsig",
+   "category": "feature_flags",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "statsig",
+     "on": "host",
+     "pattern": "(^|\\.)statsig(api)?\\.(com|net)$|(^|\\.)featureassets\\.org$|(^|\\.)prodregistryv2\\.org$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Statsig host"
+    }
+   ]
+  },
+  {
+   "id": "optimizely",
+   "name": "Optimizely",
+   "category": "feature_flags",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "optimizely",
+     "on": "host",
+     "pattern": "(^|\\.)optimizely\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An Optimizely host"
+    }
+   ]
+  },
+  {
+   "id": "growthbook",
+   "name": "GrowthBook",
+   "category": "feature_flags",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "growthbook",
+     "on": "host",
+     "pattern": "(^|\\.)growthbook\\.io$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A GrowthBook host"
+    }
+   ]
+  },
+  {
+   "id": "split",
+   "name": "Split",
+   "category": "feature_flags",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "split",
+     "on": "host",
+     "pattern": "(^|\\.)split\\.io$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Split host"
+    }
+   ]
+  },
+  {
+   "id": "cloudflare_turnstile",
+   "name": "Cloudflare Turnstile",
+   "category": "bot_protection",
+   "references": [],
+   "implies": [
+    "cloudflare"
+   ],
+   "signals": [
+    {
+     "id": "challenges",
+     "on": "host",
+     "pattern": "^challenges\\.cloudflare\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Cloudflare's challenge host"
+    }
+   ]
+  },
+  {
+   "id": "cloudflare_bot_management",
+   "name": "Cloudflare Bot Management",
+   "category": "bot_protection",
+   "references": [],
+   "implies": [
+    "cloudflare"
+   ],
+   "signals": [
+    {
+     "id": "cf-bm",
+     "on": "cookie",
+     "pattern": "^(__cf_bm|cf_clearance)$",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "Cloudflare's bot management cookie names"
+    }
+   ]
+  },
+  {
+   "id": "recaptcha",
+   "name": "Google reCAPTCHA",
+   "category": "bot_protection",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "recaptcha",
+     "on": "path",
+     "pattern": "^/recaptcha/(api|enterprise)",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "reCAPTCHA's script and API path"
+    }
+   ]
+  },
+  {
+   "id": "hcaptcha",
+   "name": "hCaptcha",
+   "category": "bot_protection",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "hcaptcha",
+     "on": "host",
+     "pattern": "(^|\\.)hcaptcha\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An hCaptcha host"
+    }
+   ]
+  },
+  {
+   "id": "akamai_bot_manager",
+   "name": "Akamai Bot Manager",
+   "category": "bot_protection",
+   "references": [],
+   "implies": [
+    "akamai"
+   ],
+   "signals": [
+    {
+     "id": "abck",
+     "on": "cookie",
+     "pattern": "^(_abck|bm_sz|bm_sv|ak_bmsc|bm_mi)$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Akamai Bot Manager's cookie names"
+    }
+   ]
+  },
+  {
+   "id": "datadome",
+   "name": "DataDome",
+   "category": "bot_protection",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "datadome",
+     "on": "host",
+     "pattern": "(^|\\.)datadome\\.co$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A DataDome host"
+    },
+    {
+     "id": "datadome-cookie",
+     "on": "cookie",
+     "pattern": "^datadome$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "DataDome's cookie name"
+    }
+   ]
+  },
+  {
+   "id": "human_security",
+   "name": "HUMAN (PerimeterX)",
+   "category": "bot_protection",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "px",
+     "on": "cookie",
+     "pattern": "^(_px[a-z0-9]*|_pxhd|_pxvid|pxcts)$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A HUMAN/PerimeterX cookie name"
+    },
+    {
+     "id": "px-hosts",
+     "on": "host",
+     "pattern": "(^|\\.)(px-cloud\\.net|perimeterx\\.net|px-cdn\\.net)$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A HUMAN/PerimeterX host"
+    }
+   ]
+  },
+  {
+   "id": "kasada",
+   "name": "Kasada",
+   "category": "bot_protection",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "kpsdk",
+     "on": "request_header_prefix",
+     "name": "x-kpsdk-",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Kasada's x-kpsdk- headers"
+    },
+    {
+     "id": "kpsdk-response",
+     "on": "response_header_prefix",
+     "name": "x-kpsdk-",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Kasada's x-kpsdk- response headers"
+    }
+   ]
+  },
+  {
+   "id": "imperva",
+   "name": "Imperva",
+   "category": "bot_protection",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "incap",
+     "on": "cookie",
+     "pattern": "^(incap_ses_|visid_incap_|nlbi_)",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An Imperva Incapsula cookie name"
+    },
+    {
+     "id": "x-iinfo",
+     "on": "response_header",
+     "name": "x-iinfo",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Imperva's x-iinfo header"
+    },
+    {
+     "id": "x-cdn",
+     "on": "response_header",
+     "name": "x-cdn",
+     "pattern": "(?i)imperva|incapsula",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "Imperva names itself in x-cdn"
+    }
+   ]
+  },
+  {
+   "id": "aws_waf",
+   "name": "AWS WAF",
+   "category": "bot_protection",
+   "references": [],
+   "implies": [
+    "aws"
+   ],
+   "signals": [
+    {
+     "id": "aws-waf",
+     "on": "cookie",
+     "pattern": "^aws-waf-token$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "AWS WAF's challenge token cookie name"
+    },
+    {
+     "id": "captcha",
+     "on": "host",
+     "pattern": "\\.(captcha|token)\\.awswaf\\.com$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An AWS WAF challenge host"
+    }
+   ]
+  },
+  {
+   "id": "arkose",
+   "name": "Arkose Labs",
+   "category": "bot_protection",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "arkose",
+     "on": "host",
+     "pattern": "(^|\\.)(arkoselabs\\.com|funcaptcha\\.com)$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An Arkose Labs host"
+    }
+   ]
+  },
+  {
+   "id": "friendly_captcha",
+   "name": "Friendly Captcha",
+   "category": "bot_protection",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "fc",
+     "on": "host",
+     "pattern": "(^|\\.)friendlycaptcha\\.(com|eu)$",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "A Friendly Captcha host"
+    }
+   ]
+  },
+  {
+   "id": "inertia",
+   "name": "Inertia.js",
+   "category": "frontend",
+   "references": [
+    "https://inertiajs.com/the-protocol"
+   ],
+   "implies": [],
+   "signals": [
+    {
+     "id": "x-inertia",
+     "on": "response_header",
+     "name": "x-inertia",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An Inertia page response"
+    },
+    {
+     "id": "x-inertia-request",
+     "on": "request_header",
+     "name": "x-inertia",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "An Inertia request"
+    },
+    {
+     "id": "version",
+     "on": "request_header",
+     "name": "x-inertia-version",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "An Inertia asset version header"
+    }
+   ]
+  },
+  {
+   "id": "fastify",
+   "name": "Fastify",
+   "category": "framework",
+   "references": [],
+   "implies": [
+    "nodejs"
+   ],
+   "signals": [
+    {
+     "id": "not-found",
+     "on": "body",
+     "pattern": "\\\"message\\\"\\s*:\\s*\\\"Route [A-Z]+:/[^\\\"]* not found\\\"",
+     "mime": "json",
+     "weight": 90,
+     "tier": "vendor",
+     "description": "Fastify's default not-found JSON"
+    }
+   ]
+  },
+  {
+   "id": "prisma",
+   "name": "Prisma",
+   "category": "baas",
+   "references": [
+    "https://www.prisma.io/docs/orm/reference/error-reference"
+   ],
+   "implies": [],
+   "signals": [
+    {
+     "id": "code",
+     "on": "body",
+     "pattern": "\\\"code\\\"\\s*:\\s*\\\"P[1-6]\\d{3}\\\"",
+     "mime": "json",
+     "weight": 60,
+     "tier": "convention",
+     "description": "A forwarded Prisma error code"
+    }
+   ]
+  },
+  {
+   "id": "f5_bigip",
+   "name": "F5 BIG-IP",
+   "category": "proxy",
+   "references": [],
+   "implies": [],
+   "signals": [
+    {
+     "id": "bigip",
+     "on": "cookie",
+     "pattern": "^BIGipServer",
+     "weight": 100,
+     "tier": "vendor",
+     "description": "F5 BIG-IP's persistence cookie name"
+    }
+   ]
+  }
+ ]
+}

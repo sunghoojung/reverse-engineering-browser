@@ -1,0 +1,73 @@
+/* Backend screen (backend_map.js). Colors are the app's semantic tokens, so
+ * both themes follow app.css. */
+#screen-backend:not([hidden]) { display: flex; flex-direction: column; }
+.backend-map-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--chrome); }
+.backend-map-tabs { display: flex; }
+.backend-map-party { display: flex; gap: 2px; }
+.backend-map-status { margin-left: auto; min-width: 0; color: var(--muted); font: 11px/1.4 var(--sans); overflow-wrap: anywhere; }
+.backend-map-status[data-kind="partial"], .backend-map-status[data-kind="limited"] { color: var(--state-warn); }
+.backend-map-notice { padding: 7px 12px; border-bottom: 1px solid var(--line); color: var(--muted); background: var(--panel-2); font: 11px/1.5 var(--sans); }
+.backend-map-notice[hidden] { display: none; }
+.backend-map-notice[data-kind="error"] { color: var(--state-danger); }
+.backend-map-notice[data-kind="partial"], .backend-map-notice[data-kind="limited"] { color: var(--state-warn); }
+.backend-map-panel { flex: 1 1 0; min-height: 0; display: grid; grid-template-columns: minmax(220px, 34%) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+.backend-map-panel[hidden] { display: none; }
+.backend-map-list { min-width: 0; min-height: 0; overflow: auto; border-right: 1px solid var(--line); background: var(--panel); padding: 4px 0 12px; }
+.backend-map-detail { min-width: 0; min-height: 0; overflow: auto; background: var(--bg); }
+.backend-map-detail:focus-visible, .backend-map-table-wrap:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.backend-map-group-title { margin: 10px 12px 4px; color: var(--faint); font: 600 10px/1.4 var(--sans); letter-spacing: .04em; text-transform: uppercase; }
+.backend-map-item { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; align-items: center; padding: 6px 12px; border: 0; border-left: 2px solid transparent; background: transparent; color: var(--text); text-align: left; font: 12px/1.35 var(--sans); }
+.backend-map-item:hover { background: var(--panel-2); }
+.backend-map-item:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.backend-map-item[aria-pressed="true"] { background: var(--accent-soft); border-left-color: var(--accent); }
+.backend-map-item[data-basis="implied"] .backend-map-name { color: var(--muted); }
+.backend-map-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.backend-map-confidence { color: var(--muted); font: 11px var(--mono); font-variant-numeric: tabular-nums; }
+.backend-map-meta { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.backend-map-badge, .backend-map-side, .backend-map-token { max-width: 100%; padding: 0 5px; border: 1px solid var(--line); border-radius: 3px; color: var(--muted); font: 10px/16px var(--sans); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.backend-map-token { color: var(--kind-script); font-family: var(--mono); }
+.backend-map-category { color: var(--faint); font: 10px/16px var(--sans); }
+.backend-map-badge[data-basis="marker"] { color: var(--state-ok); border-color: currentColor; }
+.backend-map-badge[data-basis="declared"] { color: var(--state-warn); border-style: dashed; }
+.backend-map-party[hidden] { display: none; }
+.backend-map-signal-host[data-declared="true"] .backend-map-host-name { color: var(--muted); }
+.backend-map-item[data-declared="true"] .backend-map-name { color: var(--muted); font-style: italic; }
+.backend-map-detail-body { padding: 12px 16px 24px; max-width: 980px; }
+.backend-map-detail-title { margin: 0 0 8px; font: 600 14px/1.4 var(--sans); overflow-wrap: anywhere; }
+.backend-map-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 12px; margin: 0 0 12px; font: 12px/1.45 var(--sans); }
+.backend-map-facts dt { color: var(--faint); }
+.backend-map-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.backend-map-signal { margin: 0 0 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }
+.backend-map-signal[data-tier="convention"] { border-style: dashed; }
+.backend-map-signal-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.backend-map-signal-on { font: 600 11px/1.4 var(--sans); }
+.backend-map-weight { color: var(--faint); font: 10px var(--mono); }
+.backend-map-signal-text { margin: 4px 0 6px; color: var(--muted); font: 12px/1.45 var(--sans); }
+.backend-map-signal-host { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 2px 0; }
+.backend-map-host-name { min-width: 0; font: 11px var(--mono); overflow-wrap: anywhere; }
+.backend-map-count { color: var(--faint); font: 11px var(--mono); }
+/* Row IDs are long; a citation wraps rather than hide its hop and header. */
+.backend-map-evidence { max-width: 100%; min-height: 22px; padding: 2px 6px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel-2); color: var(--accent); font: 11px/1.35 var(--mono); text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.backend-map-routes .backend-map-evidence { white-space: nowrap; overflow-wrap: normal; }
+.backend-map-evidence:hover { border-color: var(--accent); }
+.backend-map-evidence:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+.backend-map-none { margin: 12px; color: var(--muted); font: 12px/1.5 var(--sans); }
+.backend-map-refs { color: var(--faint); font: 11px/1.5 var(--sans); overflow-wrap: anywhere; }
+.backend-map-table-wrap { max-width: 100%; overflow: auto; border: 1px solid var(--line); border-radius: 4px; }
+.backend-map-routes { width: 100%; border-collapse: collapse; font: 11px/1.4 var(--sans); }
+.backend-map-routes th { position: sticky; top: 0; padding: 4px 8px; background: var(--panel-2); color: var(--faint); font-weight: 600; text-align: left; white-space: nowrap; }
+.backend-map-routes td { padding: 3px 8px; border-top: 1px solid var(--line-soft); vertical-align: top; }
+.backend-map-template { font-family: var(--mono); overflow-wrap: anywhere; }
+.backend-map-method { font-family: var(--mono); color: var(--method-safe); }
+.backend-map-number { text-align: right; font-variant-numeric: tabular-nums; }
+.backend-map-about { padding: 6px 12px; border-top: 1px solid var(--line); background: var(--chrome); color: var(--muted); font: 11px/1.5 var(--sans); }
+.backend-map-about summary { cursor: pointer; }
+.backend-map-about summary:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+.backend-map-about ul { margin: 4px 0 0; padding-left: 18px; max-height: 120px; overflow: auto; }
+@media (max-width: 900px) {
+  .backend-map-panel { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, 40%) minmax(0, 1fr); }
+  .backend-map-list { border-right: 0; border-bottom: 1px solid var(--line); }
+}
+/* Route cells keep their text whole; the table scrolls inside its frame. */
+.backend-map-routes td { white-space: nowrap; }
+.backend-map-routes .backend-map-template { overflow-wrap: normal; }

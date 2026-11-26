@@ -2978,6 +2978,329 @@
         }
       }
     },
+    "/api/backend-map": {
+      "get": {
+        "operationId": "get_backend_map",
+        "summary": "Guess the site's backend from its captured traffic",
+        "description": "Reads every Traffic row the query selects, through the same exact joins as export_requests_har, and matches each hop against a reviewed, embedded rule set (reb-backend-signatures-v1) to guess the backend: hosting and platform, CDN and edge, proxy, web server, framework, language, API layer, backend services, auth, storage and third-party services (protocol/http-api.md, Backend map). It sends no request and looks nothing up; remote addresses are attributed only with the provider ranges bundled with it. Each technology gives a capped additive confidence, whether it was seen directly or only implied, its hosts and party, and every signal with the first and last row and hop it matched, the header name for a header signal. Credential header values and cookie values never reach a rule, cookies match by name only, and a rule returns at most a short plain token it captured, such as an edge region or a version. hosts lists each host's role, methods, statuses, protocols, remote addresses with their ranges, route templates with identifiers collapsed and query names without values, and static asset prefixes. coverage says how many entries had response headers, URLs and bodies, so a Metadata-only session reads as such. Takes the get_requests filter and sort parameters with no page, or rows. Repeated reads of an unchanged session reuse the map.",
+        "tags": [
+          "events"
+        ],
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "parameters": [
+          {
+            "name": "through",
+            "in": "query",
+            "required": false,
+            "description": "Only requests indexed before this count. A previous answer's through keeps later pages to the same requests; their fields stay live, so while capture runs a sort or filter on a changing field (status, size, type) can move rows across pages. Capture order does not move.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "description": "Sort key. size is the transferred size, start the first record's time, initiator and protocol their labels. Rows that tie, and rows without a value, keep capture order; rows without a value sort last.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "capture",
+                "name",
+                "status",
+                "type",
+                "method",
+                "time",
+                "size",
+                "initiator",
+                "start",
+                "protocol"
+              ],
+              "default": "capture"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "description": "asc or desc.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "default": "asc"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "description": "Traffic filter text, case-insensitive. Words match method, path and status; -word excludes them. domain:host (* is a wildcard), method:, status-code:, larger-than:N (k and m are 1,024 multiples, of the transferred size) and mime-type: match exactly, and a leading - negates them.",
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "tab_id",
+            "in": "query",
+            "required": false,
+            "description": "Requests of one browser tab, extension:<id> for the extension traffic one extension made, or unattributed for requests without an owner.",
+            "schema": {
+              "type": "string",
+              "pattern": "^(unattributed|[1-9][0-9]{0,9}|extension:[a-p]{32})$"
+            }
+          },
+          {
+            "name": "domain",
+            "in": "query",
+            "required": false,
+            "description": "Requests whose domain, as listed in facets.domains, is exactly this.",
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "description": "Requests of one Traffic resource type.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "xhr",
+                "doc",
+                "css",
+                "js",
+                "font",
+                "img",
+                "media",
+                "socket",
+                "wasm",
+                "other"
+              ]
+            }
+          },
+          {
+            "name": "named",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated session:process:sequence root events, at most 64, that match q as well: researcher names live in the UI, not the index.",
+            "schema": {
+              "type": "string",
+              "maxLength": 4096
+            }
+          },
+          {
+            "name": "failed",
+            "in": "query",
+            "required": false,
+            "description": "1 keeps only failed requests.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "invert",
+            "in": "query",
+            "required": false,
+            "description": "1 keeps the requests the q filter does not match; without q it has no effect.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "hide_internal",
+            "in": "query",
+            "required": false,
+            "description": "1 hides browser-internal requests (browser_internal) and counts them in hidden_internal.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "third_party",
+            "in": "query",
+            "required": false,
+            "description": "1 keeps requests whose site differs from their tab's latest top-level document at their start. Sites are the last two host labels, or three after a short second level and a two-letter country code; there is no public suffix list.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "from_ns",
+            "in": "query",
+            "required": false,
+            "description": "Keeps requests whose last record is at or after this monotonic time.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "to_ns",
+            "in": "query",
+            "required": false,
+            "description": "Keeps requests whose first record is at or before this monotonic time.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "rows",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated Traffic row IDs to map, instead of a selection.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The backend map.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackendMap"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "ETag unchanged; no response body.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid, duplicate or unknown query parameter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "A rows ID names no request row.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Two request exports or backend maps are already running. Retry when one ends.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Folds new records into the request index as get_requests does, then reads each selected row's byte range of the event store and the artifacts it names, one row at a time. It shares the two export permits with export_requests_har. Stored events and artifacts are never changed, no network request is made and no browser mutation is requested.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/backend_map.rs",
+              "symbol": "add_row"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/request_har.rs",
+              "symbol": "visit_rows"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
     "/api/requests/har": {
       "get": {
         "operationId": "export_requests_har",
@@ -11868,6 +12191,980 @@
   },
   "components": {
     "schemas": {
+      "BackendMap": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "An offline guess at a site's backend from the session's captured traffic (protocol/http-api.md, Backend map).",
+        "required": [
+          "format",
+          "mode",
+          "network_requests",
+          "rule_set",
+          "first_party",
+          "technologies",
+          "hosts",
+          "declared_hosts",
+          "coverage",
+          "limitations"
+        ],
+        "properties": {
+          "format": {
+            "const": "reb-backend-map-v1"
+          },
+          "mode": {
+            "const": "offline-passive"
+          },
+          "network_requests": {
+            "const": 0
+          },
+          "rule_set": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "format",
+              "reviewed",
+              "sha256",
+              "technologies",
+              "signals",
+              "ranges"
+            ],
+            "properties": {
+              "format": {
+                "const": "reb-backend-signatures-v1"
+              },
+              "reviewed": {
+                "type": "string"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "technologies": {
+                "type": "integer"
+              },
+              "signals": {
+                "type": "integer"
+              },
+              "ranges": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "format",
+                  "retrieved",
+                  "sha256",
+                  "providers"
+                ],
+                "properties": {
+                  "format": {
+                    "const": "reb-backend-ip-ranges-v1"
+                  },
+                  "retrieved": {
+                    "type": "string"
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "providers": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "id",
+                        "name",
+                        "prefixes"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "prefixes": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "first_party": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "sites",
+              "from_documents"
+            ],
+            "properties": {
+              "sites": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "from_documents": {
+                "type": "boolean",
+                "description": "False when no top-level document was captured and the busiest host stands in."
+              }
+            }
+          },
+          "technologies": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "name",
+                "category",
+                "category_label",
+                "confidence",
+                "basis",
+                "strongest_tier",
+                "implied_by",
+                "party",
+                "scope",
+                "hosts",
+                "details",
+                "signals",
+                "references"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "category": {
+                  "type": "string"
+                },
+                "category_label": {
+                  "type": "string"
+                },
+                "confidence": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100,
+                  "description": "The sum of the distinct signals' reviewed weights, capped at 100; an implied technology takes the confidence of what implies it. Not a probability."
+                },
+                "basis": {
+                  "enum": [
+                    "direct",
+                    "implied",
+                    "declared"
+                  ],
+                  "description": "direct: a signal matched traffic. implied: only a matched technology implies it. declared: only declared hosts or header names matched, which supports at most 40."
+                },
+                "strongest_tier": {
+                  "enum": [
+                    "vendor",
+                    "convention",
+                    null
+                  ]
+                },
+                "implied_by": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "party": {
+                  "enum": [
+                    "first_party",
+                    "third_party",
+                    "mixed",
+                    "implied"
+                  ]
+                },
+                "scope": {
+                  "enum": [
+                    "site",
+                    "service",
+                    "vendor"
+                  ],
+                  "description": "site: seen on a first-party host, or implied by something that was. service: a backend service, API, auth, storage or third-party product seen only on its vendor's hosts. vendor: hosting, CDN, server or framework seen only on a third party's hosts, so it describes that vendor rather than the site. Technologies are listed site first, then service, then vendor."
+                },
+                "hosts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "details": {
+                  "type": "object",
+                  "description": "Short tokens a signal captured, such as edge_region, pop, region, version or project, with how often each was seen.",
+                  "additionalProperties": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "value",
+                        "count"
+                      ],
+                      "properties": {
+                        "value": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,47}$"
+                        },
+                        "count": {
+                          "type": "integer",
+                          "minimum": 1
+                        }
+                      }
+                    }
+                  }
+                },
+                "signals": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "signal_id",
+                      "on",
+                      "tier",
+                      "weight",
+                      "content",
+                      "description",
+                      "hosts"
+                    ],
+                    "properties": {
+                      "signal_id": {
+                        "type": "string"
+                      },
+                      "on": {
+                        "enum": [
+                          "response_header",
+                          "response_header_prefix",
+                          "request_header",
+                          "request_header_prefix",
+                          "cookie",
+                          "host",
+                          "path",
+                          "query_key",
+                          "body",
+                          "request_body",
+                          "remote_address",
+                          "protocol"
+                        ]
+                      },
+                      "tier": {
+                        "enum": [
+                          "vendor",
+                          "convention"
+                        ],
+                        "description": "vendor: a marker one product emits by design. convention: a name or shape products share or anyone can set."
+                      },
+                      "weight": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100
+                      },
+                      "content": {
+                        "type": "boolean",
+                        "description": "The signal reads a captured body."
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "hosts": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "host",
+                            "party",
+                            "declared",
+                            "count",
+                            "first"
+                          ],
+                          "properties": {
+                            "host": {
+                              "type": "string"
+                            },
+                            "party": {
+                              "enum": [
+                                "first_party",
+                                "third_party"
+                              ]
+                            },
+                            "declared": {
+                              "type": "boolean",
+                              "description": "True when the host or header name was only named by the traffic (a policy, Link or CORS header, or a URL in a body), not contacted or sent. first is then where it was named."
+                            },
+                            "count": {
+                              "type": "integer",
+                              "minimum": 1
+                            },
+                            "first": {
+                              "oneOf": [
+                                {
+                                  "type": "object",
+                                  "additionalProperties": false,
+                                  "required": [
+                                    "row_id",
+                                    "request_id",
+                                    "hop",
+                                    "time_ns"
+                                  ],
+                                  "properties": {
+                                    "row_id": {
+                                      "type": "string",
+                                      "description": "The Traffic row (get_requests id)."
+                                    },
+                                    "request_id": {
+                                      "type": "string",
+                                      "description": "The row's root request ID."
+                                    },
+                                    "hop": {
+                                      "type": "integer",
+                                      "minimum": 0
+                                    },
+                                    "time_ns": {
+                                      "type": "string",
+                                      "pattern": "^[0-9]+$",
+                                      "description": "The hop's start on the capture's monotonic clock."
+                                    },
+                                    "header": {
+                                      "type": "string",
+                                      "description": "The header name as captured, for a header signal."
+                                    }
+                                  }
+                                },
+                                {
+                                  "type": "object",
+                                  "additionalProperties": false,
+                                  "required": [
+                                    "artifact_id",
+                                    "sha256"
+                                  ],
+                                  "description": "A script artifact (Sources) instead of a Traffic row: scripts are kept as source artifacts, not response bodies.",
+                                  "properties": {
+                                    "artifact_id": {
+                                      "type": "string"
+                                    },
+                                    "sha256": {
+                                      "type": "string",
+                                      "pattern": "^[0-9a-f]{64}$"
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            "last": {
+                              "oneOf": [
+                                {
+                                  "type": "object",
+                                  "additionalProperties": false,
+                                  "required": [
+                                    "row_id",
+                                    "request_id",
+                                    "hop",
+                                    "time_ns"
+                                  ],
+                                  "properties": {
+                                    "row_id": {
+                                      "type": "string",
+                                      "description": "The Traffic row (get_requests id)."
+                                    },
+                                    "request_id": {
+                                      "type": "string",
+                                      "description": "The row's root request ID."
+                                    },
+                                    "hop": {
+                                      "type": "integer",
+                                      "minimum": 0
+                                    },
+                                    "time_ns": {
+                                      "type": "string",
+                                      "pattern": "^[0-9]+$",
+                                      "description": "The hop's start on the capture's monotonic clock."
+                                    },
+                                    "header": {
+                                      "type": "string",
+                                      "description": "The header name as captured, for a header signal."
+                                    }
+                                  }
+                                },
+                                {
+                                  "type": "object",
+                                  "additionalProperties": false,
+                                  "required": [
+                                    "artifact_id",
+                                    "sha256"
+                                  ],
+                                  "description": "A script artifact (Sources) instead of a Traffic row: scripts are kept as source artifacts, not response bodies.",
+                                  "properties": {
+                                    "artifact_id": {
+                                      "type": "string"
+                                    },
+                                    "sha256": {
+                                      "type": "string",
+                                      "pattern": "^[0-9a-f]{64}$"
+                                    }
+                                  }
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "references": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "hosts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "host",
+                "site",
+                "party",
+                "document",
+                "rows",
+                "entries",
+                "role",
+                "methods",
+                "statuses",
+                "types",
+                "mime_types",
+                "protocols",
+                "addresses",
+                "entries_with_response_headers",
+                "technologies",
+                "api_styles",
+                "cors",
+                "routes",
+                "static"
+              ],
+              "properties": {
+                "host": {
+                  "type": "string"
+                },
+                "site": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "party": {
+                  "enum": [
+                    "first_party",
+                    "third_party"
+                  ]
+                },
+                "document": {
+                  "type": "boolean"
+                },
+                "rows": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "entries": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "role": {
+                  "enum": [
+                    "document",
+                    "api",
+                    "third_party_api",
+                    "static",
+                    "first_party",
+                    "third_party"
+                  ]
+                },
+                "methods": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "statuses": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "types": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "mime_types": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "protocols": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "addresses": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "address",
+                      "count",
+                      "ranges"
+                    ],
+                    "properties": {
+                      "address": {
+                        "type": "string"
+                      },
+                      "count": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "ranges": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "entries_with_response_headers": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "technologies": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "api_styles": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "cors": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "exposed",
+                    "allowed",
+                    "requested"
+                  ],
+                  "description": "Header names from Access-Control-Expose-Headers, Access-Control-Allow-Headers and the page's Access-Control-Request-Headers: custom backend headers by name.",
+                  "properties": {
+                    "exposed": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "allowed": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "requested": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "routes": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "method",
+                      "template",
+                      "count",
+                      "api_style",
+                      "statuses",
+                      "mime_types",
+                      "query_keys",
+                      "matched_paths",
+                      "first"
+                    ],
+                    "properties": {
+                      "method": {
+                        "type": "string"
+                      },
+                      "template": {
+                        "type": "string",
+                        "description": "The path with identifiers collapsed to their shape: {int}, {uuid}, {objectid}, {ulid}, {hex}, {<prefix>_id}, {date}, {email} or {token}."
+                      },
+                      "count": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "api_style": {
+                        "enum": [
+                          "websocket",
+                          "server_sent_events",
+                          "grpc_web",
+                          "connect",
+                          "graphql",
+                          "trpc",
+                          "react_server_components",
+                          "json",
+                          "document",
+                          "form",
+                          "other"
+                        ]
+                      },
+                      "statuses": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "mime_types": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "query_keys": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "description": "Query parameter names seen on the route; values are not kept."
+                      },
+                      "matched_paths": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "description": "Route templates the server named itself in x-matched-path, x-nextjs-matched-path or x-sveltekit-routeid."
+                      },
+                      "first": {
+                        "oneOf": [
+                          {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "row_id",
+                              "request_id",
+                              "hop",
+                              "time_ns"
+                            ],
+                            "properties": {
+                              "row_id": {
+                                "type": "string",
+                                "description": "The Traffic row (get_requests id)."
+                              },
+                              "request_id": {
+                                "type": "string",
+                                "description": "The row's root request ID."
+                              },
+                              "hop": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "time_ns": {
+                                "type": "string",
+                                "pattern": "^[0-9]+$",
+                                "description": "The hop's start on the capture's monotonic clock."
+                              },
+                              "header": {
+                                "type": "string",
+                                "description": "The header name as captured, for a header signal."
+                              }
+                            }
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                },
+                "static": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "count",
+                    "prefixes"
+                  ],
+                  "properties": {
+                    "count": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "prefixes": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "prefix",
+                          "count"
+                        ],
+                        "properties": {
+                          "prefix": {
+                            "type": "string"
+                          },
+                          "count": {
+                            "type": "integer",
+                            "minimum": 1
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "declared_hosts": {
+            "type": "array",
+            "description": "Hosts named by a CSP (header or meta), Report-To, Reporting-Endpoints, NEL or Link header, every one; and hosts of URLs in script, page or JSON bodies that a signal matched or that are on the first party's site.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "host",
+                "party",
+                "wildcard",
+                "contacted",
+                "sources",
+                "count",
+                "technologies",
+                "first"
+              ],
+              "properties": {
+                "host": {
+                  "type": "string"
+                },
+                "party": {
+                  "enum": [
+                    "first_party",
+                    "third_party"
+                  ]
+                },
+                "wildcard": {
+                  "type": "boolean",
+                  "description": "Named as *.host."
+                },
+                "contacted": {
+                  "type": "boolean",
+                  "description": "The session also sent a request to this host."
+                },
+                "sources": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "csp:<directive>, csp-report-only:<directive>, meta-csp:<directive>, report-to, reporting-endpoints, nel, link:<rel>, script, page or json."
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "technologies": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "first": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "row_id",
+                        "request_id",
+                        "hop",
+                        "time_ns"
+                      ],
+                      "properties": {
+                        "row_id": {
+                          "type": "string",
+                          "description": "The Traffic row (get_requests id)."
+                        },
+                        "request_id": {
+                          "type": "string",
+                          "description": "The row's root request ID."
+                        },
+                        "hop": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "time_ns": {
+                          "type": "string",
+                          "pattern": "^[0-9]+$",
+                          "description": "The hop's start on the capture's monotonic clock."
+                        },
+                        "header": {
+                          "type": "string",
+                          "description": "The header name as captured, for a header signal."
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "artifact_id",
+                        "sha256"
+                      ],
+                      "description": "A script artifact (Sources) instead of a Traffic row: scripts are kept as source artifacts, not response bodies.",
+                      "properties": {
+                        "artifact_id": {
+                          "type": "string"
+                        },
+                        "sha256": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "coverage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "complete",
+              "index",
+              "rows",
+              "entries",
+              "unlinked_entries",
+              "entries_with_response_headers",
+              "entries_without_response_headers",
+              "entries_with_urls",
+              "credential_values_dropped",
+              "response_bodies_read",
+              "response_bodies_binary",
+              "response_bodies_not_captured",
+              "request_bodies_read",
+              "captures_refused",
+              "declarations",
+              "internal_entries",
+              "scripts_read",
+              "scripts_unreadable"
+            ],
+            "properties": {
+              "complete": {
+                "type": "boolean",
+                "description": "The request index had folded the whole store when the rows were chosen."
+              },
+              "index": {
+                "type": "object"
+              },
+              "rows": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "entries": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "unlinked_entries": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "entries_with_response_headers": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "entries_without_response_headers": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "entries_with_urls": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "credential_values_dropped": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "response_bodies_read": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "response_bodies_binary": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "response_bodies_not_captured": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "request_bodies_read": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "captures_refused": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "declarations": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "internal_entries": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "scripts_read": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "scripts_unreadable": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "limitations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "Error": {
         "type": "object",
         "properties": {

@@ -97,6 +97,7 @@ privacy, and implementation limits are documented in
 - Request and response editing, blocking, forwarding, dropping, and replacement.
 - [Isolated HTML response preview](./html-response-preview-v1.md) over retained content (retired with CDP body capture).
 - Links from network values to memory, source, fingerprints, WASM, and Value Trace.
+- A [backend map](./backend-map-v1.md) is implemented as **Backend** and `get_backend_map`: an offline guess at hosting, CDN, proxy, server, framework, API layer, backend services and third-party products from headers, cookie names, hosts, paths, bodies, declared hosts, CORS names and published address ranges, with scored, cited evidence and per-host route templates.
 - Editable Repeater with cancellation, history, variables, and response comparison.
 - API Collection with folders, scoped variables, saved requests, and execution history.
 

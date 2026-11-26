@@ -37,6 +37,7 @@ Tool names are OpenAPI operation IDs. The same names work with
 | Read a script, body or module as text, in pages | `get_artifact_text` with `offset` and `encoding` (needs `--permission full` or `--allow-content`: it returns captured content) |
 | Find a literal in every retained file | `search_artifact_text` with `q` (needs `--permission full` or `--allow-content`) |
 | Wait until the browser produces something | `wait_for_events` |
+| What is behind the site: hosting, CDN, framework, backend services, API routes? | `get_backend_map` (optionally with Traffic filters such as `domain` or `q`); each technology cites rows to read with `get_request_headers` |
 | How did a native request come about? | `get_origin_trace`, `get_request_signal_profile`, `get_request_stack` (the JavaScript and Wasm stack and async tasks that started it; `navigation_sequence` for a script navigation) |
 | VM analysis of retained samples | `get_vm_analysis`, `get_vm_opcode_workspace`, `get_vm_host_links` (need `--allow-effects`: they write a derived cache) |
 | Start a session with named capture options | `start_live_session` (needs `--permission full`, or `--allow-effects --allow-session-start`) or `reb-api session start` |

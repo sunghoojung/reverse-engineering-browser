@@ -204,7 +204,7 @@ export async function checkSidebarNavigation(root) {
   assert.doesNotMatch(html+app,/advanced-navigation|advanced-items/,'No workspace may hide behind an Advanced menu');
   assert.doesNotMatch(sidebar,/<details\b/,'Sidebar entries are always visible');
   const entries=[...nav.matchAll(/<button\b[^>]*>/g)].map(match=>match[0]);
-  const order=['traffic','sources','vm','signals','backtrace','api-collection','analyst','tools'];
+  const order=['traffic','sources','vm','signals','backtrace','backend','api-collection','analyst','tools'];
   assert.deepEqual(entries.map(entry=>entry.match(/data-screen="([^"]+)"/)?.[1]),order,'Every workspace has one direct entry, in sidebar order');
   entries.forEach((entry,index)=>{
     assert.match(entry,/class="nav-button"/,'Workspace entries share navigation focus semantics');
@@ -273,7 +273,7 @@ export async function checkSidebarNavigation(root) {
     assert.equal(press({ctrlKey:true,code:`Digit${index+1}`}),true);assert.deepEqual(clicks,[name]);
   });
   clicks.length=0;focusedEntry=null;
-  for(const init of [{metaKey:true,code:'Digit9'},{code:'Digit1'},{metaKey:true,shiftKey:true,code:'Digit1'},
+  for(const init of [{metaKey:true,code:'Digit0'},{code:'Digit1'},{metaKey:true,shiftKey:true,code:'Digit1'},
     {metaKey:true,altKey:true,code:'Digit1'},{metaKey:true,repeat:true,code:'Digit1'},{metaKey:true,code:'KeyJ'}])
     assert.equal(press(init),false,`Ignored: ${JSON.stringify(init)}`);
   modal=true;assert.equal(press({metaKey:true,code:'Digit2'}),false,'A modal dialog keeps the keyboard');modal=false;

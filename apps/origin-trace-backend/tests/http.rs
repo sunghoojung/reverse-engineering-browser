@@ -727,9 +727,10 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 72, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 73, "Review route coverage when the API changes");
     assert!(ids.contains("get_wasm_run_memory"));
     assert!(ids.contains("export_requests_har"));
+    assert!(ids.contains("get_backend_map"));
     assert!(ids.contains("get_wasm_pseudocode"));
     assert!(ids.contains("search_wasm_inspection"));
     assert!(ids.contains("get_wasm_pseudocode"));
@@ -822,7 +823,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 72);
+    assert_eq!(operation_count, 73);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -13775,6 +13776,7 @@ async fn request_har_exports_redirect_and_failed_hops_with_their_headers() {
         "https://example.test/next"
     );
     assert_eq!(first["_reb"]["outcome"], "redirect");
+    assert_eq!(first["_reb"]["request_id"], "17");
     assert_eq!(first["_reb"]["url_complete"], true);
     assert_eq!(first["startedDateTime"], "1970-01-01T00:00:00.001Z");
     assert_eq!(first["time"], 3.0);
@@ -13828,6 +13830,197 @@ async fn request_har_exports_redirect_and_failed_hops_with_their_headers() {
         )
         .await;
     }
+}
+
+/// The backend map reads every row through the HAR joins: a response block's
+/// headers and remote address name Vercel, Next.js and Cloudflare, cookies
+/// match by name, and no credential or whole header value comes back. A
+/// second read of the unchanged session answers 304 to its tag.
+#[tokio::test]
+async fn backend_map_guesses_the_stack_from_headers_without_values() {
+    let server = Server::start().await;
+    let event = |sequence: u64, request: u64, kind: &str, parent: u64, payload: &[u8]| {
+        json!({"protocol_version":3,"session_id":"1","sequence_number":sequence.to_string(),
+            "monotonic_time_ns":(1_000_000 * sequence).to_string(),"navigation_id":"0","frame_id":"9","artifact_id":"0",
+            "parent_event_id":parent.to_string(),"request_id":request.to_string(),"process_id":7,"thread_id":1,"tab_id":1,
+            "category":"network","type":kind,"flags":0,"status_code":0,"error_code":0,"encoded_data_length":"0",
+            "decoded_body_length":"0","resource_type":0,"initiator_process_id":0,"initiator_request_id":0,
+            "payload_encoding":"hex","payload":hex::encode(payload),"payload_size":payload.len(),"payload_truncated":false})
+    };
+    let target = |text: &[u8]| {
+        let mut out = vec![0u8; 128];
+        (out[0], out[2], out[8]) = (2, 128, 2);
+        out[4..8].copy_from_slice(&(text.len() as u32).to_le_bytes());
+        out[12..12 + text.len()].copy_from_slice(text);
+        out
+    };
+    let block: &[u8] = b"Server: Vercel\r\nX-Vercel-Id: iad1::sfo1::abcde-1732560000000-feedface\r\nX-Powered-By: Next.js\r\nCF-Ray: 8e1b2c3d4e5f6a7b-SJC\r\nSet-Cookie: __cf_bm=BM-SECRET; path=/\r\n";
+    // A browser-source response block: status 200 from 104.16.1.1:443.
+    let mut headers = vec![0u8; 128];
+    (headers[0], headers[2], headers[4], headers[5], headers[7]) = (2, 128, 1, 1, 4);
+    headers[8..12].copy_from_slice(&5u32.to_le_bytes());
+    headers[12..16].copy_from_slice(&(block.len() as u32).to_le_bytes());
+    headers[20..22].copy_from_slice(&200u16.to_le_bytes());
+    headers[22..24].copy_from_slice(&443u16.to_le_bytes());
+    headers[24..28].copy_from_slice(&[104, 16, 1, 1]);
+    headers[48..80].copy_from_slice(&Sha256::digest(block));
+    let mut received = event(4, 17, "response_headers", 1, &headers);
+    received["artifact_id"] = json!("5");
+    let mut response = event(3, 17, "response_started", 1, b"text/html; protocol=h2");
+    response["status_code"] = json!(200);
+    let mut api = event(
+        7,
+        18,
+        "response_started",
+        6,
+        b"application/json; protocol=h2",
+    );
+    api["status_code"] = json!(200);
+    let events = vec![
+        event(1, 17, "request_started", 0, b"GET app.example.test"),
+        event(2, 17, "request_target", 1, &target(b"/")),
+        response,
+        received,
+        event(5, 17, "request_completed", 3, b""),
+        event(6, 18, "request_started", 0, b"GET app.example.test"),
+        event(
+            8,
+            18,
+            "request_target",
+            6,
+            &target(b"/api/users/42?expand=1"),
+        ),
+        api,
+        event(9, 18, "request_completed", 7, b""),
+    ];
+    server.file("events.jsonl", &jsonl(&events));
+    let hash = hex::encode(Sha256::digest(block));
+    let artifact = json!({"protocol_version":1,"artifact_id":"5","session_id":"1","navigation_id":"0",
+        "frame_id":"9","parent_artifact_id":"0","creator_event_id":"4","execution_context_id":"0",
+        "capture_origin":"network_request","kind":"response_headers","url":"https://app.example.test/",
+        "mime_type":"text/plain","byte_size":block.len(),"sha256":hash,"sensitive":true,
+        "content_path":format!("blobs/{hash}.bin")});
+    server.file(&format!("artifacts/blobs/{hash}.bin"), block);
+    // A script is kept as a source artifact, not a response body; the map
+    // reads it once for bundle signals. One on an unmapped host is not read.
+    let script: &[u8] = b"window.next={version:\"14.2.3\",appDir:!0};";
+    let script_hash = hex::encode(Sha256::digest(script));
+    let other: &[u8] = b"window.next={version:\"9.9.9\"};";
+    let other_hash = hex::encode(Sha256::digest(other));
+    let script_artifact = |id: &str, host: &str, hash: &str, bytes: &[u8]| {
+        json!({"protocol_version":1,"artifact_id":id,
+        "session_id":"1","navigation_id":"0","frame_id":"9","parent_artifact_id":"0","creator_event_id":"3",
+        "execution_context_id":"0","capture_origin":"network_response","kind":"javascript",
+        "url":format!("https://{host}/_next/static/chunks/main.js"),"mime_type":"application/javascript",
+        "byte_size":bytes.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")})
+    };
+    server.file(&format!("artifacts/blobs/{script_hash}.bin"), script);
+    server.file(&format!("artifacts/blobs/{other_hash}.bin"), other);
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!(
+            "{artifact}\n{}\n{}\n",
+            script_artifact("6", "app.example.test", &script_hash, script),
+            script_artifact("7", "elsewhere.test", &other_hash, other)
+        )
+        .as_bytes(),
+    );
+    let route = "/api/backend-map";
+    let mut answers = 0;
+    let (map, tag) = loop {
+        let response = server.get(route).await;
+        if response.status() != 200 {
+            panic!("{}: {}", response.status(), response.text().await.unwrap());
+        }
+        let tag = response.headers()["etag"].to_str().unwrap().to_owned();
+        let bytes = assert_contract_response(response, "get", route, 200).await;
+        let map: Value = serde_json::from_slice(&bytes).unwrap();
+        if map["coverage"]["complete"] == true && map["coverage"]["rows"] == 2 {
+            break (map, tag);
+        }
+        answers += 1;
+        assert!(
+            answers < 240,
+            "the map never covered the store: {}",
+            map["coverage"]
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    let text = map.to_string();
+    assert!(!text.contains("BM-SECRET"), "{text}");
+    assert!(!text.contains("1732560000000"), "{text}");
+    assert_eq!(map["format"], "reb-backend-map-v1");
+    assert_eq!(map["network_requests"], 0);
+    let find = |id: &str| {
+        map["technologies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|technology| technology["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {id}: {text}"))
+    };
+    let vercel = find("vercel");
+    assert_eq!(vercel["confidence"], 100);
+    assert_eq!(vercel["details"]["edge_region"][0]["value"], "iad1");
+    let header = &vercel["signals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|signal| signal["signal_id"] == "vercel.x-vercel-id")
+        .unwrap()["hosts"][0];
+    assert_eq!(header["first"]["header"], "X-Vercel-Id");
+    assert_eq!(header["party"], "first_party");
+    assert_eq!(find("nextjs")["basis"], "direct");
+    assert_eq!(
+        find("nextjs")["details"]["version"],
+        json!([{"value": "14.2.3", "count": 1}])
+    );
+    assert_eq!(map["coverage"]["scripts_read"], 1);
+    assert_eq!(find("react")["basis"], "implied");
+    let cloudflare = find("cloudflare");
+    assert_eq!(cloudflare["details"]["pop"][0]["value"], "SJC");
+    assert!(
+        cloudflare["signals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|signal| signal["on"] == "remote_address")
+    );
+    assert!(
+        cloudflare["signals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|signal| signal["on"] == "cookie")
+    );
+    let host = &map["hosts"][0];
+    assert_eq!(host["host"], "app.example.test");
+    assert_eq!(host["role"], "document");
+    assert_eq!(
+        host["addresses"][0],
+        json!({"address": "104.16.1.1", "count": 1, "ranges": ["cloudflare"]})
+    );
+    let routes = host["routes"].as_array().unwrap();
+    let users = routes
+        .iter()
+        .find(|route| route["template"] == "/api/users/{int}")
+        .unwrap();
+    assert_eq!(users["query_keys"], json!(["expand"]));
+    assert_eq!(users["api_style"], "json");
+    assert_eq!(map["coverage"]["entries_with_response_headers"], 1);
+    assert_eq!(map["coverage"]["credential_values_dropped"], 1);
+
+    let unchanged = server
+        .client
+        .get(format!("{}{route}", server.url))
+        .header("if-none-match", &tag)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unchanged.status(), 304);
+    let refused = server.get(&format!("{route}?credential_values=1")).await;
+    assert_contract_response(refused, "get", route, 400).await;
 }
 
 /// A cookie spans the session: the response that set it, a script write and

@@ -966,7 +966,7 @@ fn host_of(domain: &str) -> &str {
     }
 }
 /// Approximate site without a public suffix list; port of `trafficSite`.
-fn site(domain: &str) -> Option<String> {
+pub(crate) fn site(domain: &str) -> Option<String> {
     let host = host_of(domain).to_lowercase();
     if host.is_empty() || host == "unknown" {
         return None;

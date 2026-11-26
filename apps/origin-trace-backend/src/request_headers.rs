@@ -478,7 +478,7 @@ fn address(block: &Block) -> Value {
 /// Whether a header's value is a credential, withheld unless the caller asks.
 /// Decided from the name alone. A false match only keeps a value out of JSON;
 /// the binary artifact still has it.
-fn credential_name(name: &str) -> bool {
+pub(crate) fn credential_name(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     if READABLE_NAMES.contains(&name.as_str()) {
         return false;

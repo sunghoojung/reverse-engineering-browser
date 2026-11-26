@@ -24,6 +24,14 @@ for identity, privacy, input bounds and file-safety requirements.
 [Python-only project](../docs/product/python-client-project-v1.md); its explicitly
 versioned timeouts are per-operation, not the Go/JavaScript overall deadline.
 
+`python3 tools/update-backend-ip-ranges.py` regenerates
+`apps/origin-trace-backend/assets/backend-ip-ranges.json`, the provider ranges
+the [backend map](../docs/product/backend-map-v1.md) attributes remote addresses
+with. It downloads the Cloudflare, Fastly, AWS and Google lists, so run it only
+as maintenance and review the diff; `--input-dir` reads saved copies instead.
+The map itself never touches the network. `node tools/check-backend-map-ui.mjs`
+drives the Backend screen offline.
+
 Run `python3 tools/validate-evidence-store.py path/to/events.jsonl` to validate
 normalized protocol v2 or v3 evidence, including runtime fingerprint operations
 and artifact capture success or failure records. Validation checks record shape,

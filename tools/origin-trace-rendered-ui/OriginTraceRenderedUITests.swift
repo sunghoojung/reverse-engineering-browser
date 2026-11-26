@@ -6420,6 +6420,53 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
+  // Backend opens from the sidebar at both sizes, reads the session's map once,
+  // and lays out its tabs, lists and detail without clipping. Arrow keys move
+  // between the tabs and between hosts, and the selection follows; captured
+  // host names stay text. The rail keeps every workspace and action inside the
+  // minimum window.
+  @MainActor
+  func test46BackendMap() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      let rail = try await ui.json("""
+        (() => { const bar = document.querySelector('#sidebar');
+          return {overflow: bar.scrollHeight - bar.clientHeight}; })()
+        """)
+      XCTAssertEqual((rail["overflow"] as? NSNumber)?.intValue ?? -1, 0, "\(size.name): the sidebar does not overflow: \(rail)")
+      try await show(ui, "backend")
+      try await ui.waitUntil("""
+        document.querySelector('#screen-backend').getAttribute('aria-busy') !== 'true' &&
+          document.querySelector('#screen-backend .backend-map-status').textContent.includes('requests')
+        """, "\(size.name): the backend map did not load")
+      let notice = try await ui.value("document.querySelector('#screen-backend .backend-map-notice').dataset.kind") as? String
+      XCTAssertNotEqual(notice, "error", "\(size.name): the map read failed")
+      try await assertLayout(ui, "#screen-backend", "\(size.name) backend stack")
+      try await assertInert(ui, "\(size.name) backend stack")
+      try await ui.screenshot("backend-stack-\(size.name)")
+      _ = try await ui.value("document.querySelector('#backend-tab-stack').focus()")
+      try await ui.key(124, "\u{F703}", modifiers: [.function, .numericPad])
+      try await ui.waitUntil("""
+        !document.querySelector('#backend-panel-hosts').hidden &&
+          document.activeElement === document.querySelector('#backend-tab-hosts')
+        """, "\(size.name): Right Arrow did not move to Hosts")
+      let hosts = try await ui.value("document.querySelectorAll('#screen-backend .backend-map-host-list .backend-map-item').length") as? Int ?? 0
+      XCTAssertGreaterThan(hosts, 0, "\(size.name): Hosts lists the session's hosts")
+      if hosts > 1 {
+        _ = try await ui.value("document.querySelector('#screen-backend .backend-map-host-list .backend-map-item').focus()")
+        try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad])
+        try await ui.waitUntil("""
+          (() => { const items = [...document.querySelectorAll('#screen-backend .backend-map-host-list .backend-map-item')];
+            return items[1] === document.activeElement && items[1].getAttribute('aria-pressed') === 'true'; })()
+          """, "\(size.name): Down Arrow did not select the next host")
+      }
+      try await assertLayout(ui, "#screen-backend", "\(size.name) backend hosts")
+      try await assertInert(ui, "\(size.name) backend hosts")
+      try await ui.screenshot("backend-hosts-\(size.name)")
+      try await lightScreenshot(ui, "backend-hosts", size.name, scope: "#screen-backend")
+    }
+  }
+
   // #434 phase 1: a request a watch rule matched is marked on its Traffic row
   // and in General with its rule, and Show in debugger opens its observation
   // in the Sources debugger sidebar, chosen and focused. Where rules are armed

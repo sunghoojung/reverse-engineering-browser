@@ -203,7 +203,7 @@ pub fn entries(
             let receive = milliseconds(finish - response_at.unwrap_or(finish));
             let (url, url_complete) = urls[index].clone();
             let hop_method = hop.method.clone().unwrap_or_else(|| method.clone());
-            let mut request = json!({
+            let mut har_request = json!({
                 "method": hop_method,
                 "url": url,
                 "httpVersion": if final_hop { row["protocol"].as_str().unwrap_or("") } else { "" },
@@ -216,9 +216,9 @@ pub fn entries(
             if index == 0
                 && let Some(body) = request_body(records, &hops[0], artifacts, root)
             {
-                request["bodySize"] = body.0;
+                har_request["bodySize"] = body.0;
                 if let Some(data) = body.1 {
-                    request["postData"] = data;
+                    har_request["postData"] = data;
                 }
             }
             let mut content = json!({
@@ -241,7 +241,7 @@ pub fn entries(
             let mut entry = json!({
                 "startedDateTime": iso_date(start),
                 "time": wait + receive,
-                "request": request,
+                "request": har_request,
                 "response": {
                     "status": status,
                     "statusText": "",
@@ -697,6 +697,29 @@ pub fn export(sink: &mut Sink, rows: &[i64], index: Value, export: &Export) {
     if sink.write(format!("],\"_reb\":{closing}}}}}").as_bytes()) {
         sink.flush();
     }
+}
+
+/// Calls `visit` with each row of `rows` and its entries, in order, reading
+/// one batch of rows and one row's records at a time, as `export` does. A
+/// `false` from `visit` stops the walk. Returns the rows visited.
+pub(crate) fn visit_rows(
+    rows: &[i64],
+    export: &Export,
+    mut visit: impl FnMut(&Value, &[Value]) -> Result<bool>,
+) -> Result<usize> {
+    let mut drops: HashMap<String, Drops> = HashMap::new();
+    let mut visited = 0;
+    for batch in rows.chunks(BATCH) {
+        let documents = export.requests.blocking_lock().export_documents(batch)?;
+        for row in &documents {
+            let entries = row_entries(row, &mut drops, export)?;
+            visited += 1;
+            if !visit(row, &entries)? {
+                return Ok(visited);
+            }
+        }
+    }
+    Ok(visited)
 }
 
 /// One row's entries from every record of its root request.

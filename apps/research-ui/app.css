@@ -5576,3 +5576,16 @@ details.decoder-card > header p { margin-top: 0; }
 .wasm-function-rename:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .block-graph-analyst-name { flex: 0 1 auto; max-width: 30%; font-size: 12px; }
 .block-graph-fn-row > .block-graph-fn-analyst { flex: 0 1 auto; max-width: 45%; margin-left: auto; font-size: 11px; }
+
+/* Nine workspaces fit the rail at the 560 px minimum window only with tighter
+   spacing; a taller window keeps the roomier rail. Last, so it overrides the
+   rail sizes above. */
+@media (max-height: 620px) {
+  .app[data-sidebar="rail"] .sidebar { gap: 6px; padding: 6px 6px 4px; }
+  .app[data-sidebar="rail"] .sidebar-head { gap: 4px; }
+  .app[data-sidebar="rail"] .primary-nav { gap: 4px; }
+  .app[data-sidebar="rail"] .nav-group + .nav-group { padding-top: 4px; }
+  .app[data-sidebar="rail"] :is(.nav-button, .sidebar-action) { min-height: 28px; }
+  .app[data-sidebar="rail"] .sidebar-search { height: 30px; }
+  .app[data-sidebar="rail"] .sidebar-actions { padding-top: 4px; }
+}
